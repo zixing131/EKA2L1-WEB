@@ -9,7 +9,7 @@ jobs:
   build-wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
@@ -24,7 +24,7 @@ jobs:
         run: emcc --version
 
       - name: Cache build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: build_wasm
           key: wasm-build-${{ github.sha }}
@@ -60,7 +60,7 @@ jobs:
           cp src/emu/web/shell.html wasm-package/index.html 2>/dev/null || true
 
       - name: Upload WASM Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}
           path: wasm-package/
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -79,7 +79,7 @@ jobs:
         run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Download WASM Artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: "eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}"
           path: wasm-files
