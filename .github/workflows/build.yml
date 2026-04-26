@@ -1,100 +1,101 @@
 name: WASM CI
 
-on: [push, pull_request]
+on: 
+  push:
+  pull_request:
+  workflow_dispatch: # 正确的位置：放在 on 下面，允许手动触发
 
 jobs:
   build-wasm:
     runs-on: ubuntu-latest
-       workflow_dispatch:
     steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-        submodules: recursive
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    - name: Setup Emscripten
-      uses: mymindstorm/setup-emsdk@v13
-      with:
-        version: latest
-        actions-cache-folder: 'emsdk-cache'
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v13
+        with:
+          version: latest
+          actions-cache-folder: 'emsdk-cache'
 
-    - name: Verify Emscripten
-      run: emcc --version
+      - name: Verify Emscripten
+        run: emcc --version
 
-    - name: Cache build
-      uses: actions/cache@v3
-      with:
-        path: build_wasm
-        key: wasm-build-${{ github.sha }}
-        restore-keys: wasm-build-
+      - name: Cache build
+        uses: actions/cache@v3
+        with:
+          path: build_wasm
+          key: wasm-build-${{ github.sha }}
+          restore-keys: wasm-build-
 
-    - name: CMake Configure
-      run: |
-        emcmake cmake -B build_wasm \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCI=ON \
-          -DEKA2L1_BUILD_TOOLS=OFF \
-          -DEKA2L1_BUILD_TESTS=OFF \
-          -DEKA2L1_ENABLE_SCRIPTING_ABILITY=OFF \
-          -DEKA2L1_BUILD_VULKAN_BACKEND=OFF \
-          -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=OFF
+      - name: CMake Configure
+        run: |
+          emcmake cmake -B build_wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCI=ON \
+            -DEKA2L1_BUILD_TOOLS=OFF \
+            -DEKA2L1_BUILD_TESTS=OFF \
+            -DEKA2L1_ENABLE_SCRIPTING_ABILITY=OFF \
+            -DEKA2L1_BUILD_VULKAN_BACKEND=OFF \
+            -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=OFF
 
-    - name: CMake Build
-      run: cmake --build build_wasm --config Release --parallel $(nproc)
+      - name: CMake Build
+        run: cmake --build build_wasm --config Release --parallel $(nproc)
 
-    - name: Compute git short sha
-      id: git_short_sha
-      run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Compute git short sha
+        id: git_short_sha
+        run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-    - name: Package WASM output
-      run: |
-        mkdir -p wasm-package
-        cp build_wasm/bin/eka2l1.js wasm-package/ 2>/dev/null || true
-        cp build_wasm/bin/eka2l1.wasm wasm-package/ 2>/dev/null || true
-        cp build_wasm/bin/eka2l1.html wasm-package/ 2>/dev/null || true
-        cp build_wasm/bin/eka2l1.data wasm-package/ 2>/dev/null || true
-        cp build_wasm/bin/eka2l1.worker.js wasm-package/ 2>/dev/null || true
-        cp build_wasm/bin/eka2l1.js.mem wasm-package/ 2>/dev/null || true
-        # Include our custom shell.html as the main page
-        cp src/emu/web/shell.html wasm-package/index.html 2>/dev/null || true
+      - name: Package WASM output
+        run: |
+          mkdir -p wasm-package
+          cp build_wasm/bin/eka2l1.js wasm-package/ 2>/dev/null || true
+          cp build_wasm/bin/eka2l1.wasm wasm-package/ 2>/dev/null || true
+          cp build_wasm/bin/eka2l1.html wasm-package/ 2>/dev/null || true
+          cp build_wasm/bin/eka2l1.data wasm-package/ 2>/dev/null || true
+          cp build_wasm/bin/eka2l1.worker.js wasm-package/ 2>/dev/null || true
+          cp build_wasm/bin/eka2l1.js.mem wasm-package/ 2>/dev/null || true
+          cp src/emu/web/shell.html wasm-package/index.html 2>/dev/null || true
 
-    - name: Upload WASM Artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}
-        path: wasm-package/
+      - name: Upload WASM Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}
+          path: wasm-package/
 
   roll-release:
     needs: [build-wasm]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-    - name: Compute git short sha
-      id: git_short_sha
-      run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Compute git short sha
+        id: git_short_sha
+        run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-    - name: Download WASM Artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: "eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}"
-        path: wasm-files
+      - name: Download WASM Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: "eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}"
+          path: wasm-files
 
-    - name: Package for release
-      run: |
-        cd wasm-files
-        zip -r ../EKA2L1-WebAssembly.zip .
-        cd ..
+      - name: Package for release
+        run: |
+          cd wasm-files
+          zip -r ../EKA2L1-WebAssembly.zip .
+          cd ..
 
-    - name: Create release
-      uses: "marvinpinto/action-automatic-releases@latest"
-      with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        automatic_release_tag: "continous"
-        prerelease: false
-        title: "Automatic CI builds (WebAssembly)"
-        files: |
-          EKA2L1-WebAssembly.zip
+      - name: Create release
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "continuous" # 修正了单词拼写: continous -> continuous
+          prerelease: false
+          title: "Automatic CI builds (WebAssembly)"
+          files: |
+            EKA2L1-WebAssembly.zip
