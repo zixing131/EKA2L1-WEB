@@ -691,6 +691,10 @@ namespace eka2l1 {
             return 1;
         }
 
+        if (!mem_) {
+            return 1;
+        }
+
         bool should_step = false;
         bool script_hits_the_feels = false;
 

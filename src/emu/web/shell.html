@@ -641,9 +641,7 @@
                     updateStatus('green', 'ROM: ' + file.name);
                     // Call the C++ main initialization with the ROM path
                     if (module && module._wasm_init_with_rom) {
-                        module._wasm_init_with_rom(module.allocate(
-                            module.intArrayFromString(targetPath), 'i8', 0
-                        ));
+                        module.ccall('wasm_init_with_rom', 'number', ['string'], [targetPath]);
                     }
                 } else {
                     showOverlay('Error: ' + info, 3000);
@@ -660,9 +658,7 @@
                     showOverlay('Package installed!', 2000);
                     updateStatus('green', 'Installed: ' + file.name);
                     if (module && module._wasm_install_package) {
-                        module._wasm_install_package(module.allocate(
-                            module.intArrayFromString(targetPath), 'i8', 0
-                        ));
+                        module.ccall('wasm_install_package', 'number', ['string'], [targetPath]);
                     }
                 } else {
                     showOverlay('Error: ' + info, 3000);

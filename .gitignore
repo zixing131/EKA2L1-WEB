@@ -17,3 +17,7 @@ out
 .metadata
 cmake-build-*
 .idea
+.DS_Store
+/build_wasm_test
+/CMakeFiles
+CMakeCache.txt

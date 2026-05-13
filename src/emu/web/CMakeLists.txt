@@ -75,8 +75,6 @@ if (EMSCRIPTEN)
         "SHELL:-s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\"$autoResumeAudioContext\"]"
         "SHELL:-s MIN_WEBGL_VERSION=2"
         "SHELL:-s MAX_WEBGL_VERSION=2"
-        "SHELL:-s ASYNCIFY=1"
-        "SHELL:-s ASYNCIFY_IMPORTS=[\"asyncify_sleep\",\"asyncify_main_loop\"]"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
         -O2
@@ -86,6 +84,11 @@ if (EMSCRIPTEN)
 
     set_target_properties(eka2l1_wasm PROPERTIES
         OUTPUT_NAME "eka2l1"
-        SUFFIX ".js"
+        SUFFIX ".html"
+    )
+
+    # Emscripten processes {{{ SCRIPT }}} in the shell template to produce the final HTML
+    target_link_options(eka2l1_wasm PRIVATE
+        "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
     )
 endif()
