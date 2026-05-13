@@ -15,7 +15,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <drivers/graphics/backend/context_emscripten.h>
+#include "context_emscripten.h"
 #include <common/log.h>
 
 #include <SDL2/SDL.h>

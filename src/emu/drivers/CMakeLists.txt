@@ -173,8 +173,12 @@ add_library(miniBAE_EMU STATIC ${MINIBAE_SHARED_SOURCES})
 target_include_directories(miniBAE_EMU
     PRIVATE include/drivers/audio/backend/minibae ${MINIBAE_INTERNAL_INCLUDE_DIRS})
 target_link_libraries(miniBAE_EMU PRIVATE common)
+if (EMSCRIPTEN)
+    target_compile_options(miniBAE_EMU PRIVATE -Wno-int-conversion -Wno-incompatible-pointer-types)
+endif()
 
 if (EMSCRIPTEN)
+    target_compile_options(drivers PRIVATE "SHELL:-sUSE_SDL=2")
     target_link_libraries(drivers PRIVATE common glad glm miniBAE_EMU)
     # SDL2 is provided by Emscripten via -s USE_SDL=2, linked automatically
 else()

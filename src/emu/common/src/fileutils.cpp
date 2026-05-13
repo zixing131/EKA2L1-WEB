@@ -31,7 +31,7 @@
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
-#elif EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(DARWIN)
+#elif EKA2L1_PLATFORM(POSIX)
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -50,6 +50,11 @@
 
 #include <common/pystr.h>
 #include <common/wildcard.h>
+
+#if EKA2L1_PLATFORM(WASM)
+// Emscripten doesn't have stat64; use stat instead
+#define stat64 stat
+#endif
 
 namespace eka2l1::common {
     std::int64_t file_size(const std::string &path) {

@@ -44,6 +44,7 @@
 #include <common/platform.h>
 #include <common/version.h>
 
+#include <config/app_settings.h>
 #include <config/config.h>
 
 #include <drivers/audio/audio.h>
@@ -69,8 +70,8 @@ static SDL_AudioDeviceID g_audio_device = 0;
 namespace eka2l1::web {
     struct wasm_state {
         std::unique_ptr<eka2l1::system> symsys;
-        drivers::graphics_driver *graphics_driver = nullptr;
-        drivers::audio_driver *audio_driver = nullptr;
+        drivers::graphics_driver_ptr graphics_driver;
+        drivers::audio_driver_instance audio_driver;
         config::state conf;
         std::unique_ptr<config::app_settings> app_settings;
 
@@ -91,6 +92,7 @@ namespace eka2l1::web {
 }
 
 using namespace eka2l1::web;
+using namespace eka2l1;
 
 // ============================================================================
 // SDL2-based Emu Window for Web
@@ -175,7 +177,7 @@ public:
 
             case SDL_MOUSEWHEEL: {
                 if (mouse_wheeling) {
-                    mouse_wheeling(userdata_, eka2l1::vec2d{event.wheel.x, event.wheel.y});
+                    mouse_wheeling(userdata_, eka2l1::vec2d{static_cast<double>(event.wheel.x), static_cast<double>(event.wheel.y)});
                 }
                 break;
             }
@@ -410,12 +412,12 @@ static bool init_emulator() {
     g_state.symsys->startup();
 
     // Mount drives
-    g_state.symsys->mount(eka2l1::drive_c, eka2l1::drive_media::physical,
-        storage_path + "/drives/c/", eka2l1::io_attrib_internal);
-    g_state.symsys->mount(eka2l1::drive_d, eka2l1::drive_media::physical,
-        storage_path + "/drives/d/", eka2l1::io_attrib_internal);
-    g_state.symsys->mount(eka2l1::drive_e, eka2l1::drive_media::physical,
-        storage_path + "/drives/e/", eka2l1::io_attrib_removeable);
+    g_state.symsys->mount(drive_c, drive_media::physical,
+        storage_path + "/drives/c/", io_attrib_internal);
+    g_state.symsys->mount(drive_d, drive_media::physical,
+        storage_path + "/drives/d/", io_attrib_internal);
+    g_state.symsys->mount(drive_e, drive_media::physical,
+        storage_path + "/drives/e/", io_attrib_removeable);
 
     // Try to set device
     eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
@@ -437,7 +439,7 @@ static bool init_emulator() {
         return false;
     }
 
-    g_state.symsys->set_graphics_driver(g_state.graphics_driver);
+    g_state.symsys->set_graphics_driver(g_state.graphics_driver.get());
 
     // Create audio driver (use null backend for WASM - Web Audio API is not yet wired)
     g_state.audio_driver = eka2l1::drivers::make_audio_driver(
@@ -453,7 +455,7 @@ static bool init_emulator() {
             g_state.conf.sf2_bank_path);
     }
 
-    g_state.symsys->set_audio_driver(g_state.audio_driver);
+    g_state.symsys->set_audio_driver(g_state.audio_driver.get());
 
     g_state.initialized = true;
     g_state.running = true;
@@ -528,9 +530,9 @@ int wasm_init_with_rom(const char *rom_path) {
     }
 
     // Mount ROM drive
-    g_state.symsys->mount(eka2l1::drive_z, eka2l1::drive_media::rom,
+    g_state.symsys->mount(drive_z, drive_media::rom,
         eka2l1::add_path(g_state.conf.storage, "/drives/z/"),
-        eka2l1::io_attrib_internal | eka2l1::io_attrib_write_protected);
+        io_attrib_internal | io_attrib_write_protected);
 
     g_state.symsys->initialize_user_parties();
 
@@ -591,7 +593,7 @@ void wasm_reset() {
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_volume(int volume) {
     if (g_state.audio_driver) {
-        g_state.audio_driver->set_volume(volume);
+        g_state.audio_driver->master_volume(static_cast<std::uint32_t>(volume));
     }
 }
 

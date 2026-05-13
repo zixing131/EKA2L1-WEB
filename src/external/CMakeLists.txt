@@ -38,6 +38,8 @@ if (EMSCRIPTEN)
     # Force ARM32 flag so dynarmic is skipped and dyncom is used
     set(ARCHITECTURE_ARM32 TRUE)
     set(ARCHITECTURE_AARCH64 FALSE)
+    # fmt's consteval support is broken in Emscripten's Clang; disable it globally
+    add_compile_definitions(FMT_USE_CONSTEVAL=0)
 elseif (MSVC)
     check_symbol_exists("_M_ARM" "" ARCHITECTURE_ARM32)
     check_symbol_exists("_M_ARM64" "" ARCHITECTURE_AARCH64)

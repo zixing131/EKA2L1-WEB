@@ -5,6 +5,7 @@
 # The web frontend executable
 add_executable(eka2l1_wasm
     src/main.cpp
+    src/platform_stubs.cpp
 )
 
 target_include_directories(eka2l1_wasm PUBLIC include)
@@ -15,7 +16,7 @@ target_link_libraries(eka2l1_wasm PRIVATE
     config
     cpu
     disasm
-    dispatch
+    epocdispatch
     drivers
     epoc
     epockern
@@ -39,12 +40,25 @@ set_target_properties(eka2l1_wasm PROPERTIES
 )
 
 if (EMSCRIPTEN)
+    set(WASM_STAGE_DIR "${CMAKE_BINARY_DIR}/bin")
+
+    # Stage resources before linking so Emscripten file_packager can find them
+    add_custom_command(TARGET eka2l1_wasm PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/resources/upscale"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/miscs"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/gl/" "${WASM_STAGE_DIR}/resources/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/upscale/" "${WASM_STAGE_DIR}/resources/upscale/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.hsb" "${WASM_STAGE_DIR}/resources/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.sf2" "${WASM_STAGE_DIR}/resources/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/miscs/" "${WASM_STAGE_DIR}/miscs/"
+        COMMENT "Staging resources for Emscripten file packaging"
+    )
+
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         "SHELL:-s MAXIMUM_MEMORY=1073741824"
         "SHELL:-s USE_SDL=2"
-        "SHELL:-s USE_OPENGL=3"
         "SHELL:-s FULL_ES3=1"
         "SHELL:-s USE_FREETYPE=1"
         "SHELL:-s USE_PTHREADS=1"
@@ -63,9 +77,8 @@ if (EMSCRIPTEN)
         "SHELL:-s MAX_WEBGL_VERSION=2"
         "SHELL:-s ASYNCIFY=1"
         "SHELL:-s ASYNCIFY_IMPORTS=[\"asyncify_sleep\",\"asyncify_main_loop\"]"
-        "SHELL:--preload-file resources@resources"
-        "SHELL:--preload-file miscs@miscs"
-        "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
+        "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
+        "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
         -O2
         -g2
         "--closure=0"
@@ -74,17 +87,5 @@ if (EMSCRIPTEN)
     set_target_properties(eka2l1_wasm PROPERTIES
         OUTPUT_NAME "eka2l1"
         SUFFIX ".js"
-    )
-
-    # Copy resources to build directory for Emscripten's file packaging
-    add_custom_command(TARGET eka2l1_wasm POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:eka2l1_wasm>/resources"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:eka2l1_wasm>/resources/upscale"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:eka2l1_wasm>/miscs"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/gl/" "$<TARGET_FILE_DIR:eka2l1_wasm>/resources/"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/upscale/" "$<TARGET_FILE_DIR:eka2l1_wasm>/resources/upscale/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.hsb" "$<TARGET_FILE_DIR:eka2l1_wasm>/resources/"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.sf2" "$<TARGET_FILE_DIR:eka2l1_wasm>/resources/"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/miscs/" "$<TARGET_FILE_DIR:eka2l1_wasm>/miscs/"
     )
 endif()

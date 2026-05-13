@@ -20,7 +20,7 @@
 #include <common/platform.h>
 #include <common/types.h>
 
-#if EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(DARWIN)
+#if EKA2L1_PLATFORM(POSIX)
 #include <sys/mman.h>
 #include <unistd.h>
 #elif EKA2L1_PLATFORM(WIN32)

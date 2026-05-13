@@ -37,13 +37,15 @@
 #include <pthread.h>
 #if EKA2L1_PLATFORM(MACOS)
 #define X_PLATFORM X_MACINTOSH
+#elif EKA2L1_PLATFORM(WASM)
+#define X_PLATFORM X_LINUX
 #elif EKA2L1_PLATFORM(UNIX)
 #if EKA2L1_PLATFORM(ANDROID)
 #define X_PLATFORM X_ANDROID
 #else
 #define X_PLATFORM X_LINUX
 #endif
-#endif 
+#endif
 #endif
 
 #if EKA2L1_ARCH(ARM64)
@@ -52,4 +54,6 @@
 #define CPU_TYPE kx86_64
 #elif EKA2L1_ARCH(ARM)
 #define CPU_TYPE kARM
+#elif EKA2L1_PLATFORM(WASM)
+#define CPU_TYPE kx86_64
 #endif

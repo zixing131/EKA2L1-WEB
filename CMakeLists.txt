@@ -61,6 +61,12 @@ else()
     set(ENABLE_DISCORD_RICH_PRESENCE 0)
 endif()
 
+if (EMSCRIPTEN)
+    # All TUs need -pthread so wasm-ld accepts --shared-memory (atomics/bulk-memory features)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+endif()
+
 add_subdirectory(src/patch)
 add_subdirectory(src/external)
 add_subdirectory(src/emu)

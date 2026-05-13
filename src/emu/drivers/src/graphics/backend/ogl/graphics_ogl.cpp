@@ -32,6 +32,8 @@
 
 #if EKA2L1_PLATFORM(ANDROID)
 #include <EGL/egl.h>
+#elif EKA2L1_PLATFORM(WASM)
+#include <SDL2/SDL.h>
 #endif
 
 #define IMGUI_IMPL_OPENGL_LOADER_GLAD

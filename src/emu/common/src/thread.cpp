@@ -114,7 +114,10 @@ namespace eka2l1::common {
     }
 #else
     void set_thread_name(const char *thread_name) {
-#if EKA2L1_PLATFORM(DARWIN)
+#if EKA2L1_PLATFORM(WASM)
+        // pthread_setname_np not available in Emscripten
+        (void)thread_name;
+#elif EKA2L1_PLATFORM(DARWIN)
         pthread_setname_np(thread_name);
 #else
         pthread_setname_np(pthread_self(), thread_name);
@@ -122,6 +125,10 @@ namespace eka2l1::common {
     }
 
     void set_thread_priority(const thread_priority pri) {
+#if EKA2L1_PLATFORM(WASM)
+        // Thread priority not supported in Emscripten
+        (void)pri;
+#else
         pthread_t this_thread = pthread_self();
 
         std::int32_t max_prio = sched_get_priority_max(SCHED_OTHER);
@@ -136,6 +143,7 @@ namespace eka2l1::common {
         }
 
         pthread_setschedparam(this_thread, SCHED_OTHER, &params);
+#endif
     }
 #endif
 }

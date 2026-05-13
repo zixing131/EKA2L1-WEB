@@ -24,7 +24,7 @@
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
-#elif EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(DARWIN)
+#elif EKA2L1_PLATFORM(POSIX)
 #include <sys/mman.h>
 #include <sys/stat.h>
 

@@ -16,6 +16,14 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-invalid-offsetof")
 endif ()
 
+if (EMSCRIPTEN)
+    # SDL2 headers need -sUSE_SDL=2 as a compile flag to get the real headers
+    add_compile_options("SHELL:-sUSE_SDL=2")
+    # pthreads: set BEFORE add_subdirectory so ALL translation units get atomics/bulk-memory
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+endif()
+
 add_subdirectory(bridge)
 add_subdirectory(common)
 add_subdirectory(config)
