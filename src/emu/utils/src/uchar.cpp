@@ -20,64 +20,53 @@
 
 #include <cctype>
 #include <cwctype>
+#include <locale>
 #include <utils/uchar.h>
 
 namespace eka2l1::epoc {
 
-    // ---- C-locale helpers (used when std::locale is unavailable, e.g. WASM) ----
-
-    static inline std::uint32_t get_uchar_category_c(const uchar c) {
+    // C-locale helpers — used when ln is nullptr (e.g. Emscripten/WASM where
+    // std::locale construction is unavailable).
+    static std::uint32_t get_uchar_category_c(const uchar c) {
         const wchar_t wc = static_cast<wchar_t>(c);
-        if (std::iswcntrl(wc))  return uchar_category::UCHAR_CATEGORY_OTHER_CONTROL;
-        if (std::iswpunct(wc))  return uchar_category::UCHAR_CATEGORY_PUNCTUATION_GROUP;
+        if (std::iswcntrl(wc)) return uchar_category::UCHAR_CATEGORY_OTHER_CONTROL;
+        if (std::iswpunct(wc)) return uchar_category::UCHAR_CATEGORY_PUNCTUATION_GROUP;
         if (std::iswalpha(wc)) {
             return std::iswlower(wc)
                 ? uchar_category::UCHAR_CATEGORY_LETTER_LOWERCASE
                 : uchar_category::UCHAR_CATEGORY_LETTER_UPPERCASE;
         }
-        if (std::iswspace(wc))  return uchar_category::UCHAR_CATEGORY_SEPARATOR_SPACE;
-        if (std::iswdigit(wc))  return uchar_category::UCHAR_CATEGORY_NUMBER_DECIMAL_DIGIT;
+        if (std::iswspace(wc)) return uchar_category::UCHAR_CATEGORY_SEPARATOR_SPACE;
+        if (std::iswdigit(wc)) return uchar_category::UCHAR_CATEGORY_NUMBER_DECIMAL_DIGIT;
         return uchar_category::UCHAR_CATEGORY_OTHER_NOT_ASSIGNED;
     }
 
-    // ---- Public API ----
-
-    std::uint32_t get_uchar_category(const uchar c, std::locale &ln) {
-#ifdef __EMSCRIPTEN__
-        return get_uchar_category_c(c);
-#else
-        wchar_t the_wc = static_cast<wchar_t>(c);
-
-        if (std::iscntrl(the_wc, ln)) return uchar_category::UCHAR_CATEGORY_OTHER_CONTROL;
-        if (std::ispunct(the_wc, ln)) return uchar_category::UCHAR_CATEGORY_PUNCTUATION_GROUP;
-        if (std::isalpha(the_wc, ln)) {
-            return std::islower(the_wc, ln)
+    std::uint32_t get_uchar_category(const uchar c, std::locale *ln) {
+        if (!ln) return get_uchar_category_c(c);
+        const wchar_t wc = static_cast<wchar_t>(c);
+        if (std::iscntrl(wc, *ln)) return uchar_category::UCHAR_CATEGORY_OTHER_CONTROL;
+        if (std::ispunct(wc, *ln)) return uchar_category::UCHAR_CATEGORY_PUNCTUATION_GROUP;
+        if (std::isalpha(wc, *ln)) {
+            return std::islower(wc, *ln)
                 ? uchar_category::UCHAR_CATEGORY_LETTER_LOWERCASE
                 : uchar_category::UCHAR_CATEGORY_LETTER_UPPERCASE;
         }
-        if (std::isspace(the_wc, ln)) return uchar_category::UCHAR_CATEGORY_SEPARATOR_SPACE;
-        if (std::isdigit(the_wc, ln)) return uchar_category::UCHAR_CATEGORY_NUMBER_DECIMAL_DIGIT;
+        if (std::isspace(wc, *ln)) return uchar_category::UCHAR_CATEGORY_SEPARATOR_SPACE;
+        if (std::isdigit(wc, *ln)) return uchar_category::UCHAR_CATEGORY_NUMBER_DECIMAL_DIGIT;
         return uchar_category::UCHAR_CATEGORY_OTHER_NOT_ASSIGNED;
-#endif
     }
 
-    const uchar uppercase_uchar(const uchar c, std::locale &ln) {
-#ifdef __EMSCRIPTEN__
-        return static_cast<uchar>(std::towupper(static_cast<wchar_t>(c)));
-#else
-        return std::toupper(static_cast<wchar_t>(c), ln);
-#endif
+    const uchar uppercase_uchar(const uchar c, std::locale *ln) {
+        if (!ln) return static_cast<uchar>(std::towupper(static_cast<wchar_t>(c)));
+        return std::toupper(static_cast<wchar_t>(c), *ln);
     }
 
-    const uchar lowercase_uchar(const uchar c, std::locale &ln) {
-#ifdef __EMSCRIPTEN__
-        return static_cast<uchar>(std::towlower(static_cast<wchar_t>(c)));
-#else
-        return std::tolower(static_cast<wchar_t>(c), ln);
-#endif
+    const uchar lowercase_uchar(const uchar c, std::locale *ln) {
+        if (!ln) return static_cast<uchar>(std::towlower(static_cast<wchar_t>(c)));
+        return std::tolower(static_cast<wchar_t>(c), *ln);
     }
 
-    const uchar fold_uchar(const uchar c, std::locale &ln) {
+    const uchar fold_uchar(const uchar c, std::locale *ln) {
         return uppercase_uchar(c, ln);
     }
 

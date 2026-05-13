@@ -57,12 +57,14 @@ if (EMSCRIPTEN)
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        "SHELL:-s INITIAL_MEMORY=268435456"
         "SHELL:-s MAXIMUM_MEMORY=1073741824"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=1"
         "SHELL:-s USE_FREETYPE=1"
         "SHELL:-s USE_PTHREADS=1"
-        "SHELL:-s PTHREAD_POOL_SIZE=4"
+        "SHELL:-s PTHREAD_POOL_SIZE=8"
+        "SHELL:-s DEFAULT_PTHREAD_STACK_SIZE=2097152"
         "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\"]"
         "SHELL:-s EXPORT_NAME=createEKA2L1Module"
         "SHELL:-s MODULARIZE=1"

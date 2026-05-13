@@ -5389,19 +5389,19 @@ namespace eka2l1::epoc {
 
     /*======================= LOCALE-RELATED FUNCTION ====================*/
     BRIDGE_FUNC(std::uint32_t, uchar_get_category, const epoc::uchar character) {
-        return epoc::get_uchar_category(character, *kern->get_current_locale());
+        return epoc::get_uchar_category(character, kern->get_current_locale());
     }
 
     BRIDGE_FUNC(std::uint32_t, uchar_lowercase, const epoc::uchar character) {
-        return epoc::lowercase_uchar(character, *kern->get_current_locale());
+        return epoc::lowercase_uchar(character, kern->get_current_locale());
     }
 
     BRIDGE_FUNC(std::uint32_t, uchar_uppercase, const epoc::uchar character) {
-        return epoc::uppercase_uchar(character, *kern->get_current_locale());
+        return epoc::uppercase_uchar(character, kern->get_current_locale());
     }
 
     BRIDGE_FUNC(std::uint32_t, uchar_fold, const epoc::uchar character) {
-        return epoc::fold_uchar(character, *kern->get_current_locale());
+        return epoc::fold_uchar(character, kern->get_current_locale());
     }
 
     BRIDGE_FUNC(address, get_locale_char_set) {
@@ -5415,7 +5415,7 @@ namespace eka2l1::epoc {
         }
 
         const T *str_data = reinterpret_cast<const T *>(des->get_pointer(kern->crr_process()));
-        std::locale &current_locale = *kern->get_current_locale();
+        std::locale *current_locale = kern->get_current_locale();
 
         if (!str_data) {
             return epoc::error_bad_descriptor;

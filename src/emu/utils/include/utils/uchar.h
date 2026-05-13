@@ -80,43 +80,46 @@ namespace eka2l1::epoc {
      * 
      * @returns Categories of the character.
      */
-    std::uint32_t get_uchar_category(const uchar c, std::locale &ln);
+    // ln may be nullptr (e.g. on WASM where std::locale is unavailable),
+    // in which case the C locale is used as a fallback.
+    std::uint32_t get_uchar_category(const uchar c, std::locale *ln);
 
     /**
      * @brief   Uppercase an Unicode character.
-     * 
+     *
      * If the character is already uppercased, the passed character is returned.
-     * 
+     *
      * @param   c      Character to uppercase.
-     * @param   ln     The locale to base this uppercase on.
-     * 
+     * @param   ln     The locale to base this uppercase on (may be nullptr).
+     *
      * @returns Uppercased character
      * @see     lowercase_uchar
      */
-    const uchar uppercase_uchar(const uchar c, std::locale &ln);
+    const uchar uppercase_uchar(const uchar c, std::locale *ln);
 
     /**
      * @brief   Lowercase an Unicode character.
-     * 
+     *
      * If the character is already lowercased, the passed character is returned.
-     * 
+     *
      * @param   c      Character to lowercase.
-     * @param   ln     The locale to base this lowercase on.
-     * 
+     * @param   ln     The locale to base this lowercase on (may be nullptr).
+     *
      * @returns Lowercased character
      * @see     uppercase_uchar
      */
-    const uchar lowercase_uchar(const uchar c, std::locale &ln);
+    const uchar lowercase_uchar(const uchar c, std::locale *ln);
 
     /**
      * @brief   Fold an Unicode character.
-     * 
-     * An Unicode character when folded can be used in comparision that do not care about things such as case and accents.
-     * 
+     *
+     * An Unicode character when folded can be used in comparision that do not care about
+     * things such as case and accents.
+     *
      * @param   c      Character to fold.
-     * @param   ln     The locale to base this fold on.
-     * 
+     * @param   ln     The locale to base this fold on (may be nullptr).
+     *
      * @returns Folded character
      */
-    const uchar fold_uchar(const uchar c, std::locale &ln);
+    const uchar fold_uchar(const uchar c, std::locale *ln);
 }
