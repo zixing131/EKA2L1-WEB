@@ -48,10 +48,6 @@ add_library(drivers
         src/audio/dsp.cpp
         src/audio/player.cpp
         src/audio/stream.cpp
-        src/audio/backend/cubeb/audio_cubeb.cpp
-        src/audio/backend/cubeb/stream_cubeb.cpp
-        src/audio/backend/ffmpeg/dsp_ffmpeg.cpp
-        src/audio/backend/ffmpeg/player_ffmpeg.cpp
         src/audio/backend/minibae/player_minibae.cpp
         src/audio/backend/tinysoundfont/player_tsf.cpp
         src/audio/backend/bae_platimpl.cpp
@@ -80,9 +76,22 @@ add_library(drivers
         src/graphics/backend/ogl/shader_ogl.cpp
         src/sensor/backend/null/sensor_null.cpp
         src/sensor/sensor.cpp
-        src/video/backend/ffmpeg/video_player_ffmpeg.cpp
         src/video/video.cpp
         ${DRIVERS_VULKAN_SRC})
+
+if (NOT EMSCRIPTEN)
+    target_sources(drivers PRIVATE
+        src/audio/backend/cubeb/audio_cubeb.cpp
+        src/audio/backend/cubeb/stream_cubeb.cpp
+        src/audio/backend/ffmpeg/dsp_ffmpeg.cpp
+        src/audio/backend/ffmpeg/player_ffmpeg.cpp
+        src/video/backend/ffmpeg/video_player_ffmpeg.cpp
+    )
+else()
+    target_sources(drivers PRIVATE
+        src/audio/backend/null/audio_null.cpp
+    )
+endif()
 if (NOT ANDROID)
     target_sources(drivers PRIVATE
         include/drivers/input/backend/emu_controller_sdl2.h

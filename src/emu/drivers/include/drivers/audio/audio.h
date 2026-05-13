@@ -109,7 +109,8 @@ namespace eka2l1::drivers {
     };
 
     enum class audio_driver_backend {
-        cubeb
+        cubeb,
+        null
     };
 
     using audio_driver_instance = std::unique_ptr<audio_driver>;

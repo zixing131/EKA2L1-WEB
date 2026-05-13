@@ -439,9 +439,9 @@ static bool init_emulator() {
 
     g_state.symsys->set_graphics_driver(g_state.graphics_driver);
 
-    // Create audio driver
+    // Create audio driver (use null backend for WASM - Web Audio API is not yet wired)
     g_state.audio_driver = eka2l1::drivers::make_audio_driver(
-        eka2l1::drivers::audio_driver_backend::cubeb,
+        eka2l1::drivers::audio_driver_backend::null,
         g_state.conf.audio_master_volume,
         eka2l1::drivers::player_type_tsf
     );

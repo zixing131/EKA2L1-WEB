@@ -33,16 +33,45 @@ target_link_libraries(eka2l1_wasm PRIVATE
     yaml-cpp
 )
 
-# Link Emscripten-provided libraries
+# Set output directory
+set_target_properties(eka2l1_wasm PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 if (EMSCRIPTEN)
-    target_link_libraries(eka2l1_wasm PRIVATE
-        sdl2
-        gl
+    # Emscripten linker flags for WASM output
+    target_link_options(eka2l1_wasm PRIVATE
+        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        "SHELL:-s MAXIMUM_MEMORY=1073741824"
+        "SHELL:-s USE_SDL=2"
+        "SHELL:-s USE_OPENGL=3"
+        "SHELL:-s FULL_ES3=1"
+        "SHELL:-s USE_FREETYPE=1"
+        "SHELL:-s USE_PTHREADS=1"
+        "SHELL:-s PTHREAD_POOL_SIZE=4"
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\"]"
+        "SHELL:-s EXPORT_NAME=createEKA2L1Module"
+        "SHELL:-s MODULARIZE=1"
+        "SHELL:-s FORCE_FILESYSTEM=1"
+        "SHELL:-s ENVIRONMENT=web"
+        "SHELL:-s WASM=1"
+        "SHELL:-s GL_ASSERTIONS=0"
+        "SHELL:-s GL_DEBUG=0"
+        "SHELL:-s ALLOW_TABLE_GROWTH=1"
+        "SHELL:-s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\"$autoResumeAudioContext\"]"
+        "SHELL:-s MIN_WEBGL_VERSION=2"
+        "SHELL:-s MAX_WEBGL_VERSION=2"
+        "SHELL:-s ASYNCIFY=1"
+        "SHELL:-s ASYNCIFY_IMPORTS=[\"asyncify_sleep\",\"asyncify_main_loop\"]"
+        "SHELL:--preload-file resources@resources"
+        "SHELL:--preload-file miscs@miscs"
+        "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
+        -O2
+        -g2
+        "--closure=0"
     )
 
-    # Set Emscripten linker flags for WASM output
     set_target_properties(eka2l1_wasm PROPERTIES
-        LINK_FLAGS "${EMSCRIPTEN_LINKER_FLAGS}"
         OUTPUT_NAME "eka2l1"
         SUFFIX ".js"
     )
@@ -59,8 +88,3 @@ if (EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/miscs/" "$<TARGET_FILE_DIR:eka2l1_wasm>/miscs/"
     )
 endif()
-
-# Set output directory
-set_target_properties(eka2l1_wasm PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)

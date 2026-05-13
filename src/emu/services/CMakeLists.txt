@@ -168,28 +168,14 @@ add_library(epocservs
         src/audio/mmf/audio.cpp
         src/audio/mmf/dev.cpp
         src/backup/backup.cpp
-        src/bluetooth/protocols/btlink/resolver_inet.cpp
-        src/bluetooth/protocols/l2cap/socket_inet.cpp
-        src/bluetooth/protocols/rfcomm/rfcomm_inet.cpp
         src/bluetooth/protocols/sdp/pdu_builder.cpp
-        src/bluetooth/protocols/sdp/sdp_inet.cpp
-        src/bluetooth/protocols/asker_inet.cpp
-        src/bluetooth/protocols/base_inet.cpp
-        src/bluetooth/protocols/btmidman_lan_matching.cpp
-        src/bluetooth/protocols/btmidman_proxserv_matching.cpp
-        src/bluetooth/protocols/btmidman_inet.cpp
         src/bluetooth/protocols/common.cpp
-        src/bluetooth/protocols/overall.cpp
         src/bluetooth/bt.cpp
         src/bluetooth/btman.cpp
-        src/bluetooth/btmidman.cpp
         src/centralrepo/centralrepo.cpp
         src/centralrepo/cre.cpp
         src/centralrepo/repo.cpp
         src/comm/comm.cpp
-        src/internet/protocols/overall.cpp
-        src/internet/protocols/resolver.cpp
-        src/internet/protocols/socket.cpp
         src/internet/browser.cpp
         src/internet/connmonitor.cpp
         src/internet/nifman.cpp
@@ -314,6 +300,31 @@ add_library(epocservs
         src/window/util.cpp
         src/window/window.cpp)
 
+if (NOT EMSCRIPTEN)
+    target_sources(epocservs PRIVATE
+        src/bluetooth/btmidman.cpp
+        src/bluetooth/protocols/btlink/resolver_inet.cpp
+        src/bluetooth/protocols/l2cap/socket_inet.cpp
+        src/bluetooth/protocols/rfcomm/rfcomm_inet.cpp
+        src/bluetooth/protocols/sdp/sdp_inet.cpp
+        src/bluetooth/protocols/asker_inet.cpp
+        src/bluetooth/protocols/base_inet.cpp
+        src/bluetooth/protocols/btmidman_lan_matching.cpp
+        src/bluetooth/protocols/btmidman_proxserv_matching.cpp
+        src/bluetooth/protocols/btmidman_inet.cpp
+        src/bluetooth/protocols/overall.cpp
+        src/internet/protocols/overall.cpp
+        src/internet/protocols/resolver.cpp
+        src/internet/protocols/socket.cpp
+    )
+else()
+    target_sources(epocservs PRIVATE
+        src/bluetooth/btmidman_null.cpp
+        src/bluetooth/protocols/overall_null.cpp
+        src/internet/protocols/overall_null.cpp
+    )
+endif()
+
 target_include_directories(epocservs PUBLIC include)
 
 target_include_directories(epocservs PUBLIC
@@ -326,10 +337,15 @@ target_link_libraries(epocservs PUBLIC
         epocloader
         epocmem
         epocutils
+        thread-pool)
+
+if (NOT EMSCRIPTEN)
+    target_link_libraries(epocservs PUBLIC
         uv_a
         uvw
         uvlooper
-        thread-pool)
+    )
+endif()
 
 target_link_libraries(epocservs PRIVATE
         config

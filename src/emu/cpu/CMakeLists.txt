@@ -90,7 +90,10 @@ add_library(cpu
         ${SOURCE_12L1R_PUBLIC}
         ${SOURCE_DYNCOM})
 
-if (ARCHITECTURE_ARM32)
+if (EMSCRIPTEN)
+    # WASM sandbox cannot execute JIT-generated machine code; use dyncom interpreter only
+    # dyncom sources are already included in the base add_library() call above
+elseif (ARCHITECTURE_ARM32)
     target_sources(cpu PRIVATE ${SOURCE_12L1R})
     target_link_libraries(cpu PRIVATE Catch2)
 else()

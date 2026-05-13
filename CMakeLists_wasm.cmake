@@ -93,9 +93,8 @@ set(EMSCRIPTEN_LINKER_FLAGS
     "--closure=0"
     "-s ASYNCIFY=1"
     "-s ASYNCIFY_IMPORTS=['asyncify_sleep','asyncify_main_loop']"
-    "--no-heap-copy"
 )
 
 # ---- Compiler flags ----
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-warn-absolute-paths")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-warn-absolute-paths -Wno-invalid-offsetof -fno-exceptions-legacy")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-warn-absolute-paths -Wno-invalid-offsetof")

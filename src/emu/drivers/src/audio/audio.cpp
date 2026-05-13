@@ -18,9 +18,13 @@
  */
 
 #include <drivers/audio/audio.h>
-#include <drivers/audio/backend/cubeb/audio_cubeb.h>
-
 #include <common/platform.h>
+
+#if !EKA2L1_PLATFORM(WASM)
+#include <drivers/audio/backend/cubeb/audio_cubeb.h>
+#else
+#include <drivers/audio/backend/null/audio_null.h>
+#endif
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <drivers/audio/backend/wmf/wmf_loader.h>
@@ -62,10 +66,12 @@ namespace eka2l1::drivers {
         if (loader::init_mf()) {
             res.push_back(player_type_wmf);
         } else
-#endif  
+#endif
+#if !EKA2L1_PLATFORM(WASM)
         {
             res.push_back(player_type_ffmpeg);
         }
+#endif
 
         return res;
     }
@@ -138,8 +144,13 @@ namespace eka2l1::drivers {
     audio_driver_instance make_audio_driver(const audio_driver_backend backend, const std::uint32_t initial_master_vol,
         const player_type preferred_midi_backend) {
         switch (backend) {
+#if !EKA2L1_PLATFORM(WASM)
         case audio_driver_backend::cubeb: {
             return std::make_unique<cubeb_audio_driver>(initial_master_vol, preferred_midi_backend);
+        }
+#endif
+        case audio_driver_backend::null: {
+            return std::make_unique<null_audio_driver>(initial_master_vol, preferred_midi_backend);
         }
 
         default:

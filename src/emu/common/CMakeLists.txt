@@ -95,13 +95,18 @@ add_library(common
         src/types.cpp
         src/unicode.cpp
         src/url.cpp
-        src/upnp.cpp
         src/region.cpp
         src/virtualmem.cpp
         src/watcher.cpp
         src/wildcard.cpp
         ${CUSTOM_COMMON_SOURCE}
         )
+
+if (NOT EMSCRIPTEN)
+    target_sources(common PRIVATE src/upnp.cpp)
+else()
+    target_sources(common PRIVATE src/upnp_null.cpp)
+endif()
 
 if (ANDROID)
     target_sources(common PRIVATE
@@ -118,7 +123,11 @@ endif()
 
 target_include_directories(common PUBLIC include)
 target_link_libraries(common PUBLIC fmt miniz spdlog)
-target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
+if (NOT EMSCRIPTEN)
+    target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
+else()
+    target_link_libraries(common PRIVATE pugixml re2::re2)
+endif()
 
 if (UNIX OR APPLE)
     set_property(TARGET common PROPERTY POSITION_INDEPENDENT_CODE ON)

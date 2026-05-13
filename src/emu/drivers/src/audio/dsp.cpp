@@ -17,8 +17,11 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <drivers/audio/backend/ffmpeg/dsp_ffmpeg.h>
+#include <common/platform.h>
 #include <drivers/audio/dsp.h>
+#if !EKA2L1_PLATFORM(WASM)
+#include <drivers/audio/backend/ffmpeg/dsp_ffmpeg.h>
+#endif
 
 #include <common/log.h>
 
@@ -84,9 +87,10 @@ namespace eka2l1::drivers {
 
     std::unique_ptr<dsp_stream> new_dsp_out_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
+#if !EKA2L1_PLATFORM(WASM)
         case dsp_stream_backend_ffmpeg:
             return std::make_unique<dsp_output_stream_ffmpeg>(aud);
-
+#endif
         default:
             break;
         }
@@ -96,9 +100,10 @@ namespace eka2l1::drivers {
 
     std::unique_ptr<dsp_stream> new_dsp_in_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
+#if !EKA2L1_PLATFORM(WASM)
         case dsp_stream_backend_ffmpeg:
             return std::make_unique<dsp_input_stream_shared>(aud);
-
+#endif
         default:
             break;
         }
