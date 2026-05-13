@@ -38,6 +38,7 @@
 
 // EKA2L1 headers
 #include <common/algorithm.h>
+#include <common/buffer.h>
 #include <common/fileutils.h>
 #include <common/log.h>
 #include <common/path.h>
@@ -53,6 +54,12 @@
 
 #include <system/epoc.h>
 #include <system/devices.h>
+#include <system/installation/rpkg.h>
+#include <system/installation/common.h>
+
+#include <services/applist/applist.h>
+#include <utils/apacmd.h>
+#include <common/cvt.h>
 
 #include <kernel/kernel.h>
 
@@ -382,9 +389,29 @@ static bool init_emulator() {
 
     LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 WebAssembly v0.0.1 ({}-{})", GIT_BRANCH, GIT_COMMIT_HASH);
 
-    // Load config
+    // All persistent data lives under the IDBFS mount point.
+    // Override the storage path BEFORE creating the system so that device_manager,
+    // package manager, etc. all use the same persisted location.
+    const std::string storage_path = "/eka2l1";
+    g_state.conf.storage = storage_path;
+
+    // Load config (may return early if config.yml doesn't exist yet – that's fine)
     g_state.conf.deserialize();
+    // Re-enforce storage path in case deserialize() loaded a stale relative path.
+    g_state.conf.storage = storage_path;
+
     g_state.app_settings = std::make_unique<config::app_settings>(&g_state.conf);
+
+    // Create necessary directories in Emscripten FS
+    eka2l1::common::create_directory(storage_path);
+    eka2l1::common::create_directory(storage_path + "/drives");
+    eka2l1::common::create_directory(storage_path + "/drives/c");
+    eka2l1::common::create_directory(storage_path + "/drives/d");
+    eka2l1::common::create_directory(storage_path + "/drives/e");
+    eka2l1::common::create_directory(storage_path + "/drives/z");
+    eka2l1::common::create_directory(storage_path + "/roms");
+    eka2l1::common::create_directory(storage_path + "/temp");
+    eka2l1::common::create_directory(storage_path + "/rpkg");
 
     // Create system
     eka2l1::system_create_components comp;
@@ -394,19 +421,6 @@ static bool init_emulator() {
     comp.settings_ = g_state.app_settings.get();
 
     g_state.symsys = std::make_unique<eka2l1::system>(comp);
-
-    // Setup virtual filesystem paths (using Emscripten's virtual FS)
-    const std::string storage_path = "/eka2l1";
-
-    // Create necessary directories in Emscripten FS
-    eka2l1::common::create_directory(storage_path);
-    eka2l1::common::create_directory(storage_path + "/drives");
-    eka2l1::common::create_directory(storage_path + "/drives/c");
-    eka2l1::common::create_directory(storage_path + "/drives/d");
-    eka2l1::common::create_directory(storage_path + "/drives/e");
-    eka2l1::common::create_directory(storage_path + "/drives/z");
-    eka2l1::common::create_directory(storage_path + "/temp");
-    eka2l1::common::create_directory(storage_path + "/rpkg");
 
     // Startup the system
     g_state.symsys->startup();
@@ -514,14 +528,28 @@ static void main_loop() {
 extern "C" {
 
 /**
- * Initialize emulator with a ROM file path.
- * Called from JavaScript after the user loads a ROM file.
+ * Initialize emulator with a ROM (and optionally RPKG) file.
+ * Called from JavaScript after the user loads device files into the VFS.
+ *
+ * EKA1 mode  (rpkg_path == NULL or ""):
+ *   install_rom(rom_path) – self-contained old-style ROM.
+ *
+ * EKA2 mode (rpkg_path provided):
+ *   install_rpkg(rpkg_path) – extracts Z-drive contents and registers device.
+ *   Then copies rom_path to roms/<firmcode>/SYM.ROM.
+ *
+ * After installation:
+ *   set_device(0) → triggers full reset() (memory, dispatcher, services).
+ *   mount drive_z from the extracted directory.
+ *   initialize_user_parties() → HLE libraries + boot.
  */
 EMSCRIPTEN_KEEPALIVE
-int wasm_init_with_rom(const char *rom_path) {
+int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
     if (!rom_path) return -1;
 
-    LOG_INFO(FRONTEND_CMDLINE, "Initializing with ROM: {}", rom_path);
+    const bool has_rpkg = (rpkg_path && rpkg_path[0] != '\0');
+    LOG_INFO(FRONTEND_CMDLINE, "Initializing with ROM: {}  RPKG: {}",
+        rom_path, has_rpkg ? rpkg_path : "(none)");
 
     if (!g_state.initialized) {
         if (!init_emulator()) {
@@ -529,19 +557,98 @@ int wasm_init_with_rom(const char *rom_path) {
         }
     }
 
-    // Mount ROM drive
+    eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
+
+    if (dvcmngr->total() == 0) {
+        // Validate ROM file exists and is readable.
+        {
+            common::ro_std_file_stream check_stream(std::string(rom_path), true);
+            if (!check_stream.valid()) {
+                LOG_ERROR(FRONTEND_CMDLINE, "ROM file not found or not readable: {}", rom_path);
+                return -3;
+            }
+        }
+
+        const std::string &storage = g_state.conf.storage;
+        const std::string rom_resident  = eka2l1::add_path(storage, "roms/");
+        const std::string drives_z_path = eka2l1::add_path(storage, "drives/z/");
+
+        eka2l1::common::create_directories(rom_resident);
+        eka2l1::common::create_directories(drives_z_path);
+
+        eka2l1::device_installation_error install_err = eka2l1::device_installation_none;
+
+        if (has_rpkg) {
+            // ---- EKA2 path: RPKG contains Z-drive content, ROM is just the kernel image ----
+            {
+                common::ro_std_file_stream rpkg_check(std::string(rpkg_path), true);
+                if (!rpkg_check.valid()) {
+                    LOG_ERROR(FRONTEND_CMDLINE, "RPKG file not found or not readable: {}", rpkg_path);
+                    return -3;
+                }
+            }
+
+            std::string firmware_code;
+            LOG_INFO(FRONTEND_CMDLINE, "EKA2 install: RPKG={} ROM={}", rpkg_path, rom_path);
+
+            install_err = eka2l1::loader::install_rpkg(
+                dvcmngr, std::string(rpkg_path), drives_z_path, firmware_code, nullptr, nullptr);
+
+            if (install_err != eka2l1::device_installation_none) {
+                LOG_ERROR(FRONTEND_CMDLINE, "RPKG installation failed, error={}",
+                    static_cast<int>(install_err));
+                return -(1000 + static_cast<int>(install_err));
+            }
+
+            // Copy ROM image to roms/<firmcode>/SYM.ROM
+            const std::string rom_dir = eka2l1::add_path(rom_resident, firmware_code + "/");
+            eka2l1::common::create_directories(rom_dir);
+            if (!eka2l1::common::copy_file(std::string(rom_path),
+                    eka2l1::add_path(rom_dir, "SYM.ROM"), true)) {
+                LOG_ERROR(FRONTEND_CMDLINE, "Failed to copy ROM to {}", rom_dir);
+                return -5;
+            }
+
+            LOG_INFO(FRONTEND_CMDLINE, "EKA2 device installed: firmcode={}", firmware_code);
+        } else {
+            // ---- EKA1 path: single self-contained ROM file ----
+            LOG_INFO(FRONTEND_CMDLINE, "EKA1 install: ROM={}", rom_path);
+
+            install_err = eka2l1::loader::install_rom(
+                dvcmngr, std::string(rom_path), rom_resident, drives_z_path, nullptr, nullptr);
+
+            if (install_err != eka2l1::device_installation_none) {
+                LOG_ERROR(FRONTEND_CMDLINE, "ROM installation failed, error={}",
+                    static_cast<int>(install_err));
+                return -(1000 + static_cast<int>(install_err));
+            }
+
+            LOG_INFO(FRONTEND_CMDLINE, "EKA1 device installed");
+        }
+
+        LOG_INFO(FRONTEND_CMDLINE, "{} device(s) now registered", dvcmngr->total());
+    }
+
+    // Triggers reset(): memory model init, ROM load, dispatcher + service setup.
+    if (!g_state.symsys->set_device(0)) {
+        LOG_ERROR(FRONTEND_CMDLINE, "set_device(0) failed");
+        return -4;
+    }
+
+    // Mount Z drive from the extracted ROM filesystem contents.
     g_state.symsys->mount(drive_z, drive_media::rom,
         eka2l1::add_path(g_state.conf.storage, "/drives/z/"),
         io_attrib_internal | io_attrib_write_protected);
 
+    // Register HLE dispatch libraries, init services, start the bootload.
     g_state.symsys->initialize_user_parties();
 
     return 0;
 }
 
 /**
- * Install a SIS package from the given path.
- * Called from JavaScript after the user loads a SIS file.
+ * Install a SIS package from the given VFS path.
+ * Returns 0 on success, negative on error, or package::installation_result value.
  */
 EMSCRIPTEN_KEEPALIVE
 int wasm_install_package(const char *pkg_path) {
@@ -551,14 +658,108 @@ int wasm_install_package(const char *pkg_path) {
 
     if (!g_state.symsys) return -2;
 
-    auto pkgmngr = g_state.symsys->get_packages();
-    if (pkgmngr) {
-        // Package installation logic
-        LOG_INFO(FRONTEND_CMDLINE, "Package installation queued");
-        return 0;
+    const std::u16string path_u16 = eka2l1::common::utf8_to_ucs2(std::string(pkg_path));
+    const int result = g_state.symsys->install_package(path_u16, drive_e);
+
+    if (result == 0) {
+        LOG_INFO(FRONTEND_CMDLINE, "Package installed successfully");
+    } else {
+        LOG_ERROR(FRONTEND_CMDLINE, "Package installation failed: {}", result);
     }
 
-    return -3;
+    return result;
+}
+
+/**
+ * Return a JSON array of installed (visible) apps from the APA registry.
+ * Format: [{"uid":<number>,"name":"<string>"},...]
+ * The returned pointer is valid until the next call to this function.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_get_app_list() {
+    static std::string s_json;
+
+    if (!g_state.symsys) {
+        s_json = "[]";
+        return s_json.c_str();
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        s_json = "[]";
+        return s_json.c_str();
+    }
+
+    auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+        kern->get_by_name<eka2l1::service::server>(
+            eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+
+    if (!alserv) {
+        s_json = "[]";
+        return s_json.c_str();
+    }
+
+    std::string json = "[";
+    bool first = true;
+
+    for (auto &reg : alserv->get_registerations()) {
+        if (reg.caps.is_hidden) continue;
+
+        std::string name = eka2l1::common::ucs2_to_utf8(
+            reg.mandatory_info.long_caption.to_std_string(nullptr));
+
+        // Minimal JSON escaping: replace backslash then double-quote
+        std::string escaped;
+        escaped.reserve(name.size());
+        for (char c : name) {
+            if (c == '\\') { escaped += "\\\\"; }
+            else if (c == '"') { escaped += "\\\""; }
+            else { escaped += c; }
+        }
+
+        if (!first) json += ',';
+        first = false;
+        json += "{\"uid\":";
+        json += std::to_string(reg.mandatory_info.uid);
+        json += ",\"name\":\"";
+        json += escaped;
+        json += "\"}";
+    }
+
+    json += ']';
+    s_json = std::move(json);
+    return s_json.c_str();
+}
+
+/**
+ * Launch an installed app by its UID.
+ * Returns 0 on success, negative on error.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_launch_app(int uid) {
+    if (!g_state.symsys) return -1;
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) return -2;
+
+    auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+        kern->get_by_name<eka2l1::service::server>(
+            eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+
+    if (!alserv) return -3;
+
+    eka2l1::apa_app_registry *reg = alserv->get_registration(
+        static_cast<std::uint32_t>(uid));
+    if (!reg) return -4;
+
+    epoc::apa::command_line cmdline;
+    cmdline.launch_cmd_ = epoc::apa::command_create;
+
+    kern->lock();
+    const bool ok = alserv->launch_app(*reg, cmdline, nullptr, nullptr);
+    kern->unlock();
+
+    return ok ? 0 : -5;
 }
 
 /**
@@ -635,6 +836,13 @@ int wasm_get_state() {
 // ============================================================================
 
 int main(int argc, char **argv) {
+    // Must initialize logging before any LOG_* calls, otherwise spd_logger
+    // and filterings are null, which causes a null-function trap in WASM.
+    eka2l1::log::setup_log(nullptr);
+    // By default spdlog only writes to EKA2L1.log; toggle_console() adds the
+    // stdout sink so logs appear in the browser devtools console.
+    eka2l1::log::toggle_console();
+
     LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 WebAssembly starting...");
 
     // Initialize SDL

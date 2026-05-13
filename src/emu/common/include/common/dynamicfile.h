@@ -20,60 +20,62 @@
 
 #pragma once
 
-#include <fstream>
+#include <cstdio>
 #include <string>
 
 namespace eka2l1::common {
     /**
-     * \brief A wrapper around ifstream, support reading many encodings.
+     * \brief A file reader that supports UTF-8 and UCS-2 encoded text files.
      *
-     * This is a wrapper of fstream, supports reading UTF-8 and UCS-2 file
-     * to either string or an 16-bit string
-     * 
-     * It was born to deal with system files in Symbian, where most of them
-     * are saved as an UCS2 file.
+     * Reimplemented on top of C-style FILE* to avoid std::ifstream locale
+     * issues in environments like Emscripten/WASM where std::basic_filebuf
+     * internals may call unavailable locale facets and abort.
      */
     class dynamic_ifile {
-        std::ifstream stream_;
-        int ucs2_;
+        FILE *fp_;
+        int   ucs2_;  // -1 = UTF-8, 0 = UCS-2 LE, 1 = UCS-2 BE
+        bool  eof_;
+        bool  fail_;
 
     public:
         explicit dynamic_ifile(const std::string &name);
 
-        /**
-         * \brief Read a line to an 8-bit string
-         *
-         * String will be set to empty if the line is empty or file failed 
-         */
-        bool getline(std::string &line);
+        // Allow move-assignment (used when retrying with another filename).
+        dynamic_ifile(dynamic_ifile &&o) noexcept
+            : fp_(o.fp_), ucs2_(o.ucs2_), eof_(o.eof_), fail_(o.fail_) {
+            o.fp_ = nullptr;
+        }
+        dynamic_ifile &operator=(dynamic_ifile &&o) noexcept {
+            if (this != &o) {
+                if (fp_) fclose(fp_);
+                fp_   = o.fp_;
+                ucs2_ = o.ucs2_;
+                eof_  = o.eof_;
+                fail_ = o.fail_;
+                o.fp_ = nullptr;
+            }
+            return *this;
+        }
 
-        /** 
-         * \brief Read a line to u16string
-         *
-         * String will be set to empty if the line is empty or file failed 
-         */
+        dynamic_ifile(const dynamic_ifile &) = delete;
+        dynamic_ifile &operator=(const dynamic_ifile &) = delete;
+
+        ~dynamic_ifile() {
+            if (fp_) { fclose(fp_); fp_ = nullptr; }
+        }
+
+        bool getline(std::string &line);
         bool getline(std::u16string &line);
 
         void read(std::string &line, const std::size_t len);
-
         void read(std::u16string &line, const std::size_t len);
 
         void seek(int mode, const std::size_t offset);
 
-        bool eof() {
-            return stream_.eof();
-        }
+        bool eof()  const { return eof_  || (fp_ && feof(fp_)); }
+        bool fail() const { return fail_ || !fp_; }
 
-        bool fail() {
-            return stream_.fail();
-        }
-
-        void set_ucs2(int ucs2) {
-            ucs2_ = ucs2;
-        }
-
-        inline bool is_ucs2() {
-            return ucs2_ != -1;
-        }
+        void set_ucs2(int ucs2) { ucs2_ = ucs2; }
+        bool is_ucs2() const    { return ucs2_ != -1; }
     };
 }

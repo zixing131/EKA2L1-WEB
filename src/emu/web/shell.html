@@ -375,6 +375,95 @@
                 gap: 4px;
             }
         }
+
+        /* ---- App List Panel ---- */
+        #app-list-panel {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 300px;
+            height: 100%;
+            background: #1a1a2e;
+            border-right: 1px solid #3a3a6a;
+            z-index: 400;
+            padding: 16px;
+            overflow-y: auto;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        #app-list-panel.visible {
+            display: flex;
+        }
+
+        #app-list-panel h3 {
+            color: #e94560;
+            margin-bottom: 8px;
+            font-size: 1em;
+        }
+
+        #app-list-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        #btn-refresh-apps {
+            background: #0f3460;
+            color: #e0e0e0;
+            border: 1px solid #3a3a6a;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+
+        #btn-refresh-apps:hover { background: #1a4a80; }
+
+        #app-list-items {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .app-item {
+            background: #0f0f23;
+            border: 1px solid #3a3a6a;
+            border-radius: 6px;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .app-item:hover {
+            background: #16213e;
+            border-color: #e94560;
+        }
+
+        .app-item-icon {
+            font-size: 1.4em;
+            flex-shrink: 0;
+        }
+
+        .app-item-name {
+            font-size: 0.85em;
+            color: #e0e0e0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        #app-list-empty {
+            color: #606080;
+            font-size: 0.85em;
+            text-align: center;
+            padding: 20px 0;
+        }
     </style>
 </head>
 <body>
@@ -395,6 +484,7 @@
     <div id="toolbar">
         <button class="toolbar-btn" id="btn-rom" title="Load ROM/RPKG">📦 ROM</button>
         <button class="toolbar-btn" id="btn-install" title="Install SIS Package">📲 Install</button>
+        <button class="toolbar-btn" id="btn-apps" title="Installed Apps">📋 Apps</button>
         <button class="toolbar-btn" id="btn-run" title="Run/Pause">▶ Run</button>
         <button class="toolbar-btn" id="btn-reset" title="Reset Emulator">🔄 Reset</button>
         <div class="toolbar-spacer"></div>
@@ -427,16 +517,46 @@
 <div id="file-dialog">
     <div class="file-dialog-content">
         <h2 id="dialog-title">Load ROM/RPKG</h2>
-        <p id="dialog-desc">Select a ROM file (.rom) or RPKG file (.rpkg) to boot the emulator.</p>
+        <p id="dialog-desc">Select a ROM file (.rom) to boot the emulator.</p>
+
+        <!-- ROM file (always shown) -->
         <div class="file-drop-zone" id="file-drop-zone">
             <div class="icon">📁</div>
-            <div>Drag & Drop file here or click to browse</div>
+            <div id="drop-zone-label">ROM file (.rom) – drag &amp; drop or click</div>
             <input type="file" id="file-input" style="display:none;" accept=".rom,.rpkg,.sis,.sisx">
         </div>
-        <div>
-            <button class="dialog-btn" id="dialog-ok">OK</button>
+
+        <!-- RPKG file (only shown for ROM installs) -->
+        <div id="rpkg-section" style="display:none;margin-top:10px;">
+            <p style="color:#a0a0c0;font-size:0.85em;margin-bottom:6px;">
+                S60 3rd gen / S^3 devices (Nokia N95, 5800, N8…) also need an <strong>RPKG</strong> file.
+                If you have one, select it below (optional for EKA1 devices):
+            </p>
+            <div class="file-drop-zone" id="rpkg-drop-zone" style="padding:20px 10px;">
+                <div class="icon">📦</div>
+                <div id="rpkg-drop-label">RPKG file (.rpkg) – drag &amp; drop or click (optional)</div>
+                <input type="file" id="rpkg-input" style="display:none;" accept=".rpkg">
+            </div>
+        </div>
+
+        <div style="margin-top:12px;">
+            <button class="dialog-btn" id="dialog-ok">Install</button>
             <button class="dialog-btn secondary" id="dialog-cancel">Cancel</button>
         </div>
+    </div>
+</div>
+
+<!-- App List Panel -->
+<div id="app-list-panel">
+    <div id="app-list-header">
+        <h3>📋 Installed Apps</h3>
+        <div style="display:flex;gap:6px;">
+            <button id="btn-refresh-apps" title="Refresh app list">⟳ Refresh</button>
+            <button id="btn-close-apps" title="Close" style="background:#3a3a6a;color:#e0e0e0;border:1px solid #5a5a8a;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em;">✕</button>
+        </div>
+    </div>
+    <div id="app-list-items">
+        <div id="app-list-empty">No apps installed yet.<br>Install a .sis/.sisx file first.</div>
     </div>
 </div>
 
@@ -507,6 +627,26 @@
     let animationFrameId = null;
     let currentDialogMode = 'rom'; // 'rom' or 'install'
 
+    // Pending ROM / RPKG VFS paths (set when user picks files in the dialog)
+    let pendingRomPath  = null;
+    let pendingRpkgPath = null;
+
+    // ---- IndexedDB Persistence ----
+    // Flush the IDBFS-backed /eka2l1 directory to IndexedDB.
+    // Call this after any write that should survive a page reload.
+    function syncToIDB(onDone) {
+        if (!module || !module.FS || !module.FS.syncfs ||
+            !(module.FS.filesystems && module.FS.filesystems.IDBFS)) {
+            if (onDone) onDone(null);
+            return;
+        }
+        module.FS.syncfs(false, function(err) {
+            if (err) console.warn('IDBFS save error:', err);
+            else console.log('[EKA2L1] Saved to IndexedDB');
+            if (onDone) onDone(err);
+        });
+    }
+
     // ---- Loading Progress ----
     function updateLoadingProgress(percent, text) {
         loadingBar.style.width = percent + '%';
@@ -519,6 +659,7 @@
 
         const moduleConfig = {
             canvas: canvas,
+            noInitialRun: true,   // We call callMain() manually after IDBFS is ready
             print: function(text) {
                 console.log('[EKA2L1]', text);
             },
@@ -540,39 +681,62 @@
                     this.totalDependencies = 0;
                 }
             },
-            preRun: [
-                function() {
-                    // Ensure audio context is resumed on user gesture
-                    if (module && module.autoResumeAudioContext) {
-                        module.autoResumeAudioContext(
-                            function() { return typeof AudioContext !== 'undefined'; },
-                            function() { return new AudioContext(); }
-                        );
-                    }
-                }
-            ],
+            preRun: [],
             postRun: [
                 function() {
                     updateLoadingProgress(100, 'Ready!');
                     setTimeout(function() {
                         splashScreen.classList.add('hidden');
                         mainContainer.style.display = 'flex';
-                        updateStatus('green', 'Ready - Load a ROM to begin');
+
+                        // Check if a device was already installed in a previous session.
+                        // If so, the emulator will have auto-initialized via set_device().
+                        var state = module ? module.ccall('wasm_get_state', 'number', [], []) : 0;
+                        if (state & 1) {
+                            // bit 0: initialized
+                            updateStatus('green', 'Ready - Device loaded from storage');
+                        } else {
+                            updateStatus('yellow', 'Load a ROM/RPKG to begin');
+                        }
                     }, 500);
                 }
             ]
         };
 
-        // The module factory is created by Emscripten with EXPORT_NAME
+        // The module factory is created by Emscripten with EXPORT_NAME=createEKA2L1Module
         if (typeof createEKA2L1Module !== 'undefined') {
             createEKA2L1Module(moduleConfig).then(function(mod) {
                 module = mod;
+
+                updateLoadingProgress(80, 'Setting up persistent storage...');
+
+                // Mount /eka2l1 as IDBFS so ROM/package data survives page reloads.
+                var idbfsAvailable = mod.FS && mod.FS.filesystems && mod.FS.filesystems.IDBFS;
+
+                function startMain() {
+                    updateLoadingProgress(95, 'Starting emulator...');
+                    mod.callMain([]);
+                }
+
+                if (idbfsAvailable) {
+                    try { mod.FS.mkdir('/eka2l1'); } catch(e) { /* exists on reload */ }
+                    mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
+
+                    mod.FS.syncfs(true, function(err) {
+                        if (err) console.warn('[EKA2L1] IDBFS initial load (OK on first run):', err);
+                        else console.log('[EKA2L1] Loaded persisted data from IndexedDB');
+                        startMain();
+                    });
+                } else {
+                    console.warn('[EKA2L1] IDBFS not available – data will not persist across reloads');
+                    startMain();
+                }
             }).catch(function(err) {
                 console.error('Failed to load EKA2L1:', err);
                 updateLoadingProgress(0, 'Error loading: ' + err.message);
             });
         } else {
-            // Fallback: module already loaded (non-modularized build)
+            // Fallback: non-modularized build
             module = moduleConfig;
             if (typeof Module !== 'undefined') {
                 Object.assign(Module, moduleConfig);
@@ -620,6 +784,55 @@
         reader.readAsArrayBuffer(file);
     }
 
+    // ---- ROM install error decoder ----
+    var installErrNames = [
+        'none','not_exist','insufficient','rpkg_corrupt',
+        'determine_product_failure','already_exist','general_failure',
+        'rom_fail_to_copy','vpl_file_invalid','rofs_corrupt',
+        'rom_file_corrupt','fpsx_corrupt'
+    ];
+    function decodeInstallError(result) {
+        if (result === 0) return null;
+        if (result <= -1000) {
+            var idx = -(result + 1000);
+            return installErrNames[idx] || ('error_' + idx);
+        }
+        if (result === -3) return 'file_not_found';
+        if (result === -4) return 'set_device_failed';
+        if (result === -5) return 'rom_copy_failed';
+        return 'code_' + result;
+    }
+
+    // ---- Trigger actual ROM installation after both files are in VFS ----
+    function triggerRomInstall(romPath, rpkgPath, romName) {
+        showOverlay('Installing device, please wait...', 0);
+        updateStatus('yellow', 'Installing...');
+        setTimeout(function() {
+            var result = module ? module.ccall(
+                'wasm_init_with_rom', 'number',
+                ['string', 'string'],
+                [romPath, rpkgPath || '']
+            ) : -1;
+            if (result === 0) {
+                showOverlay('ROM ready!', 2000);
+                updateStatus('green', 'ROM: ' + romName);
+                syncToIDB(function() { console.log('[EKA2L1] ROM data saved to IndexedDB'); });
+                // Reset pending state
+                pendingRomPath = null;
+                pendingRpkgPath = null;
+                document.getElementById('drop-zone-label').textContent =
+                    'ROM file (.rom) – drag & drop or click';
+                document.getElementById('rpkg-drop-label').textContent =
+                    'RPKG file (.rpkg) – drag & drop or click (optional)';
+            } else {
+                var errName = decodeInstallError(result);
+                var errMsg = 'Install failed: ' + errName + ' (see console)';
+                showOverlay(errMsg, 6000);
+                updateStatus('red', errMsg);
+            }
+        }, 50);
+    }
+
     function handleFileSelect(files) {
         if (!files || files.length === 0) return;
 
@@ -627,27 +840,29 @@
         var ext = file.name.split('.').pop().toLowerCase();
 
         if (currentDialogMode === 'rom') {
-            var targetPath = '/eka2l1/drives/z/rom.rom';
-            if (ext === 'rpkg') {
-                targetPath = '/eka2l1/rpkg/' + file.name;
-            }
-
+            var targetPath = '/eka2l1/rom_upload.rom';
             showOverlay('Loading ' + file.name + '...', 0);
             updateStatus('yellow', 'Loading ROM...');
 
             loadFileToVirtualFS(file, targetPath, function(success, info) {
                 if (success) {
-                    showOverlay('ROM loaded! Starting emulation...', 2000);
-                    updateStatus('green', 'ROM: ' + file.name);
-                    // Call the C++ main initialization with the ROM path
-                    if (module && module._wasm_init_with_rom) {
-                        module.ccall('wasm_init_with_rom', 'number', ['string'], [targetPath]);
+                    pendingRomPath = targetPath;
+                    document.getElementById('drop-zone-label').textContent =
+                        '✓ ROM: ' + file.name;
+                    // If RPKG is already selected, install now; otherwise wait
+                    if (pendingRpkgPath) {
+                        triggerRomInstall(pendingRomPath, pendingRpkgPath, file.name);
+                        fileDialog.classList.remove('visible');
+                    } else {
+                        showOverlay('ROM loaded. Click Install or also select RPKG.', 0);
+                        updateStatus('yellow', 'ROM loaded – select RPKG if needed');
                     }
                 } else {
                     showOverlay('Error: ' + info, 3000);
                     updateStatus('red', 'Failed to load ROM');
                 }
             });
+
         } else if (currentDialogMode === 'install') {
             var targetPath = '/eka2l1/temp/' + file.name;
             showOverlay('Installing ' + file.name + '...', 0);
@@ -655,22 +870,63 @@
 
             loadFileToVirtualFS(file, targetPath, function(success, info) {
                 if (success) {
-                    showOverlay('Package installed!', 2000);
-                    updateStatus('green', 'Installed: ' + file.name);
-                    if (module && module._wasm_install_package) {
-                        module.ccall('wasm_install_package', 'number', ['string'], [targetPath]);
-                    }
+                    showOverlay('Installing ' + file.name + '...', 0);
+                    updateStatus('yellow', 'Installing...');
+                    setTimeout(function() {
+                        var result = module ? module.ccall('wasm_install_package', 'number', ['string'], [targetPath]) : -1;
+                        if (result === 0) {
+                            showOverlay('Package installed!', 2000);
+                            updateStatus('green', 'Installed: ' + file.name);
+                            syncToIDB(function() {
+                                console.log('[EKA2L1] Package data saved to IndexedDB');
+                                if (appListPanel && appListPanel.classList.contains('visible')) {
+                                    refreshAppList();
+                                }
+                            });
+                        } else {
+                            showOverlay('Install failed (code ' + result + ')', 3000);
+                            updateStatus('red', 'Install failed: ' + file.name);
+                        }
+                    }, 50);
                 } else {
                     showOverlay('Error: ' + info, 3000);
                     updateStatus('red', 'Failed to install');
                 }
             });
-        }
 
-        fileDialog.classList.remove('visible');
+            fileDialog.classList.remove('visible');
+        }
+    }
+
+    function handleRpkgFileSelect(files) {
+        if (!files || files.length === 0) return;
+        var file = files[0];
+        var targetPath = '/eka2l1/rpkg_upload.rpkg';
+        showOverlay('Loading RPKG ' + file.name + '...', 0);
+
+        loadFileToVirtualFS(file, targetPath, function(success, info) {
+            if (success) {
+                pendingRpkgPath = targetPath;
+                document.getElementById('rpkg-drop-label').textContent =
+                    '✓ RPKG: ' + file.name;
+                // If ROM is also selected, go ahead and install
+                if (pendingRomPath) {
+                    triggerRomInstall(pendingRomPath, pendingRpkgPath, file.name);
+                    fileDialog.classList.remove('visible');
+                } else {
+                    showOverlay('RPKG loaded. Now select ROM file.', 0);
+                    updateStatus('yellow', 'RPKG loaded – select ROM file');
+                }
+            } else {
+                showOverlay('Error loading RPKG: ' + info, 3000);
+            }
+        });
     }
 
     // ---- Emulation Control ----
+    // The C++ main loop is already started by main() via emscripten_set_main_loop.
+    // We just toggle the paused flag; calling wasm_main_loop() from JS would throw
+    // an "unwind" exception because simulate_infinite_loop=1 is for C main() only.
     function startEmulation() {
         if (!module) return;
         isRunning = true;
@@ -678,11 +934,7 @@
         document.getElementById('btn-run').classList.add('active');
         updateStatus('green', 'Running');
         showOverlay('Running', 1000);
-
-        // Start the main loop
-        if (module._wasm_main_loop) {
-            module._wasm_main_loop();
-        }
+        module.ccall('wasm_set_paused', null, ['number'], [0]);
     }
 
     function pauseEmulation() {
@@ -691,6 +943,7 @@
         document.getElementById('btn-run').classList.remove('active');
         updateStatus('yellow', 'Paused');
         showOverlay('Paused', 0);
+        module.ccall('wasm_set_paused', null, ['number'], [1]);
     }
 
     function resetEmulation() {
@@ -720,9 +973,11 @@
     // Toolbar buttons
     document.getElementById('btn-rom').addEventListener('click', function() {
         currentDialogMode = 'rom';
-        document.getElementById('dialog-title').textContent = 'Load ROM/RPKG';
-        document.getElementById('dialog-desc').textContent = 'Select a ROM file (.rom) or RPKG file (.rpkg) to boot the emulator.';
-        fileInput.accept = '.rom,.rpkg';
+        document.getElementById('dialog-title').textContent = 'Install Device (ROM + RPKG)';
+        document.getElementById('dialog-desc').textContent =
+            'Select your ROM file. For S60 3rd gen / S^3 devices also provide the RPKG file.';
+        fileInput.accept = '.rom';
+        document.getElementById('rpkg-section').style.display = 'block';
         fileDialog.classList.add('visible');
     });
 
@@ -731,8 +986,59 @@
         document.getElementById('dialog-title').textContent = 'Install SIS Package';
         document.getElementById('dialog-desc').textContent = 'Select a SIS package (.sis, .sisx) to install.';
         fileInput.accept = '.sis,.sisx';
+        document.getElementById('rpkg-section').style.display = 'none';
         fileDialog.classList.add('visible');
     });
+
+    // ---- App List ----
+    var appListPanel = document.getElementById('app-list-panel');
+
+    function refreshAppList() {
+        if (!module) return;
+        var jsonStr = module.ccall('wasm_get_app_list', 'string', [], []);
+        var apps = [];
+        try { apps = JSON.parse(jsonStr); } catch(e) {}
+
+        var container = document.getElementById('app-list-items');
+        container.innerHTML = '';
+
+        if (!apps || apps.length === 0) {
+            container.innerHTML = '<div id="app-list-empty">No apps installed yet.<br>Install a .sis/.sisx file first.</div>';
+            return;
+        }
+
+        apps.forEach(function(app) {
+            var item = document.createElement('div');
+            item.className = 'app-item';
+            item.innerHTML = '<span class="app-item-icon">📱</span>' +
+                             '<span class="app-item-name">' + app.name + '</span>';
+            item.addEventListener('click', function() {
+                if (module) {
+                    var result = module.ccall('wasm_launch_app', 'number', ['number'], [app.uid]);
+                    if (result === 0) {
+                        updateStatus('green', 'Launched: ' + app.name);
+                        showOverlay('Launching ' + app.name + '...', 1500);
+                    } else {
+                        updateStatus('red', 'Launch failed: ' + app.name);
+                    }
+                }
+            });
+            container.appendChild(item);
+        });
+    }
+
+    document.getElementById('btn-apps').addEventListener('click', function() {
+        appListPanel.classList.toggle('visible');
+        if (appListPanel.classList.contains('visible')) {
+            refreshAppList();
+        }
+    });
+
+    document.getElementById('btn-close-apps').addEventListener('click', function() {
+        appListPanel.classList.remove('visible');
+    });
+
+    document.getElementById('btn-refresh-apps').addEventListener('click', refreshAppList);
 
     document.getElementById('btn-run').addEventListener('click', function() {
         if (isRunning) {
@@ -756,10 +1062,21 @@
     // File dialog
     document.getElementById('dialog-cancel').addEventListener('click', function() {
         fileDialog.classList.remove('visible');
+        pendingRomPath = null;
+        pendingRpkgPath = null;
     });
 
+    // "Install" button: for ROM mode, trigger install if ROM is selected
     document.getElementById('dialog-ok').addEventListener('click', function() {
-        fileDialog.classList.remove('visible');
+        if (currentDialogMode === 'rom' && pendingRomPath) {
+            triggerRomInstall(pendingRomPath, pendingRpkgPath, pendingRomPath.split('/').pop());
+            fileDialog.classList.remove('visible');
+        } else if (currentDialogMode === 'rom' && !pendingRomPath) {
+            // Prompt user to select ROM first
+            fileInput.click();
+        } else {
+            fileDialog.classList.remove('visible');
+        }
     });
 
     fileDropZone.addEventListener('click', function() {
@@ -770,7 +1087,28 @@
         handleFileSelect(this.files);
     });
 
-    // Drag and drop
+    // RPKG file input
+    var rpkgInput = document.getElementById('rpkg-input');
+    document.getElementById('rpkg-drop-zone').addEventListener('click', function() {
+        rpkgInput.click();
+    });
+    rpkgInput.addEventListener('change', function() {
+        handleRpkgFileSelect(this.files);
+    });
+    document.getElementById('rpkg-drop-zone').addEventListener('dragover', function(e) {
+        e.preventDefault();
+        this.classList.add('dragover');
+    });
+    document.getElementById('rpkg-drop-zone').addEventListener('dragleave', function() {
+        this.classList.remove('dragover');
+    });
+    document.getElementById('rpkg-drop-zone').addEventListener('drop', function(e) {
+        e.preventDefault();
+        this.classList.remove('dragover');
+        handleRpkgFileSelect(e.dataTransfer.files);
+    });
+
+    // Drag and drop for ROM zone
     fileDropZone.addEventListener('dragover', function(e) {
         e.preventDefault();
         fileDropZone.classList.add('dragover');

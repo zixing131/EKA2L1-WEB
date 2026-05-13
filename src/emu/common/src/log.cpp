@@ -197,6 +197,10 @@ namespace eka2l1 {
         };
 
         void setup_log(std::shared_ptr<base_logger> gui_logger) {
+            if (already_setup) {
+                return;
+            }
+
             const char *log_file_name = "EKA2L1.log";
             const char *log_file_name_prev = "EKA2L1_TakeThis.log";
 

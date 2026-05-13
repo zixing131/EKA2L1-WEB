@@ -183,7 +183,14 @@ namespace eka2l1 {
         utc_offset_ = common::get_current_utc_offset();
         cpu_hz_ = DEFAULT_EMULATED_CPU_HZ;
 
+        // On Emscripten the default std::locale() constructor tries to load
+        // system locale data that isn't available in WASM and crashes.
+        // std::locale::classic() returns a static "C" locale that is always safe.
+#ifdef __EMSCRIPTEN__
+        locale_ = std::make_unique<std::locale>(std::locale::classic());
+#else
         locale_ = std::make_unique<std::locale>();
+#endif
 
         dll_global_data_chunk_ = nullptr;
         custom_code_chunk = nullptr;

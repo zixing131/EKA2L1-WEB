@@ -65,6 +65,8 @@ if (EMSCRIPTEN)
     # All TUs need -pthread so wasm-ld accepts --shared-memory (atomics/bulk-memory features)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+    # emscripten's clang does not fully support consteval; disable it for fmt
+    add_compile_definitions(FMT_USE_CONSTEVAL=0)
 endif()
 
 add_subdirectory(src/patch)

@@ -67,6 +67,7 @@ if (EMSCRIPTEN)
         "SHELL:-s EXPORT_NAME=createEKA2L1Module"
         "SHELL:-s MODULARIZE=1"
         "SHELL:-s FORCE_FILESYSTEM=1"
+        "SHELL:-lidbfs.js"
         "SHELL:-s ENVIRONMENT=web"
         "SHELL:-s WASM=1"
         "SHELL:-s GL_ASSERTIONS=0"
