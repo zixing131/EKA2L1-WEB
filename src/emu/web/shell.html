@@ -634,15 +634,267 @@
     // ---- IndexedDB Persistence ----
     // Flush the IDBFS-backed /eka2l1 directory to IndexedDB.
     // Call this after any write that should survive a page reload.
+    // Emscripten's IDBFS caches the IndexedDB handle in IDBFS.dbs[name] and
+    // never checks whether it's still alive. After the connection goes idle
+    // (GC, idle timeout, another tab's versionchange) the cached handle becomes
+    // stale and the next syncfs fails with
+    //   InvalidStateError: The database connection is closing
+    // Force a reconnect by dropping the cache before every sync attempt.
+    function dropIDBFSCache() {
+        try {
+            var idbfs = module && module.FS && module.FS.filesystems && module.FS.filesystems.IDBFS;
+            if (idbfs && idbfs.dbs) {
+                for (var k in idbfs.dbs) {
+                    try { idbfs.dbs[k].close(); } catch (e) { /* already closed */ }
+                }
+                idbfs.dbs = {};
+            }
+        } catch (e) { console.warn('[EKA2L1] dropIDBFSCache failed:', e); }
+    }
+
+    // Replacement for Emscripten's IDBFS.syncfs. The stock version opens ONE
+    // IDB connection in getDB and reuses it across getRemoteSet AND reconcile.
+    // Between those two transactions the connection may enter the "closing"
+    // state (especially after a long wasm task), which makes
+    // reconcile's transaction throw "InvalidStateError: The database
+    // connection is closing".
+    //
+    // This rewrite opens a FRESH connection for each transaction and closes
+    // it as soon as the transaction completes — so two short-lived
+    // connections are used instead of one long-lived shared one. That avoids
+    // the stale-handle bug entirely.
+    var DB_STORE_NAME = 'FILE_DATA';
+    var DB_VERSION = 21;
+
+    function idbOpen() {
+        return new Promise(function(resolve, reject) {
+            console.log('[EKA2L1] idbOpen: indexedDB.open(/eka2l1, v' + DB_VERSION + ')');
+            var req;
+            try { req = indexedDB.open('/eka2l1', DB_VERSION); }
+            catch (e) { console.error('[EKA2L1] idbOpen throw:', e); reject(e); return; }
+            req.onupgradeneeded = function(e) {
+                console.log('[EKA2L1] idbOpen: onupgradeneeded oldV=' + e.oldVersion + ' newV=' + e.newVersion);
+                var db = e.target.result;
+                var tx = e.target.transaction;
+                var store = db.objectStoreNames.contains(DB_STORE_NAME)
+                    ? tx.objectStore(DB_STORE_NAME)
+                    : db.createObjectStore(DB_STORE_NAME);
+                if (!store.indexNames.contains('timestamp')) {
+                    store.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+            req.onsuccess = function() { console.log('[EKA2L1] idbOpen: onsuccess'); resolve(req.result); };
+            req.onerror = function(e) { console.warn('[EKA2L1] idbOpen: onerror', e.target.error); reject(e.target.error); e.preventDefault(); };
+            req.onblocked = function(e) { console.warn('[EKA2L1] idbOpen: onblocked', e); };
+        });
+    }
+
+    // Mimics MEMFS->IDB write half of IDBFS.syncfs(false). Each operation
+    // (manifest read, file write/delete) gets its own short-lived connection.
+    function customSyncToIDB(onDone) {
+        if (!module || !module.FS) { onDone && onDone(null); return; }
+        var FS = module.FS;
+        var MEMFS = FS.filesystems && FS.filesystems.MEMFS;
+        var ROOT = '/eka2l1';
+        var t0 = performance.now();
+        console.log('[EKA2L1] customSyncToIDB: scanning local tree...');
+
+        // 1. Walk local tree → entries (path -> {timestamp, isDir, contents?})
+        var local = {};
+        try {
+            var stack = [ROOT];
+            while (stack.length) {
+                var p = stack.pop();
+                var st;
+                try { st = FS.lstat(p); } catch (e) { continue; }
+                var isDir = FS.isDir(st.mode);
+                local[p] = { timestamp: st.mtime, isDir: isDir };
+                if (isDir) {
+                    FS.readdir(p).forEach(function(n) {
+                        if (n === '.' || n === '..') return;
+                        stack.push(p + '/' + n);
+                    });
+                }
+            }
+        } catch (e) { console.error('[EKA2L1] local scan failed:', e); onDone && onDone(e); return; }
+        delete local[ROOT]; // never store the mount root itself
+
+        // 2. Open IDB once just to read existing manifest, then close.
+        idbOpen().then(function(db) {
+            var remote = {};
+            var tx = db.transaction([DB_STORE_NAME], 'readonly');
+            var store = tx.objectStore(DB_STORE_NAME);
+            var idx = store.index('timestamp');
+            idx.openKeyCursor().onsuccess = function(e) {
+                var cur = e.target.result;
+                if (cur) {
+                    remote[cur.primaryKey] = { timestamp: cur.key };
+                    cur.continue();
+                }
+            };
+            tx.oncomplete = function() {
+                db.close();
+                doReconcile(local, remote, onDone, t0);
+            };
+            tx.onerror = function(ev) {
+                console.warn('[EKA2L1] manifest read tx error:', ev.target.error);
+                try { db.close(); } catch (_) {}
+                onDone && onDone(ev.target.error);
+            };
+        }).catch(function(err) {
+            console.error('[EKA2L1] idbOpen failed:', err);
+            onDone && onDone(err);
+        });
+    }
+
+    function tsValue(t) {
+        if (!t) return 0;
+        return (t instanceof Date) ? t.getTime() : Number(t);
+    }
+
+    // Replacement for Emscripten's syncfs(true) — IDB → MEMFS. Same reasoning
+    // as customSyncToIDB: use a fresh short-lived connection per transaction.
+    function customLoadFromIDB(onDone) {
+        if (!module || !module.FS) { onDone && onDone(null); return; }
+        var FS = module.FS;
+        var t0 = performance.now();
+        console.log('[EKA2L1] customLoadFromIDB: opening IndexedDB...');
+
+        idbOpen().then(function(db) {
+            var tx = db.transaction([DB_STORE_NAME], 'readonly');
+            var store = tx.objectStore(DB_STORE_NAME);
+            // Sort entries by path length so parent dirs come first.
+            var entries = []; // [ [path, value], ... ]
+            store.openCursor().onsuccess = function(e) {
+                var cur = e.target.result;
+                if (cur) {
+                    entries.push([cur.primaryKey, cur.value]);
+                    cur.continue();
+                }
+            };
+            tx.oncomplete = function() {
+                try { db.close(); } catch (_) {}
+                // Sort: dirs before files (shorter path first; ties by string)
+                entries.sort(function(a, b) {
+                    if (a[0].length !== b[0].length) return a[0].length - b[0].length;
+                    return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
+                });
+                var nFiles = 0, nDirs = 0, nErr = 0;
+                entries.forEach(function(kv) {
+                    var path = kv[0], entry = kv[1];
+                    try {
+                        if (FS.isDir(entry.mode)) {
+                            try { FS.mkdirTree(path, entry.mode); } catch (e) { /* exists */ }
+                            nDirs++;
+                        } else if (FS.isFile(entry.mode)) {
+                            FS.writeFile(path, entry.contents, { canOwn: true });
+                            try { FS.chmod(path, entry.mode); } catch (_) {}
+                            nFiles++;
+                        } else if (entry.link) {
+                            try { FS.symlink(entry.link, path); } catch (_) {}
+                        }
+                        if (entry.timestamp) {
+                            try { FS.utime(path, entry.timestamp, entry.timestamp); } catch (_) {}
+                        }
+                    } catch (e) {
+                        nErr++;
+                        if (nErr < 5) console.warn('[EKA2L1] restore failed for', path, e);
+                    }
+                });
+                var dt = (performance.now() - t0).toFixed(0);
+                console.log('[EKA2L1] customLoadFromIDB done in ' + dt +
+                    'ms: ' + nDirs + ' dirs, ' + nFiles + ' files, ' + nErr + ' errors');
+                onDone && onDone(null);
+            };
+            tx.onerror = function(ev) {
+                console.warn('[EKA2L1] load manifest tx error:', ev.target.error);
+                try { db.close(); } catch (_) {}
+                onDone && onDone(ev.target.error);
+            };
+        }).catch(function(err) {
+            console.warn('[EKA2L1] customLoadFromIDB idbOpen failed (OK on first run):', err);
+            onDone && onDone(null); // first-run: no DB yet, that's fine
+        });
+    }
+    function doReconcile(local, remote, onDone, t0) {
+        // Diff local vs remote → create/update list & delete list.
+        var create = [], remove = [];
+        for (var p in local) {
+            var lt = tsValue(local[p].timestamp);
+            var rt = remote[p] ? tsValue(remote[p].timestamp) : -1;
+            if (rt !== lt) create.push(p);
+        }
+        for (var rp in remote) if (!local[rp]) remove.push(rp);
+
+        if (create.length === 0 && remove.length === 0) {
+            console.log('[EKA2L1] Nothing to sync (took ' + (performance.now() - t0).toFixed(0) + 'ms)');
+            onDone && onDone(null);
+            return;
+        }
+        console.log('[EKA2L1] sync: writing ' + create.length + ' entries, deleting ' + remove.length);
+
+        // Sort paths so parent directories are written first.
+        create.sort();
+
+        idbOpen().then(function(db) {
+            var tx = db.transaction([DB_STORE_NAME], 'readwrite');
+            var store = tx.objectStore(DB_STORE_NAME);
+            var FS = module.FS;
+            try {
+                create.forEach(function(p) {
+                    var st = FS.lstat(p);
+                    var isDir = FS.isDir(st.mode);
+                    var entry = { timestamp: st.mtime };
+                    if (isDir) {
+                        entry.mode = st.mode;
+                    } else {
+                        // Read file contents from MEMFS
+                        var stream = FS.open(p, 'r');
+                        var data = new Uint8Array(st.size);
+                        FS.read(stream, data, 0, st.size, 0);
+                        FS.close(stream);
+                        entry.contents = data;
+                        entry.mode = st.mode;
+                    }
+                    store.put(entry, p);
+                });
+                remove.forEach(function(p) { store.delete(p); });
+            } catch (e) {
+                console.error('[EKA2L1] sync prep failed:', e);
+                try { db.close(); } catch (_) {}
+                onDone && onDone(e);
+                return;
+            }
+            tx.oncomplete = function() {
+                db.close();
+                console.log('[EKA2L1] customSyncToIDB done in ' + (performance.now() - t0).toFixed(0) + 'ms');
+                onDone && onDone(null);
+            };
+            tx.onerror = tx.onabort = function(ev) {
+                console.warn('[EKA2L1] sync write tx aborted:', ev.target.error);
+                try { db.close(); } catch (_) {}
+                onDone && onDone(ev.target.error);
+            };
+        }).catch(function(err) {
+            console.error('[EKA2L1] reconcile idbOpen failed:', err);
+            onDone && onDone(err);
+        });
+    }
+
     function syncToIDB(onDone) {
-        if (!module || !module.FS || !module.FS.syncfs ||
-            !(module.FS.filesystems && module.FS.filesystems.IDBFS)) {
+        if (!module || !module.FS) {
+            console.warn('[EKA2L1] syncToIDB: FS unavailable, skipping');
             if (onDone) onDone(null);
             return;
         }
+        // IDBFS.reconcile is patched at startup to use fresh connections,
+        // so the stock syncfs(false) is now safe to use.
+        console.log('[EKA2L1] syncfs(false) start...');
+        var t0 = performance.now();
         module.FS.syncfs(false, function(err) {
-            if (err) console.warn('IDBFS save error:', err);
-            else console.log('[EKA2L1] Saved to IndexedDB');
+            var dt = (performance.now() - t0).toFixed(0);
+            if (err) console.warn('[EKA2L1] syncfs error after ' + dt + 'ms:', err);
+            else console.log('[EKA2L1] Saved to IndexedDB in ' + dt + 'ms');
             if (onDone) onDone(err);
         });
     }
@@ -701,9 +953,7 @@
                 module = mod;
 
                 updateLoadingProgress(80, 'Setting up persistent storage...');
-
-                // Mount /eka2l1 as IDBFS so ROM/package data survives page reloads.
-                var idbfsAvailable = mod.FS && mod.FS.filesystems && mod.FS.filesystems.IDBFS;
+                console.log('[EKA2L1] module factory resolved, FS=', !!mod.FS, 'IDB=', typeof indexedDB);
 
                 function startMain() {
                     updateLoadingProgress(95, 'Starting emulator...');
@@ -711,13 +961,20 @@
                     // the main loop. Internally it throws "unwind" because
                     // simulate_infinite_loop=1, but Emscripten catches it so
                     // control returns here normally.
+                    var mainStarted = true;
                     try {
                         mod.callMain([]);
                     } catch (e) {
                         // unwind is the expected control-flow for simulate_infinite_loop
                         if (!(e && (e === 'unwind' || e.name === 'ExitStatus'))) {
                             console.error('[EKA2L1] main() threw unexpected error:', e);
+                            mainStarted = false;
                         }
+                    }
+
+                    if (!mainStarted) {
+                        updateStatus('red', 'Startup failed: invalid persisted data (see console)');
+                        return;
                     }
 
                     splashScreen.classList.add('hidden');
@@ -737,19 +994,63 @@
                     }
                 }
 
-                if (idbfsAvailable) {
-                    try { mod.FS.mkdir('/eka2l1'); } catch(e) { /* exists on reload */ }
-                    mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
+                // Patch IDBFS.getDB to never cache the IDB connection.
+                // The stock code caches the handle in IDBFS.dbs[name] and
+                // reuses it across the readonly (getRemoteSet) and readwrite
+                // (reconcile) transactions. After a long wasm task the browser
+                // can put the cached handle into "closing" state, making the
+                // second transaction throw InvalidStateError.
+                // Fix: always open a fresh connection, close it when the
+                // caller is done (the caller calls db.close() after each tx
+                // via oncomplete).
+                (function patchIDBFS() {
+                    var IDBFS = mod.FS.filesystems && mod.FS.filesystems.IDBFS;
+                    if (!IDBFS) { console.warn('[EKA2L1] IDBFS not found, skipping patch'); return; }
+                    IDBFS.getDB = function(name, callback) {
+                        // Always open fresh — never use the cache.
+                        var req;
+                        try { req = IDBFS.indexedDB().open(name, IDBFS.DB_VERSION); }
+                        catch(e) { return callback(e); }
+                        req.onupgradeneeded = function(e) {
+                            var db = e.target.result;
+                            var tx = e.target.transaction;
+                            var store = db.objectStoreNames.contains(IDBFS.DB_STORE_NAME)
+                                ? tx.objectStore(IDBFS.DB_STORE_NAME)
+                                : db.createObjectStore(IDBFS.DB_STORE_NAME);
+                            if (!store.indexNames.contains('timestamp'))
+                                store.createIndex('timestamp', 'timestamp', { unique: false });
+                        };
+                        req.onsuccess = function() {
+                            var db = req.result;
+                            // Close the connection as soon as it has no pending
+                            // transactions so the next getDB call starts fresh.
+                            db.onversionchange = function() { db.close(); };
+                            callback(null, db);
+                        };
+                        req.onerror = function(e) { callback(e.target.error); e.preventDefault(); };
+                    };
+                    // Clear any stale cached handles left from before the patch.
+                    IDBFS.dbs = {};
+                    console.log('[EKA2L1] IDBFS.getDB patched (no-cache mode)');
+                })();
 
-                    mod.FS.syncfs(true, function(err) {
-                        if (err) console.warn('[EKA2L1] IDBFS initial load (OK on first run):', err);
-                        else console.log('[EKA2L1] Loaded persisted data from IndexedDB');
-                        startMain();
-                    });
-                } else {
-                    console.warn('[EKA2L1] IDBFS not available – data will not persist across reloads');
+                try { mod.FS.mkdir('/eka2l1'); } catch(e) { /* exists on reload */ }
+                mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
+
+                console.log('[EKA2L1] syncfs(true) start');
+                mod.FS.syncfs(true, function(err) {
+                    if (err) console.warn('[EKA2L1] initial load err (OK on first run):', err);
+                    try {
+                        var entries = mod.FS.readdir('/eka2l1').filter(function(n){ return n !== '.' && n !== '..'; });
+                        console.log('[EKA2L1] /eka2l1 after restore:', entries);
+                        if (entries.indexOf('devices.yml') !== -1) {
+                            console.log('[EKA2L1] devices.yml size=' + mod.FS.stat('/eka2l1/devices.yml').size);
+                        } else {
+                            console.warn('[EKA2L1] devices.yml NOT present');
+                        }
+                    } catch(e) {}
                     startMain();
-                }
+                });
             }).catch(function(err) {
                 console.error('Failed to load EKA2L1:', err);
                 updateLoadingProgress(0, 'Error loading: ' + err.message);
@@ -833,9 +1134,25 @@
                 [romPath, rpkgPath || '']
             ) : -1;
             if (result === 0) {
-                showOverlay('ROM ready!', 2000);
-                updateStatus('green', 'ROM: ' + romName);
-                syncToIDB(function() { console.log('[EKA2L1] ROM data saved to IndexedDB'); });
+                // ROM install wrote many files to /eka2l1 (devices.yml + drives/z/*).
+                // We MUST wait for syncfs(false) to flush them to IndexedDB before
+                // the user reloads, otherwise the next session will find total()==0
+                // and the device list will be lost.
+                console.log('[EKA2L1] ROM install OK – flushing to IndexedDB...');
+                showOverlay('Saving to storage, please wait...', 0);
+                updateStatus('yellow', 'Saving...');
+                refreshAppList();
+                syncToIDB(function(err) {
+                    if (err) {
+                        console.error('[EKA2L1] IDBFS sync FAILED – data will be lost on reload:', err);
+                        showOverlay('Save failed – data will NOT persist on reload', 6000);
+                        updateStatus('red', 'Save failed');
+                    } else {
+                        console.log('[EKA2L1] ROM data saved to IndexedDB');
+                        showOverlay('ROM ready!', 2000);
+                        updateStatus('green', 'ROM: ' + romName);
+                    }
+                });
                 // Reset pending state
                 pendingRomPath = null;
                 pendingRpkgPath = null;

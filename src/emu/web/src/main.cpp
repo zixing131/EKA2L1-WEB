@@ -567,6 +567,18 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
 
     eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
 
+    // Diagnostic: how many devices did device_manager find at startup?
+    // After a page reload this comes from /eka2l1/devices.yml restored by IDBFS.
+    LOG_INFO(FRONTEND_CMDLINE, "device_manager loaded {} device(s) from {}",
+        dvcmngr->total(), g_state.conf.storage);
+    {
+        common::ro_std_file_stream yml_check(
+            eka2l1::add_path(g_state.conf.storage, "devices.yml"), true);
+        LOG_INFO(FRONTEND_CMDLINE, "devices.yml exists/valid: {} size={}",
+            yml_check.valid() ? "yes" : "no",
+            yml_check.valid() ? static_cast<int>(yml_check.size()) : -1);
+    }
+
     if (dvcmngr->total() == 0) {
         // Validate ROM file exists and is readable.
         {
@@ -634,7 +646,11 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
             LOG_INFO(FRONTEND_CMDLINE, "EKA1 device installed");
         }
 
-        LOG_INFO(FRONTEND_CMDLINE, "{} device(s) now registered", dvcmngr->total());
+        // install_rpkg/install_rom call add_new_device() but never save_devices().
+        // Without this call devices.yml is never written to disk, so the device
+        // list is lost on every page reload.
+        dvcmngr->save_devices();
+        LOG_INFO(FRONTEND_CMDLINE, "{} device(s) now registered, devices.yml saved", dvcmngr->total());
     }
 
     // Triggers reset(): memory model init, ROM load, dispatcher + service setup.
@@ -760,12 +776,32 @@ int wasm_launch_app(int uid) {
         static_cast<std::uint32_t>(uid));
     if (!reg) return -4;
 
+    const std::u16string app_path = reg->mandatory_info.app_path.to_std_string(nullptr);
+    LOG_INFO(FRONTEND_CMDLINE, "Launching app uid=0x{:08X} path={}",
+        static_cast<std::uint32_t>(uid), eka2l1::common::ucs2_to_utf8(app_path));
+
     epoc::apa::command_line cmdline;
     cmdline.launch_cmd_ = epoc::apa::command_create;
 
     kern->lock();
-    const bool ok = alserv->launch_app(*reg, cmdline, nullptr, nullptr);
+    const bool ok = alserv->launch_app(*reg, cmdline, nullptr,
+        [](kernel::process *pr) {
+            if (!pr) {
+                LOG_ERROR(FRONTEND_CMDLINE, "Launched app exited with null process handle");
+                return;
+            }
+
+            LOG_INFO(FRONTEND_CMDLINE,
+                "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
+                pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
+                eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
+        });
     kern->unlock();
+
+    if (!ok) {
+        LOG_ERROR(FRONTEND_CMDLINE, "launch_app returned false for uid=0x{:08X}",
+            static_cast<std::uint32_t>(uid));
+    }
 
     return ok ? 0 : -5;
 }

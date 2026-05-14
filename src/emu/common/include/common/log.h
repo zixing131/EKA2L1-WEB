@@ -96,11 +96,11 @@ namespace eka2l1 {
 #define LOG_CRITICAL_IF(class, flag, fmt, ...)
 #else
 #ifdef ENABLE_SCRIPTING
-#define COND_CHECK(class, serv) if (eka2l1::log::spd_logger && eka2l1::log::filterings->is_passed(class, spdlog::level::serv))
-#define COND_CHECK_AND(class, serv) &&eka2l1::log::spd_logger &&eka2l1::log::filterings->is_passed(class, spdlog::level::serv)
+#define COND_CHECK(class, serv) if (eka2l1::log::spd_logger && eka2l1::log::filterings && eka2l1::log::filterings->is_passed(class, spdlog::level::serv))
+#define COND_CHECK_AND(class, serv) &&eka2l1::log::spd_logger &&eka2l1::log::filterings &&eka2l1::log::filterings->is_passed(class, spdlog::level::serv)
 #else
-#define COND_CHECK(class, serv) if (eka2l1::log::filterings->is_passed(class, spdlog::level::serv))
-#define COND_CHECK_AND(class, serv) &&eka2l1::log::filterings->is_passed(class, spdlog::level::serv)
+#define COND_CHECK(class, serv) if (eka2l1::log::spd_logger && eka2l1::log::filterings && eka2l1::log::filterings->is_passed(class, spdlog::level::serv))
+#define COND_CHECK_AND(class, serv) &&eka2l1::log::spd_logger &&eka2l1::log::filterings &&eka2l1::log::filterings->is_passed(class, spdlog::level::serv)
 #endif
 
 #define LOG_TRACE(class, fmt, ...) COND_CHECK(class, trace) \

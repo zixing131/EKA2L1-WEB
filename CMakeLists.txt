@@ -67,6 +67,11 @@ if (EMSCRIPTEN)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
     # emscripten's clang does not fully support consteval; disable it for fmt
     add_compile_definitions(FMT_USE_CONSTEVAL=0)
+    # yaml-cpp and several emulator subsystems throw/catch C++ exceptions during
+    # startup. This must be enabled before adding subdirectories so static libs
+    # like config/epoc/yaml-cpp are compiled with exception tables too.
+    add_compile_options(-fexceptions)
+    add_link_options("SHELL:-s DISABLE_EXCEPTION_CATCHING=0")
 endif()
 
 add_subdirectory(src/patch)

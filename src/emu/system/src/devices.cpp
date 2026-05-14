@@ -29,11 +29,219 @@
 #include <common/types.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstddef>
 #include <fstream>
 #include <map>
 #include <sstream>
 
 namespace eka2l1 {
+    namespace {
+        struct device_config_record {
+            std::string key;
+            std::string firmcode;
+            std::string manufacturer;
+            std::string model;
+            std::string platver;
+            std::uint32_t machine_uid = 0;
+        };
+
+        std::string trim_ascii(const std::string &input) {
+            const std::size_t begin = input.find_first_not_of(" \t\r\n");
+            if (begin == std::string::npos) {
+                return "";
+            }
+
+            const std::size_t end = input.find_last_not_of(" \t\r\n");
+            return input.substr(begin, end - begin + 1);
+        }
+
+        bool is_valid_yaml_escape_char(const char ch) {
+            switch (ch) {
+            case '0':
+            case 'a':
+            case 'b':
+            case 't':
+            case 'n':
+            case 'v':
+            case 'f':
+            case 'r':
+            case 'e':
+            case '"':
+            case '/':
+            case '\\':
+            case 'N':
+            case '_':
+            case 'L':
+            case 'P':
+            case 'x':
+            case 'u':
+            case 'U':
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        std::string repair_yaml_unknown_escapes(const std::string &input) {
+            std::string output;
+            output.reserve(input.size() + 16);
+
+            bool in_double_quote = false;
+
+            for (std::size_t i = 0; i < input.size(); ++i) {
+                const char ch = input[i];
+
+                if (ch == '"') {
+                    std::size_t slash_count = 0;
+                    for (std::size_t back = output.size(); back > 0 && output[back - 1] == '\\'; --back) {
+                        ++slash_count;
+                    }
+
+                    if ((slash_count % 2) == 0) {
+                        in_double_quote = !in_double_quote;
+                    }
+
+                    output.push_back(ch);
+                    continue;
+                }
+
+                if (in_double_quote && ch == '\\') {
+                    const char next = ((i + 1) < input.size()) ? input[i + 1] : '\0';
+                    if ((next == '\0') || !is_valid_yaml_escape_char(next)) {
+                        // Turn invalid escape (e.g. "\�") into a literal backslash.
+                        output += "\\\\";
+                        continue;
+                    }
+                }
+
+                output.push_back(ch);
+            }
+
+            return output;
+        }
+
+        std::string decode_yaml_scalar_lossy(const std::string &input) {
+            const std::string trimmed = trim_ascii(input);
+            if (trimmed.size() < 2) {
+                return trimmed;
+            }
+
+            const char quote = trimmed.front();
+            if ((quote != '\'' && quote != '"') || (trimmed.back() != quote)) {
+                return trimmed;
+            }
+
+            std::string output;
+            output.reserve(trimmed.size() - 2);
+
+            for (std::size_t i = 1; i + 1 < trimmed.size(); ++i) {
+                const char ch = trimmed[i];
+
+                if (quote == '\'' && ch == '\'' && (i + 2 < trimmed.size()) && trimmed[i + 1] == '\'') {
+                    output.push_back('\'');
+                    ++i;
+                    continue;
+                }
+
+                if (quote == '"' && ch == '\\' && (i + 2 < trimmed.size())) {
+                    const char next = trimmed[++i];
+                    switch (next) {
+                    case '0': output.push_back('\0'); break;
+                    case 'a': output.push_back('\a'); break;
+                    case 'b': output.push_back('\b'); break;
+                    case 't': output.push_back('\t'); break;
+                    case 'n': output.push_back('\n'); break;
+                    case 'v': output.push_back('\v'); break;
+                    case 'f': output.push_back('\f'); break;
+                    case 'r': output.push_back('\r'); break;
+                    case 'e': output.push_back('\x1b'); break;
+                    case '"': output.push_back('"'); break;
+                    case '/': output.push_back('/'); break;
+                    case '\\': output.push_back('\\'); break;
+                    default:
+                        output.push_back('\\');
+                        output.push_back(next);
+                        break;
+                    }
+
+                    continue;
+                }
+
+                output.push_back(ch);
+            }
+
+            return output;
+        }
+
+        bool parse_devices_yaml_lossy(const std::string &content, std::vector<device_config_record> &records) {
+            std::istringstream input(content);
+            std::string line;
+            device_config_record current;
+            bool has_current = false;
+
+            auto flush_current = [&]() {
+                if (!has_current) {
+                    return;
+                }
+
+                if (current.firmcode.empty()) {
+                    current.firmcode = current.key;
+                }
+
+                if (!current.firmcode.empty() && !current.model.empty() && !current.platver.empty()) {
+                    records.push_back(current);
+                }
+
+                current = device_config_record{};
+                has_current = false;
+            };
+
+            while (std::getline(input, line)) {
+                if (trim_ascii(line).empty() || trim_ascii(line).front() == '#') {
+                    continue;
+                }
+
+                const std::size_t indent = line.find_first_not_of(' ');
+                const std::string stripped = trim_ascii(line);
+                const std::size_t colon = stripped.find(':');
+                if (colon == std::string::npos) {
+                    continue;
+                }
+
+                if (indent == 0) {
+                    flush_current();
+
+                    current.key = decode_yaml_scalar_lossy(stripped.substr(0, colon));
+                    has_current = !current.key.empty();
+                    continue;
+                }
+
+                if (!has_current) {
+                    continue;
+                }
+
+                const std::string key = trim_ascii(stripped.substr(0, colon));
+                const std::string value = decode_yaml_scalar_lossy(stripped.substr(colon + 1));
+
+                if (key == "platver") {
+                    current.platver = value;
+                } else if (key == "manufacturer") {
+                    current.manufacturer = value;
+                } else if (key == "firmcode") {
+                    current.firmcode = value;
+                } else if (key == "model") {
+                    current.model = value;
+                } else if (key == "machine-uid") {
+                    current.machine_uid = static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 0));
+                }
+            }
+
+            flush_current();
+            return !records.empty();
+        }
+    }
+
     static std::map<std::string, std::uint32_t> DEVICE_UID_MAP = {
         { "nem-4", 0x101F8C19 }, // Nokia N-Gage
         { "rh-29", 0x101FB2B1 }, // Nokia N-Gage QD
@@ -180,6 +388,7 @@ namespace eka2l1 {
             devices.clear();
         }
 
+        std::string whole_config;
         try {
             common::ro_std_file_stream devices_stream(add_path(conf->storage, "devices.yml"), true);
             if (!devices_stream.valid()) {
@@ -187,39 +396,93 @@ namespace eka2l1 {
                 return;
             }
 
-            std::string whole_config(devices_stream.size(), ' ');
+            whole_config.assign(devices_stream.size(), ' ');
             devices_stream.read(whole_config.data(), whole_config.size());
-
-            devices_node = YAML::Load(whole_config);
-        } catch (YAML::Exception exception) {
+        } catch (const std::exception &exception) {
+            LOG_ERROR(SYSTEM, "Failed to read devices.yml: {}", exception.what());
             return;
         }
 
-        for (auto device_node : devices_node) {
-            const std::string firmcode = device_node.first.as<std::string>();
-            const std::string manufacturer = device_node.second["manufacturer"].as<std::string>();
-            const std::string model = device_node.second["model"].as<std::string>();
-
-            const std::string plat_ver = device_node.second["platver"].as<std::string>();
-            epocver ver = string_to_epocver(plat_ver.c_str());
-
-            std::uint32_t machine_uid = 0;
-
+        auto parse_devices_yaml = [&](const std::string &content) -> bool {
             try {
-                machine_uid = device_node.second["machine-uid"].as<int>();
-            } catch (YAML::Exception exception) {
-                machine_uid = 0;
+                devices_node = YAML::Load(content);
+                return true;
+            } catch (const std::exception &exception) {
+                LOG_ERROR(SYSTEM, "Failed to parse devices.yml: {}", exception.what());
+                return false;
+            }
+        };
+
+        bool parsed_with_yaml = parse_devices_yaml(whole_config);
+
+        if (!parsed_with_yaml) {
+            const std::string repaired_config = repair_yaml_unknown_escapes(whole_config);
+
+            if (repaired_config != whole_config) {
+                parsed_with_yaml = parse_devices_yaml(repaired_config);
             }
 
-            if (machine_uid == 0) {
-                auto ite = DEVICE_UID_MAP.find(common::lowercase_string(firmcode));
+            if (parsed_with_yaml) {
+                LOG_WARN(SYSTEM, "Recovered malformed devices.yml by repairing invalid escape sequences");
+            }
+        }
 
-                if (ite != DEVICE_UID_MAP.end()) {
-                    machine_uid = ite->second;
+        if (parsed_with_yaml) {
+            if (!devices_node.IsMap()) {
+                LOG_ERROR(SYSTEM, "Invalid devices.yml root node (expected map)");
+                return;
+            }
+
+            for (auto device_node : devices_node) {
+                try {
+                    const std::string firmcode = device_node.first.as<std::string>();
+                    const std::string manufacturer = device_node.second["manufacturer"].as<std::string>();
+                    const std::string model = device_node.second["model"].as<std::string>();
+
+                    const std::string plat_ver = device_node.second["platver"].as<std::string>();
+                    epocver ver = string_to_epocver(plat_ver.c_str());
+
+                    std::uint32_t machine_uid = 0;
+
+                    try {
+                        machine_uid = device_node.second["machine-uid"].as<int>();
+                    } catch (const YAML::Exception &) {
+                        machine_uid = 0;
+                    }
+
+                    if (machine_uid == 0) {
+                        auto ite = DEVICE_UID_MAP.find(common::lowercase_string(firmcode));
+
+                        if (ite != DEVICE_UID_MAP.end()) {
+                            machine_uid = ite->second;
+                        }
+                    }
+
+                    add_new_device(firmcode, model, manufacturer, ver, machine_uid);
+                } catch (const std::exception &exception) {
+                    LOG_ERROR(SYSTEM, "Skipping invalid device entry in devices.yml: {}", exception.what());
                 }
             }
+        } else {
+            std::vector<device_config_record> records;
+            if (!parse_devices_yaml_lossy(whole_config, records)) {
+                return;
+            }
 
-            add_new_device(firmcode, model, manufacturer, ver, machine_uid);
+            for (const device_config_record &record : records) {
+                std::uint32_t machine_uid = record.machine_uid;
+                if (machine_uid == 0) {
+                    auto ite = DEVICE_UID_MAP.find(common::lowercase_string(record.firmcode));
+                    if (ite != DEVICE_UID_MAP.end()) {
+                        machine_uid = ite->second;
+                    }
+                }
+
+                add_new_device(record.firmcode, record.model, record.manufacturer,
+                    string_to_epocver(record.platver.c_str()), machine_uid);
+            }
+
+            LOG_WARN(SYSTEM, "Recovered malformed devices.yml using permissive parser");
         }
 
         // Save any additions we add it during deserialize
@@ -231,13 +494,13 @@ namespace eka2l1 {
         emitter << YAML::BeginMap;
 
         for (const auto &device : devices) {
-            emitter << YAML::Key << device.firmware_code;
+            emitter << YAML::Key << YAML::SingleQuoted << device.firmware_code;
             emitter << YAML::Value << YAML::BeginMap;
 
-            emitter << YAML::Key << "platver" << YAML::Value << epocver_to_string(device.ver);
-            emitter << YAML::Key << "manufacturer" << YAML::Value << device.manufacturer;
-            emitter << YAML::Key << "firmcode" << YAML::Value << device.firmware_code;
-            emitter << YAML::Key << "model" << YAML::Value << device.model;
+            emitter << YAML::Key << "platver" << YAML::Value << YAML::SingleQuoted << epocver_to_string(device.ver);
+            emitter << YAML::Key << "manufacturer" << YAML::Value << YAML::SingleQuoted << device.manufacturer;
+            emitter << YAML::Key << "firmcode" << YAML::Value << YAML::SingleQuoted << device.firmware_code;
+            emitter << YAML::Key << "model" << YAML::Value << YAML::SingleQuoted << device.model;
             emitter << YAML::Key << "machine-uid" << YAML::Value << device.machine_uid;
 
             emitter << YAML::EndMap;
