@@ -1352,6 +1352,7 @@
                 if (module) {
                     var result = module.ccall('wasm_launch_app', 'number', ['number'], [app.uid]);
                     if (result === 0) {
+                        startEmulation();
                         updateStatus('green', 'Launched: ' + app.name);
                         showOverlay('Launching ' + app.name + '...', 1500);
                     } else {

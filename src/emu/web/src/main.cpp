@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengles2.h>
@@ -500,8 +501,42 @@ static void main_loop() {
         }
     }
 
-    // Run one iteration of the emulator
-    g_state.symsys->loop();
+    // Run several short guest slices per browser frame. A single full guest
+    // timeslice can block the browser, but only one tiny slice per RAF makes
+    // app startup crawl. Use a wall-clock budget to balance progress/yielding.
+    static constexpr double FRAME_CPU_BUDGET_MS = 8.0;
+    static constexpr int MAX_SLICES_PER_FRAME = 64;
+
+    const double frame_start = emscripten_get_now();
+    int slices = 0;
+    while (slices < MAX_SLICES_PER_FRAME) {
+        const int loop_result = g_state.symsys->loop();
+        ++slices;
+
+        if (loop_result == 0) {
+            break;
+        }
+
+        if ((emscripten_get_now() - frame_start) >= FRAME_CPU_BUDGET_MS) {
+            break;
+        }
+    }
+
+    static double last_progress_log = 0.0;
+    const double progress_now = emscripten_get_now();
+    if ((progress_now - last_progress_log) >= 5000.0) {
+        last_progress_log = progress_now;
+
+        if (eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system()) {
+            kernel::thread *thread = kern->crr_thread();
+            kernel::process *process = kern->crr_process();
+            LOG_INFO(FRONTEND_CMDLINE, "WASM frame: slices={} budget_ms={:.2f} process={} thread={} state={}",
+                slices, progress_now - frame_start,
+                process ? process->name() : "(none)",
+                thread ? thread->name() : "(none)",
+                thread ? static_cast<int>(thread->current_state()) : -1);
+        }
+    }
 
     // Swap buffers
     SDL_GL_SwapWindow(g_window);
@@ -781,26 +816,45 @@ int wasm_launch_app(int uid) {
         static_cast<std::uint32_t>(uid), eka2l1::common::ucs2_to_utf8(app_path));
 
     epoc::apa::command_line cmdline;
-    cmdline.launch_cmd_ = epoc::apa::command_create;
+    // Match the desktop app-list launcher. command_create is used by the
+    // command-line path, but UI-launched apps expect the normal open command.
+    cmdline.launch_cmd_ = epoc::apa::command_open;
 
-    kern->lock();
-    const bool ok = alserv->launch_app(*reg, cmdline, nullptr,
-        [](kernel::process *pr) {
-            if (!pr) {
-                LOG_ERROR(FRONTEND_CMDLINE, "Launched app exited with null process handle");
-                return;
-            }
+    bool ok = false;
+    try {
+        kern->lock();
+        ok = alserv->launch_app(*reg, cmdline, nullptr,
+            [](kernel::process *pr) {
+                if (!pr) {
+                    LOG_ERROR(FRONTEND_CMDLINE, "Launched app exited with null process handle");
+                    return;
+                }
 
-            LOG_INFO(FRONTEND_CMDLINE,
-                "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
-                pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
-                eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
-        });
-    kern->unlock();
+                LOG_INFO(FRONTEND_CMDLINE,
+                    "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
+                    pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
+                    eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
+            });
+        kern->unlock();
+    } catch (const std::exception &exception) {
+        kern->unlock();
+        LOG_ERROR(FRONTEND_CMDLINE, "Exception while launching app uid=0x{:08X}: {}",
+            static_cast<std::uint32_t>(uid), exception.what());
+        return -6;
+    } catch (...) {
+        kern->unlock();
+        LOG_ERROR(FRONTEND_CMDLINE, "Unknown exception while launching app uid=0x{:08X}",
+            static_cast<std::uint32_t>(uid));
+        return -7;
+    }
 
     if (!ok) {
         LOG_ERROR(FRONTEND_CMDLINE, "launch_app returned false for uid=0x{:08X}",
             static_cast<std::uint32_t>(uid));
+    }
+
+    if (ok) {
+        g_state.paused = false;
     }
 
     return ok ? 0 : -5;

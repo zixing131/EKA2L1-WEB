@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <common/log.h>
+#include <common/time.h>
 #include <common/types.h>
 #include <cpu/dyncom/arm_dyncom_dec.h>
 #include <cpu/dyncom/arm_dyncom_interpreter.h>
@@ -907,6 +908,16 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #undef RM
 #undef RS
 
+#ifdef __EMSCRIPTEN__
+    // The web build runs dyncom on the browser main thread. Some guest startup
+    // paths can stay inside this interpreter long enough to freeze the page
+    // before the outer emulator loop gets a chance to yield.
+    static constexpr std::uint64_t WASM_DYNCOM_RUN_BUDGET_US = 8000;
+    const std::uint64_t wasm_dyncom_deadline_us = eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
+        + WASM_DYNCOM_RUN_BUDGET_US;
+    bool wasm_dyncom_deadline_hit = false;
+#endif
+
 #define CRn inst_cream->crn
 #define OPCODE_1 inst_cream->opcode_1
 #define OPCODE_2 inst_cream->opcode_2
@@ -932,17 +943,31 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 
 // GCC and Clang have a C++ extension to support a lookup table of labels. Otherwise, fallback to a
 // clunky switch statement.
+#ifdef __EMSCRIPTEN__
+#define WASM_DYNCOM_YIELD_CHECK                                                \
+    if (((num_instrs & 0x3FF) == 0)                                             \
+        && (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()  \
+            >= wasm_dyncom_deadline_us)) {                                      \
+        wasm_dyncom_deadline_hit = true;                                        \
+        goto END;                                                               \
+    }
+#else
+#define WASM_DYNCOM_YIELD_CHECK
+#endif
+
 #if defined __GNUC__ || defined __clang__
 #define GOTO_NEXT_INST                         \
     if (num_instrs >= cpu->NumInstrsToExecute) \
         goto END;                              \
     num_instrs++;                              \
+    WASM_DYNCOM_YIELD_CHECK;                   \
     goto *InstLabel[inst_base->idx]
 #else
 #define GOTO_NEXT_INST                         \
     if (num_instrs >= cpu->NumInstrsToExecute) \
         goto END;                              \
     num_instrs++;                              \
+    WASM_DYNCOM_YIELD_CHECK;                   \
     switch (inst_base->idx) {                  \
     case 0:                                    \
         goto VMLA_INST;                        \
@@ -4516,6 +4541,11 @@ YIELD_INST : {
 #undef VFP_INTERPRETER_IMPL
 
 END : {
+#ifdef __EMSCRIPTEN__
+    if (wasm_dyncom_deadline_hit) {
+        LOG_TRACE(eka2l1::CPU_DYNCOM, "WASM dyncom yielded after {} instructions", num_instrs);
+    }
+#endif
     SAVE_NZCVT;
     cpu->NumInstrsToExecute = 0;
     return num_instrs;

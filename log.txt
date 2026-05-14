@@ -1,0 +1,565 @@
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application%2Fx-json-stream&client-id=NO_AUTH&client-version=peregrine-lite-telemetry-20260513.276&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754412424&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+format-lib.js:5 AST library loaded: 1.10.80
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754412689&time-delta-to-apply-millis=use-collector-delta&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754412691&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754412697&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754412952&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754413690&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754414194&w=0&anoncknm=app_anon&NoResponseBody=true:1  Failed to load resource: net::ERR_CONNECTION_RESET
+ruffle.js:2  POST https://browser.events.data.msn.cn/OneCollector/1.0?cors=true&content-type=application/x-json-stream&client-id=NO_AUTH&client-version=1DS-Web-JS-3.2.8&apikey=0ded60c75e44443aa3484c42c1c43fe8-9fc57d3f-fdac-4bcf-b927-75eafe60192e-7279&upload-time=1778754416372&w=0&anoncknm=app_anon&NoResponseBody=true net::ERR_CONNECTION_RESET
+pt @ ruffle.js:2
+A @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+St @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+$t @ ruffle.js:2
+t.sendSynchronousBatch @ ruffle.js:2
+q @ ruffle.js:2
+t.processTelemetry @ ruffle.js:2
+r @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+x @ ruffle.js:2
+$ @ ruffle.js:2
+c.<computed> @ ruffle.js:2
+(匿名) @ ruffle.js:2
+(匿名) @ ruffle.js:2
+Y @ ruffle.js:2
+i @ ruffle.js:2
+processTelemetry @ ruffle.js:2
+r @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+x @ ruffle.js:2
+$ @ ruffle.js:2
+c.<computed> @ ruffle.js:2
+f.<computed> @ ruffle.js:2
+t.<computed> @ ruffle.js:2
+r @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+x @ ruffle.js:2
+$ @ ruffle.js:2
+c.<computed> @ ruffle.js:2
+f.<computed> @ ruffle.js:2
+t.processTelemetry @ ruffle.js:2
+r @ ruffle.js:2
+(匿名) @ ruffle.js:2
+v @ ruffle.js:2
+x @ ruffle.js:2
+$ @ ruffle.js:2
+c.<computed> @ ruffle.js:2
+t.track @ ruffle.js:2
+(匿名) @ ruffle.js:2
+t.track @ ruffle.js:2
+transport @ dapp-interface.js:94
+(匿名) @ dapp-interface.js:94
+sendContentViewEvent @ dapp-interface.js:94
+(匿名) @ dapp-interface.js:94
+queueEvent @ dapp-interface.js:94
+autoSendContentViewEvent @ dapp-interface.js:94
+(匿名) @ dapp-interface.js:94
+e @ dapp-interface.js:94
+setTimeout
+e @ dapp-interface.js:94
+已导航到     http://127.0.0.1:8080/eka2l1.html
+eka2l1.html:956 [EKA2L1] module factory resolved, FS= true IDB= object
+eka2l1.html:1034 [EKA2L1] IDBFS.getDB patched (no-cache mode)
+eka2l1.html:1040 [EKA2L1] syncfs(true) start
+eka2l1.html:1045 [EKA2L1] /eka2l1 after restore: (8) ['devices.yml', 'drives', 'j2me', 'rom_upload.rom', 'roms', 'rpkg', 'rpkg_upload.rpkg', 'temp']
+eka2l1.html:1047 [EKA2L1] devices.yml size=192
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:944 [Frontend.Cmdline]: EKA2L1 WebAssembly starting...
+eka2l1.js:12573 [Deprecation]
+    The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet)
+1263169 @ eka2l1.js:12573
+runMainThreadEmAsm @ eka2l1.js:8379
+_emscripten_asm_const_int_sync_on_main_thread @ eka2l1.js:8382
+$EMSCRIPTENAUDIO_OpenDevice @ eka2l1.wasm:0x5b3188
+$main @ eka2l1.wasm:0x9f141
+(匿名) @ eka2l1.js:943
+callMain @ eka2l1.js:14725
+startMain @ eka2l1.html:966
+(匿名) @ eka2l1.html:1052
+doCallback @ eka2l1.js:3656
+done @ eka2l1.js:3667
+transaction.oncomplete @ eka2l1.js:2997
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:952 [Frontend.Cmdline]: SDL initialized successfully
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:953 [Frontend.Cmdline]: OpenGL Renderer: WebKit WebGL
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:954 [Frontend.Cmdline]: OpenGL Version: OpenGL ES 3.0 (WebGL 2.0 (OpenGL ES 3.0 Chromium))
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:393 [Frontend.Cmdline]: EKA2L1 WebAssembly v0.0.1 (master-c932c736b)
+eka2l1.html:916 [EKA2L1] E /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/system/src/devices.cpp:411 [System]: Failed to parse devices.yml: yaml-cpp: error at line 6, column 27: unknown escape character: 
+eka2l1.html:916 [EKA2L1] W /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/system/src/devices.cpp:485 [System]: Recovered malformed devices.yml using permissive parser
+eka2l1.html:916 [EKA2L1] E /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/config/src/panic_blacklist.cpp:33 [Config]: Failed to open thread panic blacklist file!
+eka2l1.html:919 [EKA2L1] emscripten_set_main_loop_timing: Cannot set timing mode for main loop since a main loop does not exist! Call emscripten_set_main_loop first to set one up.
+printErr @ eka2l1.html:919
+_emscripten_set_main_loop_timing @ eka2l1.js:8233
+_eglSwapInterval @ eka2l1.js:8292
+$SDL_EGL_SetSwapInterval @ eka2l1.wasm:0x5f42eb
+$eka2l1::drivers::graphics::gl_context_emscripten::set_swap_interval(int) @ eka2l1.wasm:0xecc1e
+invoke_vii @ eka2l1.js:13665
+$eka2l1::drivers::ogl_graphics_driver::ogl_graphics_driver(eka2l1::drivers::window_system_info const&) @ eka2l1.wasm:0xd9a83
+invoke_iii @ eka2l1.js:13521
+$eka2l1::drivers::create_graphics_driver(eka2l1::drivers::graphic_api, eka2l1::drivers::window_system_info const&) @ eka2l1.wasm:0xc40ec
+invoke_iii @ eka2l1.js:13521
+$init_emulator() @ eka2l1.wasm:0x96fef
+$main @ eka2l1.wasm:0x9fa7a
+(匿名) @ eka2l1.js:943
+callMain @ eka2l1.js:14725
+startMain @ eka2l1.html:966
+(匿名) @ eka2l1.html:1052
+doCallback @ eka2l1.js:3656
+done @ eka2l1.js:3667
+transaction.oncomplete @ eka2l1.js:2997
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/drivers/src/graphics/backend/ogl/graphics_ogl.cpp:195 [Driver.Graphics]: Supported features (for optimization): ETC2Dec;AnisotrophyFiltering
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:478 [Frontend.Cmdline]: EKA2L1 WebAssembly initialized successfully!
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:595 [Frontend.Cmdline]: Initializing with ROM:   RPKG: (none)
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:608 [Frontend.Cmdline]: device_manager loaded 1 device(s) from /eka2l1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:614 [Frontend.Cmdline]: devices.yml exists/valid: yes size=192
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/kernel.cpp:1298 [Kernel]: Rom mapped to address: 0x8dc0000
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: ROM, base (in parent): 0x80000000, max size: 0x42b5000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: Global static kernel data, base (in parent): 0x84300000, max size: 0x20000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: DispatcherTrampolines, base (in parent): 0x84400000, max size: 0x4000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: DispatcherStaticData, base (in parent): 0x84500000, max size: 0x4000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:472 [Service.Applist]: Loading app registries
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: 7Days, uid: 0xE534CAFF
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: About product, uid: 0x10005A22
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Adobe Reader, uid: 0x20001BB9
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Standby, uid: 0x102750F0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x10281867
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x1020E4F1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Own key, uid: 0x1020E4F2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: App. manager, uid: 0x101F8512
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Audio message, uid: 0x1020745A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x100059B5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Bluetooth, uid: 0x10005951
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app:  , uid: 0x101F4CE5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Calculator, uid: 0x10005902
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Calendar, uid: 0x10005901
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Cell broadcast, uid: 0x101F4CD3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Save certificate, uid: 0x100059D2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: CfmwLauncher, uid: 0x10204375
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Download, uid: 0x10008D4A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Connection mgr., uid: 0x101F84D0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Converter, uid: 0x101F4668
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Help, uid: 0x10005234
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Download, uid: 0x10008D3F
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: File manager, uid: 0x101F84EB
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Download, uid: 0x102072C4
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Phone settings, uid: 0x100058EC
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x101FFA91
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Image print, uid: 0x1020E470
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Image viewer, uid: 0x101F4D90
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Log, uid: 0x101F4CD5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Video editor, uid: 0x10208A29
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Messaging, uid: 0x100058C5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Gallery, uid: 0x101F8599
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Menu, uid: 0x101F4CD2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Msg. reader, uid: 0x10201B00
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x2000C4D5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Multimedia, uid: 0x100058DF
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: E-mail, uid: 0x101F4CD6
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: E-mail, uid: 0x101F4CE4
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: MsgUrlHandler, uid: 0x1000A7FC
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Download songs, uid: 0x101F8839
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Notes, uid: 0x10005907
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: NOT, uid: 0x101F86A0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Notes, uid: 0x1000599D
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Device manager, uid: 0x101F6DE5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Sync, uid: 0x101F6DE4
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x10207277
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Telephone, uid: 0x100058B3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Contacts, uid: 0x101F4CCE
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Profiles, uid: 0x100058F8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Configurations, uid: 0x101F8597
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Themes, uid: 0x10005A32
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x10008D3C
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Licence download, uid: 0x10008D64
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Services, uid: 0x101F8532
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x100056CF
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Text message, uid: 0x100058BD
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Speed dial, uid: 0x1000590A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x100058F4
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Presentation, uid: 0x101F874A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Installer, uid: 0x101F875A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x100058F3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Speech, uid: 0x10201AF2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Message editor, uid: 0x102072D8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: USB, uid: 0x102068E2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Service commds., uid: 0x10005955
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x10281D15
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Voice comms., uid: 0x101F8555
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x102818E7
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Call mailbox, uid: 0x100058F5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Music search, uid: 0x2000F8E6
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Welcome, uid: 0x10281D06
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: WidgetUI, uid: 0x10282822
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Zip manager, uid: 0x2000023D
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Active notes, uid: 0x10281A31
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Search, uid: 0x200044D5
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: GPS data, uid: 0x101F85A0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Web, uid: 0x10008D39
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Camera, uid: 0x101F857A
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app:  , uid: 0x2000854D
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Cell broadcast, uid: 0x101F4CD3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Clock, uid: 0x10005903
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Licences, uid: 0x101F85C7
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Groove Labyrinth 2, uid: 0xA0006D8B
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x1028246E
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Jelly Chase, uid: 0xA0002C40
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Landmarks, uid: 0x101F85A2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Select language, uid: 0x102832EE
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Landmarks, uid: 0x101F85C1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Positioning, uid: 0x10281861
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x102824CD
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Marble Cannon, uid: 0x2000109F
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: RealPlayer, uid: 0x10005A3E
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: , uid: 0x10005A3F
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Dictionary, uid: 0x200159D0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Search, uid: 0x20000907
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Music player, uid: 0x102072C3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Music store, uid: 0x101FFB51
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Video sharing, uid: 0x10282391
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: My Nokia, uid: 0x20004F86
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Download!, uid: 0x20007803
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Podcasting, uid: 0x1028190B
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Share online, uid: 0x200009E0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Quickoffice, uid: 0x200002C0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Adobe Reader, uid: 0x2000745E
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Quickpoint, uid: 0x200002C3
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Quicksheet, uid: 0x200002C2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Quickword, uid: 0x200002C1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Radio, uid: 0x10281CB9
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Flash Player, uid: 0x101FD693
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: SIM services, uid: 0x101F4CE0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Settings, uid: 0x20009B72
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Settings wizard, uid: 0x10281C96
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Maps, uid: 0x20001F63
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Phone switch, uid: 0x101FF968
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Video call, uid: 0x101F8681
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: FM radio, uid: 0x101FF976
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:314 [Service.Applist]: Found app: Voice recorder, uid: 0x100058CA
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:553 [Service.Applist]: Done loading!
+eka2l1.js:2995 [Violation]
+    'complete' handler took 199ms
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:537 [Frontend.Cmdline]: WASM frame: slices=64 budget_ms=0.25 process=(none) thread=(none) state=-1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:816 [Frontend.Cmdline]: Launching app uid=0xE534CAFF path=E:\system\programs\Symbian3rd.exe
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/kernel.cpp:918 [Kernel]: Spawned process: Symbian3rd, entry point = 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: code696291706, base (in parent): 0x70000000, max size: 0x1b9000 type: normal, access: code 
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: symbian3rd.exe (UID3=0xE534CAFF) runtime code: 0x70000000
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: symbian3rd.exe (UID3=0xE534CAFF) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: apparc.dll (UID3=0x10003A3D) runtime code: 0x80a41ef8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: apparc.dll (UID3=0x10003A3D) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: bitgdi.dll (UID3=0x10003B18) runtime code: 0x804796e8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: bitgdi.dll (UID3=0x10003B18) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: commdb.dll (UID3=0x10004E1C) runtime code: 0x80786f08
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: commdb.dll (UID3=0x10004E1C) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: cone.dll (UID3=0x10003A41) runtime code: 0x8056ffd8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: cone.dll (UID3=0x10003A41) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: etel.dll (UID3=0x10003D46) runtime code: 0x80217988
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: etel.dll (UID3=0x10003D46) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: etel3rdparty.dll (UID3=0x10004268) runtime code: 0x8044a0d8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: etel3rdparty.dll (UID3=0x10004268) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: mediaclientaudiostream.dll (UID3=0x10003996) runtime code: 0x804d3eb8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: mediaclientaudiostream.dll (UID3=0x10003996) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: scdv.dll (UID3=0x100001EC) runtime code: 0x8068a5e8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: scdv.dll (UID3=0x100001EC) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: ws32.dll (UID3=0x10003B21) runtime code: 0x804b1098
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: ws32.dll (UID3=0x10003B21) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: avkon.dll (UID3=0x100056C6) runtime code: 0x81412a68
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: avkon.dll (UID3=0x100056C6) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: dfpaeabi.dll (UID3=0x0) runtime code: 0x80193748
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: dfpaeabi.dll (UID3=0x0) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: drtaeabi.dll (UID3=0x0) runtime code: 0x8018fe08
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: drtaeabi.dll (UID3=0x0) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: efsrv.dll (UID3=0x100039E4) runtime code: 0x801edab8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: efsrv.dll (UID3=0x100039E4) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: eikcore.dll (UID3=0x10004892) runtime code: 0x80b02cb8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: eikcore.dll (UID3=0x10004892) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: esock.dll (UID3=0x10003D3F) runtime code: 0x802adcb8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: esock.dll (UID3=0x10003D3F) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: euser.dll (UID3=0x100039E5) runtime code: 0x8019ae68
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: euser.dll (UID3=0x100039E5) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: insock.dll (UID3=0x10003D44) runtime code: 0x802d4d68
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: insock.dll (UID3=0x10003D44) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: scppnwdl.dll (UID3=0x0) runtime code: 0x8019acc8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: scppnwdl.dll (UID3=0x0) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: sendas2.dll (UID3=0x10204285) runtime code: 0x80a736c8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: sendas2.dll (UID3=0x10204285) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:108 [Kernel]: Process Symbian3rd capabilities: NetworkSvr LocalService ReadUserData WriteUserData 
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local1403862064, base (in parent): 0x400000, max size: 0x10000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local3910923284, base (in parent): 0x500000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local4095173464, base (in parent): 0x600000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: $HEAP, base (in parent): 0x700000, max size: 0x100000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local304714276, base (in parent): 0x800000, max size: 0xe00000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] E /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:333 [Kernel]: Getting descriptor length of unused slot: 1
+eka2l1.html:916 [EKA2L1] E /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:389 [Kernel]: Parameter slot unused, error: 3
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2272 [Kernel]: Thread with last name: Main renamed to Symbian3rd
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/applist/applist.cpp:644 [Service.Applist]: AppList::AppLanguage stubbed to returns ELangEnglish
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: FbsSharedChunk, base (in parent): 0x40000000, max size: 0x200000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: FbsLargeChunk, base (in parent): 0x40200000, max size: 0x6000000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fbs/impls/font.cpp:1163 [Service.Fbs]: Found font folder: Z:\Resource\Fonts\
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: ScreenBuffer0, base (in parent): 0xc9200000, max size: 0x6a400 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: WsGlobalMemChunk, base (in parent): 0x46200000, max size: 0x2000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: WsCodeChunk, base (in parent): 0x46300000, max size: 0x2000 type: normal, access: global
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/window/window.cpp:248 [Service.Window]: Create screen device.
+eka2l1.html:916 [EKA2L1] W /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/window/window.cpp:228 [Service.Window]: Object handle is invalid 0
+eka2l1.html:916 [EKA2L1] W /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/window/window.cpp:312 [Service.Window]: Unable to find parent for new group with ID = 0x0. Use root
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\Resource\Uiklaf\eikcore.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\Resource\Uiklaf\eikcore.r01: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\Resource\Uiklaf\eikcore.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\Resource\Uiklaf\eikcore.r01, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 65537
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\Resource\Uiklaf\eikpriv.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\Resource\Uiklaf\eikpriv.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\Resource\Uiklaf\eikpriv.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\Resource\Uiklaf\eikpriv.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\Resource\Uiklaf\eikpriv.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\Resource\Uiklaf\eikpriv.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\Resource\Uiklaf\eikpriv.r
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\Resource\Uiklaf\eikpriv.r: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\Resource\Uiklaf\eikpriv.r
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\Resource\Uiklaf\eikpriv.rsc
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\Resource\Uiklaf\eikpriv.rsc: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\Resource\Uiklaf\eikpriv.rsc
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\Resource\Uiklaf\eikpriv.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 131074
+eka2l1.html:916 [EKA2L1] W /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/include/services/context.h:102 [Service.Track]: Getting packed struct with mismatch size (72 vs 64), size to get will be automatically clamped
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/centralrepo/centralrepo.cpp:355 [Service.CenRep]: Try to open repo 0x10272618
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1178 [Kernel]: Create session to unexist server: !AknIconServer
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:106 [Service.Loader]: Trying to summon: AknIconSrv.exe
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/kernel.cpp:918 [Kernel]: Spawned process: AknIconSrv, entry point = 0x82716168
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: akniconsrv.exe (UID3=0x1020735B) runtime code: 0x82716168
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: akniconsrv.exe (UID3=0x1020735B) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:108 [Kernel]: Process AknIconSrv capabilities: ReadDeviceData WriteDeviceData ProtServer SwEvent NetworkSvr LocalService ReadUserData WriteUserData Location UserEnv 
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local3800045359, base (in parent): 0x400000, max size: 0x3000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local1450150246, base (in parent): 0x500000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local4143187398, base (in parent): 0x600000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: $HEAP, base (in parent): 0x700000, max size: 0x1000000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2272 [Kernel]: Thread with last name: Main renamed to !AknIconServer
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1105 [Kernel]: Server !AknIconServer created
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f876e, key: 0x4, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x8, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x7, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x4, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x1, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x2, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8773, key: 0x6, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8614, key: 0x1, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x101f8615, key: 0x1, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x10207218, key: 0x4, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2598 [Kernel]: Define to property with category: 0x10207218, key: 0x5, type: int
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/centralrepo/centralrepo.cpp:355 [Service.CenRep]: Try to open repo 0x101F876E
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/centralrepo/centralrepo.cpp:611 [Service.CenRep]: Repo 0x101F876E: changes saved
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\akniconsrv.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 65537
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1178 [Kernel]: Create session to unexist server: !ecomserver
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:106 [Service.Loader]: Trying to summon: ecomserver
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/kernel.cpp:918 [Kernel]: Spawned process: ecomserver, entry point = 0x80295C48
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local31345254, base (in parent): 0x400000, max size: 0x1000 type: normal, access: local, anonymous
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: ecomserver.exe (UID3=0x10009D8F) runtime code: 0x80295c48
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: ecomserver.exe (UID3=0x10009D8F) runtime data: 0x400000
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:108 [Kernel]: Process ecomserver capabilities: ProtServer 
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local798674251, base (in parent): 0x500000, max size: 0x2000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local324186842, base (in parent): 0x600000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local256214730, base (in parent): 0x700000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: $HEAP, base (in parent): 0x800000, max size: 0x100000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2272 [Kernel]: Thread with last name: Main renamed to !ecomserver
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1105 [Kernel]: Server !ecomserver created
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2549 [Kernel]: Attach to property with category: 0x101f75b6, key: 0x102047b7
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: Z:\private\10009D8F\EComSrvr.ini
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for Z:\private\10009D8F\EComSrvr.ini: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: Z:\private\10009D8F\EComSrvr.ini
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: C:\private\10009D8F\EComSrvr.ini
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for C:\private\10009D8F\EComSrvr.ini: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: C:\private\10009D8F\EComSrvr.ini
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1178 [Kernel]: Create session to unexist server: !DmDomainServer
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: Z:\private\10009D8F\
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for Z:\private\10009D8F\: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: Z:\private\10009D8F\
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: Z:\private\10009D8F\ecom-*-*.s01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:116 [Service.EFsrv]: UID requested: 0x0, 0x0, 0x0
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:216 [Service.EFsrv]: Queried entries: 0x1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\private\10009D8F\ecom-0-1.s01, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 196609
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: Z:\private\10009D8F\ecom-*-*.s00
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:116 [Service.EFsrv]: UID requested: 0x0, 0x0, 0x0
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:216 [Service.EFsrv]: Queried entries: 0x0
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: Z:\private\10009D8F\ecom-*-*.spi
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:116 [Service.EFsrv]: UID requested: 0x0, 0x0, 0x0
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:216 [Service.EFsrv]: Queried entries: 0x2
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\private\10009D8F\ecom-2-0.spi, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 393217
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\private\10009D8F\ecom-0-0.spi, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 458753
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:537 [Frontend.Cmdline]: WASM frame: slices=13 budget_ms=8.30 process=ecomserver[10009d8f]0001 thread=!ecomserver state=1
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/web/src/main.cpp:537 [Frontend.Cmdline]: WASM frame: slices=15 budget_ms=8.18 process=ecomserver[10009d8f]0001 thread=!ecomserver state=1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: Y:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: X:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: W:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: V:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: U:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: T:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: S:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: R:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: Q:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: P:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: O:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: N:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: M:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: L:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: K:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: J:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: I:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: H:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: G:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: F:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: E:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: D:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: C:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: B:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/dirs.cpp:65 [Service.EFsrv]: Opening directory: A:\resource\plugins\*
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1299 [Kernel]: Leave started! Guess leave code: -12
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1314 [Kernel]: Leave trapped by trap handler.
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:681 [Service.EFsrv]: Notify requested with wildcard: C:\resource\plugins\
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:681 [Service.EFsrv]: Notify requested with wildcard: D:\resource\plugins\
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:681 [Service.EFsrv]: Notify requested with wildcard: E:\resource\plugins\
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:498 [Kernel]: Rendezvous to: Symbian3rd
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1178 [Kernel]: Create session to unexist server: CdlServer
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:106 [Service.Loader]: Trying to summon: cdlserver.exe
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/kernel.cpp:918 [Kernel]: Spawned process: cdlserver, entry point = 0x826D0598
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: cdlserver.exe (UID3=0x1027287A) runtime code: 0x826d0598
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: cdlserver.exe (UID3=0x1027287A) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:108 [Kernel]: Process cdlserver capabilities: ReadDeviceData WriteDeviceData ProtServer SwEvent NetworkSvr LocalService ReadUserData WriteUserData Location UserEnv 
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local2284402767, base (in parent): 0x400000, max size: 0x2000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local3800778056, base (in parent): 0x500000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: local932410486, base (in parent): 0x600000, max size: 0x1000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/chunk.cpp:157 [Kernel]: Chunk created: $HEAP, base (in parent): 0x700000, max size: 0x100000 type: normal, access: local
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:2272 [Kernel]: Thread with last name: Main renamed to CdlServer
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/svc.cpp:1105 [Kernel]: Server CdlServer created
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/libmanager.cpp:1320 [Kernel]: Get Info of Z:\sys\bin\101f84b9.dll
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/libmanager.cpp:1320 [Kernel]: Get Info of Z:\sys\bin\101fe2aa.dll
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/libmanager.cpp:1320 [Kernel]: Get Info of Z:\sys\bin\10281fc6.dll
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/libmanager.cpp:1320 [Kernel]: Get Info of Z:\sys\bin\102827CF.dll
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\resource\cdl\101f84b9_cdl_detail.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 65537
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\resource\cdl\101fe2aa_cdl_detail.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 196609
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\resource\cdl\10281fc6_cdl_detail.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 262145
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: Z:\resource\cdl\102827cf_cdl_detail.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 327681
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/process.cpp:498 [Kernel]: Rendezvous to: Symbian3rd
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/ui/cap/oom_app.cpp:81 [Service.UI]: Blanking screen in AKNCAP session stubbed
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/centralrepo/centralrepo.cpp:611 [Service.CenRep]: Repo 0x101F876E: changes saved
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/centralrepo/centralrepo.cpp:611 [Service.CenRep]: Repo 0x101F876E: changes saved
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:217 [Service.Loader]: Loaded library: 10281fc6.dll
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: 10281fc6.dll (UID3=0x10281FC6) runtime code: 0x826296d8
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: 10281fc6.dll (UID3=0x10281FC6) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:217 [Service.Loader]: Loaded library: 101fe2aa.dll
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: 101fe2aa.dll (UID3=0x101FE2AA) runtime code: 0x82609688
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: 101fe2aa.dll (UID3=0x101FE2AA) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] W /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/include/services/context.h:102 [Service.Track]: Getting packed struct with mismatch size (72 vs 64), size to get will be automatically clamped
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/libmanager.cpp:1320 [Kernel]: Get Info of Z:\sys\bin\akninit.dll
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/loader/loader.cpp:217 [Service.Loader]: Loaded library: akninit.dll
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:252 [Kernel]: akninit.dll (UID3=0x100056C8) runtime code: 0x814bf878
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/kernel/src/codeseg.cpp:253 [Kernel]: akninit.dll (UID3=0x100056C8) runtime data: 0x0
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikcoctl.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikcoctl.r01: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\resource\eikcoctl.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\eikcoctl.r01, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 196611
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\avkon.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\avkon.r01: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\resource\avkon.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\avkon.r01, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 262148
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\aknpriv.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\aknpriv.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\aknpriv.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\aknpriv.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\aknpriv.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\aknpriv.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\aknpriv.r
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\aknpriv.r: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\aknpriv.r
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\aknpriv.rsc
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\aknpriv.rsc: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\resource\aknpriv.rsc
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\aknpriv.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 327685
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikctl.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikctl.r01: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\resource\eikctl.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\eikctl.r01, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 393222
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikcdlg.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikcdlg.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\eikcdlg.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikcdlg.r01
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikcdlg.r01: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\eikcdlg.r01
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikcdlg.r
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikcdlg.r: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: z:\resource\eikcdlg.r
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: z:\resource\eikcdlg.rsc
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for z:\resource\eikcdlg.rsc: found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:840 [Service.EFsrv]: Get entry completed ok: z:\resource\eikcdlg.rsc
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:850 [Service.EFsrv]: Opening file: z:\resource\eikcdlg.rsc, raw mode 1
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/files.cpp:859 [Service.EFsrv]: Handle opened: 458759
+eka2l1.html:916 [EKA2L1] I /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:813 [Service.EFsrv]: Get entry of: c:\resource\errrd
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:827 [Service.EFsrv]: Get entry result for c:\resource\errrd: not found
+eka2l1.html:916 [EKA2L1] T /Users/zixing/Documents/zixing/github/EKA2L1/src/emu/services/src/fs/fs.cpp:831 [Service.EFsrv]: Get entry completed not found: c:\resource\errrd

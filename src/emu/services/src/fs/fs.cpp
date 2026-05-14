@@ -33,6 +33,7 @@
 #include <common/cvt.h>
 #include <common/log.h>
 #include <common/path.h>
+#include <common/time.h>
 #include <common/wildcard.h>
 
 #include <kernel/kernel.h>
@@ -815,10 +816,19 @@ namespace eka2l1 {
 
         io_system *io = ctx->sys->get_io_system();
 
+        const std::uint64_t entry_start_us = common::get_current_utc_time_in_microseconds_since_epoch();
         std::optional<entry_info> entry_hle = io->get_entry_info(fname);
+        const std::uint64_t entry_elapsed_us = common::get_current_utc_time_in_microseconds_since_epoch() - entry_start_us;
+
+        if (entry_elapsed_us > 50000) {
+            LOG_WARN(SERVICE_EFSRV, "Slow get_entry_info for {} took {}us", common::ucs2_to_utf8(fname), entry_elapsed_us);
+        }
+
+        LOG_TRACE(SERVICE_EFSRV, "Get entry result for {}: {}", common::ucs2_to_utf8(fname), entry_hle ? "found" : "not found");
 
         if (!entry_hle) {
             ctx->complete(epoc::error_not_found);
+            LOG_TRACE(SERVICE_EFSRV, "Get entry completed not found: {}", common::ucs2_to_utf8(fname));
             return;
         }
 
@@ -827,6 +837,7 @@ namespace eka2l1 {
 
         ctx->write_data_to_descriptor_argument<epoc::fs::entry>(1, entry, nullptr, true);
         ctx->complete(epoc::error_none);
+        LOG_TRACE(SERVICE_EFSRV, "Get entry completed ok: {}", common::ucs2_to_utf8(fname));
     }
 
     void fs_server_client::set_entry(service::ipc_context *ctx) {
