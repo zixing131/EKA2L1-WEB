@@ -1,0 +1,305 @@
+# EKA2L1 WASM Web 版调试记录（续）
+
+> 对话时间：2026-05-13 ~ 2026-05-14
+> 接续 [cursor.md](./cursor.md)，继续修复 WASM 版的运行时崩溃 / 死锁 / 持久化问题
+> 目标：让 EKA2L1 在浏览器中可启动、可装 ROM、可列出 app、可点击运行、可持久化
+
+---
+
+## 错误链与修复过程
+
+### 错误 10：`Uncaught RuntimeError: memory access out of bounds` in ntimer 线程
+
+**现象**
+点击 Install ROM 后崩溃，调用栈：
+```
+__thread_proxy<ntimer::reset()::$_0>(void*) (eka2l1.wasm:0x360b08)
+  ← __pthread_create
+  ← eka2l1::system::set_device(unsigned char)
+  ← wasm_init_with_rom
+```
+
+**初步推断**
+默认 `INITIAL_MEMORY` 仅 16MB，timer 线程创建时栈/堆分配越界。
+
+**修复**（`src/emu/web/CMakeLists.txt`）
+```
+"SHELL:-s INITIAL_MEMORY=268435456"   # 16MB → 256MB
+```
+
+---
+
+### 错误 11：SDL 互斥锁 `memory access out of bounds`
+
+**现象**
+内存增大后 ntimer 线程不再崩，但 `main_loop()` → `SDL_PollEvent` → `SDL_LockMutex` → `__pthread_mutex_trylock` 崩溃。
+
+**根因**
+Emscripten 默认 pthread 栈仅 64KB。Worker 线程（ntimer）栈溢出后污染邻近堆内存，恰好覆写了 SDL 全局事件队列的 mutex 指针 `SDL_EventQ.lock`。后续主线程 `SDL_LockMutex` 解引用坏地址 → WASM 越界陷阱。
+
+**修复**
+```
+"SHELL:-s DEFAULT_PTHREAD_STACK_SIZE=2097152"   # 64KB → 2MB
+"SHELL:-s PTHREAD_POOL_SIZE=8"                  # 预创建 worker 数
+```
+
+---
+
+### 错误 12：同样的 `memory access out of bounds` 在多种线程类型上重现
+
+**现象**
+增加 worker 栈后，`ntimer::reset()::$_0` 和 `BS::thread_pool::worker_thread` 仍在 `__thread_proxy` 入口处的同一个 WASM offset 崩溃。地址固定、与内存大小无关。
+
+**诊断**
+加 `-s ASSERTIONS=1` 重新构建，浏览器控制台暴露真正错误：
+
+```
+Aborted(Stack overflow! Stack cookie has been overwritten at 0x0027ce10,
+        expected hex dwords 0x89BACDFE and 0x2135467,
+        but received 0x1f504061 0xf6218f81)
+```
+
+**根因**
+**主浏览器线程的 shadow stack 溢出**（默认仅 64KB），cookie 在 0x0027ce10（≈2.6MB 地址）被覆写。
+`init_emulator()` → `set_device(0)` → `kernel_system::reset()` 复杂 C++ 模板调用链超过 64KB 栈空间，污染相邻全局数据。Worker 线程的"越界"是次级现象（主线程栈溢出腐坏了它们的入口参数）。
+
+**修复**（`src/emu/web/CMakeLists.txt`）
+```
+"SHELL:-s STACK_SIZE=8388608"          # 主线程 64KB → 8MB
+"SHELL:-s INITIAL_MEMORY=536870912"    # 256MB → 512MB
+"SHELL:-s MAXIMUM_MEMORY=2147483648"   # 1GB → 2GB
+"SHELL:-s PTHREAD_POOL_SIZE=32"        # 8 → 32（线程池耗尽警告）
+```
+
+---
+
+### 错误 13：`emscripten_set_main_loop_timing: Cannot set timing mode... a main loop does not exist!`
+
+**现象**
+启动时 SDL `SDL_GL_SetSwapInterval(1)` 调用 `emscripten_set_main_loop_timing`，但此时 `emscripten_set_main_loop` 尚未注册。
+
+**修复**（`src/emu/web/src/main.cpp`）
+```cpp
+// WASM 下跳过：emscripten_set_main_loop 用 requestAnimationFrame 自带 vsync
+#ifndef __EMSCRIPTEN__
+    SDL_GL_SetSwapInterval(1);
+#endif
+```
+
+> 注：另一处同名警告来自 SDL `SDL_Init` 内部，无法避免，无害。
+
+---
+
+### 错误 14：`Blocking on the main thread is very dangerous` + setTimeout 卡 1.4 秒
+
+**根因（第一处）**
+页面重载、IDBFS 已有设备数据时：
+1. `init_emulator()` 检测到设备存在 → 调 `set_device(0)` → **timer 线程启动**
+2. `wasm_init_with_rom()` 再次调 `set_device(0)` → `ntimer::reset()::wipeout()` → `timer_thread_->join()` → **阻塞主浏览器线程**（Emscripten pthreads 主线程不允许 `Atomics.wait`）
+
+**修复**（`src/emu/web/src/main.cpp`）
+移除 `init_emulator()` 里的 `set_device()`，由 `wasm_init_with_rom()` 统一调用一次。
+
+---
+
+### 错误 15：阻塞仍在 + 已安装的 app 不显示
+
+**根因（第二处）**
+`applist_server::rescan_registries()` 用 `BS::thread_pool::submit_loop()` 并行加载注册表，然后 `load_registry_task.wait()`——这在浏览器主线程上**死锁**：主线程被 `Atomics.wait` 挂起后无法处理 worker 的完成消息，wait 永不返回，app 列表永远为空。
+
+**修复**（`src/emu/services/src/applist/applist.cpp`，两处）
+```cpp
+#ifdef __EMSCRIPTEN__
+    for (std::size_t idx = 0; idx < register_file_paths.size(); idx++) {
+        // 同步加载，绕过线程池
+        bool modified = kern->is_eka1()
+            ? load_registry_oldarch(io, register_file_paths[idx], drv, lang)
+            : load_registry(io, register_file_paths[idx], drv, lang);
+        if (modified) global_modified = true;
+    }
+#else
+    auto load_registry_task = loading_thread_pool_.submit_loop(...);
+    load_registry_task.wait();
+#endif
+```
+
+---
+
+### 错误 16：初始化完成后整个程序卡住
+
+**根因（第三处）**
+`thread_scheduler` 启用 `cpu_load_save` 时，无线程可运行就调 `idle_event.wait()`。这个调用在 `system_impl::loop()` 持有 `mut` 期间发生，导致**经典死锁**：
+
+```
+main thread:  loop() 持有 mut → crr_thread() → 无线程 → idle_event.wait() 永远等
+timer thread: 回调需要内核状态 → 需要 mut → 被 main 阻塞
+              → 永远无法 idle_event.set()
+```
+
+`cpu_load_save` 是桌面优化（调度器空闲休眠），但 WASM 上调度器跑在主线程，不能阻塞。
+
+**修复**（`src/emu/system/src/epoc.cpp` `system_impl::startup()`）
+```cpp
+#ifdef __EMSCRIPTEN__
+    // 调度器跑在主线程，不能 idle_event.wait()
+    conf_->cpu_load_save = false;
+#endif
+```
+
+---
+
+### 错误 17：点击 app 后黑屏 + 大量 `__syscall_mprotect` 警告
+
+**根因**
+`common/src/virtualmem.cpp` 的 `commit()` / `decommit()` / `change_protection()` 直接调 `mprotect()`。WASM 上 Emscripten stub `mprotect` 返回 -1，函数返回 `false` → Symbian 内存管理器认为内存提交失败 → app 代码段无法加载 → 黑屏。
+
+**修复**（`src/emu/common/src/virtualmem.cpp`）
+```cpp
+bool commit(...) {
+#if EKA2L1_PLATFORM(WIN32)
+    ...
+#elif EKA2L1_PLATFORM(WASM)
+    // WASM 没有页级保护，内存始终可访问
+    (void)ptr; (void)size; (void)commit_prot;
+#else
+    if (mprotect(...) == -1) return false;
+#endif
+    return true;
+}
+
+// decommit / change_protection 同理
+
+bool is_memory_wx_exclusive() {
+#if EKA2L1_PLATFORM(UWP) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(WASM)
+    return true;   // 走 W^X 兼容路径
+#else
+    return false;
+#endif
+}
+```
+
+---
+
+### 错误 18：IDBFS 已持久化，但刷新后 app 列表丢失
+
+**根因**
+错误 14 修复后，`init_emulator()` 不再自动 `set_device()`。所以即使 IDBFS 数据已从 IndexedDB 恢复到 `/eka2l1/`，刷新后 `wasm_get_state()` 永远是 0，UI 不知道有设备，也不会触发初始化。
+
+**修复**（`src/emu/web/shell.html` postRun 回调）
+```javascript
+// 用空字符串调 wasm_init_with_rom：
+// - 若 device_manager 已有设备（IDBFS 恢复出来的）→ 跳过安装、直接 set_device(0) → 返回 0
+// - 若没有设备 → ROM 路径无效返回 -3，提示用户加载 ROM
+var result = module.ccall('wasm_init_with_rom', 'number',
+    ['string', 'string'], ['', '']);
+if (result === 0) {
+    updateStatus('green', 'Device loaded from storage');
+    refreshAppList();
+} else {
+    updateStatus('yellow', 'Load a ROM/RPKG to begin');
+}
+```
+
+---
+
+### 错误 19：打开页面立刻 `memory access out of bounds` in `spdlog::logger::log_it_`
+
+**现象**
+刷新页面，splash 还没消失就报：
+```
+eka2l1.wasm:0x370b4a Uncaught RuntimeError: memory access out of bounds
+  at spdlog::logger::log_it_(...)
+  ← logger::log_<char[70], int, char const*, char const*&, char const*>(...)
+  ← wasm_init_with_rom (eka2l1.wasm:0x5f7ca)
+  ← Object.ccall
+  ← eka2l1.html:699  (postRun setTimeout)
+```
+
+**根因**
+`moduleConfig.noInitialRun = true` 让 Emscripten 不自动调 `main()`，必须由 JS `callMain()` 触发。但 **postRun 在 callMain 之前就跑了**（postRun = "module 启动完毕"，与 main 是否运行无关）：
+
+```
+正确顺序应是: WASM ready → postRun → IDBFS mount/sync → callMain → main() → setup_log → ...
+实际顺序却是: WASM ready → postRun(里面的 setTimeout 500ms) → ... → callMain
+```
+
+错误 18 的修复把 `wasm_init_with_rom("", "")` 放进了 postRun 的 setTimeout 中，结果该调用在 `main()` 跑之前就触发了——这时 `eka2l1::log::spd_logger` 还是空 `shared_ptr`。`LOG_INFO` 宏先过 `filterings->is_passed(...)` 检查（filterings 也未初始化但 reset 状态恰好让 is_passed 返回 true，或栈布局蒙混过关），然后调 `spd_logger->info(...)` 解引用 null shared_ptr → WASM trap。
+
+也就是说错误 18 不能放 postRun 里，必须放到 callMain 之后。
+
+**修复**（`src/emu/web/shell.html`）
+- 把 postRun 简化为只更新 UI 进度条，**不再调** `wasm_init_with_rom`
+- 把设备恢复逻辑挪到 `startMain()` 里的 `mod.callMain([])` **之后**（main() 抛 unwind 是预期的，要 try/catch 掉以让流程继续）
+
+```js
+function startMain() {
+    try { mod.callMain([]); }
+    catch (e) {
+        if (!(e === 'unwind' || e.name === 'ExitStatus')) {
+            console.error('main() threw unexpected error:', e);
+        }
+    }
+    // 此时 spd_logger 已就绪
+    var result = module.ccall('wasm_init_with_rom', 'number',
+        ['string', 'string'], ['', '']);
+    ...
+}
+```
+
+**第二层防御**（`src/emu/web/src/main.cpp`）
+在 `wasm_init_with_rom` 入口加 spd_logger null-check，即使 JS 端再有 bug 误在 main 之前调用，C 端也不会崩：
+```cpp
+if (!eka2l1::log::spd_logger) {
+    eka2l1::log::setup_log(nullptr);
+    eka2l1::log::toggle_console();
+}
+```
+
+---
+
+## 涉及文件汇总（本轮新增/修改）
+
+| 文件 | 改动 |
+|---|---|
+| `src/emu/web/CMakeLists.txt` | `INITIAL_MEMORY=512MB`、`MAXIMUM_MEMORY=2GB`、`STACK_SIZE=8MB`、`DEFAULT_PTHREAD_STACK_SIZE=2MB`、`PTHREAD_POOL_SIZE=32`、`ASSERTIONS=1` |
+| `src/emu/web/src/main.cpp` | `SDL_GL_SetSwapInterval` 加 `#ifndef __EMSCRIPTEN__`；移除 `init_emulator()` 里的 `set_device()` |
+| `src/emu/web/shell.html` | postRun 只更新进度；设备恢复 (`wasm_init_with_rom("","")`) 挪到 `startMain()` 里 `callMain()` 之后，并 try/catch 掉 `unwind` |
+| `src/emu/web/src/main.cpp` | `wasm_init_with_rom` 入口给 `spd_logger` 加 null-check，必要时自动 `setup_log()` |
+| `src/emu/services/src/applist/applist.cpp` | WASM 下 `rescan_registries` 与 `on_drive_change` 同步加载，绕过 `BS::thread_pool::submit_loop().wait()` |
+| `src/emu/system/src/epoc.cpp` | WASM 下 `system_impl::startup()` 强制 `conf_->cpu_load_save = false` |
+| `src/emu/common/src/virtualmem.cpp` | WASM 分支跳过 `mprotect`；`is_memory_wx_exclusive()` 返回 `true` |
+
+---
+
+## 关键经验
+
+1. **Emscripten + pthreads + 主浏览器线程禁止 `Atomics.wait`**：所有 `join()` / `future::wait()` / `condition_variable::wait()` / 阻塞的 `mutex::lock()` 在主线程上都会死锁。需要在 WASM 上把它们换成同步执行或非阻塞轮询。
+
+2. **诊断技巧**：`-s ASSERTIONS=1` 给出栈 cookie 地址 + 期望值/实际值，比单看 "memory access out of bounds" 信息量大得多。
+
+3. **栈大小是默认 64KB**，对于复杂 C++ 模板调用链远远不够。WASM 主线程需要 8MB+，worker 至少 2MB。
+
+4. **`cpu_load_save` 是桌面调度器优化**，依赖"调度器在自己的线程里休眠"模型，与 WASM 单主线程模型根本冲突，必须关掉。
+
+5. **WASM 没有 mprotect**：所有依赖页级保护的代码必须走 W^X 兼容路径或返回成功，否则模拟器以为内存提交失败。
+
+---
+
+## 构建命令
+
+```bash
+cmake --build build_wasm_test --target eka2l1_wasm -j4
+
+# 测试
+cd build_wasm_test/bin
+python3 ../../src/emu/web/serve.py 8080 .
+```
+
+---
+
+## 仍未解决 / 待验证
+
+- [ ] mprotect 修复后黑屏是否解决（用户验证中）
+- [ ] 持久化是否在刷新后正常恢复（用户验证中）
+- [ ] `__syscall_mprotect` 警告 = Emscripten 层调 mprotect，**不是** EKA2L1 调的；现在 EKA2L1 这边不调了，Emscripten 那边的警告可能来自 libc 内部（如线程栈分配），数量应大幅减少
+- [ ] 长时间运行时 CPU 性能：dyncom 解释器在 WASM 上很慢，主循环每帧能跑的 ticks 数有限，复杂 app 可能很卡

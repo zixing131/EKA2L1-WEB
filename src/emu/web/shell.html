@@ -682,23 +682,15 @@
                 }
             },
             preRun: [],
+            // NOTE: do NOT call wasm_init_with_rom here.
+            // With noInitialRun=true, postRun fires BEFORE callMain(), so the
+            // spdlog logger (set up inside main()) is still null. The first
+            // LOG_INFO in wasm_init_with_rom then dereferences a null
+            // spd_logger and traps with "memory access out of bounds".
+            // Device restore is triggered from the .then() handler after callMain().
             postRun: [
                 function() {
                     updateLoadingProgress(100, 'Ready!');
-                    setTimeout(function() {
-                        splashScreen.classList.add('hidden');
-                        mainContainer.style.display = 'flex';
-
-                        // Check if a device was already installed in a previous session.
-                        // If so, the emulator will have auto-initialized via set_device().
-                        var state = module ? module.ccall('wasm_get_state', 'number', [], []) : 0;
-                        if (state & 1) {
-                            // bit 0: initialized
-                            updateStatus('green', 'Ready - Device loaded from storage');
-                        } else {
-                            updateStatus('yellow', 'Load a ROM/RPKG to begin');
-                        }
-                    }, 500);
                 }
             ]
         };
@@ -715,7 +707,34 @@
 
                 function startMain() {
                     updateLoadingProgress(95, 'Starting emulator...');
-                    mod.callMain([]);
+                    // callMain() runs main(), which sets up spdlog and registers
+                    // the main loop. Internally it throws "unwind" because
+                    // simulate_infinite_loop=1, but Emscripten catches it so
+                    // control returns here normally.
+                    try {
+                        mod.callMain([]);
+                    } catch (e) {
+                        // unwind is the expected control-flow for simulate_infinite_loop
+                        if (!(e && (e === 'unwind' || e.name === 'ExitStatus'))) {
+                            console.error('[EKA2L1] main() threw unexpected error:', e);
+                        }
+                    }
+
+                    splashScreen.classList.add('hidden');
+                    mainContainer.style.display = 'flex';
+
+                    // Try to restore device from persisted IDBFS data. After
+                    // main() runs, the logger and the global system are ready,
+                    // so wasm_init_with_rom("","") will either reuse an existing
+                    // device (returns 0) or report no ROM available (negative).
+                    var result = module.ccall('wasm_init_with_rom', 'number',
+                        ['string', 'string'], ['', '']);
+                    if (result === 0) {
+                        updateStatus('green', 'Device loaded from storage');
+                        refreshAppList();
+                    } else {
+                        updateStatus('yellow', 'Load a ROM/RPKG to begin');
+                    }
                 }
 
                 if (idbfsAvailable) {

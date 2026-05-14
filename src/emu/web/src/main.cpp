@@ -547,6 +547,14 @@ EMSCRIPTEN_KEEPALIVE
 int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
     if (!rom_path) return -1;
 
+    // Defensive: if JS calls us before main() runs, spd_logger is null and the
+    // first LOG_INFO traps with an out-of-bounds access. Ensure setup_log() has
+    // run before any logging happens here.
+    if (!eka2l1::log::spd_logger) {
+        eka2l1::log::setup_log(nullptr);
+        eka2l1::log::toggle_console();
+    }
+
     const bool has_rpkg = (rpkg_path && rpkg_path[0] != '\0');
     LOG_INFO(FRONTEND_CMDLINE, "Initializing with ROM: {}  RPKG: {}",
         rom_path, has_rpkg ? rpkg_path : "(none)");

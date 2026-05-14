@@ -67,14 +67,18 @@ namespace eka2l1::common {
             translate_protection(commit_prot));
 
         if (!res) {
+            return false;
+        }
+#elif EKA2L1_PLATFORM(WASM)
+        // WASM has no page-level protection; memory is always accessible.
+        (void)ptr; (void)size; (void)commit_prot;
 #else
         const int result = mprotect(ptr, size, translate_protection(commit_prot));
 
         if (result == -1) {
-#endif
             return false;
         }
-
+#endif
         return true;
     }
 
@@ -83,14 +87,17 @@ namespace eka2l1::common {
         const auto res = VirtualFree(ptr, size, MEM_DECOMMIT);
 
         if (!res) {
+            return false;
+        }
+#elif EKA2L1_PLATFORM(WASM)
+        (void)ptr; (void)size;
 #else
         const auto result = mprotect(ptr, size, PROT_NONE);
 
         if (result == -1) {
-#endif
             return false;
         }
-
+#endif
         return true;
     }
 
@@ -102,19 +109,22 @@ namespace eka2l1::common {
             translate_protection(new_prot), &oldprot);
 
         if (!res) {
+            return false;
+        }
+#elif EKA2L1_PLATFORM(WASM)
+        (void)ptr; (void)size; (void)new_prot;
 #else
         const int result = mprotect(ptr, size, translate_protection(new_prot));
 
         if (result == -1) {
-#endif
             return false;
         }
-
+#endif
         return true;
     }
 
     bool is_memory_wx_exclusive() {
-#if EKA2L1_PLATFORM(UWP) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(ANDROID)
+#if EKA2L1_PLATFORM(UWP) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(WASM)
         return true;
 #else
         return false;
