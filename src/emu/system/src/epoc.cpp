@@ -590,6 +590,13 @@ namespace eka2l1 {
     void system_impl::startup() {
         exit = false;
 
+#ifdef __EMSCRIPTEN__
+        // On WASM the scheduler runs on the main browser thread and cannot block.
+        // cpu_load_save uses idle_event.wait() which deadlocks because the timer thread
+        // cannot fire while the main thread holds mut and waits on idle_event.
+        conf_->cpu_load_save = false;
+#endif
+
         // Initialize all the system that doesn't depend on others first
         timing_ = std::make_unique<ntimer>(DEFAULT_CPU_HZ);
         timing_->set_realtime_level(get_realtime_level_from_string(conf_->rtos_level.c_str()));

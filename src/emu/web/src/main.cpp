@@ -363,8 +363,10 @@ static bool init_sdl() {
         return false;
     }
 
-    // Enable vsync
+    // Enable vsync (skip on WASM: emscripten_set_main_loop_timing not available yet)
+#ifndef __EMSCRIPTEN__
     SDL_GL_SetSwapInterval(1);
+#endif
 
     // Initialize SDL audio
     SDL_AudioSpec want_spec;
@@ -433,11 +435,9 @@ static bool init_emulator() {
     g_state.symsys->mount(drive_e, drive_media::physical,
         storage_path + "/drives/e/", io_attrib_removeable);
 
-    // Try to set device
-    eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
-    if (dvcmngr->total() > 0) {
-        g_state.symsys->set_device(g_state.conf.device);
-    }
+    // On WASM, do NOT call set_device() here: wasm_init_with_rom() will call it once.
+    // Calling it here causes a second set_device() call later which triggers
+    // ntimer::wipeout() -> timer_thread_->join(), blocking the main browser thread.
 
     // Create graphics driver (OpenGL ES 3.0 / WebGL2)
     auto web_window = std::make_unique<sdl_web_window>(g_window);

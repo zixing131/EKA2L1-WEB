@@ -383,6 +383,14 @@ namespace eka2l1 {
                 rescan_registries_on_drive_newarch(io, drv, register_file_paths);
             }
 
+#ifdef __EMSCRIPTEN__
+            for (std::size_t idx = 0; idx < register_file_paths.size(); idx++) {
+                bool entry_modified = kern->is_eka1()
+                    ? load_registry_oldarch(io, register_file_paths[idx], drive_number(idx % drive_count), language::en)
+                    : load_registry(io, register_file_paths[idx], drive_number(idx % drive_count), language::en);
+                if (entry_modified) modified = true;
+            }
+#else
             auto load_registry_task = loading_thread_pool_.submit_loop<std::size_t>(0, register_file_paths.size(),
                 [this, &register_file_paths, &modified, io](std::size_t idx) {
                     bool entry_modified = false;
@@ -399,6 +407,7 @@ namespace eka2l1 {
                 });
 
             load_registry_task.wait();
+#endif
             break;
         }
 
@@ -499,6 +508,16 @@ namespace eka2l1 {
 
         auto current_lang = kern->get_current_language();
 
+#ifdef __EMSCRIPTEN__
+        for (std::size_t idx = 0; idx < register_file_paths.size(); idx++) {
+            auto path = register_file_paths[idx];
+            drive_number drv = char16_to_drive(path[0]);
+            bool modified = kern->is_eka1()
+                ? load_registry_oldarch(io, register_file_paths[idx], drv, current_lang)
+                : load_registry(io, register_file_paths[idx], drv, current_lang);
+            if (modified) global_modified = true;
+        }
+#else
         auto load_registry_task = loading_thread_pool_.submit_loop<std::size_t>(0, register_file_paths.size(),
             [this, &register_file_paths, &global_modified, io, current_lang](std::size_t idx) {
                 bool modified = false;
@@ -518,6 +537,7 @@ namespace eka2l1 {
             });
 
         load_registry_task.wait();
+#endif
 
         if (global_modified) {
             sort_registry_list();
