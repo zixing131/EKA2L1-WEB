@@ -238,12 +238,25 @@ namespace eka2l1 {
             });
 
             spdlog::set_pattern("%L %^%v%$");
+#ifdef __EMSCRIPTEN__
+            // On WASM, every log call goes wasm-to-js -> console.log, which is
+            // synchronous and forces DevTools to render each line. Thousands of
+            // logs per second was overwhelming the renderer to the point that
+            // the page appeared frozen even though the emulator was making
+            // progress. Default to warn-level on WASM; explicit overrides via
+            // toggle_console / config still work.
+            spdlog::set_level(spdlog::level::warn);
+            spd_logger->flush_on(spdlog::level::err);
+#else
             spdlog::set_level(spdlog::level::trace);
-
             spd_logger->flush_on(spdlog::level::debug);
+#endif
 
             // Setup the filterings
             filterings = std::make_unique<log_filterings>();
+#ifdef __EMSCRIPTEN__
+            filterings->reset_all(spdlog::level::warn);
+#endif
             already_setup = true;
         }
         

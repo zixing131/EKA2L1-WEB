@@ -11,6 +11,9 @@
 
 ARMul_State::ARMul_State(eka2l1::arm::dyncom_core *core, PrivilegeMode initial_mode)
     : core(core) {
+    // Pre-reserve to avoid the cascade of rehashes that otherwise dominate
+    // dyncom CPU time as the cache grows from 0 to thousands of entries.
+    instruction_cache.reserve(64 * 1024);
     Reset();
     ChangePrivilegeMode(initial_mode);
 }

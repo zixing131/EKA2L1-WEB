@@ -36,6 +36,7 @@
 // Emscripten-specific headers
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <unistd.h>
 
 // EKA2L1 headers
 #include <common/algorithm.h>
@@ -330,8 +331,18 @@ static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
 // ============================================================================
 
 static bool init_sdl() {
-    // SDL init with video, audio, and timer subsystems
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
+    // SDL init with video, audio, and timer subsystems.
+    // On WASM we deliberately skip SDL_INIT_AUDIO: SDL2's Emscripten audio
+    // backend uses ScriptProcessorNode whose onaudioprocess callback runs on
+    // the browser main thread and performs SDL_ResampleAudio synchronously.
+    // Profiling showed it monopolized the main thread, starving
+    // requestAnimationFrame and freezing the page.
+#ifdef __EMSCRIPTEN__
+    constexpr Uint32 SDL_INIT_FLAGS = SDL_INIT_VIDEO | SDL_INIT_TIMER;
+#else
+    constexpr Uint32 SDL_INIT_FLAGS = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
+#endif
+    if (SDL_Init(SDL_INIT_FLAGS) != 0) {
         LOG_ERROR(FRONTEND_CMDLINE, "SDL_Init failed: {}", SDL_GetError());
         return false;
     }
@@ -369,7 +380,10 @@ static bool init_sdl() {
     SDL_GL_SetSwapInterval(1);
 #endif
 
-    // Initialize SDL audio
+#ifndef __EMSCRIPTEN__
+    // Initialize SDL audio (skipped on WASM — SDL2 Emscripten audio runs
+    // SDL_ResampleAudio on the main thread via ScriptProcessorNode and
+    // starves the RAF loop; profiling traced page freeze to this path).
     SDL_AudioSpec want_spec;
     SDL_zero(want_spec);
     want_spec.freq = 44100;
@@ -382,6 +396,7 @@ static bool init_sdl() {
     if (g_audio_device > 0) {
         SDL_PauseAudioDevice(g_audio_device, 0);
     }
+#endif
 
     return true;
 }
@@ -484,6 +499,44 @@ static bool init_emulator() {
 // ============================================================================
 
 static void main_loop() {
+    const double mainloop_entry_ms = emscripten_get_now();
+
+    // Per-frame cost accumulators (across all frames since last heartbeat).
+    static double s_acc_loop_ms = 0.0;
+    static double s_acc_swap_ms = 0.0;
+    static double s_acc_total_ms = 0.0;
+    static double s_max_loop_ms = 0.0;
+    static double s_max_swap_ms = 0.0;
+    static double s_max_total_ms = 0.0;
+
+    // Low-frequency heartbeat (~once every 2 s) so we can detect whether
+    // main_loop has stopped being called without flooding DevTools.
+    {
+        static double s_last_hb_ms = 0.0;
+        static std::uint64_t s_frames_since_last_hb = 0;
+        static size_t s_last_used_mb = 0;
+        ++s_frames_since_last_hb;
+        const double now_ms = mainloop_entry_ms;
+        if (now_ms - s_last_hb_ms >= 2000.0) {
+            const size_t heap_size = EM_ASM_INT({ return HEAP8.length; });
+            const size_t sbrk_used = (size_t)sbrk(0);
+            const size_t used_mb = sbrk_used / (1024 * 1024);
+            const double n = (s_frames_since_last_hb > 0) ? (double)s_frames_since_last_hb : 1.0;
+            LOG_WARN(FRONTEND_CMDLINE,
+                "[hb] t={:.0f} frames={} heap={}MB used~{}MB d={}MB | per-frame avg loop={:.2f}ms swap={:.2f}ms total={:.2f}ms | max loop={:.2f}ms swap={:.2f}ms total={:.2f}ms",
+                now_ms, s_frames_since_last_hb,
+                heap_size / (1024 * 1024), used_mb,
+                static_cast<long long>(used_mb) - static_cast<long long>(s_last_used_mb),
+                s_acc_loop_ms / n, s_acc_swap_ms / n, s_acc_total_ms / n,
+                s_max_loop_ms, s_max_swap_ms, s_max_total_ms);
+            s_last_used_mb = used_mb;
+            s_last_hb_ms = now_ms;
+            s_frames_since_last_hb = 0;
+            s_acc_loop_ms = s_acc_swap_ms = s_acc_total_ms = 0.0;
+            s_max_loop_ms = s_max_swap_ms = s_max_total_ms = 0.0;
+        }
+    }
+
     if (!g_state.initialized || !g_state.symsys) {
         return;
     }
@@ -504,10 +557,14 @@ static void main_loop() {
     // Run several short guest slices per browser frame. A single full guest
     // timeslice can block the browser, but only one tiny slice per RAF makes
     // app startup crawl. Use a wall-clock budget to balance progress/yielding.
-    static constexpr double FRAME_CPU_BUDGET_MS = 8.0;
-    static constexpr int MAX_SLICES_PER_FRAME = 64;
+    // Keep this well below the 16ms RAF budget so the browser main thread
+    // has room to dispatch DOM events (HTML buttons, etc). The browser tab
+    // was pinning 100% CPU with 4ms/64 slices, starving click handlers.
+    static constexpr double FRAME_CPU_BUDGET_MS = 2.0;
+    static constexpr int MAX_SLICES_PER_FRAME = 8;
 
     const double frame_start = emscripten_get_now();
+    const double loop_start = frame_start;
     int slices = 0;
     while (slices < MAX_SLICES_PER_FRAME) {
         const int loop_result = g_state.symsys->loop();
@@ -522,24 +579,23 @@ static void main_loop() {
         }
     }
 
-    static double last_progress_log = 0.0;
-    const double progress_now = emscripten_get_now();
-    if ((progress_now - last_progress_log) >= 5000.0) {
-        last_progress_log = progress_now;
-
-        if (eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system()) {
-            kernel::thread *thread = kern->crr_thread();
-            kernel::process *process = kern->crr_process();
-            LOG_INFO(FRONTEND_CMDLINE, "WASM frame: slices={} budget_ms={:.2f} process={} thread={} state={}",
-                slices, progress_now - frame_start,
-                process ? process->name() : "(none)",
-                thread ? thread->name() : "(none)",
-                thread ? static_cast<int>(thread->current_state()) : -1);
-        }
-    }
+    const double loop_end = emscripten_get_now();
 
     // Swap buffers
     SDL_GL_SwapWindow(g_window);
+    const double swap_end = emscripten_get_now();
+
+    {
+        const double loop_ms = loop_end - loop_start;
+        const double swap_ms = swap_end - loop_end;
+        const double total_ms = swap_end - mainloop_entry_ms;
+        s_acc_loop_ms += loop_ms;
+        s_acc_swap_ms += swap_ms;
+        s_acc_total_ms += total_ms;
+        if (loop_ms > s_max_loop_ms) s_max_loop_ms = loop_ms;
+        if (swap_ms > s_max_swap_ms) s_max_swap_ms = swap_ms;
+        if (total_ms > s_max_total_ms) s_max_total_ms = total_ms;
+    }
 
     // FPS counting
     g_state.frame_count++;

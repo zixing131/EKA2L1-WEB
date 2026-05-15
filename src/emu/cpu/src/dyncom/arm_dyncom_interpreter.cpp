@@ -830,6 +830,19 @@ static unsigned int InterpreterTranslateInstruction(ARMul_State *cpu, const std:
     return inst_size;
 }
 
+// Bound the per-cpu translation cache. Without this the unordered_map grows
+// unbounded as guest code walks new PCs, and every insertion eventually
+// triggers an expensive rehash that — under WASM — pinned the browser tab at
+// 100% CPU (profile showed __emplace_unique_key_args dominating samples).
+static constexpr std::size_t INSTRUCTION_CACHE_FLUSH_THRESHOLD = 256 * 1024;
+
+static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
+    if (cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD) {
+        cpu->instruction_cache.clear();
+        cpu->trans_cache_buf_top = 0;
+    }
+}
+
 static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     // Decode instruction, get index
     // Allocate memory and init InsCream
@@ -838,6 +851,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     ARM_INST_PTR inst_base = nullptr;
     TransExtData ret = TransExtData::NON_BRANCH;
     int size = 0; // instruction size of basic block
+    maybe_flush_instruction_cache(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
@@ -863,6 +877,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
 
 static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     ARM_INST_PTR inst_base = nullptr;
+    maybe_flush_instruction_cache(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
@@ -4543,7 +4558,15 @@ YIELD_INST : {
 END : {
 #ifdef __EMSCRIPTEN__
     if (wasm_dyncom_deadline_hit) {
-        LOG_TRACE(eka2l1::CPU_DYNCOM, "WASM dyncom yielded after {} instructions", num_instrs);
+        // WARN so it survives the WASM warn-level filter; rate-limit so we
+        // don't flood the console if the watchdog fires every slice.
+        static std::uint64_t s_yield_count = 0;
+        static std::uint64_t s_next_log = 1;
+        if (++s_yield_count >= s_next_log) {
+            LOG_WARN(eka2l1::CPU_DYNCOM, "WASM dyncom yielded after {} instructions (total yields: {})",
+                num_instrs, s_yield_count);
+            s_next_log *= 2;
+        }
     }
 #endif
     SAVE_NZCVT;
