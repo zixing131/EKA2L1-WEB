@@ -843,10 +843,16 @@ static constexpr std::size_t INSTRUCTION_CACHE_FLUSH_THRESHOLD = 256 * 1024;
 std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
 #endif
 
+// Translations now survive context switches, so trans_cache_buf can fill up
+// from accumulation alone. One block is at most a page of Thumb instructions
+// (~96KB of cream); flush well before the hard end of the buffer since the
+// capacity assert in AllocBuffer is compiled out in release builds.
+static constexpr std::size_t TRANS_CACHE_FLUSH_MARGIN = 1024 * 1024;
+
 static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
-    if (cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD) {
-        cpu->instruction_cache.clear();
-        cpu->trans_cache_buf_top = 0;
+    if ((cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD)
+        || (cpu->trans_cache_buf_top >= TRANS_CACHE_SIZE - TRANS_CACHE_FLUSH_MARGIN)) {
+        cpu->invalidate_translation_cache();
     }
 }
 
@@ -878,6 +884,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     };
 
     cpu->instruction_cache[pc_start] = bb_start;
+    cpu->mark_code_page(pc_start);
 #ifdef __EMSCRIPTEN__
     eka2l1_wasm_guest_blocks_translated++;
 #endif
@@ -900,6 +907,7 @@ static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, s
     }
 
     cpu->instruction_cache[pc_start] = bb_start;
+    cpu->mark_code_page(pc_start);
 
     return KEEP_GOING;
 }
@@ -969,8 +977,11 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 // GCC and Clang have a C++ extension to support a lookup table of labels. Otherwise, fallback to a
 // clunky switch statement.
 #ifdef __EMSCRIPTEN__
+// Each clock read crosses the wasm->JS boundary (system_clock -> Date.now), so
+// keep the cadence wide: every 8192 instructions bounds the deadline overshoot
+// to well under a millisecond while costing 8x less than the old 1024 stride.
 #define WASM_DYNCOM_YIELD_CHECK                                                \
-    if (((num_instrs & 0x3FF) == 0)                                             \
+    if (((num_instrs & 0x1FFF) == 0)                                            \
         && (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()  \
             >= wasm_dyncom_deadline_us)) {                                      \
         wasm_dyncom_deadline_hit = true;                                        \
@@ -1651,15 +1662,28 @@ DISPATCH : {
         cpu->Reg[15] &= 0xfffffffc;
 
     // Find the cached instruction cream, otherwise translate it...
-    auto itr = cpu->instruction_cache.find(cpu->Reg[15]);
-    if (itr != cpu->instruction_cache.end()) {
-        ptr = itr->second;
-    } else if (cpu->NumInstrsToExecute != 1) {
-        if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
-            goto END;
-    } else {
-        if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
-            goto END;
+    {
+        const std::uint32_t dispatch_pc = cpu->Reg[15];
+        ARMul_State::block_lookup_entry &bl_entry = cpu->block_lookup_ref(dispatch_pc);
+
+        if ((bl_entry.pc == dispatch_pc) && (bl_entry.generation == cpu->block_lookup_generation)) {
+            ptr = bl_entry.ptr;
+        } else {
+            auto itr = cpu->instruction_cache.find(dispatch_pc);
+            if (itr != cpu->instruction_cache.end()) {
+                ptr = itr->second;
+            } else if (cpu->NumInstrsToExecute != 1) {
+                if (InterpreterTranslateBlock(cpu, ptr, dispatch_pc) == FETCH_EXCEPTION)
+                    goto END;
+            } else {
+                if (InterpreterTranslateSingle(cpu, ptr, dispatch_pc) == FETCH_EXCEPTION)
+                    goto END;
+            }
+
+            bl_entry.pc = dispatch_pc;
+            bl_entry.generation = cpu->block_lookup_generation;
+            bl_entry.ptr = ptr;
+        }
     }
 
     inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr];

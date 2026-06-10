@@ -738,26 +738,11 @@ namespace eka2l1 {
 
         if (to_run != nullptr) {
             if (!should_step) {
-                int ticks_to_run = to_run->get_remaining_screenticks();
-
-#ifdef __EMSCRIPTEN__
-                // The web build runs on the browser main thread. A full Symbian
-                // timeslice can monopolize one requestAnimationFrame callback
-                // during app startup, making the page appear hung. Keep each
-                // browser frame short and let Emscripten yield naturally.
-                static constexpr int MAX_WASM_TICKS_PER_LOOP = 20000;
-                ticks_to_run = std::min(ticks_to_run, MAX_WASM_TICKS_PER_LOOP);
-#endif
-
-                const std::uint64_t run_start_us = common::get_current_utc_time_in_microseconds_since_epoch();
-                cpu->run(ticks_to_run);
-
-#ifdef __EMSCRIPTEN__
-                const std::uint64_t run_elapsed_us = common::get_current_utc_time_in_microseconds_since_epoch() - run_start_us;
-                if (run_elapsed_us > 100000) {
-                    LOG_WARN(SYSTEM, "Slow WASM CPU slice: {} ticks took {}us", ticks_to_run, run_elapsed_us);
-                }
-#endif
+                // On WASM the dyncom interpreter has its own wall-clock
+                // watchdog (~8ms) that returns control mid-timeslice, so the
+                // full timeslice can be requested here without freezing the
+                // browser main thread.
+                cpu->run(to_run->get_remaining_screenticks());
             } else {
                 cpu->step();
 

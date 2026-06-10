@@ -139,8 +139,12 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::load_context(const thread_context &ctx) {
-        clear_instruction_cache();
-
+        // Translations deliberately survive thread switches. The scheduler runs
+        // switch_context after every single slice, so clearing here (the old
+        // behavior) forced a full retranslation of the working set every
+        // ~20K instructions. Cross-address-space safety is handled by
+        // flush_tlb(), which the scheduler calls exactly when the process
+        // (and therefore the code mapping) changes.
         for (uint8_t i = 0; i < 16; i++) {
             state_->Reg[i] = ctx.cpu_registers[i];
         }
@@ -161,15 +165,26 @@ namespace eka2l1::arm {
 
     void dyncom_core::dirty_tlb_page(address addr) {
         mem_cache_.make_dirty(addr);
+
+        // A page being unmapped invalidates any translation made from it
+        // (DLL unload, code chunk decommit). The bitmap filters out the
+        // common data-page case so heap decommits stay cheap.
+        if (state_->is_code_page(addr)) {
+            state_->invalidate_translation_cache();
+        }
     }
 
     void dyncom_core::flush_tlb() {
         mem_cache_.flush();
+
+        // Called by the scheduler on address-space switches: the same virtual
+        // address may map different code in the new process, so cached
+        // translations (keyed by PC only) must go.
+        state_->invalidate_translation_cache();
     }
 
     void dyncom_core::clear_instruction_cache() {
-        state_->instruction_cache.clear();
-        state_->trans_cache_buf_top = 0;
+        state_->invalidate_translation_cache();
     }
 
     void dyncom_core::imb_range(address addr, std::size_t size) {

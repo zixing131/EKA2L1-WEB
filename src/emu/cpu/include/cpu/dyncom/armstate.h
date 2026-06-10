@@ -245,6 +245,46 @@ public:
     // process for our purposes), not per ARMul_State (which tracks CPU core state).
     std::unordered_map<std::uint32_t, std::size_t> instruction_cache;
 
+    // Direct-mapped lookaside in front of instruction_cache: DISPATCH runs on
+    // every taken branch and unordered_map::find dominated interpreter
+    // profiles. Invalidation is O(1) via the generation counter.
+    struct block_lookup_entry {
+        std::uint32_t pc;
+        std::uint32_t generation;
+        std::size_t ptr;
+    };
+    static constexpr std::size_t BLOCK_LOOKUP_SIZE = 1 << 13;
+    std::array<block_lookup_entry, BLOCK_LOOKUP_SIZE> block_lookup{};
+    std::uint32_t block_lookup_generation = 1; // zero-init entries always miss
+
+    // One bit per 4KB guest page that holds at least one translated block.
+    // Lets dirty_tlb_page() ignore the frequent data-page unmaps (heap
+    // decommits) and only drop translations when an actual code page changes.
+    std::array<std::uint64_t, 1 << 14> code_page_bitmap{};
+
+    block_lookup_entry &block_lookup_ref(const std::uint32_t pc) {
+        // Mix high bits in so ARM (4-aligned) PCs still populate odd slots.
+        return block_lookup[((pc >> 1) ^ (pc >> 14)) & (BLOCK_LOOKUP_SIZE - 1)];
+    }
+
+    void mark_code_page(const std::uint32_t pc) {
+        code_page_bitmap[(pc >> 12) >> 6] |= (1ull << ((pc >> 12) & 63));
+    }
+
+    bool is_code_page(const std::uint32_t addr) const {
+        return (code_page_bitmap[(addr >> 12) >> 6] & (1ull << ((addr >> 12) & 63))) != 0;
+    }
+
+    // Drop every cached translation. Replaces the old pattern of clearing
+    // instruction_cache/trans_cache_buf_top at each call site so the lookaside
+    // and the code-page bitmap can never get out of sync with them.
+    void invalidate_translation_cache() {
+        instruction_cache.clear();
+        trans_cache_buf_top = 0;
+        ++block_lookup_generation;
+        code_page_bitmap.fill(0);
+    }
+
 private:
     void ResetMPCoreCP15Registers();
     eka2l1::arm::dyncom_core *core;
