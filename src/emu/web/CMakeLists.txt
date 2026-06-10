@@ -76,15 +76,25 @@ if (EMSCRIPTEN)
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
-        "SHELL:-s INITIAL_MEMORY=536870912"
+        # 256MB start, grow on demand. iOS Safari kills the tab around ~1.2GB
+        # commit; a 512MB upfront heap + a ROM install (whole-file buffers +
+        # extraction + IndexedDB sync) blew past that and the page "refreshed"
+        # mid-install, leaving a half-persisted device.
+        "SHELL:-s INITIAL_MEMORY=268435456"
         "SHELL:-s MAXIMUM_MEMORY=2147483648"
         "SHELL:-s STACK_SIZE=8388608"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=1"
         "SHELL:-s USE_FREETYPE=1"
         "SHELL:-s USE_PTHREADS=1"
-        "SHELL:-s PTHREAD_POOL_SIZE=32"
-        "SHELL:-s DEFAULT_PTHREAD_STACK_SIZE=2097152"
+        # Pooled workers cost real memory on iOS (JS worker + wasm stack each);
+        # 16 covers the emulator's steady-state thread count, and runtime
+        # creation still works for stragglers since nothing blocks on spawn.
+        "SHELL:-s PTHREAD_POOL_SIZE=16"
+        # 1MB per worker stack (allocated from the wasm heap). The old 64KB
+        # default overflowed; 1MB keeps 16x headroom over that crash without
+        # 32MB+ of standing stacks.
+        "SHELL:-s DEFAULT_PTHREAD_STACK_SIZE=1048576"
         "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\"]"
         "SHELL:-s EXPORT_NAME=createEKA2L1Module"
         "SHELL:-s MODULARIZE=1"

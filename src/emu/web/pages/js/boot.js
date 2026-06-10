@@ -56,6 +56,25 @@
         IDBFS.dbs = {};
     }
 
+    // SDL's Emscripten port creates the WebGL context with default attributes
+    // (default GPU, alpha-composited canvas). Wrap getContext on our canvas so
+    // every WebGL request runs on the discrete/high-performance GPU and skips
+    // features the emulator never uses (alpha compositing, antialiasing of a
+    // plain textured quad) — cheaper compositing, smoother presentation.
+    function boostWebGLContext(canvas) {
+        var original = canvas.getContext.bind(canvas);
+        canvas.getContext = function (type, attrs) {
+            if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+                attrs = attrs || {};
+                attrs.powerPreference = 'high-performance';
+                attrs.alpha = false;
+                attrs.antialias = false;
+                attrs.desynchronized = true;
+            }
+            return original(type, attrs);
+        };
+    }
+
     /**
      * Boot the emulator core.
      * opts: { canvas: HTMLCanvasElement, onProgress(pct, text) }
@@ -69,6 +88,8 @@
                 reject(new Error('eka2l1.js not loaded'));
                 return;
             }
+
+            boostWebGLContext(opts.canvas);
 
             onProgress(8, '加载 WebAssembly 模块…');
 
@@ -220,23 +241,39 @@
         ccall('wasm_debug_dump', null, [], []);
     };
 
-    /** Write a File/Blob into the wasm VFS. Resolves with the target path. */
+    /**
+     * Write a File/Blob into the wasm VFS in 8MB slices. Streaming matters on
+     * iOS Safari: loading a 100MB+ ROM as one ArrayBuffer (on top of the MEMFS
+     * copy) pushed the tab over the memory limit and got it killed mid-install.
+     * Resolves with the target path.
+     */
     EKA2L1.writeFileToVFS = function (file, targetPath) {
-        return new Promise(function (resolve, reject) {
-            var reader = new FileReader();
-            reader.onload = function (e) {
-                try {
-                    var data = new Uint8Array(e.target.result);
-                    var dir = targetPath.substring(0, targetPath.lastIndexOf('/'));
-                    EKA2L1.module.FS.mkdirTree(dir);
-                    EKA2L1.module.FS.writeFile(targetPath, data);
-                    resolve(targetPath);
-                } catch (err) {
-                    reject(err);
-                }
-            };
-            reader.onerror = function () { reject(new Error('读取文件失败')); };
-            reader.readAsArrayBuffer(file);
+        var FS = EKA2L1.module.FS;
+        var CHUNK = 8 * 1024 * 1024;
+
+        var dir = targetPath.substring(0, targetPath.lastIndexOf('/'));
+        FS.mkdirTree(dir);
+
+        var stream = FS.open(targetPath, 'w');
+        var offset = 0;
+
+        function writeNext() {
+            if (offset >= file.size) {
+                FS.close(stream);
+                return Promise.resolve(targetPath);
+            }
+            var slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
+            return slice.arrayBuffer().then(function (buf) {
+                var data = new Uint8Array(buf);
+                FS.write(stream, data, 0, data.length, offset);
+                offset += data.length;
+                return writeNext();
+            });
+        }
+
+        return writeNext().catch(function (err) {
+            try { FS.close(stream); } catch (e) {}
+            throw err;
         });
     };
 

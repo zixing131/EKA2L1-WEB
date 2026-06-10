@@ -891,6 +891,20 @@ static void main_loop() {
         }
     }
 
+    // Cap at 60fps. The loop runs on requestAnimationFrame, which fires at
+    // display refresh — 120Hz on ProMotion phones/laptops would double the
+    // per-second CPU burn for no visible benefit. Skipped ticks still polled
+    // events above and keep the audio queue fed below.
+    static double s_last_frame_ms = 0.0;
+    const double now_ms = emscripten_get_now();
+    if ((now_ms - s_last_frame_ms) < 15.5) {
+        if (g_state.audio_driver) {
+            static_cast<eka2l1::drivers::web_audio_driver *>(g_state.audio_driver.get())->pump();
+        }
+        return;
+    }
+    s_last_frame_ms = now_ms;
+
     // Execute screen redraws deferred by the animation scheduler. They must
     // run here on the main thread: redraw performs synchronous GPU calls
     // (inline-dispatched on this thread), which would deadlock on the ntimer

@@ -299,10 +299,13 @@
                 try { EKA2L1.module.FS.unlink(romPath); } catch (e) {}
                 try { EKA2L1.module.FS.unlink(rpkgPath); } catch (e) {}
                 setStatus('yellow', '保存到浏览器…');
-                refreshApps();
+                // Persist FIRST: if the browser kills the tab during the
+                // post-install work (iOS memory pressure), the device must
+                // already be safe in IndexedDB or it comes back half-broken.
                 return EKA2L1.save();
             })
             .then(function () {
+                refreshApps();
                 EKA2L1.setPaused(true);
                 setStatus('green', '设备就绪');
                 setDeviceStatusText('已安装，数据已持久化');
