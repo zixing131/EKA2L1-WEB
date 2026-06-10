@@ -194,6 +194,98 @@
         });
     };
 
+    /**
+     * Post-install bulk save, iOS-friendly.
+     *
+     * FS.syncfs persists the whole mount in ONE IndexedDB transaction; right
+     * after a device install that means structured-cloning ~100-300MB of
+     * extracted files at once — a transient spike that gets the tab killed on
+     * iOS. This walks MEMFS and writes the same records IDBFS would (store
+     * FILE_DATA, value {timestamp, mode[, contents]}, key = path, exact
+     * mtimes) in small per-transaction batches with macrotask yields, so a
+     * later FS.syncfs reconcile sees everything as already clean.
+     * Falls back must be handled by the caller (catch -> EKA2L1.save()).
+     */
+    EKA2L1.saveInitialStaged = function (onProgress) {
+        var FS = EKA2L1.module.FS;
+        var MOUNT = '/eka2l1';
+        var STORE = 'FILE_DATA';
+        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
+        var BATCH_BYTES = 8 * 1024 * 1024;
+
+        return new Promise(function (resolve, reject) {
+            var req;
+            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
+            req.onupgradeneeded = function (e) {
+                // Mirror IDBFS.getDB's upgrade path so a fresh DB is identical.
+                var db = e.target.result;
+                var st = db.objectStoreNames.contains(STORE)
+                    ? e.target.transaction.objectStore(STORE)
+                    : db.createObjectStore(STORE);
+                if (!st.indexNames.contains('timestamp')) {
+                    st.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
+            req.onsuccess = function () { resolve(req.result); };
+        }).then(function (db) {
+            var paths = [];
+            (function walk(dir) {
+                FS.readdir(dir).forEach(function (name) {
+                    if (name === '.' || name === '..') return;
+                    var p = dir + '/' + name;
+                    paths.push(p);
+                    var st = FS.lstat(p);
+                    if (FS.isDir(st.mode)) walk(p);
+                });
+            })(MOUNT);
+
+            var i = 0;
+            var written = 0;
+
+            function nextBatch() {
+                if (i >= paths.length) {
+                    db.close();
+                    return Promise.resolve();
+                }
+                return new Promise(function (res, rej) {
+                    var tx = db.transaction([STORE], 'readwrite');
+                    tx.onerror = tx.onabort = function (e) {
+                        rej((e.target && e.target.error) || new Error('IndexedDB 写入失败'));
+                        if (e.preventDefault) e.preventDefault();
+                    };
+                    tx.oncomplete = function () { res(); };
+
+                    var store = tx.objectStore(STORE);
+                    var bytes = 0;
+                    while (i < paths.length && bytes < BATCH_BYTES) {
+                        var p = paths[i++];
+                        var st = FS.lstat(p);
+                        var entry = { timestamp: st.mtime, mode: st.mode };
+                        if (FS.isFile(st.mode)) {
+                            entry.contents = FS.readFile(p); // bounded copy (<= batch size + one file)
+                            bytes += entry.contents.length;
+                        } else if (FS.isLink(st.mode)) {
+                            entry.link = FS.readlink(p);
+                        }
+                        store.put(entry, p);
+                        written++;
+                    }
+                }).then(function () {
+                    if (onProgress) onProgress(written, paths.length);
+                    // Macrotask yield: lets Safari GC the batch copies before
+                    // the next one instead of accumulating them.
+                    return new Promise(function (r) { setTimeout(r, 0); });
+                }).then(nextBatch);
+            }
+
+            return nextBatch().catch(function (err) {
+                try { db.close(); } catch (e) {}
+                throw err;
+            });
+        });
+    };
+
     // ---- C API wrappers ----------------------------------------------------
 
     function ccall(name, ret, argTypes, args) {
@@ -346,7 +438,9 @@
                 if (r !== 0) throw new Error('安装失败：' + EKA2L1.decodeInstallError(r));
                 offset += u8.length;
                 if (onProgress) onProgress(offset, file.size);
-                return pump();
+                // Macrotask yield between chunks: gives iOS Safari a chance to
+                // GC the previous slice buffers instead of stacking them up.
+                return new Promise(function (r2) { setTimeout(r2, 0); }).then(pump);
             });
         }
 

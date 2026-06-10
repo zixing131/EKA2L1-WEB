@@ -675,6 +675,12 @@ unsigned int GetShifterOp(unsigned int inst) {
 // Replaces the old per-instruction indirect call through a stored function
 // pointer: a dense switch lets the compiler inline every (tiny) evaluator
 // body and turn the dispatch into a jump table.
+//
+// Kept out of line on purpose: inlining the full switch into every ALU
+// handler would bloat InterpreterMainLoop. The two dominant cases get a
+// separate always-inline fast path below (ShtOpEval/GetAddrEval) instead —
+// profiling showed these helpers at ~10% self time each from sheer call
+// frequency.
 static unsigned int EvalShifterOperand(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
     switch (idx) {
     case SHTOP_IMMEDIATE:
@@ -827,6 +833,42 @@ static void EvalGetAddr(ARMul_State *cpu, unsigned int idx, unsigned int inst, u
         virt_addr = 0;
         return;
     }
+}
+
+// Call-site wrappers: the single dominant case of each evaluator is inlined
+// into the instruction handlers (immediate-offset addressing for loads/
+// stores, rotated-immediate operand2 for ALU ops — by far the most frequent
+// encodings in compiled Symbian code), everything else takes the out-of-line
+// switch. This removes one call per executed memory/ALU instruction on the
+// hot path without duplicating the full evaluators 20+ times.
+#ifdef _MSC_VER
+#define DYNCOM_FORCE_INLINE __forceinline
+#else
+#define DYNCOM_FORCE_INLINE __attribute__((always_inline)) inline
+#endif
+
+DYNCOM_FORCE_INLINE static unsigned int ShtOpEval(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
+    if (idx == SHTOP_IMMEDIATE) {
+        unsigned int immed_8 = BITS(sht_oper, 0, 7);
+        unsigned int rotate_imm = BITS(sht_oper, 8, 11);
+        unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
+        if (rotate_imm == 0)
+            cpu->shifter_carry_out = cpu->CFlag;
+        else
+            cpu->shifter_carry_out = BIT(shifter_operand, 31);
+        return shifter_operand;
+    }
+    return EvalShifterOperand(cpu, idx, sht_oper);
+}
+
+DYNCOM_FORCE_INLINE static void GetAddrEval(ARMul_State *cpu, unsigned int idx, unsigned int inst, unsigned int &virt_addr) {
+    if (idx == ADDRMODE_LNSW_IMM_OFFSET) {
+        unsigned int Rn = BITS(inst, 16, 19);
+        unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
+        virt_addr = U_BIT ? (rn + OFFSET_12) : (rn - OFFSET_12);
+        return;
+    }
+    EvalGetAddr(cpu, idx, inst, virt_addr);
 }
 
 enum { FETCH_SUCCESS,
@@ -1049,7 +1091,7 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define RDLO cpu->Reg[inst_cream->RdLo]
 #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
 #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
-#define SHIFTER_OPERAND EvalShifterOperand(cpu, inst_cream->shtop_idx, inst_cream->shifter_operand)
+#define SHIFTER_OPERAND ShtOpEval(cpu, inst_cream->shtop_idx, inst_cream->shifter_operand)
 
 #define FETCH_INST                                 \
     if (inst_base->br != TransExtData::NON_BRANCH) \
@@ -2179,7 +2221,7 @@ LDC_INST : {
 LDM_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int inst = inst_cream->inst;
         if (BIT(inst, 22) && !BIT(inst, 15)) {
@@ -2266,7 +2308,7 @@ SXTH_INST : {
 }
 LDR_INST : {
     ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
     unsigned int value = cpu->ReadMemory32(addr);
     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2287,7 +2329,7 @@ LDR_INST : {
 LDRCOND_INST : {
     if (CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory32(addr);
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2330,7 +2372,7 @@ UXTAH_INST : {
 LDRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
     }
@@ -2342,7 +2384,7 @@ LDRB_INST : {
 LDRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2363,7 +2405,7 @@ LDRD_INST : {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
         // addr[2] == 0)
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
         // wouldn't do this as a single read.
@@ -2434,7 +2476,7 @@ LDREXD_INST : {
 LDRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
     }
@@ -2446,7 +2488,7 @@ LDRH_INST : {
 LDRSB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->ReadMemory8(addr);
         if (BIT(value, 7)) {
             value |= 0xffffff00;
@@ -2461,7 +2503,7 @@ LDRSB_INST : {
 LDRSH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory16(addr);
         if (BIT(value, 15)) {
@@ -2477,7 +2519,7 @@ LDRSH_INST : {
 LDRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2951,7 +2993,7 @@ RFE_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->Cpsr = cpu->ReadMemory32(address);
     cpu->Reg[15] = cpu->ReadMemory32(address + 4);
@@ -3612,7 +3654,7 @@ SRS_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->WriteMemory32(address + 0, cpu->Reg[14]);
     cpu->WriteMemory32(address + 4, cpu->Spsr_copy);
@@ -3691,7 +3733,7 @@ STM_INST : {
         unsigned int Rn = BITS(inst, 16, 19);
         unsigned int old_RN = cpu->Reg[Rn];
 
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         if (BIT(inst_cream->inst, 22) == 1) {
             for (int i = 0; i < 13; i++) {
                 if (BIT(inst_cream->inst, i)) {
@@ -3761,7 +3803,7 @@ SXTB_INST : {
 STR_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int reg = BITS(inst_cream->inst, 12, 15);
         unsigned int value = cpu->Reg[reg];
@@ -3801,7 +3843,7 @@ UXTAB_INST : {
 STRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
         cpu->WriteMemory8(addr, value);
     }
@@ -3813,7 +3855,7 @@ STRB_INST : {
 STRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
@@ -3830,7 +3872,7 @@ STRBT_INST : {
 STRD_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
         // so STRD wouldn't store these as a single write.
@@ -3902,7 +3944,7 @@ STREXH_INST : {
 STRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
         cpu->WriteMemory16(addr, value);
@@ -3915,7 +3957,7 @@ STRH_INST : {
 STRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t rt_index = BITS(inst_cream->inst, 12, 15);

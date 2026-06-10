@@ -369,7 +369,18 @@
                 // Persist FIRST: if the browser kills the tab during the
                 // post-install work (iOS memory pressure), the device must
                 // already be safe in IndexedDB or it comes back half-broken.
-                return EKA2L1.save();
+                //
+                // Batched writer instead of FS.syncfs: syncfs clones the whole
+                // ~100-300MB extracted set into ONE IndexedDB transaction,
+                // which is itself enough to get the tab killed on iOS.
+                return EKA2L1.saveInitialStaged(function (done, total) {
+                    var pct = total ? Math.floor(done * 100 / total) : 0;
+                    setStatus('yellow', '保存到浏览器 ' + pct + '%…');
+                    setInstallStage('保存到浏览器 ' + pct + '%');
+                }).catch(function (err) {
+                    console.warn('[EKA2L1] staged save failed, falling back to syncfs:', err);
+                    return EKA2L1.save();
+                });
             })
             .then(function () {
                 setInstallStage(null);

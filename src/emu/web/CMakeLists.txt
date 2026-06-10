@@ -83,7 +83,9 @@ if (EMSCRIPTEN)
         # arena; with that trimmed to 32MB on WASM the same headroom fits in
         # 160MB, leaving ~100MB more for the install spike.
         "SHELL:-s INITIAL_MEMORY=167772160"
-        "SHELL:-s MAXIMUM_MEMORY=2147483648"
+        # 1GB cap: heavy runs peak well under 400MB, and a smaller reservation
+        # is friendlier to iOS Safari's shared-memory accounting.
+        "SHELL:-s MAXIMUM_MEMORY=1073741824"
         "SHELL:-s STACK_SIZE=8388608"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=1"

@@ -903,6 +903,7 @@ static void main_loop() {
         }
         return;
     }
+    const double raf_interval_ms = (s_last_frame_ms > 0.0) ? (now_ms - s_last_frame_ms) : 16.6;
     s_last_frame_ms = now_ms;
 
     // Execute screen redraws deferred by the animation scheduler. They must
@@ -925,13 +926,22 @@ static void main_loop() {
     // timeslice can block the browser, but only one tiny slice per RAF makes
     // app startup crawl. Use a wall-clock budget to balance progress/yielding.
     //
-    // Adaptive: until the first frame is presented (boot/app startup, e.g.
-    // ECom plugin discovery takes hundreds of millions of guest instructions)
-    // spend most of the frame on the guest. Once content is on screen, back
-    // off so DOM events stay responsive.
+    // Until the first frame is presented (boot/app startup, e.g. ECom plugin
+    // discovery takes hundreds of millions of guest instructions) spend most
+    // of the frame on the guest.
+    //
+    // Post-boot the budget is a hard speed cap for CPU-hungry 3D games: at
+    // the old 8ms a game wanting more than 8ms of guest CPU per 16.6ms frame
+    // ran at ~50% no matter how fast the device was. 11ms leaves ~5ms for GL
+    // submission/audio/compositor at 60Hz and lifts that cap by ~37%.
+    // (A feedback controller keyed on RAF intervals was tried and reverted:
+    // on slow/loaded machines long intervals made it starve the guest — the
+    // opposite of the intent.)
     const bool boot_phase = (s_redraw_cb_count.load() == 0);
-    const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : 8.0;
+    const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : 11.0;
     const int MAX_SLICES_PER_FRAME = boot_phase ? 96 : 32;
+
+    (void)raf_interval_ms;
 
     const double frame_start = emscripten_get_now();
     int slices = 0;
