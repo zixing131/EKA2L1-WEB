@@ -1739,6 +1739,50 @@ int wasm_get_fps() {
 }
 
 /**
+ * Debug: dump the focus screen's guest framebuffer (the DSA chunk) to the
+ * console as base64, with the display-mode metadata needed to decode it
+ * offline. For diagnosing garbled-screen reports: the chunk shows what the
+ * guest actually drew, before any host-side interpretation.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_dump_screen() {
+    if (!g_state.winserv) {
+        std::printf("[screendump] no winserv\n");
+        return;
+    }
+
+    epoc::screen *scr = g_state.winserv->get_current_focus_screen();
+    if (!scr || !scr->screen_buffer_chunk) {
+        std::printf("[screendump] no screen/chunk\n");
+        return;
+    }
+
+    const eka2l1::vec2 size = scr->current_mode().size;
+    const int bpp = epoc::get_bpp_from_display_mode(scr->disp_mode);
+    const std::uint8_t *data = scr->screen_buffer_ptr();
+    const std::size_t total = static_cast<std::size_t>(size.x) * size.y * 4;
+
+    static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((total + 2) / 3) * 4);
+    for (std::size_t i = 0; i < total; i += 3) {
+        const std::uint32_t b0 = data[i];
+        const std::uint32_t b1 = (i + 1 < total) ? data[i + 1] : 0;
+        const std::uint32_t b2 = (i + 2 < total) ? data[i + 2] : 0;
+        const std::uint32_t n = (b0 << 16) | (b1 << 8) | b2;
+        out += B64[(n >> 18) & 63];
+        out += B64[(n >> 12) & 63];
+        out += B64[(n >> 6) & 63];
+        out += B64[n & 63];
+    }
+
+    std::printf("[screendump] w=%d h=%d mode=%d bpp=%d bytes=%zu\n",
+        size.x, size.y, static_cast<int>(scr->disp_mode), bpp, total);
+    std::printf("[screendump-data] %s\n", out.c_str());
+    std::fflush(stdout);
+}
+
+/**
  * Get emulator state as a bitmask.
  * Bit 0: initialized
  * Bit 1: running
