@@ -25,6 +25,7 @@
 // and OpenGL ES 3.0 (WebGL 2.0) for graphics rendering.
 // ============================================================================
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -56,6 +57,8 @@
 #include <drivers/input/common.h>
 #include <drivers/input/emu_controller.h>
 #include <drivers/itc.h>
+
+#include "web_audio.h"
 
 #include <system/epoc.h>
 #include <system/devices.h>
@@ -567,10 +570,13 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
     if (scr && scr->screen_texture) {
         auto &crr_mode = scr->current_mode();
 
+        // Fit the *rotated* footprint into the window (mirrors the Qt
+        // frontend): with 90/270 the screen occupies height x width.
         eka2l1::vec2 size = crr_mode.size;
-        src.size = size;
+        if ((scr->ui_rotation % 180) != 0) {
+            std::swap(size.x, size.y);
+        }
 
-        // Fit in window, keep aspect ratio
         float width = static_cast<float>(swapchain_size.x);
         float height = size.y * width / size.x;
 
@@ -592,11 +598,12 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
         dest.top = eka2l1::vec2(x, y);
         dest.size = eka2l1::vec2(static_cast<int>(width), static_cast<int>(height));
 
+        src.size = crr_mode.size;
+
         eka2l1::drivers::advance_draw_pos_around_origin(dest, scr->ui_rotation);
 
         if (scr->ui_rotation % 180 != 0) {
             std::swap(dest.size.x, dest.size.y);
-            std::swap(src.size.x, src.size.y);
         }
 
         src.size *= scr->display_scale_factor;
@@ -838,9 +845,10 @@ static bool init_emulator() {
 
     g_state.symsys->set_graphics_driver(g_state.graphics_driver.get());
 
-    // Create audio driver (use null backend for WASM - Web Audio API is not yet wired)
-    g_state.audio_driver = eka2l1::drivers::make_audio_driver(
-        eka2l1::drivers::audio_driver_backend::null,
+    // Web Audio backend: PCM is pulled on the main thread each frame and
+    // scheduled as AudioBuffer chunks (see web_audio.cpp for why SDL audio
+    // is unusable here).
+    g_state.audio_driver = std::make_unique<eka2l1::drivers::web_audio_driver>(
         g_state.conf.audio_master_volume,
         eka2l1::drivers::player_type_tsf
     );
@@ -931,6 +939,11 @@ static void main_loop() {
     // and the present command lists queued by the screen redraw callbacks.
     if (g_state.graphics_driver) {
         g_state.graphics_driver->pump();
+    }
+
+    // Feed Web Audio: pull PCM from playing guest streams and schedule it.
+    if (g_state.audio_driver) {
+        static_cast<eka2l1::drivers::web_audio_driver *>(g_state.audio_driver.get())->pump();
     }
 
     // Swap buffers
@@ -1531,6 +1544,59 @@ void wasm_send_key(int scancode, int pressed) {
 EMSCRIPTEN_KEEPALIVE
 double wasm_get_redraw_count() {
     return static_cast<double>(s_redraw_cb_count.load());
+}
+
+/**
+ * Rotate the presented screen (0/90/180/270 degrees clockwise). Landscape
+ * games run sideways on the emulated portrait device; this turns the picture
+ * without touching the guest. The window server's pointer transform already
+ * honours ui_rotation, so touch input keeps landing on the right spot.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_screen_rotation(int rotation) {
+    rotation = ((rotation % 360) + 360) % 360;
+    if ((rotation % 90) != 0) {
+        return;
+    }
+
+    if (!g_state.winserv) {
+        return;
+    }
+
+    epoc::screen *scr = g_state.winserv->get_current_focus_screen();
+    if (!scr) {
+        scr = g_state.winserv->get_screens();
+    }
+
+    if (!scr) {
+        return;
+    }
+
+    scr->ui_rotation = rotation;
+
+    // Reshape the canvas so the rotated image fills it edge-to-edge. SDL
+    // updates the canvas element; the resize event refreshes window_width/
+    // height for draw_emulated_screen's fit.
+    const eka2l1::vec2 base = scr->current_mode().size;
+    eka2l1::vec2 canvas_size = base;
+    if ((rotation % 180) != 0) {
+        std::swap(canvas_size.x, canvas_size.y);
+    }
+
+    // Keep the emulator's original upscale factor (the SDL window is created
+    // bigger than the guest screen; preserve that ratio).
+    if ((base.x > 0) && (base.y > 0) && g_window) {
+        const float upscale = static_cast<float>(std::max(g_state.window_width, g_state.window_height))
+            / static_cast<float>(std::max(base.x, base.y));
+        canvas_size.x = static_cast<int>(canvas_size.x * upscale);
+        canvas_size.y = static_cast<int>(canvas_size.y * upscale);
+        SDL_SetWindowSize(g_window, canvas_size.x, canvas_size.y);
+
+        g_state.window_width = canvas_size.x;
+        g_state.window_height = canvas_size.y;
+    }
+
+    LOG_INFO(FRONTEND_CMDLINE, "Screen rotation set to {} degrees", rotation);
 }
 
 static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {

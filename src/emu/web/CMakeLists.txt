@@ -6,6 +6,7 @@
 add_executable(eka2l1_wasm
     src/main.cpp
     src/platform_stubs.cpp
+    src/web_audio.cpp
 )
 
 target_include_directories(eka2l1_wasm PUBLIC include)

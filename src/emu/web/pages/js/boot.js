@@ -196,6 +196,11 @@
         ccall('wasm_send_key', null, ['number', 'number'], [scancode, pressed ? 1 : 0]);
     };
 
+    /** Rotate the presented screen clockwise by 0/90/180/270 degrees. */
+    EKA2L1.setRotation = function (degrees) {
+        ccall('wasm_set_screen_rotation', null, ['number'], [degrees | 0]);
+    };
+
     EKA2L1.fps = function () {
         return ccall('wasm_get_fps', 'number');
     };

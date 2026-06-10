@@ -128,22 +128,27 @@
     // ---- canvas sizing ---------------------------------------------------------
 
     var canvas = document.getElementById('canvas');
-    var BASE_W = 360, BASE_H = 640; // SDL window size owned by the emulator
+    var BASE_W = 360, BASE_H = 640; // initial SDL window size owned by the emulator
 
     function fitCanvas() {
         var scalePref = localStorage.getItem('eka2l1_scale') || 'fit';
         var stage = document.getElementById('stage');
         var sw = stage.clientWidth, sh = stage.clientHeight;
+
+        // The emulator resizes its drawing buffer on screen rotation; follow
+        // the live canvas dimensions instead of the boot-time constants.
+        var bw = canvas.width || BASE_W;
+        var bh = canvas.height || BASE_H;
         var w, h;
 
         if (scalePref === 'fit') {
-            var s = Math.min(sw / BASE_W, sh / BASE_H);
-            w = Math.floor(BASE_W * s);
-            h = Math.floor(BASE_H * s);
+            var s = Math.min(sw / bw, sh / bh);
+            w = Math.floor(bw * s);
+            h = Math.floor(bh * s);
         } else {
             var mult = parseFloat(scalePref) || 1;
-            w = BASE_W * mult;
-            h = BASE_H * mult;
+            w = bw * mult;
+            h = bh * mult;
         }
 
         canvas.style.width = w + 'px';
@@ -157,6 +162,27 @@
     }
 
     canvas.addEventListener('click', focusCanvas);
+
+    // ---- screen rotation -------------------------------------------------------
+
+    var rotKey = 'eka2l1_rot_' + appUid;
+    var rotation = parseInt(localStorage.getItem(rotKey), 10) || 0;
+
+    function applyRotation() {
+        if (!EKA2L1.ready || !started) return;
+        EKA2L1.setRotation(rotation);
+        // SDL resizes the canvas synchronously; refit on the next tick.
+        setTimeout(fitCanvas, 0);
+        focusCanvas();
+    }
+
+    window.rotateScreen = function (delta) {
+        if (!started) return;
+        rotation = ((rotation + delta) % 360 + 360) % 360;
+        localStorage.setItem(rotKey, String(rotation));
+        applyRotation();
+        EKA2L1.toast(rotation ? ('屏幕已旋转 ' + rotation + '°') : '屏幕已回正');
+    };
 
     // ---- FPS ---------------------------------------------------------------
 
@@ -224,6 +250,7 @@
                 hideOverlay();
                 focusCanvas();
                 fitCanvas();
+                if (rotation) applyRotation();
                 startAutosave();
             } else if (performance.now() - t0 > 120000) {
                 clearInterval(poll);
