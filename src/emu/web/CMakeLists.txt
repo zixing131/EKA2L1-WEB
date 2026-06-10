@@ -98,7 +98,9 @@ if (EMSCRIPTEN)
         # default overflowed; 1MB keeps 16x headroom over that crash without
         # 32MB+ of standing stacks.
         "SHELL:-s DEFAULT_PTHREAD_STACK_SIZE=1048576"
-        "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\"]"
+        # HEAPU8: the streaming RPKG installer copies picked-file chunks
+        # directly into the wasm heap from JS.
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\",\"HEAPU8\"]"
         "SHELL:-s EXPORT_NAME=createEKA2L1Module"
         "SHELL:-s MODULARIZE=1"
         "SHELL:-s FORCE_FILESYSTEM=1"

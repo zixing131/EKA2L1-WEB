@@ -1000,6 +1000,124 @@ extern "C" {
  *   mount drive_z from the extracted directory.
  *   initialize_user_parties() → HLE libraries + boot.
  */
+/*
+ * Streaming (push-mode) RPKG install.
+ *
+ * The classic path (wasm_init_with_rom) needs the whole RPKG staged in MEMFS
+ * first — a full extra copy in the JS heap, which on iOS Safari is the
+ * difference between installing and the tab getting jetsam-killed
+ * ("立即刷新"). Here JS feeds the picked File in small chunks; the container
+ * is parsed and extracted as the bytes arrive and is never resident.
+ *
+ * JS protocol:
+ *   wasm_rpkg_stream_begin() -> 0 | negative error
+ *   loop: ptr = wasm_rpkg_stream_buffer(n); HEAPU8.set(chunk, ptr);
+ *         wasm_rpkg_stream_feed(n) -> 0 | negative error
+ *   wasm_rpkg_stream_finish() -> 0 | -(1000+e)   (registers device, saves devices.yml)
+ *   write the ROM to wasm_rpkg_stream_rom_target(), then wasm_init_with_rom("", "").
+ */
+static std::unique_ptr<eka2l1::loader::rpkg_stream_installer> g_rpkg_stream;
+static std::vector<std::uint8_t> g_rpkg_stream_buf;
+static std::string g_rpkg_stream_rom_target;
+
+EMSCRIPTEN_KEEPALIVE
+std::uint8_t *wasm_rpkg_stream_buffer(int size) {
+    if (size <= 0) {
+        return nullptr;
+    }
+    if (g_rpkg_stream_buf.size() < static_cast<std::size_t>(size)) {
+        g_rpkg_stream_buf.resize(static_cast<std::size_t>(size));
+    }
+    return g_rpkg_stream_buf.data();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_rpkg_stream_begin() {
+    if (!eka2l1::log::spd_logger) {
+        eka2l1::log::setup_log(nullptr);
+        eka2l1::log::toggle_console();
+    }
+
+    if (!g_state.initialized) {
+        if (!init_emulator()) {
+            return -2;
+        }
+    }
+
+    eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
+    if (dvcmngr->total() > 0) {
+        // Same encoding wasm_init_with_rom uses for "device already exists".
+        return -(1000 + static_cast<int>(eka2l1::device_installation_already_exist));
+    }
+
+    const std::string &storage = g_state.conf.storage;
+    eka2l1::common::create_directories(eka2l1::add_path(storage, "roms/"));
+    const std::string drives_z_path = eka2l1::add_path(storage, "drives/z/");
+    eka2l1::common::create_directories(drives_z_path);
+
+    g_rpkg_stream = std::make_unique<eka2l1::loader::rpkg_stream_installer>(dvcmngr, drives_z_path);
+    g_rpkg_stream_rom_target.clear();
+
+    LOG_INFO(FRONTEND_CMDLINE, "Streaming RPKG install started");
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_rpkg_stream_feed(int size) {
+    if (!g_rpkg_stream || (size < 0) || (static_cast<std::size_t>(size) > g_rpkg_stream_buf.size())) {
+        return -1;
+    }
+    if (!g_rpkg_stream->feed(g_rpkg_stream_buf.data(), static_cast<std::size_t>(size))) {
+        g_rpkg_stream.reset();
+        return -(1000 + static_cast<int>(eka2l1::device_installation_rpkg_corrupt));
+    }
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_rpkg_stream_finish() {
+    if (!g_rpkg_stream) {
+        return -1;
+    }
+
+    std::string firmware_code;
+    const eka2l1::device_installation_error err = g_rpkg_stream->finish(firmware_code);
+    g_rpkg_stream.reset();
+    g_rpkg_stream_buf.clear();
+    g_rpkg_stream_buf.shrink_to_fit();
+
+    if (err != eka2l1::device_installation_none) {
+        LOG_ERROR(FRONTEND_CMDLINE, "Streaming RPKG install failed, error={}", static_cast<int>(err));
+        return -(1000 + static_cast<int>(err));
+    }
+
+    const std::string rom_dir = eka2l1::add_path(
+        eka2l1::add_path(g_state.conf.storage, "roms/"), firmware_code + "/");
+    eka2l1::common::create_directories(rom_dir);
+    g_rpkg_stream_rom_target = eka2l1::add_path(rom_dir, "SYM.ROM");
+
+    // install_rpkg's callers rely on this to persist devices.yml.
+    g_state.symsys->get_device_manager()->save_devices();
+
+    LOG_INFO(FRONTEND_CMDLINE, "Streaming RPKG install done: firmcode={}", firmware_code);
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_rpkg_stream_rom_target() {
+    return g_rpkg_stream_rom_target.c_str();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_rpkg_stream_abort() {
+    if (g_rpkg_stream) {
+        g_rpkg_stream->abort();
+        g_rpkg_stream.reset();
+    }
+    g_rpkg_stream_buf.clear();
+    g_rpkg_stream_buf.shrink_to_fit();
+}
+
 EMSCRIPTEN_KEEPALIVE
 int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
     if (!rom_path) return -1;

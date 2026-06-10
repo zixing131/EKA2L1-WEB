@@ -40,6 +40,9 @@
 #include <vector>
 
 namespace eka2l1::loader {
+    static device_installation_error finalize_extracted_rpkg(device_manager *dvcmngr, const std::string &devices_rom_path,
+        const std::uint32_t machine_uid, std::string &firmware_code_ret);
+
     bool should_install_requires_additional_rpkg(const std::string &path) {
         common::ro_std_file_stream rom_file_stream(path, true);
 
@@ -297,6 +300,28 @@ namespace eka2l1::loader {
             progress_cb(9, 10);
         }
 
+        const device_installation_error fin_err = finalize_extracted_rpkg(dvcmngr, devices_rom_path,
+            header.machine_uid, firmware_code_ret);
+
+        if (fin_err != device_installation_none) {
+            return fin_err;
+        }
+
+        if (progress_cb) {
+            progress_cb(10, 10);
+        }
+
+        return device_installation_none;
+    }
+
+    // The post-extraction half of an RPKG install: detect the product from the
+    // extracted temp folder, register the device and move the folder to its
+    // firmware-code name. Shared between install_rpkg() and the streaming
+    // installer below.
+    static device_installation_error finalize_extracted_rpkg(device_manager *dvcmngr, const std::string &devices_rom_path,
+        const std::uint32_t machine_uid, std::string &firmware_code_ret) {
+        const std::string folder_extracted = add_path(devices_rom_path, "temp\\");
+
         epocver ver = determine_rpkg_symbian_version(folder_extracted);
 
         std::string manufacturer;
@@ -322,7 +347,7 @@ namespace eka2l1::loader {
 
         // Rename temp folder to its product code
         eka2l1::common::move_file(folder_extracted, add_path(devices_rom_path, firmcode_low + "\\"));
-        const add_device_error err_adddvc = dvcmngr->add_new_device(firmcode, model, manufacturer, ver, header.machine_uid);
+        const add_device_error err_adddvc = dvcmngr->add_new_device(firmcode, model, manufacturer, ver, machine_uid);
 
         if (err_adddvc != add_device_none) {
             LOG_ERROR(SYSTEM, "This device ({}) failed to be install, revert all changes", firmcode);
@@ -331,10 +356,232 @@ namespace eka2l1::loader {
             return device_installation_general_failure;
         }
 
-        if (progress_cb) {
-            progress_cb(10, 10);
+        return device_installation_none;
+    }
+
+    // ---- streaming (push-mode) installer ----------------------------------
+
+    rpkg_stream_installer::rpkg_stream_installer(device_manager *dvcmngr, const std::string &devices_rom_path)
+        : dvcmngr_(dvcmngr)
+        , devices_rom_path_(devices_rom_path)
+        , state_(parse_state::header_fixed)
+        , need_(24)
+        , header_{}
+        , entry_{}
+        , data_left_(0)
+        , discard_rest_(false)
+        , finished_(false) {
+        pending_.reserve(64);
+    }
+
+    rpkg_stream_installer::~rpkg_stream_installer() {
+        if (!finished_) {
+            abort();
+        }
+    }
+
+    void rpkg_stream_installer::open_entry_output() {
+        // Byte-exact mirror of extract_file()'s path derivation.
+        std::string file_full_relative = common::ucs2_to_utf8(entry_.path.substr(3));
+        std::transform(file_full_relative.begin(), file_full_relative.end(), file_full_relative.begin(),
+            ::tolower);
+
+        std::string real_path = add_path(add_path(devices_rom_path_, "/temp/"), file_full_relative);
+
+        std::string dir = eka2l1::file_directory(real_path);
+        common::create_directories(dir);
+
+        out_ = std::make_unique<common::wo_std_file_stream>(real_path, true);
+
+        if (!out_->valid()) {
+            // install_rpkg() breaks out of the extraction loop here and still
+            // finalizes; mirror that by discarding everything that follows.
+            LOG_INFO(SYSTEM, "Skipping with real path: {}, dir: {}", real_path, dir);
+            out_.reset();
+            discard_rest_ = true;
+        }
+    }
+
+    bool rpkg_stream_installer::feed(const std::uint8_t *data, std::size_t size) {
+        while (size > 0) {
+            if (state_ == parse_state::broken) {
+                return false;
+            }
+
+            if (discard_rest_) {
+                return true;
+            }
+
+            if (state_ == parse_state::entry_data) {
+                const std::size_t take = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(data_left_, static_cast<std::uint64_t>(size)));
+
+                if (out_) {
+                    if (out_->write(data, static_cast<std::uint64_t>(take)) != take) {
+                        LOG_ERROR(SYSTEM, "Write failure while extracting {}", common::ucs2_to_utf8(entry_.path));
+                        out_.reset();
+                        discard_rest_ = true;
+                        return true;
+                    }
+                }
+
+                data += take;
+                size -= take;
+                data_left_ -= take;
+
+                if (data_left_ == 0) {
+                    out_.reset();
+                    state_ = parse_state::entry_meta;
+                    need_ = 24;
+                    pending_.clear();
+                }
+
+                continue;
+            }
+
+            // Fixed-size piece: accumulate until `need_` bytes are buffered.
+            const std::size_t take = std::min<std::size_t>(need_ - pending_.size(), size);
+            pending_.insert(pending_.end(), data, data + take);
+            data += take;
+            size -= take;
+
+            if (pending_.size() < need_) {
+                return true;
+            }
+
+            const std::uint8_t *p = pending_.data();
+
+            switch (state_) {
+            case parse_state::header_fixed: {
+                // fread(&header.magic, 4, 4): the magic block is 16 bytes.
+                std::memcpy(header_.magic, p, 16);
+                std::memcpy(&header_.major_rom, p + 16, 1);
+                std::memcpy(&header_.minor_rom, p + 17, 1);
+                std::memcpy(&header_.build_rom, p + 18, 2);
+                std::memcpy(&header_.count, p + 20, 4);
+
+                header_.machine_uid = 0;
+                header_.header_size = 0;
+
+                std::uint8_t is_ver_one = 1;
+
+                if ((header_.magic[0] == 'R') && (header_.magic[1] == 'P') && (header_.magic[2] == 'K')) {
+                    switch (header_.magic[3]) {
+                    case 'G':
+                        is_ver_one = 1;
+                        break;
+
+                    case '2':
+                        is_ver_one = 0;
+                        break;
+
+                    default:
+                        state_ = parse_state::broken;
+                        return false;
+                    }
+                }
+
+                if (is_ver_one) {
+                    header_.header_size = 24;
+                    state_ = parse_state::entry_meta;
+                    need_ = 24;
+                } else {
+                    state_ = parse_state::header_v2_extra;
+                    need_ = 8;
+                }
+
+                pending_.clear();
+                break;
+            }
+
+            case parse_state::header_v2_extra: {
+                std::memcpy(&header_.header_size, p, 4);
+                std::memcpy(&header_.machine_uid, p + 4, 4);
+
+                // install_rpkg(): total consumed (32) must equal header_size.
+                if (header_.header_size != 32) {
+                    state_ = parse_state::broken;
+                    return false;
+                }
+
+                state_ = parse_state::entry_meta;
+                need_ = 24;
+                pending_.clear();
+                break;
+            }
+
+            case parse_state::entry_meta: {
+                std::memcpy(&entry_.attrib, p, 8);
+                std::memcpy(&entry_.time, p + 8, 8);
+                std::memcpy(&entry_.path_len, p + 16, 8);
+
+                // install_rpkg() has no sanity check here, but a corrupt
+                // length would make us buffer gigabytes — refuse instead.
+                if ((entry_.path_len < 4) || (entry_.path_len > 0x8000)) {
+                    LOG_ERROR(SYSTEM, "Suspicious RPKG entry path length {}", entry_.path_len);
+                    state_ = parse_state::broken;
+                    return false;
+                }
+
+                state_ = parse_state::entry_path_and_size;
+                need_ = static_cast<std::size_t>(entry_.path_len) * 2 + 8;
+                pending_.clear();
+                break;
+            }
+
+            case parse_state::entry_path_and_size: {
+                entry_.path.resize(entry_.path_len);
+                std::memcpy(entry_.path.data(), p, entry_.path_len * 2);
+                std::memcpy(&entry_.data_size, p + entry_.path_len * 2, 8);
+
+                LOG_INFO(SYSTEM, "Extracting: {}", common::ucs2_to_utf8(entry_.path));
+
+                open_entry_output();
+
+                data_left_ = entry_.data_size;
+                state_ = parse_state::entry_data;
+                pending_.clear();
+
+                // Zero-byte files: no data follows, complete immediately.
+                if (!discard_rest_ && (data_left_ == 0)) {
+                    out_.reset();
+                    state_ = parse_state::entry_meta;
+                    need_ = 24;
+                }
+                break;
+            }
+
+            default:
+                state_ = parse_state::broken;
+                return false;
+            }
         }
 
-        return device_installation_none;
+        return true;
+    }
+
+    device_installation_error rpkg_stream_installer::finish(std::string &firmware_code_ret) {
+        out_.reset();
+        finished_ = true;
+
+        if (state_ == parse_state::broken) {
+            common::delete_folder(add_path(devices_rom_path_, "temp\\"));
+            return device_installation_rpkg_corrupt;
+        }
+
+        // A trailing partial entry matches install_rpkg()'s lenient break-and-
+        // finalize behaviour; only data cut off mid-payload is worth a warning.
+        if (state_ == parse_state::entry_data && data_left_ > 0) {
+            LOG_WARN(SYSTEM, "RPKG ended mid-file ({} bytes missing), finalizing anyway",
+                data_left_);
+        }
+
+        return finalize_extracted_rpkg(dvcmngr_, devices_rom_path_, header_.machine_uid, firmware_code_ret);
+    }
+
+    void rpkg_stream_installer::abort() {
+        out_.reset();
+        finished_ = true;
+        common::delete_folder(add_path(devices_rom_path_, "temp\\"));
     }
 }

@@ -309,6 +309,57 @@
         });
     };
 
+    /** True when the wasm core exports the streaming RPKG installer. */
+    EKA2L1.canStreamRpkg = function () {
+        var m = EKA2L1.module;
+        return !!(m && typeof m._wasm_rpkg_stream_begin === 'function' && m.HEAPU8);
+    };
+
+    /**
+     * Stream a picked RPKG File straight into the C++ installer in 8MB
+     * slices. Unlike writeFileToVFS + initDevice, the package itself never
+     * lands in MEMFS — on iOS the extra 100-400MB resident copy was what
+     * pushed the tab over the jetsam limit mid-install.
+     * Resolves with the VFS path the ROM must then be written to
+     * (roms/<firmcode>/SYM.ROM); caller finishes with initDevice('', '').
+     */
+    EKA2L1.streamInstallRpkg = function (file, onProgress) {
+        var mod = EKA2L1.module;
+        var CHUNK = 8 * 1024 * 1024;
+
+        var rc = mod.ccall('wasm_rpkg_stream_begin', 'number', [], []);
+        if (rc !== 0) {
+            return Promise.reject(new Error('安装失败：' + EKA2L1.decodeInstallError(rc)));
+        }
+
+        var offset = 0;
+
+        function pump() {
+            if (offset >= file.size) return Promise.resolve();
+            var slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
+            return slice.arrayBuffer().then(function (ab) {
+                var u8 = new Uint8Array(ab);
+                var ptr = mod.ccall('wasm_rpkg_stream_buffer', 'number', ['number'], [u8.length]);
+                if (!ptr) throw new Error('RPKG 流缓冲分配失败');
+                mod.HEAPU8.set(u8, ptr);
+                var r = mod.ccall('wasm_rpkg_stream_feed', 'number', ['number'], [u8.length]);
+                if (r !== 0) throw new Error('安装失败：' + EKA2L1.decodeInstallError(r));
+                offset += u8.length;
+                if (onProgress) onProgress(offset, file.size);
+                return pump();
+            });
+        }
+
+        return pump().then(function () {
+            var r = mod.ccall('wasm_rpkg_stream_finish', 'number', [], []);
+            if (r !== 0) throw new Error('安装失败：' + EKA2L1.decodeInstallError(r));
+            return mod.ccall('wasm_rpkg_stream_rom_target', 'string', [], []);
+        }).catch(function (err) {
+            try { mod.ccall('wasm_rpkg_stream_abort', null, [], []); } catch (e) {}
+            throw err;
+        });
+    };
+
     // ---- error decoding ----------------------------------------------------
 
     var installErrNames = [

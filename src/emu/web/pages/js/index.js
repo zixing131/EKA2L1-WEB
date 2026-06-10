@@ -282,6 +282,18 @@
         zone.classList.toggle('picked', !!rpkgFile);
     });
 
+    // Breadcrumb for silent deaths: iOS jetsam reloads the page without any
+    // error event, so persist the current install stage and report it on the
+    // next load. Cleared on success and on handled (on-screen) errors.
+    var STAGE_KEY = 'eka2l1_install_stage';
+
+    function setInstallStage(stage) {
+        try {
+            if (stage === null) localStorage.removeItem(STAGE_KEY);
+            else localStorage.setItem(STAGE_KEY, stage);
+        } catch (e) {}
+    }
+
     window.installDevice = function () {
         if (!romFile) return;
 
@@ -295,35 +307,72 @@
         // Boot the core only now (fresh visits don't boot at page load): the
         // file picking is already done, so the high-memory phase no longer
         // overlaps with the iOS Files picker backgrounding the tab.
+        setInstallStage('启动核心');
         ensureCore()
             .then(function () {
-                setStatus('yellow', '安装设备中…');
-                return EKA2L1.writeFileToVFS(romFile, romPath);
-            })
-            .then(function () {
-                return rpkgFile ? EKA2L1.writeFileToVFS(rpkgFile, rpkgPath) : null;
-            })
-            .then(function () {
-                // Heavy synchronous call; yield a frame so the UI paints first.
-                return new Promise(function (resolve) { setTimeout(resolve, 60); });
-            })
-            .then(function () {
-                var result = EKA2L1.initDevice(romPath, rpkgFile ? rpkgPath : '');
-                if (result !== 0) {
-                    throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
+                if (rpkgFile && EKA2L1.canStreamRpkg()) {
+                    // EKA2 streaming path: the RPKG is parsed/extracted as the
+                    // chunks arrive and never lands in MEMFS, and the ROM goes
+                    // straight to its final location — no temp copies at all.
+                    // This cuts the iOS install peak by the full package size.
+                    setInstallStage('流式安装 RPKG');
+                    return EKA2L1.streamInstallRpkg(rpkgFile, function (done, total) {
+                        var pct = Math.floor(done * 100 / total);
+                        setStatus('yellow', '安装 RPKG ' + pct + '%…');
+                        setInstallStage('流式安装 RPKG ' + pct + '%');
+                    }).then(function (romTarget) {
+                        setStatus('yellow', '写入 ROM…');
+                        setInstallStage('写入 ROM');
+                        return EKA2L1.writeFileToVFS(romFile, romTarget);
+                    }).then(function () {
+                        setStatus('yellow', '激活设备…');
+                        setInstallStage('激活设备');
+                        var result = EKA2L1.initDevice('', '');
+                        if (result !== 0) {
+                            throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
+                        }
+                    });
                 }
+
+                // Classic path (EKA1 ROM-only, or streaming unavailable):
+                // stage the uploads in MEMFS, then install.
+                setStatus('yellow', '写入 ROM…');
+                setInstallStage('写入 ROM');
+                return EKA2L1.writeFileToVFS(romFile, romPath)
+                    .then(function () {
+                        if (!rpkgFile) return null;
+                        setStatus('yellow', '写入 RPKG…');
+                        setInstallStage('写入 RPKG');
+                        return EKA2L1.writeFileToVFS(rpkgFile, rpkgPath);
+                    })
+                    .then(function () {
+                        // Heavy synchronous call; yield a frame so the UI paints first.
+                        return new Promise(function (resolve) { setTimeout(resolve, 60); });
+                    })
+                    .then(function () {
+                        setStatus('yellow', '解压安装…');
+                        setInstallStage('解压安装');
+                        var result = EKA2L1.initDevice(romPath, rpkgFile ? rpkgPath : '');
+                        if (result !== 0) {
+                            throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
+                        }
+                        // The installer copied the ROM into roms/<firmcode>/; drop
+                        // the uploads so they don't bloat IndexedDB on every sync.
+                        try { EKA2L1.module.FS.unlink(romPath); } catch (e) {}
+                        try { EKA2L1.module.FS.unlink(rpkgPath); } catch (e) {}
+                    });
+            })
+            .then(function () {
                 deviceReady = true;
-                // The installer copied the ROM into roms/<firmcode>/; drop the
-                // uploads so they don't bloat IndexedDB on every sync.
-                try { EKA2L1.module.FS.unlink(romPath); } catch (e) {}
-                try { EKA2L1.module.FS.unlink(rpkgPath); } catch (e) {}
                 setStatus('yellow', '保存到浏览器…');
+                setInstallStage('保存到浏览器');
                 // Persist FIRST: if the browser kills the tab during the
                 // post-install work (iOS memory pressure), the device must
                 // already be safe in IndexedDB or it comes back half-broken.
                 return EKA2L1.save();
             })
             .then(function () {
+                setInstallStage(null);
                 try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
                 refreshApps();
                 EKA2L1.setPaused(true);
@@ -335,6 +384,7 @@
                 EKA2L1.toast('设备固件安装完成');
             })
             .catch(function (err) {
+                setInstallStage(null); // surfaced on screen, breadcrumb not needed
                 console.error('[EKA2L1] device install failed:', err);
                 setStatus('red', '安装失败');
                 showError('设备固件安装失败：\n' + (err.message || err));
@@ -471,6 +521,19 @@
         });
         return bootPromise;
     }
+
+    // A leftover stage marker means the last install died silently (iOS
+    // jetsam kills + reloads the page with no error event). Tell the user
+    // exactly where it stopped — that is otherwise invisible on iPhone.
+    try {
+        var lastStage = localStorage.getItem(STAGE_KEY);
+        if (lastStage) {
+            localStorage.removeItem(STAGE_KEY);
+            showError('上次安装在「' + lastStage + '」阶段中断（页面被系统终止后自动刷新）。\n' +
+                'iPhone 上多为内存不足：请先关闭其它标签页和后台 App 再重试，' +
+                '安装期间保持本页在前台、不要锁屏。若反复中断在同一阶段，请截图反馈本提示。');
+        }
+    } catch (e) {}
 
     try {
         // The explicit flag is written on install/activation; the app cache
