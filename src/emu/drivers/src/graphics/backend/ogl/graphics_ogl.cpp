@@ -49,6 +49,14 @@ namespace eka2l1::drivers {
         }
     }
 
+#if EKA2L1_PLATFORM(WASM)
+    static void gl_post_callback_no_op(const char *name, void *funcptr, int len_args, ...) {
+        (void)name;
+        (void)funcptr;
+        (void)len_args;
+    }
+#endif
+
     void init_gl_graphics_library(graphics::gl_context::mode api) {
         switch (api) {
             case graphics::gl_context::mode::opengl: {
@@ -79,11 +87,17 @@ namespace eka2l1::drivers {
 
         // glad's post-callback runs glGetError() after *every* GL call. On
         // WebGL each glGetError forces a synchronous round-trip/flush, and a
-        // profile showed it eating ~6.6% of the browser main thread. It is a
-        // debug-only aid, so skip registering it on WASM.
+        // profile showed it eating ~6.6% of the browser main thread.
+        //
+        // NOTE: merely not registering our callback is NOT enough — this glad
+        // loader is the c-debug variant, and its *default* post callback
+        // (_post_call_callback_default_gl in glad.c) already calls
+        // glad_glGetError() after every GL function. A no-op callback must be
+        // installed to actually displace it.
 #if !EKA2L1_PLATFORM(WASM)
         glad_set_post_callback(gl_post_callback_for_error);
 #else
+        glad_set_post_callback(gl_post_callback_no_op);
         (void)&gl_post_callback_for_error;
 #endif
     }
@@ -95,6 +109,8 @@ namespace eka2l1::drivers {
         , new_surface(nullptr)
         , is_gles(false)
         , support_line_width_(true)
+        , line_width_range_ready_(false)
+        , line_width_range_{ 0, 0 }
         , point_size(1.0)
         , line_style(pen_style_none)
         , active_input_descriptors_(nullptr)
@@ -1546,16 +1562,22 @@ namespace eka2l1::drivers {
         std::uint32_t w_32 = static_cast<std::uint32_t>(cmd.data_[0]);
         float w = *reinterpret_cast<float*>(&w_32);
 
-        GLint range[2];
-        glGetIntegerv(GL_ALIASED_LINE_WIDTH_RANGE, range);
+        // This command runs on every GLES context state init (once per guest
+        // frame for 3D games). glGetIntegerv/glGetError are synchronous on
+        // WebGL, so query the supported range once and validate locally
+        // instead of asking the driver every time.
+        if (!line_width_range_ready_) {
+            glGetIntegerv(GL_ALIASED_LINE_WIDTH_RANGE, line_width_range_);
+            line_width_range_ready_ = true;
 
-        if (range[1] >= w) {
-            glad_glLineWidth(w);
-
-            if (glGetError() == GL_INVALID_VALUE) {
+            if (line_width_range_[1] <= 0) {
                 LOG_INFO(DRIVER_GRAPHICS, "OpenGL driver does not support line width feature. Disabled from now on.");
                 support_line_width_ = false;
             }
+        }
+
+        if ((w > 0.0f) && (w <= static_cast<float>(line_width_range_[1]))) {
+            glad_glLineWidth(w);
         }
     }
 

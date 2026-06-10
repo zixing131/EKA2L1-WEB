@@ -74,6 +74,19 @@ static bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
     return false;
 }
 
+// Register-list size for LDM/STM. The bit-at-a-time loop this replaces ran on
+// every executed LDM/STM (function prologue/epilogue traffic).
+static inline int CountSetBits16(unsigned int v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcount(v);
+#else
+    // SWAR popcount; MSVC's __popcnt would need a runtime CPUID check.
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    return static_cast<int>((((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24);
+#endif
+}
+
 static unsigned int DPO(Immediate)(ARMul_State *cpu, unsigned int sht_oper) {
     unsigned int immed_8 = BITS(sht_oper, 0, 7);
     unsigned int rotate_imm = BITS(sht_oper, 8, 11);
@@ -544,14 +557,7 @@ static void MLnS(RegisterPostIndexed)(ARMul_State *cpu, unsigned int inst,
 
 static void LdnStM(DecrementBefore)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
-    unsigned int i = BITS(inst, 0, 15);
-    int count = 0;
-
-    while (i) {
-        if (i & 1)
-            count++;
-        i = i >> 1;
-    }
+    const int count = CountSetBits16(BITS(inst, 0, 15));
 
     virt_addr = CHECK_READ_REG15_WA(cpu, Rn) - count * 4;
 
@@ -561,14 +567,7 @@ static void LdnStM(DecrementBefore)(ARMul_State *cpu, unsigned int inst, unsigne
 
 static void LdnStM(IncrementBefore)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
-    unsigned int i = BITS(inst, 0, 15);
-    int count = 0;
-
-    while (i) {
-        if (i & 1)
-            count++;
-        i = i >> 1;
-    }
+    const int count = CountSetBits16(BITS(inst, 0, 15));
 
     virt_addr = CHECK_READ_REG15_WA(cpu, Rn) + 4;
 
@@ -578,14 +577,7 @@ static void LdnStM(IncrementBefore)(ARMul_State *cpu, unsigned int inst, unsigne
 
 static void LdnStM(IncrementAfter)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
-    unsigned int i = BITS(inst, 0, 15);
-    int count = 0;
-
-    while (i) {
-        if (i & 1)
-            count++;
-        i = i >> 1;
-    }
+    const int count = CountSetBits16(BITS(inst, 0, 15));
 
     virt_addr = CHECK_READ_REG15_WA(cpu, Rn);
 
@@ -595,13 +587,7 @@ static void LdnStM(IncrementAfter)(ARMul_State *cpu, unsigned int inst, unsigned
 
 static void LdnStM(DecrementAfter)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
-    unsigned int i = BITS(inst, 0, 15);
-    int count = 0;
-    while (i) {
-        if (i & 1)
-            count++;
-        i = i >> 1;
-    }
+    const int count = CountSetBits16(BITS(inst, 0, 15));
     unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
     unsigned int start_addr = rn - count * 4 + 4;
 
@@ -661,87 +647,186 @@ static void LnSWoUB(ScaledRegisterOffset)(ARMul_State *cpu, unsigned int inst,
     virt_addr = addr;
 }
 
-shtop_fp_t GetShifterOp(unsigned int inst) {
+unsigned int GetShifterOp(unsigned int inst) {
     if (BIT(inst, 25)) {
-        return DPO(Immediate);
+        return SHTOP_IMMEDIATE;
     } else if (BITS(inst, 4, 11) == 0) {
-        return DPO(Register);
+        return SHTOP_REGISTER;
     } else if (BITS(inst, 4, 6) == 0) {
-        return DPO(LogicalShiftLeftByImmediate);
+        return SHTOP_LSL_IMM;
     } else if (BITS(inst, 4, 7) == 1) {
-        return DPO(LogicalShiftLeftByRegister);
+        return SHTOP_LSL_REG;
     } else if (BITS(inst, 4, 6) == 2) {
-        return DPO(LogicalShiftRightByImmediate);
+        return SHTOP_LSR_IMM;
     } else if (BITS(inst, 4, 7) == 3) {
-        return DPO(LogicalShiftRightByRegister);
+        return SHTOP_LSR_REG;
     } else if (BITS(inst, 4, 6) == 4) {
-        return DPO(ArithmeticShiftRightByImmediate);
+        return SHTOP_ASR_IMM;
     } else if (BITS(inst, 4, 7) == 5) {
-        return DPO(ArithmeticShiftRightByRegister);
+        return SHTOP_ASR_REG;
     } else if (BITS(inst, 4, 6) == 6) {
-        return DPO(RotateRightByImmediate);
+        return SHTOP_ROR_IMM;
     } else if (BITS(inst, 4, 7) == 7) {
-        return DPO(RotateRightByRegister);
+        return SHTOP_ROR_REG;
     }
-    return nullptr;
+    return SHTOP_INVALID;
 }
 
-get_addr_fp_t GetAddressingOp(unsigned int inst) {
-    if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 0) {
-        return LnSWoUB(ImmediateOffset);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterOffset);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterOffset);
-    } else if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 1) {
-        return LnSWoUB(ImmediatePreIndexed);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 4 && BIT(inst, 21) == 0) {
-        return LnSWoUB(ImmediatePostIndexed);
-    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterPostIndexed);
-    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterPostIndexed);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediateOffset);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterOffset);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 3 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediatePreIndexed);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 1 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediatePostIndexed);
-    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterPostIndexed);
-    } else if (BITS(inst, 23, 27) == 0x11) {
-        return LdnStM(IncrementAfter);
-    } else if (BITS(inst, 23, 27) == 0x13) {
-        return LdnStM(IncrementBefore);
-    } else if (BITS(inst, 23, 27) == 0x10) {
-        return LdnStM(DecrementAfter);
-    } else if (BITS(inst, 23, 27) == 0x12) {
-        return LdnStM(DecrementBefore);
+// Replaces the old per-instruction indirect call through a stored function
+// pointer: a dense switch lets the compiler inline every (tiny) evaluator
+// body and turn the dispatch into a jump table.
+static unsigned int EvalShifterOperand(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
+    switch (idx) {
+    case SHTOP_IMMEDIATE:
+        return DPO(Immediate)(cpu, sht_oper);
+    case SHTOP_REGISTER:
+        return DPO(Register)(cpu, sht_oper);
+    case SHTOP_LSL_IMM:
+        return DPO(LogicalShiftLeftByImmediate)(cpu, sht_oper);
+    case SHTOP_LSL_REG:
+        return DPO(LogicalShiftLeftByRegister)(cpu, sht_oper);
+    case SHTOP_LSR_IMM:
+        return DPO(LogicalShiftRightByImmediate)(cpu, sht_oper);
+    case SHTOP_LSR_REG:
+        return DPO(LogicalShiftRightByRegister)(cpu, sht_oper);
+    case SHTOP_ASR_IMM:
+        return DPO(ArithmeticShiftRightByImmediate)(cpu, sht_oper);
+    case SHTOP_ASR_REG:
+        return DPO(ArithmeticShiftRightByRegister)(cpu, sht_oper);
+    case SHTOP_ROR_IMM:
+        return DPO(RotateRightByImmediate)(cpu, sht_oper);
+    case SHTOP_ROR_REG:
+        return DPO(RotateRightByRegister)(cpu, sht_oper);
+    default:
+        LOG_ERROR(eka2l1::CPU_DYNCOM, "Invalid shifter operand index {}", idx);
+        return 0;
     }
-    return nullptr;
+}
+
+unsigned int GetAddressingOp(unsigned int inst) {
+    if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 0) {
+        return ADDRMODE_LNSW_IMM_OFFSET;
+    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
+        return ADDRMODE_LNSW_REG_OFFSET;
+    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
+        return ADDRMODE_LNSW_SCALED_REG_OFFSET;
+    } else if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 1) {
+        return ADDRMODE_LNSW_IMM_PRE;
+    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BITS(inst, 4, 11) == 0) {
+        return ADDRMODE_LNSW_REG_PRE;
+    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BIT(inst, 4) == 0) {
+        return ADDRMODE_LNSW_SCALED_REG_PRE;
+    } else if (BITS(inst, 24, 27) == 4 && BIT(inst, 21) == 0) {
+        return ADDRMODE_LNSW_IMM_POST;
+    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
+        return ADDRMODE_LNSW_REG_POST;
+    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
+        return ADDRMODE_LNSW_SCALED_REG_POST;
+    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_IMM_OFFSET;
+    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_REG_OFFSET;
+    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 3 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_IMM_PRE;
+    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 1 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_REG_PRE;
+    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_IMM_POST;
+    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
+        return ADDRMODE_MLNS_REG_POST;
+    } else if (BITS(inst, 23, 27) == 0x11) {
+        return ADDRMODE_LDNSTM_INC_AFTER;
+    } else if (BITS(inst, 23, 27) == 0x13) {
+        return ADDRMODE_LDNSTM_INC_BEFORE;
+    } else if (BITS(inst, 23, 27) == 0x10) {
+        return ADDRMODE_LDNSTM_DEC_AFTER;
+    } else if (BITS(inst, 23, 27) == 0x12) {
+        return ADDRMODE_LDNSTM_DEC_BEFORE;
+    }
+    return ADDRMODE_INVALID;
 }
 
 // Specialized for LDRT, LDRBT, STRT, and STRBT, which have specific addressing mode requirements
-get_addr_fp_t GetAddressingOpLoadStoreT(unsigned int inst) {
+unsigned int GetAddressingOpLoadStoreT(unsigned int inst) {
     if (BITS(inst, 25, 27) == 2) {
-        return LnSWoUB(ImmediatePostIndexed);
+        return ADDRMODE_LNSW_IMM_POST;
     } else if (BITS(inst, 25, 27) == 3) {
-        return LnSWoUB(ScaledRegisterPostIndexed);
+        return ADDRMODE_LNSW_SCALED_REG_POST;
     }
     // Reaching this would indicate the thumb version
     // of this instruction, however the 3DS CPU doesn't
     // support this variant (the 3DS CPU is only ARMv6K,
     // while this variant is added in ARMv6T2).
     // So it's sufficient for citra to not implement this.
-    return nullptr;
+    return ADDRMODE_INVALID;
+}
+
+// Same devirtualization as EvalShifterOperand, for the load/store address
+// generators.
+static void EvalGetAddr(ARMul_State *cpu, unsigned int idx, unsigned int inst, unsigned int &virt_addr) {
+    switch (idx) {
+    case ADDRMODE_LNSW_IMM_OFFSET:
+        LnSWoUB(ImmediateOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_OFFSET:
+        LnSWoUB(RegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_OFFSET:
+        LnSWoUB(ScaledRegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_IMM_PRE:
+        LnSWoUB(ImmediatePreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_PRE:
+        LnSWoUB(RegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_PRE:
+        LnSWoUB(ScaledRegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_IMM_POST:
+        LnSWoUB(ImmediatePostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_POST:
+        LnSWoUB(RegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_POST:
+        LnSWoUB(ScaledRegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_OFFSET:
+        MLnS(ImmediateOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_OFFSET:
+        MLnS(RegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_PRE:
+        MLnS(ImmediatePreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_PRE:
+        MLnS(RegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_POST:
+        MLnS(ImmediatePostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_POST:
+        MLnS(RegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_INC_AFTER:
+        LdnStM(IncrementAfter)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_INC_BEFORE:
+        LdnStM(IncrementBefore)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_DEC_AFTER:
+        LdnStM(DecrementAfter)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_DEC_BEFORE:
+        LdnStM(DecrementBefore)(cpu, inst, virt_addr);
+        return;
+    default:
+        LOG_ERROR(eka2l1::CPU_DYNCOM, "Invalid addressing mode index {}, inst 0x{:X}", idx, inst);
+        virt_addr = 0;
+        return;
+    }
 }
 
 enum { FETCH_SUCCESS,
@@ -964,7 +1049,7 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define RDLO cpu->Reg[inst_cream->RdLo]
 #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
 #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
-#define SHIFTER_OPERAND inst_cream->shtop_func(cpu, inst_cream->shifter_operand)
+#define SHIFTER_OPERAND EvalShifterOperand(cpu, inst_cream->shtop_idx, inst_cream->shifter_operand)
 
 #define FETCH_INST                                 \
     if (inst_base->br != TransExtData::NON_BRANCH) \
@@ -2094,7 +2179,7 @@ LDC_INST : {
 LDM_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int inst = inst_cream->inst;
         if (BIT(inst, 22) && !BIT(inst, 15)) {
@@ -2181,7 +2266,7 @@ SXTH_INST : {
 }
 LDR_INST : {
     ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-    inst_cream->get_addr(cpu, inst_cream->inst, addr);
+    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
     unsigned int value = cpu->ReadMemory32(addr);
     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2202,7 +2287,7 @@ LDR_INST : {
 LDRCOND_INST : {
     if (CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory32(addr);
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2245,7 +2330,7 @@ UXTAH_INST : {
 LDRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
     }
@@ -2257,7 +2342,7 @@ LDRB_INST : {
 LDRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2278,7 +2363,7 @@ LDRD_INST : {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
         // addr[2] == 0)
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
         // wouldn't do this as a single read.
@@ -2349,7 +2434,7 @@ LDREXD_INST : {
 LDRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
     }
@@ -2361,7 +2446,7 @@ LDRH_INST : {
 LDRSB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->ReadMemory8(addr);
         if (BIT(value, 7)) {
             value |= 0xffffff00;
@@ -2376,7 +2461,7 @@ LDRSB_INST : {
 LDRSH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory16(addr);
         if (BIT(value, 15)) {
@@ -2392,7 +2477,7 @@ LDRSH_INST : {
 LDRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2866,7 +2951,7 @@ RFE_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    inst_cream->get_addr(cpu, inst_cream->inst, address);
+    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->Cpsr = cpu->ReadMemory32(address);
     cpu->Reg[15] = cpu->ReadMemory32(address + 4);
@@ -3527,7 +3612,7 @@ SRS_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    inst_cream->get_addr(cpu, inst_cream->inst, address);
+    EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->WriteMemory32(address + 0, cpu->Reg[14]);
     cpu->WriteMemory32(address + 4, cpu->Spsr_copy);
@@ -3606,7 +3691,7 @@ STM_INST : {
         unsigned int Rn = BITS(inst, 16, 19);
         unsigned int old_RN = cpu->Reg[Rn];
 
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         if (BIT(inst_cream->inst, 22) == 1) {
             for (int i = 0; i < 13; i++) {
                 if (BIT(inst_cream->inst, i)) {
@@ -3676,7 +3761,7 @@ SXTB_INST : {
 STR_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int reg = BITS(inst_cream->inst, 12, 15);
         unsigned int value = cpu->Reg[reg];
@@ -3716,7 +3801,7 @@ UXTAB_INST : {
 STRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
         cpu->WriteMemory8(addr, value);
     }
@@ -3728,7 +3813,7 @@ STRB_INST : {
 STRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
@@ -3745,7 +3830,7 @@ STRBT_INST : {
 STRD_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
         // so STRD wouldn't store these as a single write.
@@ -3817,7 +3902,7 @@ STREXH_INST : {
 STRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
         cpu->WriteMemory16(addr, value);
@@ -3830,7 +3915,7 @@ STRH_INST : {
 STRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        EvalGetAddr(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t rt_index = BITS(inst_cream->inst, 12, 15);

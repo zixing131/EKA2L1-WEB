@@ -137,6 +137,8 @@ namespace eka2l1::drivers {
 
         bool is_gles;
         bool support_line_width_;
+        bool line_width_range_ready_;
+        GLint line_width_range_[2];
 
         float point_size;
         pen_style line_style;

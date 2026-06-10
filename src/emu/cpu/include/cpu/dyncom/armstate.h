@@ -22,6 +22,7 @@
 #include <common/types.h>
 #include <unordered_map>
 
+#include <cpu/12l1r/tlb.h>
 #include <cpu/dyncom/arm_regformat.h>
 
 namespace eka2l1::arm {
@@ -158,15 +159,79 @@ public:
 
     // Reads/writes data in big/little endian format based on the
     // state of the E (endian) bit in the APSR.
-    std::uint8_t ReadMemory8(std::uint32_t address) const;
-    std::uint16_t ReadMemory16(std::uint32_t address) const;
-    std::uint32_t ReadMemory32(std::uint32_t address) const;
-    std::uint64_t ReadMemory64(std::uint32_t address) const;
+    //
+    // The TLB-hit fast path is inlined here so the interpreter does not pay an
+    // out-of-line call per guest memory access (these are the hottest helpers
+    // after the interpreter loop itself). Misses and big-endian mode take the
+    // *Slow out-of-line path, which keeps the original full logic.
+    std::uint8_t ReadMemory8(std::uint32_t address) const {
+        if (const std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+            return *ptr;
+        }
+        return ReadMemory8Slow(address);
+    }
+    std::uint16_t ReadMemory16(std::uint32_t address) const {
+        if (const std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
+            return *ptr;
+        }
+        return ReadMemory16Slow(address);
+    }
+    std::uint32_t ReadMemory32(std::uint32_t address) const {
+        if (const std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
+            return *ptr;
+        }
+        return ReadMemory32Slow(address);
+    }
+    std::uint64_t ReadMemory64(std::uint32_t address) const {
+        if (const std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
+            return *ptr;
+        }
+        return ReadMemory64Slow(address);
+    }
     std::uint32_t ReadCode(std::uint32_t address) const;
-    void WriteMemory8(std::uint32_t address, std::uint8_t data);
-    void WriteMemory16(std::uint32_t address, std::uint16_t data);
-    void WriteMemory32(std::uint32_t address, std::uint32_t data);
-    void WriteMemory64(std::uint32_t address, std::uint64_t data);
+    void WriteMemory8(std::uint32_t address, std::uint8_t data) {
+        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+            *ptr = data;
+            return;
+        }
+        WriteMemory8Slow(address, data);
+    }
+    void WriteMemory16(std::uint32_t address, std::uint16_t data) {
+        if (!InBigEndianMode()) {
+            if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
+                *ptr = data;
+                return;
+            }
+        }
+        WriteMemory16Slow(address, data);
+    }
+    void WriteMemory32(std::uint32_t address, std::uint32_t data) {
+        if (!InBigEndianMode()) {
+            if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
+                *ptr = data;
+                return;
+            }
+        }
+        WriteMemory32Slow(address, data);
+    }
+    void WriteMemory64(std::uint32_t address, std::uint64_t data) {
+        if (!InBigEndianMode()) {
+            if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
+                *ptr = data;
+                return;
+            }
+        }
+        WriteMemory64Slow(address, data);
+    }
+
+    std::uint8_t ReadMemory8Slow(std::uint32_t address) const;
+    std::uint16_t ReadMemory16Slow(std::uint32_t address) const;
+    std::uint32_t ReadMemory32Slow(std::uint32_t address) const;
+    std::uint64_t ReadMemory64Slow(std::uint32_t address) const;
+    void WriteMemory8Slow(std::uint32_t address, std::uint8_t data);
+    void WriteMemory16Slow(std::uint32_t address, std::uint16_t data);
+    void WriteMemory32Slow(std::uint32_t address, std::uint32_t data);
+    void WriteMemory64Slow(std::uint32_t address, std::uint64_t data);
 
     void RaiseException(const int type, const std::uint32_t data);
     void RaiseSystemCall(std::uint32_t val);
@@ -296,4 +361,8 @@ public:
 private:
     void ResetMPCoreCP15Registers();
     eka2l1::arm::dyncom_core *core;
+
+    // Borrowed from core->mem_cache(), cached so the inlined memory fast
+    // paths above don't need the (incomplete here) dyncom_core type.
+    eka2l1::arm::r12l1::tlb *mem_cache_direct{ nullptr };
 };

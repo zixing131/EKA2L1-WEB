@@ -94,7 +94,8 @@
                 ? '服务器缺少 COOP/COEP 响应头（serve.py 已带，换其它服务器要自行加）。'
                 : '当前以 ' + location.protocol + '//' + location.hostname +
                   ' 打开，不是安全上下文。iPhone 请改用 https:// 访问（或本机 localhost），' +
-                  '用「http://局域网IP」会导致多线程不可用。';
+                  '用「http://局域网IP」会导致多线程不可用。自带的 serve.py 加 --tls 参数' +
+                  '即可提供 https（自签证书，首次访问需在警告页选择「仍要访问」）。';
             return '无法启用多线程（SharedArrayBuffer 不可用），模拟器核心无法启动。\n' + hint;
         }
         return null;
