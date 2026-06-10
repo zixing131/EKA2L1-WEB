@@ -63,8 +63,15 @@
 #include <system/installation/common.h>
 
 #include <services/applist/applist.h>
+#include <services/fbs/fbs.h>
 #include <utils/apacmd.h>
+#include <common/crypt.h>
 #include <common/cvt.h>
+#include <loader/mbm.h>
+#include <loader/mif.h>
+#include <loader/nvg.h>
+#include <loader/svgb.h>
+#include <vfs/vfs.h>
 
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
@@ -1107,6 +1114,183 @@ const char *wasm_get_app_list() {
     json += ']';
     s_json = std::move(json);
     return s_json.c_str();
+}
+
+/**
+ * Decode an app's icon into a JSON payload the page can render directly:
+ *   {"type":"svg","data":"<base64 svg>"}            MIF vector icons
+ *   {"type":"rgba","w":W,"h":H,"data":"<base64>"}   MBM / AIF bitmaps (mask
+ *                                                   merged into alpha)
+ *   null                                            no icon / decode failure
+ * Mirrors the extraction logic of the Qt/Android frontends. The returned
+ * pointer is valid until the next call.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_get_app_icon(int uid) {
+    static std::string s_icon_json;
+    s_icon_json = "null";
+
+    if (!g_state.symsys) {
+        return s_icon_json.c_str();
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        return s_icon_json.c_str();
+    }
+
+    auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+        kern->get_by_name<eka2l1::service::server>(
+            eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+    if (!alserv) {
+        return s_icon_json.c_str();
+    }
+
+    eka2l1::apa_app_registry *reg = alserv->get_registration(static_cast<std::uint32_t>(uid));
+    if (!reg) {
+        return s_icon_json.c_str();
+    }
+
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+    const std::u16string path_ext = eka2l1::common::lowercase_ucs2_string(
+        eka2l1::path_extension(reg->icon_file_path));
+
+    auto make_rgba_json = [](const std::uint8_t *data, const int w, const int h) {
+        return "{\"type\":\"rgba\",\"w\":" + std::to_string(w) + ",\"h\":" + std::to_string(h)
+            + ",\"data\":\"" + eka2l1::crypt::base64_encode(data, static_cast<std::size_t>(w) * h * 4)
+            + "\"}";
+    };
+
+    if (path_ext == u".mif") {
+        // Vector icon: debinarize SVGB/NVG to plain SVG text — the browser
+        // renders SVG natively, so no rasterizer is needed on this side.
+        eka2l1::symfile file_route = io->open_file(reg->icon_file_path, READ_MODE | BIN_MODE);
+        if (!file_route) {
+            return s_icon_json.c_str();
+        }
+
+        eka2l1::ro_file_stream file_route_stream(file_route.get());
+        eka2l1::loader::mif_file mif_parser(reinterpret_cast<eka2l1::common::ro_stream *>(&file_route_stream));
+        if (!mif_parser.do_parse()) {
+            return s_icon_json.c_str();
+        }
+
+        int dest_size = 0;
+        if (!mif_parser.read_mif_entry(0, nullptr, dest_size) || (dest_size <= 0)) {
+            return s_icon_json.c_str();
+        }
+
+        std::vector<std::uint8_t> data(dest_size);
+        mif_parser.read_mif_entry(0, data.data(), dest_size);
+
+        eka2l1::common::ro_buf_stream inside_stream(data.data(), data.size());
+        eka2l1::loader::mif_icon_header header;
+        inside_stream.read(&header, sizeof(header));
+
+        // MEMFS path outside /eka2l1 so it never gets persisted to IndexedDB.
+        // (wo_growable_buf_stream is ostringstream-based, which traps on WASM
+        // due to the missing locale database — file round-trip instead.)
+        static const char *TMP_SVG = "/icon_tmp.svg";
+        bool svg_ok = false;
+        {
+            eka2l1::common::wo_std_file_stream out_stream(TMP_SVG, true);
+            if (header.type == eka2l1::loader::mif_icon_type_svg) {
+                std::vector<eka2l1::loader::svgb_convert_error_description> errors;
+                if (eka2l1::loader::convert_svgb_to_svg(inside_stream, out_stream, errors)) {
+                    svg_ok = true;
+                } else if (!errors.empty()
+                    && (errors[0].reason_ == eka2l1::loader::svgb_convert_error_invalid_file)) {
+                    // Entry is already plain SVG text, pass it through.
+                    out_stream.write(data.data() + sizeof(header), data.size() - sizeof(header));
+                    svg_ok = true;
+                }
+            } else {
+                eka2l1::common::ro_buf_stream nvg_stream(data.data() + sizeof(header),
+                    data.size() - sizeof(header));
+                std::vector<eka2l1::loader::nvg_convert_error_description> errors_nvg;
+                svg_ok = eka2l1::loader::convert_nvg_to_svg(nvg_stream, out_stream, errors_nvg);
+            }
+        }
+
+        if (svg_ok) {
+            eka2l1::common::ro_std_file_stream svg_in(TMP_SVG, true);
+            if (svg_in.valid() && svg_in.size() > 0) {
+                std::vector<std::uint8_t> svg_data(svg_in.size());
+                svg_in.read(svg_data.data(), svg_data.size());
+                s_icon_json = "{\"type\":\"svg\",\"data\":\""
+                    + eka2l1::crypt::base64_encode(svg_data.data(), svg_data.size()) + "\"}";
+            }
+        }
+
+        return s_icon_json.c_str();
+    }
+
+    eka2l1::fbs_server *fbss = reinterpret_cast<eka2l1::fbs_server *>(
+        kern->get_by_name<eka2l1::service::server>(
+            eka2l1::epoc::get_fbs_server_name_by_epocver(kern->get_epoc_version())));
+    if (!fbss) {
+        return s_icon_json.c_str();
+    }
+
+    if (path_ext == u".mbm") {
+        eka2l1::symfile file_route = io->open_file(reg->icon_file_path, READ_MODE | BIN_MODE);
+        if (!file_route) {
+            return s_icon_json.c_str();
+        }
+
+        eka2l1::ro_file_stream file_route_stream(file_route.get());
+        eka2l1::loader::mbm_file mbm_parser(reinterpret_cast<eka2l1::common::ro_stream *>(&file_route_stream));
+        if (!mbm_parser.do_read_headers() || mbm_parser.sbm_headers.empty()) {
+            return s_icon_json.c_str();
+        }
+
+        eka2l1::loader::sbm_header *icon_header = &mbm_parser.sbm_headers[0];
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(icon_header->size_pixels.x)
+            * icon_header->size_pixels.y * 4);
+        eka2l1::common::wo_buf_stream rgba_stream(rgba.data(), rgba.size());
+
+        if (eka2l1::epoc::convert_to_rgba8888(fbss, mbm_parser, 0, rgba_stream)) {
+            s_icon_json = make_rgba_json(rgba.data(), icon_header->size_pixels.x,
+                icon_header->size_pixels.y);
+        }
+
+        return s_icon_json.c_str();
+    }
+
+    // AIF & friends: icons were loaded into the registry during the scan.
+    std::optional<eka2l1::apa_app_masked_icon_bitmap> icon_pair = alserv->get_icon(*reg, 0);
+    if (!icon_pair.has_value() || !icon_pair->first) {
+        return s_icon_json.c_str();
+    }
+
+    eka2l1::epoc::bitwise_bitmap *main_bitmap = icon_pair->first;
+    const int w = main_bitmap->header_.size_pixels.x;
+    const int h = main_bitmap->header_.size_pixels.y;
+
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(w) * h * 4);
+    eka2l1::common::wo_buf_stream rgba_stream(rgba.data(), rgba.size());
+    if (!eka2l1::epoc::convert_to_rgba8888(fbss, main_bitmap, rgba_stream)) {
+        return s_icon_json.c_str();
+    }
+
+    if (icon_pair->second) {
+        eka2l1::epoc::bitwise_bitmap *mask_bitmap = icon_pair->second;
+        if ((mask_bitmap->header_.size_pixels.x == w) && (mask_bitmap->header_.size_pixels.y == h)) {
+            std::vector<std::uint8_t> mask_rgba(rgba.size());
+            eka2l1::common::wo_buf_stream mask_stream(mask_rgba.data(), mask_rgba.size());
+
+            // make_standard_mask: alpha=255 where the mask pixel is pure white
+            // (= icon visible); copy that straight into the icon's alpha.
+            if (eka2l1::epoc::convert_to_rgba8888(fbss, mask_bitmap, mask_stream, true)) {
+                for (std::size_t i = 3; i < rgba.size(); i += 4) {
+                    rgba[i] = mask_rgba[i];
+                }
+            }
+        }
+    }
+
+    s_icon_json = make_rgba_json(rgba.data(), w, h);
+    return s_icon_json.c_str();
 }
 
 /**

@@ -172,6 +172,18 @@
         return ccall('wasm_launch_app', 'number', ['number'], [uid]);
     };
 
+    /**
+     * Decoded icon for an app, or null.
+     * {type:'svg', data:<b64>} | {type:'rgba', w, h, data:<b64>}
+     */
+    EKA2L1.appIcon = function (uid) {
+        try {
+            return JSON.parse(ccall('wasm_get_app_icon', 'string', ['number'], [uid]));
+        } catch (e) {
+            return null;
+        }
+    };
+
     EKA2L1.setPaused = function (paused) {
         ccall('wasm_set_paused', null, ['number'], [paused ? 1 : 0]);
     };

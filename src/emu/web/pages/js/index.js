@@ -50,7 +50,99 @@
         document.getElementById('deviceStatusText').textContent = text;
     }
 
+    // ---- icons ----------------------------------------------------------------
+
+    var ICONS_CACHE_KEY = 'eka2l1_icons_cache';
+    var ICONS_CACHE_LIMIT = 3.5 * 1024 * 1024; // stay well under the LS quota
+
+    var iconCache = {}; // uid -> dataURL ('' = known to have no icon)
+    try { iconCache = JSON.parse(localStorage.getItem(ICONS_CACHE_KEY)) || {}; } catch (e) {}
+
+    function persistIconCache() {
+        try {
+            var json = JSON.stringify(iconCache);
+            if (json.length <= ICONS_CACHE_LIMIT) localStorage.setItem(ICONS_CACHE_KEY, json);
+        } catch (e) { /* quota — keep in-memory only */ }
+    }
+
+    // {type:'svg'|'rgba',...} -> data URL the <img> tag can show
+    function iconToDataURL(icon) {
+        if (!icon || !icon.type) return null;
+        if (icon.type === 'svg') {
+            return 'data:image/svg+xml;base64,' + icon.data;
+        }
+        if (icon.type === 'rgba' && icon.w > 0 && icon.h > 0) {
+            try {
+                var bin = atob(icon.data);
+                var px = new Uint8ClampedArray(bin.length);
+                for (var i = 0; i < bin.length; i++) px[i] = bin.charCodeAt(i);
+                var cnv = document.createElement('canvas');
+                cnv.width = icon.w;
+                cnv.height = icon.h;
+                cnv.getContext('2d').putImageData(new ImageData(px, icon.w, icon.h), 0, 0);
+                return cnv.toDataURL('image/png');
+            } catch (e) {
+                console.warn('[EKA2L1] icon decode failed:', e);
+            }
+        }
+        return null;
+    }
+
+    function applyIcon(avatarEl, dataURL) {
+        avatarEl.classList.add('has-icon');
+        avatarEl.textContent = '';
+        var img = document.createElement('img');
+        img.className = 'game-icon-img';
+        img.src = dataURL;
+        img.alt = '';
+        avatarEl.appendChild(img);
+    }
+
+    var iconPumpRunning = false;
+
+    // Fetch missing icons one at a time so the wasm calls never jank the UI.
+    function pumpIcons() {
+        if (iconPumpRunning || !coreReady || !deviceReady) return;
+        var pending = apps.filter(function (a) { return !(a.uid in iconCache); });
+        if (pending.length === 0) return;
+        iconPumpRunning = true;
+
+        var idx = 0;
+        (function step() {
+            if (idx >= pending.length) {
+                iconPumpRunning = false;
+                persistIconCache();
+                return;
+            }
+            var app = pending[idx++];
+            var url = null;
+            try { url = iconToDataURL(EKA2L1.appIcon(app.uid)); } catch (e) {}
+            iconCache[app.uid] = url || '';
+
+            if (url) {
+                var avatarEl = document.querySelector('.game-avatar[data-icon-uid="' + app.uid + '"]');
+                if (avatarEl) applyIcon(avatarEl, url);
+            }
+            setTimeout(step, 16);
+        })();
+    }
+
     // ---- game list ---------------------------------------------------------
+
+    var VIEW_KEY = 'eka2l1_view';
+    var viewMode = localStorage.getItem(VIEW_KEY) || 'grid';
+
+    function applyViewIcon() {
+        document.getElementById('viewIconGrid').style.display = (viewMode === 'list') ? '' : 'none';
+        document.getElementById('viewIconList').style.display = (viewMode === 'grid') ? '' : 'none';
+    }
+
+    window.toggleView = function () {
+        viewMode = (viewMode === 'grid') ? 'list' : 'grid';
+        localStorage.setItem(VIEW_KEY, viewMode);
+        applyViewIcon();
+        renderGameList();
+    };
 
     var avatarPalette = ['#e94560', '#0a84ff', '#34c759', '#ff9f0a', '#bf5af2',
         '#5e5ce6', '#ff375f', '#64d2ff', '#30d158', '#ffd60a'];
@@ -68,9 +160,11 @@
             return !filter || (a.name || '').toLowerCase().indexOf(filter) !== -1;
         });
 
+        listEl.className = (viewMode === 'grid') ? 'game-grid' : 'game-list';
         listEl.innerHTML = '';
 
         if (shown.length === 0) {
+            listEl.className = 'game-list';
             var empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.innerHTML = apps.length === 0
@@ -87,8 +181,13 @@
 
             var avatar = document.createElement('div');
             avatar.className = 'game-avatar';
-            avatar.style.background = avatarColor(name);
-            avatar.textContent = name.charAt(0).toUpperCase();
+            avatar.dataset.iconUid = app.uid;
+            if (iconCache[app.uid]) {
+                applyIcon(avatar, iconCache[app.uid]);
+            } else {
+                avatar.style.background = avatarColor(name);
+                avatar.textContent = name.charAt(0).toUpperCase();
+            }
 
             var info = document.createElement('div');
             info.className = 'game-item-info';
@@ -111,6 +210,8 @@
             item.addEventListener('click', function () { playApp(app); });
             listEl.appendChild(item);
         });
+
+        pumpIcons();
     };
 
     function playApp(app) {
@@ -129,6 +230,7 @@
     try {
         apps = JSON.parse(localStorage.getItem(APPS_CACHE_KEY)) || [];
     } catch (e) { apps = []; }
+    applyViewIcon();
     renderGameList();
 
     // ---- sheets ------------------------------------------------------------
@@ -274,7 +376,10 @@
 
     window.wipeAll = function () {
         if (!confirm('确定要清除全部数据吗？\n设备固件、已装游戏和所有存档都会被删除，且无法恢复。')) return;
-        try { localStorage.removeItem(APPS_CACHE_KEY); } catch (e) {}
+        try {
+            localStorage.removeItem(APPS_CACHE_KEY);
+            localStorage.removeItem(ICONS_CACHE_KEY);
+        } catch (e) {}
         var req = indexedDB.deleteDatabase('/eka2l1');
         req.onsuccess = req.onerror = req.onblocked = function () { location.reload(); };
     };
