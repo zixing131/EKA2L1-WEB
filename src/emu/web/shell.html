@@ -1495,21 +1495,20 @@
     });
 
     // ---- Canvas Resizing ----
+    // Only scale the canvas via CSS. The canvas bitmap size (width/height
+    // attributes) is owned by SDL inside the emulator (360x640) — touching it
+    // from JS resizes the WebGL drawing buffer (worst case to 0x0 -> clamped
+    // to 1x1) and breaks all rendering.
     function resizeCanvas(scale) {
-        // Default Symbian resolution is 360x640 or 240x320
+        if (!scale || !isFinite(scale) || scale <= 0) {
+            scale = 1;
+        }
+
         var baseWidth = 360;
         var baseHeight = 640;
 
-        // If orientation is landscape
-        if (window.innerWidth > window.innerHeight) {
-            baseWidth = 640;
-            baseHeight = 360;
-        }
-
-        canvas.width = baseWidth * scale;
-        canvas.height = baseHeight * scale;
-        canvas.style.width = canvas.width + 'px';
-        canvas.style.height = canvas.height + 'px';
+        canvas.style.width = (baseWidth * scale) + 'px';
+        canvas.style.height = (baseHeight * scale) + 'px';
     }
 
     // ---- FPS Counter ----

@@ -519,12 +519,68 @@ static void register_screen_draw_callbacks() {
                 static_cast<std::uint32_t>(g_state.window_width),
                 static_cast<std::uint32_t>(g_state.window_height));
 
-            // No present status tracking: we must never block (browser main
-            // thread), and the pump drains the queue every frame anyway.
-            builder.present(nullptr);
+            // Submit the draw commands first WITHOUT the present: they run
+            // inline on this thread, so afterwards the backbuffer still holds
+            // the result (present/swap would invalidate it for readback).
+            eka2l1::drivers::command_list draw_list = builder.retrieve_command_list();
+            g_state.graphics_driver->submit_command_list(draw_list);
 
-            eka2l1::drivers::command_list retrieved = builder.retrieve_command_list();
-            g_state.graphics_driver->submit_command_list(retrieved);
+            // DIAGNOSTIC: read the default framebuffer between draw and
+            // present. (60, h-60) is inside the blue debug square, the center
+            // inside the screen texture blit.
+            static std::atomic<int> s_readback_count{ 0 };
+            const int rbc = ++s_readback_count;
+            if ((rbc <= 3) || ((rbc & 15) == 0)) {
+                GLint prev_fb = -1;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+                GLint vp[4] = { -1, -1, -1, -1 };
+                glGetIntegerv(GL_VIEWPORT, vp);
+
+                // The real canvas / drawing buffer dimensions, from JS. If
+                // these differ from window_fb_size, reads/draws land outside
+                // the actual buffer.
+                const int canvas_w = EM_ASM_INT({ return Module.canvas ? Module.canvas.width : -1; });
+                const int canvas_h = EM_ASM_INT({ return Module.canvas ? Module.canvas.height : -1; });
+                const int db_w = EM_ASM_INT({
+                    var c = Module.canvas;
+                    if (!c) return -1;
+                    var g = c.getContext('webgl2') || c.getContext('webgl');
+                    return g ? g.drawingBufferWidth : -2;
+                });
+                const int db_h = EM_ASM_INT({
+                    var c = Module.canvas;
+                    if (!c) return -1;
+                    var g = c.getContext('webgl2') || c.getContext('webgl');
+                    return g ? g.drawingBufferHeight : -2;
+                });
+
+                unsigned char center[4] = { 0 };
+                unsigned char corner[4] = { 0 };
+                unsigned char origin_px[4] = { 0 };
+                const int w = g_state.window_width;
+                const int h = g_state.window_height;
+                glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, center);
+                glReadPixels(60, h - 60, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner);
+                glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, origin_px);
+
+                LOG_WARN(FRONTEND_CMDLINE,
+                    "[readback] #{} prev_fb={} vp=({},{},{},{}) canvas={}x{} drawbuf={}x{} center=({},{},{},{}) near_top_left=({},{},{},{}) at10=({},{},{},{})",
+                    rbc, prev_fb, vp[0], vp[1], vp[2], vp[3],
+                    canvas_w, canvas_h, db_w, db_h,
+                    center[0], center[1], center[2], center[3],
+                    corner[0], corner[1], corner[2], corner[3],
+                    origin_px[0], origin_px[1], origin_px[2], origin_px[3]);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fb));
+            }
+
+            // Now present. No status tracking: we must never block here.
+            eka2l1::drivers::graphics_command_builder present_builder;
+            present_builder.present(nullptr);
+            eka2l1::drivers::command_list present_list = present_builder.retrieve_command_list();
+            g_state.graphics_driver->submit_command_list(present_list);
         });
 
         screens = screens->next;
@@ -579,12 +635,17 @@ static bool init_sdl() {
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    // Create window with OpenGL support
+    // Create window with OpenGL support.
+    // No RESIZABLE/HIGHDPI: on Emscripten those make SDL sync the canvas
+    // bitmap size to the CSS/client size on every browser resize — while the
+    // page is still showing the splash the container is 0x0, which collapses
+    // the WebGL drawing buffer to 1x1. The canvas stays at the fixed emulator
+    // resolution; the page scales it visually with CSS only.
     g_window = SDL_CreateWindow(
         "EKA2L1 Web - Symbian Emulator",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         g_state.window_width, g_state.window_height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
+        SDL_WINDOW_OPENGL
     );
 
     if (!g_window) {
