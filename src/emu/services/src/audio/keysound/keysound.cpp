@@ -257,6 +257,12 @@ namespace eka2l1 {
             return;
         }
 
+        // Audio drivers without real output (the WASM null backend) return no
+        // stream from new_output_stream; key sounds are simply skipped then.
+        if (!aud_out_) {
+            return;
+        }
+
         if (aud_out_->is_playing()) {
             aud_out_->stop();
         }

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <common/types.h>
 #include <unordered_map>
 
@@ -261,6 +262,13 @@ public:
     // Lets dirty_tlb_page() ignore the frequent data-page unmaps (heap
     // decommits) and only drop translations when an actual code page changes.
     std::array<std::uint64_t, 1 << 14> code_page_bitmap{};
+
+    // dirty_tlb_page() can fire on the timer thread while the interpreter is
+    // mid-run on the main thread; mutating instruction_cache concurrently
+    // would corrupt it (a broken bucket chain makes find() loop forever).
+    // Off-thread invalidation requests land here and DISPATCH consumes them
+    // between blocks, where resetting the translation buffer is safe.
+    std::atomic_bool icache_invalidate_pending{ false };
 
     block_lookup_entry &block_lookup_ref(const std::uint32_t pc) {
         // Mix high bits in so ARM (4-aligned) PCs still populate odd slots.

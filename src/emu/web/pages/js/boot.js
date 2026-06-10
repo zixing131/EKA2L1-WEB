@@ -204,6 +204,17 @@
         return ccall('wasm_get_redraw_count', 'number');
     };
 
+    /**
+     * Print a full guest state dump (threads, PCs, wait objects, progress
+     * counters) to the console. When something hangs, call this twice a few
+     * seconds apart from devtools: `EKA2L1.debugDump()`.
+     * If even this call never returns, the browser main thread itself is
+     * stuck inside the wasm — report that, it pinpoints a different bug class.
+     */
+    EKA2L1.debugDump = function () {
+        ccall('wasm_debug_dump', null, [], []);
+    };
+
     /** Write a File/Blob into the wasm VFS. Resolves with the target path. */
     EKA2L1.writeFileToVFS = function (file, targetPath) {
         return new Promise(function (resolve, reject) {

@@ -1661,6 +1661,14 @@ DISPATCH : {
     else
         cpu->Reg[15] &= 0xfffffffc;
 
+    // Consume off-thread invalidation requests (timer-thread unmaps of code
+    // pages) here, between blocks, where dropping the buffer is safe.
+    if (cpu->icache_invalidate_pending.load(std::memory_order_relaxed)) {
+        if (cpu->icache_invalidate_pending.exchange(false, std::memory_order_acq_rel)) {
+            cpu->invalidate_translation_cache();
+        }
+    }
+
     // Find the cached instruction cream, otherwise translate it...
     {
         const std::uint32_t dispatch_pc = cpu->Reg[15];

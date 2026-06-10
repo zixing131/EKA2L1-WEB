@@ -169,8 +169,13 @@ namespace eka2l1::arm {
         // A page being unmapped invalidates any translation made from it
         // (DLL unload, code chunk decommit). The bitmap filters out the
         // common data-page case so heap decommits stay cheap.
+        //
+        // Don't invalidate inline: this can be called from the timer thread
+        // while the interpreter is running on the main thread, and clearing
+        // instruction_cache concurrently corrupts it. Request it instead;
+        // DISPATCH consumes the flag at the next block boundary.
         if (state_->is_code_page(addr)) {
-            state_->invalidate_translation_cache();
+            state_->icache_invalidate_pending.store(true, std::memory_order_release);
         }
     }
 

@@ -75,6 +75,7 @@
 
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
+#include <kernel/thread.h>
 
 #include <services/window/window.h>
 #include <services/window/screen.h>
@@ -1528,6 +1529,112 @@ void wasm_send_key(int scancode, int pressed) {
 EMSCRIPTEN_KEEPALIVE
 double wasm_get_redraw_count() {
     return static_cast<double>(s_redraw_cb_count.load());
+}
+
+static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {
+    switch (st) {
+    case eka2l1::kernel::thread_state::create: return "create";
+    case eka2l1::kernel::thread_state::run: return "run";
+    case eka2l1::kernel::thread_state::wait: return "wait";
+    case eka2l1::kernel::thread_state::ready: return "ready";
+    case eka2l1::kernel::thread_state::stop: return "stop";
+    case eka2l1::kernel::thread_state::wait_fast_sema: return "wait_fast_sema";
+    case eka2l1::kernel::thread_state::wait_mutex: return "wait_mutex";
+    case eka2l1::kernel::thread_state::wait_condvar: return "wait_condvar";
+    case eka2l1::kernel::thread_state::wait_mutex_suspend: return "wait_mutex_suspend";
+    case eka2l1::kernel::thread_state::wait_fast_sema_suspend: return "wait_fast_sema_suspend";
+    case eka2l1::kernel::thread_state::wait_condvar_suspend: return "wait_condvar_suspend";
+    case eka2l1::kernel::thread_state::hold_mutex_pending: return "hold_mutex_pending";
+    case eka2l1::kernel::thread_state::wait_dfc: return "wait_dfc";
+    case eka2l1::kernel::thread_state::wait_hle: return "wait_hle";
+    default: return "?";
+    }
+}
+
+// dyncom progress counters (defined in the CPU module, WASM builds only).
+extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
+extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
+
+/**
+ * Dump every guest thread (state, PC/LR/SP, wait object, owning module) plus
+ * emulator progress counters to the console. Call it twice a few seconds
+ * apart when something hangs:
+ *   - instrs delta == 0  -> the guest is fully blocked (look at wait objects)
+ *   - instrs delta != 0 with the same PCs -> a guest thread is spinning there
+ * Runs lock-free on purpose: it must work even when the system is wedged.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_debug_dump() {
+    std::printf("[dump] ================= EKA2L1 state dump =================\n");
+    std::printf("[dump] guest_instrs=%llu blocks_translated=%llu redraws=%llu paused=%d\n",
+        static_cast<unsigned long long>(eka2l1_wasm_guest_instrs_total.load()),
+        static_cast<unsigned long long>(eka2l1_wasm_guest_blocks_translated.load()),
+        static_cast<unsigned long long>(s_redraw_cb_count.load()),
+        g_state.paused ? 1 : 0);
+
+    if (!g_state.symsys) {
+        std::printf("[dump] system not created\n");
+        return;
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        std::printf("[dump] kernel not created\n");
+        return;
+    }
+
+    eka2l1::arm::core *cpu = kern->get_cpu();
+    eka2l1::kernel::thread *crr = kern->crr_thread();
+
+    for (auto &obj : kern->get_thread_list()) {
+        eka2l1::kernel::thread *thr = reinterpret_cast<eka2l1::kernel::thread *>(obj.get());
+        if (!thr) {
+            continue;
+        }
+
+        eka2l1::kernel::process *pr = thr->owning_process();
+
+        std::uint32_t pc = 0, lr = 0, sp = 0;
+        if (thr == crr && cpu) {
+            pc = cpu->get_pc();
+            lr = cpu->get_lr();
+            sp = cpu->get_sp();
+        } else {
+            const eka2l1::arm::core::thread_context &ctx = thr->get_thread_context();
+            pc = ctx.cpu_registers[15];
+            lr = ctx.cpu_registers[14];
+            sp = ctx.cpu_registers[13];
+        }
+
+        // Resolve PC to the codeseg (module) containing it.
+        std::string pc_module = "?";
+        std::uint32_t pc_offset = 0;
+        if (pr) {
+            for (auto &seg_obj : kern->get_codeseg_list()) {
+                eka2l1::codeseg_ptr seg = reinterpret_cast<eka2l1::codeseg_ptr>(seg_obj.get());
+                if (!seg) {
+                    continue;
+                }
+                const eka2l1::address beg = seg->get_code_run_addr(pr);
+                if (beg && (pc >= beg) && (pc < beg + seg->get_text_size())) {
+                    pc_module = seg->name();
+                    pc_offset = pc - beg;
+                    break;
+                }
+            }
+        }
+
+        std::printf("[dump] %s thread='%s' proc='%s' state=%s pc=0x%08X (%s+0x%X) lr=0x%08X sp=0x%08X wait_obj='%s'\n",
+            (thr == crr) ? "*" : " ",
+            thr->name().c_str(),
+            pr ? pr->name().c_str() : "?",
+            thread_state_to_str(thr->current_state()),
+            pc, pc_module.c_str(), pc_offset, lr, sp,
+            thr->wait_obj ? thr->wait_obj->name().c_str() : "");
+    }
+
+    std::printf("[dump] =====================================================\n");
+    std::fflush(stdout);
 }
 
 /**
