@@ -71,6 +71,7 @@
 
 #include <services/window/window.h>
 #include <services/window/screen.h>
+#include <services/window/keys.h>
 #include <services/init.h>
 
 // ============================================================================
@@ -341,9 +342,68 @@ static eka2l1::drivers::input_event make_mouse_event_driver(const float x, const
     return evt;
 }
 
+// Map host (SDL) keycodes to Symbian scancodes for a classic non-touch S60
+// phone. Sent as key_raw events so no keybind configuration is needed.
+//   Arrows = D-pad, Enter = OK/middle key, F1/F2 = soft keys,
+//   F3/F4 (or Esc) = call/end-call, Backspace = C (clear),
+//   digits / letters map straight through, [ ] = * #.
+static std::uint32_t sdl_key_to_symbian_scancode(const int sdl_key) {
+    switch (sdl_key) {
+    case SDLK_UP:
+        return epoc::std_key_up_arrow;
+    case SDLK_DOWN:
+        return epoc::std_key_down_arrow;
+    case SDLK_LEFT:
+        return epoc::std_key_left_arrow;
+    case SDLK_RIGHT:
+        return epoc::std_key_right_arrow;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        return epoc::std_key_device_3; // middle / OK
+    case SDLK_F1:
+        return epoc::std_key_device_0; // left soft key
+    case SDLK_F2:
+        return epoc::std_key_device_1; // right soft key
+    case SDLK_F3:
+        return epoc::std_key_yes; // call (green)
+    case SDLK_F4:
+    case SDLK_ESCAPE:
+        return epoc::std_key_no; // end call (red)
+    case SDLK_BACKSPACE:
+        return epoc::std_key_backspace; // C key
+    case SDLK_LEFTBRACKET:
+    case SDLK_KP_MULTIPLY:
+        return epoc::std_key_nkp_asterisk; // *
+    case SDLK_RIGHTBRACKET:
+        return epoc::std_key_hash; // #
+    default:
+        break;
+    }
+
+    if ((sdl_key >= SDLK_0) && (sdl_key <= SDLK_9)) {
+        return static_cast<std::uint32_t>('0' + (sdl_key - SDLK_0));
+    }
+
+    if ((sdl_key >= SDLK_KP_1) && (sdl_key <= SDLK_KP_9)) {
+        return static_cast<std::uint32_t>('1' + (sdl_key - SDLK_KP_1));
+    }
+
+    if (sdl_key == SDLK_KP_0) {
+        return static_cast<std::uint32_t>('0');
+    }
+
+    if ((sdl_key >= SDLK_a) && (sdl_key <= SDLK_z)) {
+        return static_cast<std::uint32_t>('A' + (sdl_key - SDLK_a));
+    }
+
+    return 0;
+}
+
 static eka2l1::drivers::input_event make_key_event_driver(const int key, const eka2l1::drivers::key_state key_state) {
     eka2l1::drivers::input_event evt;
-    evt.type_ = eka2l1::drivers::input_event_type::key;
+    // key_raw: the code is used directly as the Symbian scancode (no keybind
+    // table lookup, which would be empty on a fresh web config).
+    evt.type_ = eka2l1::drivers::input_event_type::key_raw;
     evt.key_.state_ = key_state;
     evt.key_.code_ = key;
 
@@ -362,11 +422,23 @@ static void on_web_window_mouse_evt(void *userdata, eka2l1::vec3 mouse_pos, int 
 }
 
 static void on_web_window_key_press(void *userdata, const int key) {
+    const std::uint32_t scancode = sdl_key_to_symbian_scancode(key);
+
+    // TEMP DIAGNOSTIC: confirms SDL actually delivers keydown to the C++ side.
+    // If this never logs when you press keys, the browser/SDL isn't routing
+    // keyboard events here (focus issue). Remove once input is confirmed.
+    LOG_INFO(FRONTEND_CMDLINE, "[key] down sdl={} -> scancode=0x{:X} winserv={}",
+        key, scancode, g_state.winserv ? "ok" : "null");
+
     if (!g_state.winserv) {
         return;
     }
 
-    auto evt = make_key_event_driver(key, eka2l1::drivers::key_state::pressed);
+    if (!scancode) {
+        return;
+    }
+
+    auto evt = make_key_event_driver(static_cast<int>(scancode), eka2l1::drivers::key_state::pressed);
     g_state.winserv->queue_input_from_driver(evt);
 }
 
@@ -375,7 +447,12 @@ static void on_web_window_key_release(void *userdata, const int key) {
         return;
     }
 
-    auto evt = make_key_event_driver(key, eka2l1::drivers::key_state::released);
+    const std::uint32_t scancode = sdl_key_to_symbian_scancode(key);
+    if (!scancode) {
+        return;
+    }
+
+    auto evt = make_key_event_driver(static_cast<int>(scancode), eka2l1::drivers::key_state::released);
     g_state.winserv->queue_input_from_driver(evt);
 }
 
@@ -383,15 +460,9 @@ static void on_web_window_key_release(void *userdata, const int key) {
 // Screen composition: emulated screen texture -> backbuffer
 // ============================================================================
 
-// Render-path diagnostics, reported in the [hb] heartbeat line:
-// redraw_cb = screen redraw callbacks fired (winserv composed a frame and we
-// queued a present); pump_lists = command lists executed on the main thread.
+// Number of screen redraw callbacks fired. main_loop's boot_phase CPU budget
+// keys off whether the first frame has been presented yet (see boot_phase).
 static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
-static std::atomic<std::uint64_t> s_pump_list_count{ 0 };
-
-// Defined in arm_dyncom.cpp / arm_dyncom_interpreter.cpp (WASM builds only).
-extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
-extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
 
 // Simplified port of the Android launcher::draw(): clear the backbuffer and
 // blit the emulated screen texture scaled to fit the window, centered.
@@ -415,24 +486,13 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
     builder.set_feature(eka2l1::drivers::graphics_feature::stencil_test, false);
     builder.set_viewport(viewport);
 
-    // DIAGNOSTIC: loud red clear — if the canvas turns red, presenting works
-    // and the problem is the (black/empty) screen texture; if the canvas
-    // stays black, the present never reaches the canvas.
-    builder.clear({ 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f }, eka2l1::drivers::draw_buffer_bit_color_buffer);
+    builder.clear({ 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f }, eka2l1::drivers::draw_buffer_bit_color_buffer);
 
     if (scr && scr->screen_texture) {
         auto &crr_mode = scr->current_mode();
 
         eka2l1::vec2 size = crr_mode.size;
         src.size = size;
-
-        static std::atomic<int> s_present_log_count{ 0 };
-        const int plc = ++s_present_log_count;
-        if ((plc <= 3) || ((plc & 15) == 0)) {
-            LOG_WARN(FRONTEND_CMDLINE, "[present] #{} tex={} mode={}x{} win={}x{} scale_factor={} rot={}",
-                plc, scr->screen_texture, size.x, size.y, window_width, window_height,
-                scr->display_scale_factor, scr->ui_rotation);
-        }
 
         // Fit in window, keep aspect ratio
         float width = static_cast<float>(swapchain_size.x);
@@ -469,19 +529,6 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
         builder.set_texture_filter(scr->screen_texture, false, eka2l1::drivers::filter_option::linear);
         builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
             static_cast<float>(scr->ui_rotation), 0);
-
-        // DIAGNOSTIC: untextured blue square via the brush pipeline. Visible
-        // blue + missing screen = texture draw broken; no blue = geometry /
-        // projection broken for all quads.
-        builder.set_brush_color(eka2l1::vec3(0, 0, 255));
-        builder.draw_rectangle(eka2l1::rect(eka2l1::vec2(10, 10), eka2l1::vec2(100, 100)));
-    } else {
-        static std::atomic<int> s_present_skip_count{ 0 };
-        const int psc = ++s_present_skip_count;
-        if ((psc <= 3) || ((psc & 15) == 0)) {
-            LOG_WARN(FRONTEND_CMDLINE, "[present] #{} SKIPPED: scr={} texture={}",
-                psc, scr ? "ok" : "null", scr ? scr->screen_texture : 0);
-        }
     }
 
     builder.load_backup_state();
@@ -505,78 +552,20 @@ static void register_screen_draw_callbacks() {
                 return;
             }
 
-            const std::uint64_t fired = ++s_redraw_cb_count;
-            if (fired <= 3) {
-                LOG_WARN(FRONTEND_CMDLINE,
-                    "Screen redraw cb #{}: dsa={} texture={} mode_size={}x{} window={}x{}",
-                    fired, is_dsa, scr ? scr->screen_texture : 0,
-                    scr ? scr->current_mode().size.x : -1, scr ? scr->current_mode().size.y : -1,
-                    g_state.window_width, g_state.window_height);
-            }
+            // Counts presented frames; main_loop's boot_phase budget keys off
+            // the first redraw (see FRAME_CPU_BUDGET_MS).
+            ++s_redraw_cb_count;
 
             eka2l1::drivers::graphics_command_builder builder;
             draw_emulated_screen(builder, scr,
                 static_cast<std::uint32_t>(g_state.window_width),
                 static_cast<std::uint32_t>(g_state.window_height));
 
-            // Submit the draw commands first WITHOUT the present: they run
-            // inline on this thread, so afterwards the backbuffer still holds
-            // the result (present/swap would invalidate it for readback).
             eka2l1::drivers::command_list draw_list = builder.retrieve_command_list();
             g_state.graphics_driver->submit_command_list(draw_list);
 
-            // DIAGNOSTIC: read the default framebuffer between draw and
-            // present. (60, h-60) is inside the blue debug square, the center
-            // inside the screen texture blit.
-            static std::atomic<int> s_readback_count{ 0 };
-            const int rbc = ++s_readback_count;
-            if ((rbc <= 3) || ((rbc & 15) == 0)) {
-                GLint prev_fb = -1;
-                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-                GLint vp[4] = { -1, -1, -1, -1 };
-                glGetIntegerv(GL_VIEWPORT, vp);
-
-                // The real canvas / drawing buffer dimensions, from JS. If
-                // these differ from window_fb_size, reads/draws land outside
-                // the actual buffer.
-                const int canvas_w = EM_ASM_INT({ return Module.canvas ? Module.canvas.width : -1; });
-                const int canvas_h = EM_ASM_INT({ return Module.canvas ? Module.canvas.height : -1; });
-                const int db_w = EM_ASM_INT({
-                    var c = Module.canvas;
-                    if (!c) return -1;
-                    var g = c.getContext('webgl2') || c.getContext('webgl');
-                    return g ? g.drawingBufferWidth : -2;
-                });
-                const int db_h = EM_ASM_INT({
-                    var c = Module.canvas;
-                    if (!c) return -1;
-                    var g = c.getContext('webgl2') || c.getContext('webgl');
-                    return g ? g.drawingBufferHeight : -2;
-                });
-
-                unsigned char center[4] = { 0 };
-                unsigned char corner[4] = { 0 };
-                unsigned char origin_px[4] = { 0 };
-                const int w = g_state.window_width;
-                const int h = g_state.window_height;
-                glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, center);
-                glReadPixels(60, h - 60, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner);
-                glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, origin_px);
-
-                LOG_WARN(FRONTEND_CMDLINE,
-                    "[readback] #{} prev_fb={} vp=({},{},{},{}) canvas={}x{} drawbuf={}x{} center=({},{},{},{}) near_top_left=({},{},{},{}) at10=({},{},{},{})",
-                    rbc, prev_fb, vp[0], vp[1], vp[2], vp[3],
-                    canvas_w, canvas_h, db_w, db_h,
-                    center[0], center[1], center[2], center[3],
-                    corner[0], corner[1], corner[2], corner[3],
-                    origin_px[0], origin_px[1], origin_px[2], origin_px[3]);
-
-                glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fb));
-            }
-
-            // Now present. No status tracking: we must never block here.
+            // Present as a separate list. No status tracking: this callback may
+            // run on the timer thread and must never block.
             eka2l1::drivers::graphics_command_builder present_builder;
             present_builder.present(nullptr);
             eka2l1::drivers::command_list present_list = present_builder.retrieve_command_list();
@@ -791,126 +780,6 @@ static bool init_emulator() {
 // ============================================================================
 
 static void main_loop() {
-    const double mainloop_entry_ms = emscripten_get_now();
-
-    // Per-frame cost accumulators (across all frames since last heartbeat).
-    static double s_acc_loop_ms = 0.0;
-    static double s_acc_swap_ms = 0.0;
-    static double s_acc_total_ms = 0.0;
-    static double s_max_loop_ms = 0.0;
-    static double s_max_swap_ms = 0.0;
-    static double s_max_total_ms = 0.0;
-
-    // Low-frequency heartbeat (~once every 2 s) so we can detect whether
-    // main_loop has stopped being called without flooding DevTools.
-    {
-        static double s_last_hb_ms = 0.0;
-        static std::uint64_t s_frames_since_last_hb = 0;
-        static size_t s_last_used_mb = 0;
-        ++s_frames_since_last_hb;
-        const double now_ms = mainloop_entry_ms;
-        if (now_ms - s_last_hb_ms >= 2000.0) {
-            const size_t heap_size = EM_ASM_INT({ return HEAP8.length; });
-            const size_t sbrk_used = (size_t)sbrk(0);
-            const size_t used_mb = sbrk_used / (1024 * 1024);
-            const double n = (s_frames_since_last_hb > 0) ? (double)s_frames_since_last_hb : 1.0;
-            static std::uint64_t s_last_instrs = 0;
-            static std::uint64_t s_last_blocks = 0;
-            const std::uint64_t instrs_now = eka2l1_wasm_guest_instrs_total.load();
-            const std::uint64_t blocks_now = eka2l1_wasm_guest_blocks_translated.load();
-            LOG_WARN(FRONTEND_CMDLINE,
-                "[hb] t={:.0f} frames={} heap={}MB used~{}MB d={}MB | redraw_cb={} pump_lists={} | instr={}(+{}) blocks={}(+{}) | per-frame avg loop={:.2f}ms swap={:.2f}ms total={:.2f}ms | max loop={:.2f}ms swap={:.2f}ms total={:.2f}ms",
-                now_ms, s_frames_since_last_hb,
-                heap_size / (1024 * 1024), used_mb,
-                static_cast<long long>(used_mb) - static_cast<long long>(s_last_used_mb),
-                s_redraw_cb_count.load(), s_pump_list_count.load(),
-                instrs_now, instrs_now - s_last_instrs,
-                blocks_now, blocks_now - s_last_blocks,
-                s_acc_loop_ms / n, s_acc_swap_ms / n, s_acc_total_ms / n,
-                s_max_loop_ms, s_max_swap_ms, s_max_total_ms);
-            s_last_instrs = instrs_now;
-            s_last_blocks = blocks_now;
-            s_last_used_mb = used_mb;
-            s_last_hb_ms = now_ms;
-            s_frames_since_last_hb = 0;
-            s_acc_loop_ms = s_acc_swap_ms = s_acc_total_ms = 0.0;
-            s_max_loop_ms = s_max_swap_ms = s_max_total_ms = 0.0;
-
-            // Guest thread states: spot what the guest is spinning on / waiting
-            // for when nothing is being drawn. States: 0=create 1=run 2=wait
-            // 3=ready 4=stop 5=wait_fast_sema 6=wait_mutex 7=wait_condvar ...
-            // 13=wait_hle
-            // pc/lr come from the context saved at the last reschedule, so for
-            // a spinning thread they point inside the loop body.
-            if (g_state.initialized && g_state.symsys) {
-                eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
-                if (kern) {
-                    auto resolve = [kern](kernel::thread *thr, const std::uint32_t addr) -> std::string {
-                        for (auto &obj : kern->get_codeseg_list()) {
-                            kernel::codeseg *seg = reinterpret_cast<kernel::codeseg *>(obj.get());
-                            if (!seg) {
-                                continue;
-                            }
-                            const std::uint32_t base = seg->get_code_run_addr(thr->owning_process());
-                            if (base && (addr >= base) && (addr < base + seg->get_code_size())) {
-                                return fmt::format("{}+0x{:X}",
-                                    eka2l1::common::ucs2_to_utf8(seg->get_full_path()), addr - base);
-                            }
-                        }
-                        return "?";
-                    };
-
-                    // Hex-dump guest code around an address so the spin loop /
-                    // SVC stubs can be disassembled offline.
-                    auto dump_code = [kern](const std::uint32_t center) -> std::string {
-                        eka2l1::memory_system *mem = kern->get_memory_system();
-                        if (!mem) {
-                            return "<nomem>";
-                        }
-                        std::string out;
-                        const std::uint32_t start = (center & ~3u) - 16;
-                        for (std::uint32_t off = 0; off < 48; off += 4) {
-                            const std::uint32_t *word = reinterpret_cast<const std::uint32_t *>(
-                                mem->get_real_pointer(start + off));
-                            out += word ? fmt::format("{:08X} ", *word) : "???????? ";
-                        }
-                        return out;
-                    };
-
-                    std::string summary;
-                    std::string code_dumps;
-                    kern->lock();
-                    for (auto &obj : kern->get_thread_list()) {
-                        kernel::thread *thr = reinterpret_cast<kernel::thread *>(obj.get());
-                        if (!thr) {
-                            continue;
-                        }
-                        kernel::process *pr = thr->owning_process();
-                        const arm::core::thread_context &tctx = thr->get_thread_context();
-                        summary += fmt::format("{}/{}:{} pc=0x{:08X}({}) lr=0x{:08X}({}) | ",
-                            pr ? pr->name() : "?", thr->name(),
-                            static_cast<int>(thr->current_state()),
-                            tctx.get_pc(), resolve(thr, tctx.get_pc()),
-                            tctx.get_lr(), resolve(thr, tctx.get_lr()));
-
-                        // Only dump for the spinning (running) thread.
-                        if (thr->current_state() == kernel::thread_state::run) {
-                            code_dumps += fmt::format("[code pc-16 @0x{:08X}] {}\n",
-                                (tctx.get_pc() & ~3u) - 16, dump_code(tctx.get_pc()));
-                            code_dumps += fmt::format("[code lr-16 @0x{:08X}] {}",
-                                (tctx.get_lr() & ~3u) - 16, dump_code(tctx.get_lr()));
-                        }
-                    }
-                    kern->unlock();
-                    LOG_WARN(FRONTEND_CMDLINE, "[hb-threads] {}", summary);
-                    if (!code_dumps.empty()) {
-                        LOG_WARN(FRONTEND_CMDLINE, "[hb-code]\n{}", code_dumps);
-                    }
-                }
-            }
-        }
-    }
-
     if (!g_state.initialized || !g_state.symsys) {
         return;
     }
@@ -939,7 +808,7 @@ static void main_loop() {
     if (g_state.paused) {
         // Still flush pending GPU work (e.g. texture uploads queued before pausing).
         if (g_state.graphics_driver) {
-            s_pump_list_count += g_state.graphics_driver->pump();
+            g_state.graphics_driver->pump();
         }
         return;
     }
@@ -957,7 +826,6 @@ static void main_loop() {
     const int MAX_SLICES_PER_FRAME = boot_phase ? 64 : 16;
 
     const double frame_start = emscripten_get_now();
-    const double loop_start = frame_start;
     int slices = 0;
     while (slices < MAX_SLICES_PER_FRAME) {
         const int loop_result = g_state.symsys->loop();
@@ -972,30 +840,15 @@ static void main_loop() {
         }
     }
 
-    const double loop_end = emscripten_get_now();
-
     // Drain the graphics command queue on the browser main thread (the only
     // thread allowed to touch WebGL). This executes window-server composition
     // and the present command lists queued by the screen redraw callbacks.
     if (g_state.graphics_driver) {
-        s_pump_list_count += g_state.graphics_driver->pump();
+        g_state.graphics_driver->pump();
     }
 
     // Swap buffers
     SDL_GL_SwapWindow(g_window);
-    const double swap_end = emscripten_get_now();
-
-    {
-        const double loop_ms = loop_end - loop_start;
-        const double swap_ms = swap_end - loop_end;
-        const double total_ms = swap_end - mainloop_entry_ms;
-        s_acc_loop_ms += loop_ms;
-        s_acc_swap_ms += swap_ms;
-        s_acc_total_ms += total_ms;
-        if (loop_ms > s_max_loop_ms) s_max_loop_ms = loop_ms;
-        if (swap_ms > s_max_swap_ms) s_max_swap_ms = swap_ms;
-        if (total_ms > s_max_total_ms) s_max_total_ms = total_ms;
-    }
 
     // FPS counting
     g_state.frame_count++;

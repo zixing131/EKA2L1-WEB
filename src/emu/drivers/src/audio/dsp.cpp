@@ -85,10 +85,90 @@ namespace eka2l1::drivers {
     }
 
 
+#if EKA2L1_PLATFORM(WASM)
+    // WASM has no audio backend (ffmpeg is compiled out), so the factories used
+    // to return nullptr. The MMF device server dereferences the returned stream
+    // unconditionally, which traps. These no-op streams accept all data and
+    // report success without producing sound, keeping audio-using apps alive.
+    namespace {
+        struct dsp_output_stream_null : public dsp_output_stream {
+            bool playing_ = false;
+
+            std::uint64_t position() override { return 0; }
+            std::uint64_t real_time_position() override { return 0; }
+
+            bool set_properties(const std::uint32_t freq, const std::uint8_t channels) override {
+                freq_ = freq;
+                channels_ = channels;
+                return true;
+            }
+
+            void get_supported_formats(std::vector<four_cc> &cc_list) override {
+                cc_list.push_back(PCM16_FOUR_CC_CODE);
+            }
+
+            bool start() override {
+                playing_ = true;
+                return true;
+            }
+
+            bool stop() override {
+                playing_ = false;
+                return true;
+            }
+
+            bool is_playing() const override { return playing_; }
+
+            bool write(const std::uint8_t *data, const std::uint32_t data_size) override {
+                const std::uint32_t frame_size = channels_ ? (channels_ * static_cast<std::uint32_t>(sizeof(std::uint16_t))) : 1;
+                samples_copied_ += data_size / frame_size;
+                samples_played_ = samples_copied_;
+                return true;
+            }
+        };
+
+        struct dsp_input_stream_null : public dsp_input_stream {
+            bool recording_ = false;
+
+            std::uint64_t position() override { return 0; }
+            std::uint64_t real_time_position() override { return 0; }
+
+            bool set_properties(const std::uint32_t freq, const std::uint8_t channels) override {
+                freq_ = freq;
+                channels_ = channels;
+                return true;
+            }
+
+            void get_supported_formats(std::vector<four_cc> &cc_list) override {
+                cc_list.push_back(PCM16_FOUR_CC_CODE);
+            }
+
+            bool start() override {
+                recording_ = true;
+                return true;
+            }
+
+            bool stop() override {
+                recording_ = false;
+                return true;
+            }
+
+            bool is_recording() const override { return recording_; }
+
+            bool read(std::uint8_t *data, const std::uint32_t max_data_size) override {
+                return false;
+            }
+        };
+    }
+#endif
+
     std::unique_ptr<dsp_stream> new_dsp_out_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
-#if !EKA2L1_PLATFORM(WASM)
         case dsp_stream_backend_ffmpeg:
+#if EKA2L1_PLATFORM(WASM)
+            (void)aud;
+            return std::make_unique<dsp_output_stream_null>();
+#else
             return std::make_unique<dsp_output_stream_ffmpeg>(aud);
 #endif
         default:
@@ -100,8 +180,11 @@ namespace eka2l1::drivers {
 
     std::unique_ptr<dsp_stream> new_dsp_in_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
-#if !EKA2L1_PLATFORM(WASM)
         case dsp_stream_backend_ffmpeg:
+#if EKA2L1_PLATFORM(WASM)
+            (void)aud;
+            return std::make_unique<dsp_input_stream_null>();
+#else
             return std::make_unique<dsp_input_stream_shared>(aud);
 #endif
         default:

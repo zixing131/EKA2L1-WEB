@@ -612,6 +612,8 @@
     const loadingText = document.getElementById('loading-text');
     const mainContainer = document.getElementById('main-container');
     const canvas = document.getElementById('canvas');
+    // Clicking the canvas gives it keyboard focus so SDL receives key events.
+    if (canvas) canvas.addEventListener('click', function() { canvas.focus(); });
     const emulatorContainer = document.getElementById('emulator-container');
     const overlayMsg = document.getElementById('overlay-msg');
     const fpsDisplay = document.getElementById('fps-display');
@@ -1271,6 +1273,8 @@
         updateStatus('green', 'Running');
         showOverlay('Running', 1000);
         module.ccall('wasm_set_paused', null, ['number'], [0]);
+        // SDL only delivers keyboard events while the canvas owns focus.
+        if (canvas) canvas.focus();
     }
 
     function pauseEmulation() {
