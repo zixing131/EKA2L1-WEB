@@ -1,0 +1,96 @@
+diff --git a/include/yaml-cpp/emitter.h b/include/yaml-cpp/emitter.h
+index 2add9ee..85535fd 100644
+--- a/include/yaml-cpp/emitter.h
++++ b/include/yaml-cpp/emitter.h
+@@ -9,6 +9,7 @@
+ 
+ #include <cmath>
+ #include <cstddef>
++#include <cstdio>
+ #include <limits>
+ #include <memory>
+ #include <sstream>
+@@ -137,10 +138,18 @@ inline Emitter& Emitter::WriteIntegralType(T value) {
+ 
+   PrepareNode(EmitterNodeType::Scalar);
+ 
++#ifdef __EMSCRIPTEN__
++  // std::stringstream construction calls std::locale::locale() which is
++  // broken in Emscripten/WASM. Use snprintf (C locale, no locale object).
++  char buf[64];
++  std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(value));
++  m_stream << buf;
++#else
+   std::stringstream stream;
+   PrepareIntegralStream(stream);
+   stream << value;
+   m_stream << stream.str();
++#endif
+ 
+   StartedScalar();
+ 
+@@ -154,6 +163,26 @@ inline Emitter& Emitter::WriteStreamable(T value) {
+ 
+   PrepareNode(EmitterNodeType::Scalar);
+ 
++#ifdef __EMSCRIPTEN__
++  // Avoid std::stringstream (triggers std::locale() crash in WASM).
++  if (std::is_floating_point<T>::value) {
++    if ((std::numeric_limits<T>::has_quiet_NaN ||
++         std::numeric_limits<T>::has_signaling_NaN) &&
++        std::isnan(value)) {
++      m_stream << ".nan";
++    } else if (std::numeric_limits<T>::has_infinity && std::isinf(value)) {
++      m_stream << (std::signbit(value) ? "-.inf" : ".inf");
++    } else {
++      char buf[64];
++      std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(value));
++      m_stream << buf;
++    }
++  } else {
++    char buf[64];
++    std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(value));
++    m_stream << buf;
++  }
++#else
+   std::stringstream stream;
+   SetStreamablePrecision<T>(stream);
+ 
+@@ -178,6 +207,7 @@ inline Emitter& Emitter::WriteStreamable(T value) {
+     stream << value;
+   }
+   m_stream << stream.str();
++#endif
+ 
+   StartedScalar();
+ 
+diff --git a/include/yaml-cpp/traits.h b/include/yaml-cpp/traits.h
+index 9a62db2..676bcac 100644
+--- a/include/yaml-cpp/traits.h
++++ b/include/yaml-cpp/traits.h
+@@ -7,6 +7,7 @@
+ #pragma once
+ #endif
+ 
++#include <cstdio>
+ #include <type_traits>
+ #include <utility>
+ #include <string>
+@@ -120,9 +121,17 @@ struct is_streamable {
+ template<typename Key, bool Streamable>
+ struct streamable_to_string {
+   static std::string impl(const Key& key) {
++#ifdef __EMSCRIPTEN__
++    // std::stringstream construction crashes in WASM (triggers std::locale()).
++    // This function is only used for error-message key printing, so an empty
++    // string is an acceptable fallback.
++    (void)key;
++    return std::string();
++#else
+     std::stringstream ss;
+     ss << key;
+     return ss.str();
++#endif
+   }
+ };
+ 
