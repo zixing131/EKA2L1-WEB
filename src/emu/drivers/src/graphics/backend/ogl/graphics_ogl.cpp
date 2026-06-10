@@ -77,7 +77,15 @@ namespace eka2l1::drivers {
                 return;
         }
 
+        // glad's post-callback runs glGetError() after *every* GL call. On
+        // WebGL each glGetError forces a synchronous round-trip/flush, and a
+        // profile showed it eating ~6.6% of the browser main thread. It is a
+        // debug-only aid, so skip registering it on WASM.
+#if !EKA2L1_PLATFORM(WASM)
         glad_set_post_callback(gl_post_callback_for_error);
+#else
+        (void)&gl_post_callback_for_error;
+#endif
     }
 
     ogl_graphics_driver::ogl_graphics_driver(const window_system_info &info)

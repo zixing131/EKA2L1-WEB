@@ -21,3 +21,4 @@ cmake-build-*
 /build_wasm_test
 /CMakeFiles
 CMakeCache.txt
+/build_wasm_prof

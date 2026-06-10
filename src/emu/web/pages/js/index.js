@@ -50,6 +50,15 @@
         document.getElementById('deviceStatusText').textContent = text;
     }
 
+    // On-device visible error (iOS Safari has no console). Pass null to hide.
+    function showError(msg) {
+        var el = document.getElementById('bootError');
+        if (!el) return;
+        if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+        el.textContent = msg;
+        el.style.display = '';
+    }
+
     // ---- icons ----------------------------------------------------------------
 
     var ICONS_CACHE_KEY = 'eka2l1_icons_cache';
@@ -307,6 +316,7 @@
             .then(function () {
                 refreshApps();
                 EKA2L1.setPaused(true);
+                showError(null);
                 setStatus('green', '设备就绪');
                 setDeviceStatusText('已安装，数据已持久化');
                 document.getElementById('onboardCard').style.display = 'none';
@@ -316,7 +326,8 @@
             .catch(function (err) {
                 console.error('[EKA2L1] device install failed:', err);
                 setStatus('red', '安装失败');
-                EKA2L1.toast(err.message || '安装失败，详见控制台', 4000);
+                showError('设备固件安装失败：\n' + (err.message || err));
+                EKA2L1.toast(err.message || '安装失败，详见上方提示', 4000);
             })
             .then(function () {
                 btn.disabled = !romFile;
@@ -358,7 +369,8 @@
             .catch(function (err) {
                 console.error('[EKA2L1] SIS install failed:', err);
                 setStatus('red', '安装失败');
-                EKA2L1.toast(err.message || '安装失败，详见控制台', 4000);
+                showError('SIS 安装失败：\n' + (err.message || err));
+                EKA2L1.toast(err.message || '安装失败，详见上方提示', 4000);
             });
     });
 
@@ -424,6 +436,7 @@
         document.getElementById('deviceInstallBtn').disabled = !romFile;
     }).catch(function (err) {
         console.error('[EKA2L1] boot failed:', err);
-        setStatus('red', '启动失败，详见控制台');
+        setStatus('red', '启动失败');
+        showError('模拟器核心启动失败：\n' + (err && err.message ? err.message : err));
     });
 })();

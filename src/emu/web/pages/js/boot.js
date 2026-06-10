@@ -76,6 +76,31 @@
     }
 
     /**
+     * The wasm core is a pthreads build: it needs SharedArrayBuffer, which the
+     * browser only exposes in a cross-origin-isolated *secure* context (https
+     * or localhost + COOP/COEP headers). The classic "works on desktop, fails
+     * on iPhone" case is opening the dev server from the phone over a LAN IP
+     * (http://192.168.x.x:8080) — not a secure context, so SharedArrayBuffer is
+     * undefined and the module aborts during instantiation. Detect this up front
+     * and return a human-readable reason instead of a cryptic console error.
+     * Returns a problem string, or null when the environment is fine.
+     */
+    EKA2L1.environmentProblem = function () {
+        var crossIsolated = (typeof self !== 'undefined') && self.crossOriginIsolated;
+        if (typeof SharedArrayBuffer === 'undefined' || !crossIsolated) {
+            var ctx = (location.protocol === 'https:' || location.hostname === 'localhost' ||
+                       location.hostname === '127.0.0.1');
+            var hint = ctx
+                ? '服务器缺少 COOP/COEP 响应头（serve.py 已带，换其它服务器要自行加）。'
+                : '当前以 ' + location.protocol + '//' + location.hostname +
+                  ' 打开，不是安全上下文。iPhone 请改用 https:// 访问（或本机 localhost），' +
+                  '用「http://局域网IP」会导致多线程不可用。';
+            return '无法启用多线程（SharedArrayBuffer 不可用），模拟器核心无法启动。\n' + hint;
+        }
+        return null;
+    };
+
+    /**
      * Boot the emulator core.
      * opts: { canvas: HTMLCanvasElement, onProgress(pct, text) }
      * Resolves once main() has run (logger, SDL, services ready).
@@ -85,7 +110,13 @@
 
         return new Promise(function (resolve, reject) {
             if (typeof createEKA2L1Module === 'undefined') {
-                reject(new Error('eka2l1.js not loaded'));
+                reject(new Error('eka2l1.js 未加载'));
+                return;
+            }
+
+            var envProblem = EKA2L1.environmentProblem();
+            if (envProblem) {
+                reject(new Error(envProblem));
                 return;
             }
 

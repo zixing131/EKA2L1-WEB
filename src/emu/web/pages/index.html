@@ -13,6 +13,13 @@
 <!-- thin boot progress under the status bar -->
 <div class="boot-progress" id="bootProgress"><div class="bar" id="bootProgressBar"></div></div>
 
+<!-- Visible diagnostics. iOS Safari has no devtools console on-device, so any
+     boot/install failure (missing SharedArrayBuffer, OOM, install error code)
+     is surfaced here instead of being lost to console.error. -->
+<div id="bootError" style="display:none;margin:12px;padding:14px 16px;border-radius:14px;
+     background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);color:var(--red,#e94560);
+     font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word"></div>
+
 <!-- Desktop left rail -->
 <nav class="desktop-rail">
     <button class="rail-item active" data-tab="games" onclick="switchTab('games')">
@@ -220,9 +227,12 @@
 
 <div class="toast" id="toast"></div>
 
-<input type="file" id="sisInput" accept=".sis,.sisx" style="display:none">
-<input type="file" id="romInput" accept=".rom" style="display:none">
-<input type="file" id="rpkgInput" accept=".rpkg" style="display:none">
+<!-- No `accept` filter: .rom/.rpkg/.sis(x) are not registered iOS file types,
+     so iOS Files greys them out and the user cannot pick them at all. An
+     unfiltered picker lets every platform select the ROM/RPKG/SIS. -->
+<input type="file" id="sisInput" style="display:none">
+<input type="file" id="romInput" style="display:none">
+<input type="file" id="rpkgInput" style="display:none">
 
 <!-- SDL needs a canvas even on the library page; keep it offscreen -->
 <canvas id="canvas" tabindex="-1" style="position:fixed;left:-9999px;top:0;width:1px;height:1px"></canvas>

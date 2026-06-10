@@ -111,15 +111,32 @@ if (EMSCRIPTEN)
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
-        # Performance build: max link-time optimization, no debug info, no
-        # runtime assertions. Trade-off: crash backtraces become unsymbolized
-        # address offsets. For debugging, temporarily restore -O2 -g2 and
-        # ASSERTIONS=1.
+        # Performance build: max link-time optimization.
         -O3
-        -g0
         "--closure=0"
-        "SHELL:-s ASSERTIONS=0"
     )
+
+    # Profiling vs release link mode.
+    #   -DEKA2L1_WASM_PROFILING=ON  keeps function names in the wasm so the
+    #   browser profiler / DevTools flame chart shows real symbols (needed to
+    #   find the next dyncom hotspot). Optimization stays at -O3 so the profile
+    #   reflects the shipped code; only the symbol table is retained.
+    #
+    #   OFF (default) strips debug info and runtime assertions for the smallest,
+    #   fastest shipping build. Trade-off: crash backtraces are bare address
+    #   offsets.
+    option(EKA2L1_WASM_PROFILING "Build the WASM frontend with profiling symbols" OFF)
+    if (EKA2L1_WASM_PROFILING)
+        target_link_options(eka2l1_wasm PRIVATE
+            "SHELL:--profiling-funcs"
+            "SHELL:-s ASSERTIONS=1"
+        )
+    else()
+        target_link_options(eka2l1_wasm PRIVATE
+            -g0
+            "SHELL:-s ASSERTIONS=0"
+        )
+    endif()
 
     # Emit plain eka2l1.js (+ .wasm/.data); the UI is served from the static
     # two-page frontend in pages/ (index.html = library/installer,
