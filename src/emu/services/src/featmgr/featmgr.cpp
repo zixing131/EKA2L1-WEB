@@ -41,6 +41,15 @@ namespace eka2l1 {
         feature_id_pen = 410,
         feature_id_vibra = 411,
         feature_id_korean = 180,
+        // KFeatureIdAppMenuShowImages: gates whether Avkon apps keep image/
+        // extra entries in their Options menu. S60 apps (e.g. the built-in
+        // Calculator) call CEikMenuPane::DeleteMenuItem on these entries when
+        // the feature is reported absent — and that panics (EIKCOCTL 8) if the
+        // entry was never in the pane. Real devices report it supported.
+        // EKA2L1's featreg.cfg parsing yields almost no features (most ROM
+        // configs are near-empty / use default-support semantics we don't model
+        // yet), so default-deny breaks these apps. Force it on.
+        feature_id_app_menu_show_images = 1012,
         feature_id_japanese = 1080,
         feature_id_thai = 1081,
         feature_id_chinese = 1096,
@@ -60,6 +69,10 @@ namespace eka2l1 {
         enable_features.push_back(feature_id_pen);
         enable_features.push_back(feature_id_vibra);
         enable_features.push_back(feature_id_pen_calibration);
+        // Avkon Options-menu item gate; see the enum comment. Without this the
+        // built-in Calculator (and apps with the same pattern) panic with
+        // EIKCOCTL 8 when opening their Options menu.
+        enable_features.push_back(feature_id_app_menu_show_images);
 
         // 2. Are we welcoming SVG? Check for OpenVG, cause it should be there if this feature is available
         if (sys->get_io_system()->exist(u"z:\\sys\\bin\\libopenvg.dll")) {

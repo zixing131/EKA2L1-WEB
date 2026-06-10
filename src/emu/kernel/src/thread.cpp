@@ -517,6 +517,83 @@ namespace eka2l1 {
             return !kern->should_panic_be_blocked(this, common::ucs2_to_utf8(category), code);
         }
 
+        void thread::dump_panic_context() {
+            kernel::process *pr = owning_process();
+            arm::core *core = kern->get_cpu();
+
+            std::uint32_t pc = 0, lr = 0, sp = 0;
+            if ((kern->crr_thread() == this) && core) {
+                pc = core->get_pc();
+                lr = core->get_lr();
+                sp = core->get_sp();
+            } else {
+                pc = ctx.cpu_registers[15];
+                lr = ctx.cpu_registers[14];
+                sp = ctx.cpu_registers[13];
+            }
+
+            auto resolve = [&](const std::uint32_t addr) -> std::string {
+                if (pr) {
+                    for (auto &seg_obj : kern->get_codeseg_list()) {
+                        codeseg *seg = reinterpret_cast<codeseg *>(seg_obj.get());
+                        if (!seg) {
+                            continue;
+                        }
+                        const address beg = seg->get_code_run_addr(pr);
+                        if (beg && (addr >= beg) && (addr < beg + seg->get_text_size())) {
+                            return fmt::format("{}+0x{:X}", seg->name(), addr - beg);
+                        }
+                    }
+                }
+                return "?";
+            };
+
+            LOG_WARN(KERNEL, "Panic context: pc=0x{:08X} ({}) lr=0x{:08X} ({}) sp=0x{:08X}",
+                pc, resolve(pc), lr, resolve(lr), sp);
+
+            // Code bytes around a return address, for offline disassembly of
+            // stripped ROM binaries when chasing guest panics.
+            constexpr std::uint32_t CODE_BACK = 48;
+            constexpr std::uint32_t CODE_LEN = 96;
+            auto code_hex = [&](const std::uint32_t addr) -> std::string {
+                if (!pr) {
+                    return "";
+                }
+                const std::uint32_t start = (addr & ~1u) - CODE_BACK;
+                std::string hex;
+                hex.reserve(CODE_LEN * 2);
+                for (std::uint32_t i = 0; i < CODE_LEN; i++) {
+                    std::uint8_t *b = reinterpret_cast<std::uint8_t *>(
+                        pr->get_ptr_on_addr_space(start + i));
+                    if (!b) {
+                        hex += "??";
+                    } else {
+                        hex += fmt::format("{:02x}", *b);
+                    }
+                }
+                return fmt::format(" code[0x{:08X}..]={}", start, hex);
+            };
+
+            // Heuristic backtrace: scan the stack for words that land inside a
+            // codeseg's text section — noisy but enough to see the call chain.
+            if (pr) {
+                int printed = 0;
+                for (std::uint32_t off = 0; (off < 512) && (printed < 16); off += 4) {
+                    std::uint32_t *word = reinterpret_cast<std::uint32_t *>(
+                        pr->get_ptr_on_addr_space(sp + off));
+                    if (!word) {
+                        continue;
+                    }
+                    const std::string where = resolve(*word);
+                    if (where != "?") {
+                        LOG_WARN(KERNEL, "  stack[sp+0x{:03X}] = 0x{:08X} ({}){}", off, *word, where,
+                            (printed < 8) ? code_hex(*word) : "");
+                        printed++;
+                    }
+                }
+            }
+        }
+
         bool thread::kill(const entity_exit_type the_exit_type, const std::u16string &category,
             const std::int32_t reason) {
             if (state == kernel::thread_state::stop) {
@@ -530,8 +607,14 @@ namespace eka2l1 {
 
             switch (the_exit_type) {
             case kernel::entity_exit_type::panic:
-                LOG_TRACE(KERNEL, "Thread {} panicked with category: {} and exit code: {} {}", obj_name, exit_category_u8, reason,
+                // WARN, not TRACE: a guest panic is the single most important
+                // signal when "the app just froze" — on the web build only
+                // warn+ reaches the console, and a silently dying app looks
+                // exactly like a hang.
+                LOG_WARN(KERNEL, "Thread {} panicked with category: {} and exit code: {} {}", obj_name, exit_category_u8, reason,
                     exit_description ? (std::string("(") + *exit_description + ")") : "");
+
+                dump_panic_context();
 
                 // Decide HLE actions to take on this thread.
                 if (!take_on_panic(category, reason)) {

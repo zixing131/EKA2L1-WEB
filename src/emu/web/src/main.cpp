@@ -1432,7 +1432,9 @@ int wasm_launch_app(int uid) {
                     return;
                 }
 
-                LOG_INFO(FRONTEND_CMDLINE,
+                // WARN so it survives the web build's warn-level filter: a
+                // dying app with no visible message reads as a "hang".
+                LOG_WARN(FRONTEND_CMDLINE,
                     "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
                     pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
                     eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
