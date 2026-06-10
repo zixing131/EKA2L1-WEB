@@ -272,6 +272,8 @@ namespace eka2l1::drivers {
         // WebGL2 has neither BGRA pixel formats nor texture swizzling: the
         // guest's BGR(A) data must be reordered to RGB(A) on the CPU before
         // the upload (matches the RGB(A) formats from translate_bpp_to_format).
+        // The data pointer is always a heap copy made by the producers
+        // (bitmap_cache decompress/memcpy), so converting in place is safe.
         if (data && ((bmp->bpp == 32) || (bmp->bpp == 24))) {
             std::uint8_t *bytes = reinterpret_cast<std::uint8_t *>(const_cast<void *>(data));
             const std::size_t pixel_size = bmp->bpp / 8;
@@ -282,6 +284,23 @@ namespace eka2l1::drivers {
                 std::uint8_t *row = bytes + (static_cast<std::size_t>(y) * row_bytes);
                 for (int x = 0; x < dim.x; x++) {
                     std::swap(row[x * pixel_size], row[x * pixel_size + 2]);
+                }
+            }
+        }
+
+        // 12bpp is Symbian XRGB4444; uploaded as GL RGBA4444 the channels all
+        // land one slot off (X->R, R->G, G->B, B->A), which is exactly the
+        // "white turns cyan / red turns green" artifact. Desktop fixes it with
+        // a {G,B,A,one} texture swizzle; WebGL2 can't, so rotate the nibbles
+        // CPU-side instead and force alpha opaque (matching swizzle's "one").
+        if (data && (bmp->bpp == 12)) {
+            std::uint16_t *pixels = reinterpret_cast<std::uint16_t *>(const_cast<void *>(data));
+            const std::size_t stride_pixels = pixels_per_line ? pixels_per_line : static_cast<std::size_t>(dim.x);
+
+            for (int y = 0; y < dim.y; y++) {
+                std::uint16_t *row = pixels + (static_cast<std::size_t>(y) * stride_pixels);
+                for (int x = 0; x < dim.x; x++) {
+                    row[x] = static_cast<std::uint16_t>((row[x] << 4) | 0xF);
                 }
             }
         }
