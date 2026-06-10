@@ -29,7 +29,9 @@
 #include <services/window/classes/wingroup.h>
 #include <system/epoc.h>
 
+#include <cstdlib>
 #include <fstream>
+#include <map>
 
 namespace eka2l1::dispatch {    
     void screen_post_transferer::construct(ntimer *timing) {
@@ -192,6 +194,47 @@ namespace eka2l1::dispatch {
         return info.transfer_texture_;
     }
 
+    // Some direct-screen games ignore the reported framebuffer geometry and
+    // render with the *other* orientation's stride (e.g. 320px rows into a
+    // 240x320 portrait screen — their target hardware scans out landscape).
+    // Compare neighbour-row similarity for both strides: rows of the stride
+    // the game really used correlate strongly, the wrong stride looks like
+    // noise. Conservative: needs real content and a decisive winner.
+    static bool dsa_content_looks_transposed(const std::uint8_t *data, const eka2l1::vec2 cur_size) {
+        const int stride_cur = cur_size.x * 4;
+        const int stride_alt = cur_size.y * 4;
+        const std::size_t buf_bytes = static_cast<std::size_t>(cur_size.x) * cur_size.y * 4;
+
+        auto row_diff_per_sample = [&](const int stride) -> std::uint64_t {
+            const int rows = 24;
+            const std::size_t start = ((buf_bytes / 2) / stride) * stride - (rows / 2) * stride;
+            std::uint64_t total = 0;
+            std::uint32_t samples = 0;
+
+            for (int r = 0; r < rows; r++) {
+                const std::size_t off = start + r * stride;
+                if (off + 2 * stride > buf_bytes) {
+                    break;
+                }
+                const std::uint8_t *a = data + off;
+                const std::uint8_t *b = a + stride;
+                for (int i = 0; i < stride; i += 16) {
+                    total += static_cast<std::uint64_t>(std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i])));
+                    samples++;
+                }
+            }
+
+            return samples ? ((total * 1024) / samples) : 0;
+        };
+
+        const std::uint64_t diff_cur = row_diff_per_sample(stride_cur);
+        const std::uint64_t diff_alt = row_diff_per_sample(stride_alt);
+
+        // diff_cur must show actual content (not a blank/flat frame), and the
+        // alternate stride must be clearly more coherent.
+        return (diff_cur > 2048) && (diff_alt * 2 < diff_cur);
+    }
+
     BRIDGE_FUNC_DISPATCHER(void, update_screen, const std::uint32_t screen_number, const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         drivers::graphics_driver *driver = sys->get_graphics_driver();
@@ -208,6 +251,41 @@ namespace eka2l1::dispatch {
 
                 const char *data_ptr = reinterpret_cast<const char *>(scr->screen_buffer_ptr());
                 const std::size_t buffer_size = mode_info.size.x * mode_info.size.y * 4;
+
+                // Auto-correct games that draw with the transposed stride:
+                // when detected on several consecutive frames, switch to the
+                // wsini screen mode with the swapped dimensions so both the
+                // chunk interpretation and the presentation match the data.
+                static std::map<epoc::screen *, int> transpose_verdicts;
+                int &verdict_count = transpose_verdicts[scr];
+
+                if (verdict_count >= 0) { // negative = locked, stop probing
+                    if (dsa_content_looks_transposed(reinterpret_cast<const std::uint8_t *>(data_ptr), screen_size)) {
+                        if (++verdict_count >= 3) {
+                            int target_mode = -1;
+                            for (int i = 0; i < scr->total_screen_mode(); i++) {
+                                const epoc::config::screen_mode *cand = scr->mode_info(i);
+                                if (cand && (cand->size.x == screen_size.y) && (cand->size.y == screen_size.x)) {
+                                    target_mode = i;
+                                    break;
+                                }
+                            }
+
+                            verdict_count = -2;
+                            if (target_mode >= 0) {
+                                verdict_count = -1;
+                                LOG_INFO(HLE_DISPATCHER, "DSA content written with transposed stride, "
+                                                         "switching screen mode to {}x{}",
+                                    screen_size.y, screen_size.x);
+                                scr->set_screen_mode(dispatcher->winserv_, driver, target_mode);
+                                scr = dispatcher->winserv_->get_screens();
+                                continue; // re-run with the corrected mode
+                            }
+                        }
+                    } else {
+                        verdict_count = 0;
+                    }
+                }
 
                 std::uint64_t next_vsync_us = 0;
                 scr->vsync(sys->get_ntimer(), next_vsync_us);
@@ -259,7 +337,11 @@ namespace eka2l1::dispatch {
 
                 // 270 rotation clock-wise makes screen content comes from the top where camera lies, to down where the ports reside.
                 // That makes it a standard, non-flip landscape. 0 is obviously standard too. Therefore mode 90 and 180 needs flip.
-                const float rotation_draw = ((mode_info.rotation == 90) || (mode_info.rotation == 180)) ? 180.0f : 0.0f;
+                // Auto-transposed games already write the content upright for
+                // the landscape mode; the legacy 90/180 flip is for ROMs whose
+                // rotated modes scan from the opposite corner.
+                const bool auto_transposed = (verdict_count == -1);
+                const float rotation_draw = (!auto_transposed && ((mode_info.rotation == 90) || (mode_info.rotation == 180))) ? 180.0f : 0.0f;
 
                 eka2l1::rect source_rect { eka2l1::vec2(0, 0), mode_info.size };
                 eka2l1::rect dest_rect = source_rect;

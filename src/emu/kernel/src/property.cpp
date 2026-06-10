@@ -25,6 +25,9 @@
 
 #include <common/log.h>
 
+// Debug probe defined in kernel/svc.cpp.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1 {
     namespace service {
         property::property(kernel_system *kern)
@@ -65,6 +68,9 @@ namespace eka2l1 {
 
         bool property::set_int(int val) {
             if (data_type == service::property_type::int_data) {
+                if (eka2l1_leave_probe) {
+                    LOG_WARN(KERNEL, "[probe] property set cage=0x{:X} key=0x{:X} val={}", first, second, val);
+                }
                 ndata = val;
                 notify_request(epoc::error_none);
 

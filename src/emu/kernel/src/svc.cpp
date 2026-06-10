@@ -3110,6 +3110,13 @@ namespace eka2l1::epoc {
             return;
         }
 
+        if (eka2l1_leave_probe) {
+            // RDebug::Print carries the HLE patch libraries' own diagnostics
+            // (scdv, mediaclient, ...); surface it while the probe is armed.
+            LOG_WARN(EMULATED_STDOUT, "{}", tdes->to_std_string(kern->crr_process()));
+            return;
+        }
+
         LOG_TRACE(EMULATED_STDOUT, "{}", tdes->to_std_string(kern->crr_process()));
     }
 

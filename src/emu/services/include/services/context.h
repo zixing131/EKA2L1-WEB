@@ -98,8 +98,8 @@ namespace eka2l1 {
 
                 if ((packed_size != sizeof(T)) && !ignore_size_diff) {
                     LOG_WARN(SERVICE_TRACK, "Getting packed struct with mismatch size ({} vs {}), size to get "
-                                            "will be automatically clamped",
-                        packed_size, sizeof(T));
+                                            "will be automatically clamped (func=0x{:X})",
+                        packed_size, sizeof(T), msg ? msg->function : 0xFFFFFFFF);
                 }
 
                 T object;

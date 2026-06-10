@@ -35,6 +35,9 @@
 #include <atomic>
 #include <thread>
 
+// Debug probe defined in kernel/svc.cpp.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1::epoc {
     struct window_drawer_walker : public window_tree_walker {
         drivers::graphics_command_builder &builder_;
@@ -475,6 +478,11 @@ namespace eka2l1::epoc {
         if (crr_mode != mode) {
             LOG_TRACE(SERVICE_WINDOW, "Screen mode changed to {}", mode);
             really_changed = true;
+        }
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(SERVICE_WINDOW, "[probe] screen::set_screen_mode {} -> {} (size {}x{})",
+                old_mode, mode, mode_info(mode)->size.x, mode_info(mode)->size.y);
         }
 
         crr_mode = mode;

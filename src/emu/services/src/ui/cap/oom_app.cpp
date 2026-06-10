@@ -38,6 +38,9 @@
 #include <system/epoc.h>
 #include <vfs/vfs.h>
 
+// Debug probe defined in kernel/svc.cpp.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1 {
     oom_ui_app_server::oom_ui_app_server(eka2l1::system *sys)
         : service::typical_server(sys, OOM_APP_UI_SERVER_NAME) {
@@ -139,6 +142,24 @@ namespace eka2l1 {
 
         default: {
             LOG_WARN(SERVICE_UI, "Unimplemented opcode for OOM AKNCAP server: 0x{:X}, fake return with epoc::error_none", ctx->msg->function);
+
+            if (eka2l1_leave_probe) {
+                for (int i = 0; i < 4; i++) {
+                    const std::uint32_t raw = ctx->msg->args.args[i];
+                    LOG_WARN(SERVICE_UI, "[probe]   arg{}=0x{:X}", i, raw);
+                }
+                std::optional<std::string> buf = ctx->get_argument_value<std::string>(0);
+                if (buf.has_value()) {
+                    std::string hex;
+                    for (std::size_t i = 0; i < buf->size() && i < 96; i++) {
+                        char tmp[4];
+                        snprintf(tmp, sizeof(tmp), "%02x", static_cast<std::uint8_t>((*buf)[i]));
+                        hex += tmp;
+                    }
+                    LOG_WARN(SERVICE_UI, "[probe]   arg0 des len={} hex={}", buf->size(), hex);
+                }
+            }
+
             ctx->complete(epoc::error_none);
         }
         }

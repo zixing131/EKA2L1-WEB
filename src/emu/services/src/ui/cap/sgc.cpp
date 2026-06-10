@@ -25,6 +25,11 @@
 #include <services/window/screen.h>
 #include <services/window/window.h>
 
+#include <common/log.h>
+
+// Debug probe defined in kernel/svc.cpp.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1::epoc::cap {
     void sgc_server::wg_state::set_fullscreen(bool set) {
         if (set)
@@ -199,6 +204,12 @@ namespace eka2l1::epoc::cap {
                     break;
                 }
             }
+        }
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(SERVICE_UI, "[probe] update_screen_state_from_wg id={} app_mode={} orient_spec={} landscape={} final_mode={}",
+                group->id, state->app_screen_mode_, static_cast<int>(state->orientation_specified()),
+                static_cast<int>(state->orientation_landscape()), final_mode);
         }
 
         if (final_mode >= 0) {
