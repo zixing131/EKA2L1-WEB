@@ -424,12 +424,6 @@ static void on_web_window_mouse_evt(void *userdata, eka2l1::vec3 mouse_pos, int 
 static void on_web_window_key_press(void *userdata, const int key) {
     const std::uint32_t scancode = sdl_key_to_symbian_scancode(key);
 
-    // TEMP DIAGNOSTIC: confirms SDL actually delivers keydown to the C++ side.
-    // If this never logs when you press keys, the browser/SDL isn't routing
-    // keyboard events here (focus issue). Remove once input is confirmed.
-    LOG_INFO(FRONTEND_CMDLINE, "[key] down sdl={} -> scancode=0x{:X} winserv={}",
-        key, scancode, g_state.winserv ? "ok" : "null");
-
     if (!g_state.winserv) {
         return;
     }
@@ -1227,6 +1221,31 @@ void wasm_set_volume(int volume) {
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_paused(int paused) {
     g_state.paused = (paused != 0);
+}
+
+/**
+ * Inject a key event using a raw Symbian scancode (epoc::std_scan_code).
+ * Used by the on-screen keypad in the web UI; bypasses SDL entirely.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_send_key(int scancode, int pressed) {
+    if (!g_state.winserv || !scancode) {
+        return;
+    }
+
+    auto evt = make_key_event_driver(scancode,
+        pressed ? eka2l1::drivers::key_state::pressed : eka2l1::drivers::key_state::released);
+    g_state.winserv->queue_input_from_driver(evt);
+}
+
+/**
+ * Number of screen redraw callbacks fired so far. Zero means no emulated
+ * frame has been composed yet — the runner page polls this to know when to
+ * hide its loading overlay.
+ */
+EMSCRIPTEN_KEEPALIVE
+double wasm_get_redraw_count() {
+    return static_cast<double>(s_redraw_cb_count.load());
 }
 
 /**

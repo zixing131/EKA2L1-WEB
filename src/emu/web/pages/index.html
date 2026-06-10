@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0d0d0f" media="(prefers-color-scheme: dark)">
+    <title>EKA2L1 — 游戏库</title>
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- thin boot progress under the status bar -->
+<div class="boot-progress" id="bootProgress"><div class="bar" id="bootProgressBar"></div></div>
+
+<!-- Desktop left rail -->
+<nav class="desktop-rail">
+    <button class="rail-item active" data-tab="games" onclick="switchTab('games')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
+            <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
+        </svg>
+        <span>游戏</span>
+    </button>
+    <button class="rail-item" data-tab="settings" onclick="switchTab('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span>设置</span>
+    </button>
+</nav>
+
+<!-- Top app bar -->
+<header class="top-app-bar" id="topAppBar">
+    <div class="top-bar-small">
+        <div class="top-bar-small-title" id="topBarSmallTitle">游戏</div>
+        <div class="top-bar-status" id="coreStatus">
+            <span class="status-dot" id="coreStatusDot"></span>
+            <span id="coreStatusText">正在启动…</span>
+        </div>
+    </div>
+    <div class="top-bar-large-title" id="topBarLargeTitle">游戏</div>
+</header>
+
+<main class="page-layout">
+    <!-- Tab: 游戏 -->
+    <section class="tab-view active" id="tab-games">
+        <div class="search-bar">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" id="gameSearch" placeholder="搜索游戏" oninput="renderGameList()">
+        </div>
+
+        <!-- shown when no device is installed yet -->
+        <div class="section-card" id="onboardCard" style="display:none">
+            <div class="empty-state">
+                <span class="big">📦</span>
+                还没有安装设备固件。<br>
+                需要一个 Symbian ROM（S60v3/S^3 机型还需要 RPKG）。
+                <br><br>
+                <button class="btn btn-primary" onclick="openDeviceSheet()">安装设备 ROM</button>
+            </div>
+        </div>
+
+        <div class="section-card section-card-games">
+            <div class="game-list" id="gameList">
+                <div class="empty-state" id="gameListEmpty">
+                    <span class="big">🎮</span>
+                    暂无已安装的游戏。<br>点击右下角 + 安装 SIS 游戏包。
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab: 设置 -->
+    <section class="tab-view" id="tab-settings">
+        <div class="section-card">
+            <div class="section-title">设备</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">固件状态</div>
+                    <div class="pref-sub" id="deviceStatusText">检测中…</div>
+                </div>
+                <button class="btn" onclick="openDeviceSheet()">安装 ROM</button>
+            </div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">安装 SIS 游戏包</div>
+                    <div class="pref-sub">.sis / .sisx，安装到 E 盘</div>
+                </div>
+                <button class="btn" onclick="pickSis()">选择文件</button>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">显示</div>
+            <div class="pref-item">
+                <span class="pref-label">画面缩放</span>
+                <select id="prefScale">
+                    <option value="fit">适应窗口</option>
+                    <option value="1">1×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="2">2×</option>
+                    <option value="3">3×</option>
+                </select>
+            </div>
+            <div class="pref-item">
+                <span class="pref-label">虚拟按键</span>
+                <select id="prefKeypad">
+                    <option value="auto">触屏设备显示</option>
+                    <option value="on">总是显示</option>
+                    <option value="off">隐藏</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">数据</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">立即保存到浏览器</div>
+                    <div class="pref-sub">把虚拟磁盘写入 IndexedDB</div>
+                </div>
+                <button class="btn" onclick="manualSave()">保存</button>
+            </div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label" style="color:var(--red)">清除全部数据</div>
+                    <div class="pref-sub">删除设备固件、游戏与存档，不可恢复</div>
+                </div>
+                <button class="btn btn-danger" onclick="wipeAll()">清除</button>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">关于</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">EKA2L1 Web</div>
+                    <div class="pref-sub">Symbian OS 模拟器 · WebAssembly 移植版</div>
+                </div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<!-- FAB -->
+<button class="fab" id="fab" onclick="openInstallSheet()" title="安装">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+</button>
+
+<!-- Bottom nav (mobile) -->
+<nav class="bottom-nav">
+    <button class="bottom-nav-item active" data-tab="games" onclick="switchTab('games')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
+            <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
+        </svg>
+        <span>游戏</span>
+    </button>
+    <button class="bottom-nav-item" data-tab="settings" onclick="switchTab('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span>设置</span>
+    </button>
+</nav>
+
+<!-- Action sheet: choose what to install -->
+<div class="sheet-overlay" id="installSheetOverlay" onclick="if(event.target===this)closeSheets()">
+    <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">安装</div>
+        <button class="sheet-item" onclick="closeSheets();pickSis()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            安装 SIS 游戏包（.sis / .sisx）
+        </button>
+        <button class="sheet-item" onclick="closeSheets();openDeviceSheet()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/>
+            </svg>
+            安装设备固件（ROM + RPKG）
+        </button>
+        <button class="sheet-cancel" onclick="closeSheets()">取消</button>
+    </div>
+</div>
+
+<!-- Action sheet: device ROM/RPKG install -->
+<div class="sheet-overlay" id="deviceSheetOverlay" onclick="if(event.target===this)closeSheets()">
+    <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">安装设备固件</div>
+        <div class="sheet-desc">
+            选择 ROM 文件（.rom）。S60 第三版 / Symbian^3 机型（N73、N95、5800、N8 等）
+            还需要对应的 RPKG 文件；老机型（EKA1）只需 ROM。
+        </div>
+        <div class="drop-zone" id="romZone" onclick="document.getElementById('romInput').click()">📁 点击选择 ROM 文件</div>
+        <div class="drop-zone" id="rpkgZone" onclick="document.getElementById('rpkgInput').click()">📦 点击选择 RPKG 文件（可选）</div>
+        <button class="btn btn-primary btn-block" id="deviceInstallBtn" onclick="installDevice()" disabled>开始安装</button>
+        <button class="sheet-cancel" onclick="closeSheets()">取消</button>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<input type="file" id="sisInput" accept=".sis,.sisx" style="display:none">
+<input type="file" id="romInput" accept=".rom" style="display:none">
+<input type="file" id="rpkgInput" accept=".rpkg" style="display:none">
+
+<!-- SDL needs a canvas even on the library page; keep it offscreen -->
+<canvas id="canvas" tabindex="-1" style="position:fixed;left:-9999px;top:0;width:1px;height:1px"></canvas>
+
+<script src="eka2l1.js"></script>
+<script src="js/boot.js"></script>
+<script src="js/index.js"></script>
+
+</body>
+</html>

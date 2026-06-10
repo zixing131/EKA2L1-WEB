@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+    <meta name="theme-color" content="#0d0d0f">
+    <title>EKA2L1 — 运行</title>
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body class="player-body">
+
+<!-- Top bar -->
+<header class="player-bar">
+    <button class="icon-btn" onclick="goBack()" title="返回游戏库">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+        </svg>
+    </button>
+    <div class="player-title" id="playerTitle">EKA2L1</div>
+    <div class="player-fps" id="fpsLabel">-- FPS</div>
+    <button class="icon-btn" id="btnPause" onclick="togglePause()" title="暂停 / 继续">
+        <svg id="iconPause" width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+        </svg>
+        <svg id="iconPlay" width="19" height="19" viewBox="0 0 24 24" fill="currentColor" style="display:none">
+            <polygon points="6 3 21 12 6 21"/>
+        </svg>
+    </button>
+    <button class="icon-btn" onclick="manualSave()" title="保存存档到浏览器">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+        </svg>
+    </button>
+    <button class="icon-btn" onclick="toggleKeypad()" title="虚拟按键">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2"/>
+            <line x1="6" y1="10" x2="6" y2="10.01"/><line x1="10" y1="10" x2="10" y2="10.01"/><line x1="14" y1="10" x2="14" y2="10.01"/><line x1="18" y1="10" x2="18" y2="10.01"/>
+            <line x1="8" y1="14" x2="16" y2="14"/>
+        </svg>
+    </button>
+    <button class="icon-btn" onclick="toggleFullscreen()" title="全屏">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+        </svg>
+    </button>
+</header>
+
+<!-- Stage -->
+<main class="player-stage" id="stage">
+    <canvas id="canvas" tabindex="0"></canvas>
+
+    <div class="stage-overlay" id="bootOverlay">
+        <div class="spinner" id="overlaySpinner"></div>
+        <div class="overlay-title" id="overlayTitle">正在加载模拟器…</div>
+        <div class="overlay-text" id="overlayText"></div>
+        <div class="overlay-progress"><div class="bar" id="overlayBar"></div></div>
+        <div class="player-error-actions" id="overlayActions" style="display:none">
+            <button class="btn btn-primary" onclick="goBack()">回到游戏库</button>
+            <button class="btn" onclick="location.reload()">重试</button>
+        </div>
+    </div>
+</main>
+
+<!-- Virtual keypad: joypad + numpad, classic S60 layout -->
+<footer class="keypad hidden" id="keypad">
+    <div class="keypad-grid">
+        <button class="key key-soft" data-key="LSK">左软键</button>
+        <button class="key" data-key="UP">▲</button>
+        <button class="key key-soft" data-key="RSK">右软键</button>
+        <button class="key" data-key="LEFT">◀</button>
+        <button class="key key-accent" data-key="OK">OK</button>
+        <button class="key" data-key="RIGHT">▶</button>
+        <button class="key key-soft" data-key="CLEAR">C</button>
+        <button class="key" data-key="DOWN">▼</button>
+        <button class="key key-soft key-red" data-key="END">挂断</button>
+    </div>
+    <div class="keypad-grid">
+        <button class="key" data-key="D1">1</button>
+        <button class="key" data-key="D2">2</button>
+        <button class="key" data-key="D3">3</button>
+        <button class="key" data-key="D4">4</button>
+        <button class="key" data-key="D5">5</button>
+        <button class="key" data-key="D6">6</button>
+        <button class="key" data-key="D7">7</button>
+        <button class="key" data-key="D8">8</button>
+        <button class="key" data-key="D9">9</button>
+        <button class="key" data-key="STAR">＊</button>
+        <button class="key" data-key="D0">0</button>
+        <button class="key" data-key="HASH">＃</button>
+    </div>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script src="eka2l1.js"></script>
+<script src="js/boot.js"></script>
+<script src="js/run.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,321 @@
+/* ============================================================================
+ * EKA2L1 Web — library page (install / storage / app list)
+ *
+ * The emulator core boots in the background purely for management duties
+ * (installs, registry scan) and is kept paused — actual gameplay happens on
+ * run.html, which boots its own instance with the canvas visible.
+ * ============================================================================ */
+
+(function () {
+    'use strict';
+
+    var APPS_CACHE_KEY = 'eka2l1_apps_cache';
+
+    var coreReady = false;
+    var deviceReady = false;
+    var apps = [];
+
+    // ---- tabs --------------------------------------------------------------
+
+    var tabTitles = { games: '游戏', settings: '设置' };
+
+    window.switchTab = function (name) {
+        document.querySelectorAll('.tab-view').forEach(function (t) { t.classList.remove('active'); });
+        document.querySelectorAll('.bottom-nav-item, .rail-item').forEach(function (b) {
+            b.classList.toggle('active', b.dataset.tab === name);
+        });
+        document.getElementById('tab-' + name).classList.add('active');
+        document.getElementById('topBarLargeTitle').textContent = tabTitles[name];
+        document.getElementById('topBarSmallTitle').textContent = tabTitles[name];
+        document.getElementById('fab').classList.toggle('hidden', name !== 'games');
+        window.scrollTo({ top: 0 });
+    };
+
+    var scrolled = false;
+    window.addEventListener('scroll', function () {
+        var y = window.pageYOffset;
+        var bar = document.getElementById('topAppBar');
+        if (!scrolled && y > 24) { scrolled = true; bar.classList.add('scrolled'); }
+        else if (scrolled && y < 4) { scrolled = false; bar.classList.remove('scrolled'); }
+    }, { passive: true });
+
+    // ---- status pill -------------------------------------------------------
+
+    function setStatus(color, text) {
+        document.getElementById('coreStatusDot').className = 'status-dot ' + (color || '');
+        document.getElementById('coreStatusText').textContent = text;
+    }
+
+    function setDeviceStatusText(text) {
+        document.getElementById('deviceStatusText').textContent = text;
+    }
+
+    // ---- game list ---------------------------------------------------------
+
+    var avatarPalette = ['#e94560', '#0a84ff', '#34c759', '#ff9f0a', '#bf5af2',
+        '#5e5ce6', '#ff375f', '#64d2ff', '#30d158', '#ffd60a'];
+
+    function avatarColor(name) {
+        var h = 0;
+        for (var i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+        return avatarPalette[Math.abs(h) % avatarPalette.length];
+    }
+
+    window.renderGameList = function () {
+        var listEl = document.getElementById('gameList');
+        var filter = (document.getElementById('gameSearch').value || '').toLowerCase();
+        var shown = apps.filter(function (a) {
+            return !filter || (a.name || '').toLowerCase().indexOf(filter) !== -1;
+        });
+
+        listEl.innerHTML = '';
+
+        if (shown.length === 0) {
+            var empty = document.createElement('div');
+            empty.className = 'empty-state';
+            empty.innerHTML = apps.length === 0
+                ? '<span class="big">🎮</span>暂无已安装的游戏。<br>点击右下角 + 安装 SIS 游戏包。'
+                : '没有匹配「' + filter + '」的游戏';
+            listEl.appendChild(empty);
+            return;
+        }
+
+        shown.forEach(function (app) {
+            var name = app.name || ('App 0x' + (app.uid >>> 0).toString(16));
+            var item = document.createElement('div');
+            item.className = 'game-item';
+
+            var avatar = document.createElement('div');
+            avatar.className = 'game-avatar';
+            avatar.style.background = avatarColor(name);
+            avatar.textContent = name.charAt(0).toUpperCase();
+
+            var info = document.createElement('div');
+            info.className = 'game-item-info';
+            var nm = document.createElement('div');
+            nm.className = 'game-item-name';
+            nm.textContent = name;
+            var sub = document.createElement('div');
+            sub.className = 'game-item-sub';
+            sub.textContent = 'UID 0x' + (app.uid >>> 0).toString(16).toUpperCase();
+            info.appendChild(nm);
+            info.appendChild(sub);
+
+            var go = document.createElement('div');
+            go.className = 'game-item-go';
+            go.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+
+            item.appendChild(avatar);
+            item.appendChild(info);
+            item.appendChild(go);
+            item.addEventListener('click', function () { playApp(app); });
+            listEl.appendChild(item);
+        });
+    };
+
+    function playApp(app) {
+        location.href = 'run.html?uid=' + app.uid + '&name=' + encodeURIComponent(app.name || '');
+    }
+
+    function refreshApps() {
+        if (!coreReady || !deviceReady) return;
+        apps = EKA2L1.appList();
+        apps.sort(function (a, b) { return (a.name || '').localeCompare(b.name || '', 'zh'); });
+        try { localStorage.setItem(APPS_CACHE_KEY, JSON.stringify(apps)); } catch (e) {}
+        renderGameList();
+    }
+
+    // Render instantly from the last session's cache while the core boots.
+    try {
+        apps = JSON.parse(localStorage.getItem(APPS_CACHE_KEY)) || [];
+    } catch (e) { apps = []; }
+    renderGameList();
+
+    // ---- sheets ------------------------------------------------------------
+
+    window.openInstallSheet = function () {
+        document.getElementById('installSheetOverlay').classList.add('visible');
+    };
+
+    window.openDeviceSheet = function () {
+        document.getElementById('deviceSheetOverlay').classList.add('visible');
+    };
+
+    window.closeSheets = function () {
+        document.querySelectorAll('.sheet-overlay').forEach(function (s) {
+            s.classList.remove('visible');
+        });
+    };
+
+    // ---- device (ROM/RPKG) install ------------------------------------------
+
+    var romFile = null;
+    var rpkgFile = null;
+
+    document.getElementById('romInput').addEventListener('change', function () {
+        romFile = this.files[0] || null;
+        var zone = document.getElementById('romZone');
+        zone.textContent = romFile ? '✓ ' + romFile.name : '📁 点击选择 ROM 文件';
+        zone.classList.toggle('picked', !!romFile);
+        document.getElementById('deviceInstallBtn').disabled = !romFile || !coreReady;
+    });
+
+    document.getElementById('rpkgInput').addEventListener('change', function () {
+        rpkgFile = this.files[0] || null;
+        var zone = document.getElementById('rpkgZone');
+        zone.textContent = rpkgFile ? '✓ ' + rpkgFile.name : '📦 点击选择 RPKG 文件（可选）';
+        zone.classList.toggle('picked', !!rpkgFile);
+    });
+
+    window.installDevice = function () {
+        if (!romFile || !coreReady) return;
+
+        var btn = document.getElementById('deviceInstallBtn');
+        btn.disabled = true;
+        btn.textContent = '正在安装…';
+        setStatus('yellow', '安装设备中…');
+
+        var romPath = '/eka2l1/rom_upload.rom';
+        var rpkgPath = '/eka2l1/rpkg_upload.rpkg';
+
+        EKA2L1.writeFileToVFS(romFile, romPath)
+            .then(function () {
+                return rpkgFile ? EKA2L1.writeFileToVFS(rpkgFile, rpkgPath) : null;
+            })
+            .then(function () {
+                // Heavy synchronous call; yield a frame so the UI paints first.
+                return new Promise(function (resolve) { setTimeout(resolve, 60); });
+            })
+            .then(function () {
+                var result = EKA2L1.initDevice(romPath, rpkgFile ? rpkgPath : '');
+                if (result !== 0) {
+                    throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
+                }
+                deviceReady = true;
+                // The installer copied the ROM into roms/<firmcode>/; drop the
+                // uploads so they don't bloat IndexedDB on every sync.
+                try { EKA2L1.module.FS.unlink(romPath); } catch (e) {}
+                try { EKA2L1.module.FS.unlink(rpkgPath); } catch (e) {}
+                setStatus('yellow', '保存到浏览器…');
+                refreshApps();
+                return EKA2L1.save();
+            })
+            .then(function () {
+                EKA2L1.setPaused(true);
+                setStatus('green', '设备就绪');
+                setDeviceStatusText('已安装，数据已持久化');
+                document.getElementById('onboardCard').style.display = 'none';
+                closeSheets();
+                EKA2L1.toast('设备固件安装完成');
+            })
+            .catch(function (err) {
+                console.error('[EKA2L1] device install failed:', err);
+                setStatus('red', '安装失败');
+                EKA2L1.toast(err.message || '安装失败，详见控制台', 4000);
+            })
+            .then(function () {
+                btn.disabled = !romFile;
+                btn.textContent = '开始安装';
+            });
+    };
+
+    // ---- SIS install ---------------------------------------------------------
+
+    window.pickSis = function () {
+        if (!coreReady) { EKA2L1.toast('核心还在启动中，请稍候'); return; }
+        if (!deviceReady) { EKA2L1.toast('请先安装设备 ROM'); openDeviceSheet(); return; }
+        document.getElementById('sisInput').click();
+    };
+
+    document.getElementById('sisInput').addEventListener('change', function () {
+        var file = this.files[0];
+        this.value = '';
+        if (!file) return;
+
+        setStatus('yellow', '安装 ' + file.name + '…');
+        var target = '/eka2l1/temp/' + file.name;
+
+        EKA2L1.writeFileToVFS(file, target)
+            .then(function () {
+                return new Promise(function (resolve) { setTimeout(resolve, 60); });
+            })
+            .then(function () {
+                var result = EKA2L1.installPackage(target);
+                try { EKA2L1.module.FS.unlink(target); } catch (e) {}
+                if (result !== 0) throw new Error('安装失败（代码 ' + result + '）');
+                refreshApps();
+                return EKA2L1.save();
+            })
+            .then(function () {
+                setStatus('green', '就绪');
+                EKA2L1.toast('已安装 ' + file.name);
+            })
+            .catch(function (err) {
+                console.error('[EKA2L1] SIS install failed:', err);
+                setStatus('red', '安装失败');
+                EKA2L1.toast(err.message || '安装失败，详见控制台', 4000);
+            });
+    });
+
+    // ---- settings ------------------------------------------------------------
+
+    var prefScale = document.getElementById('prefScale');
+    var prefKeypad = document.getElementById('prefKeypad');
+    prefScale.value = localStorage.getItem('eka2l1_scale') || 'fit';
+    prefKeypad.value = localStorage.getItem('eka2l1_keypad') || 'auto';
+    prefScale.addEventListener('change', function () { localStorage.setItem('eka2l1_scale', this.value); });
+    prefKeypad.addEventListener('change', function () { localStorage.setItem('eka2l1_keypad', this.value); });
+
+    window.manualSave = function () {
+        if (!coreReady) { EKA2L1.toast('核心未就绪'); return; }
+        EKA2L1.save().then(function () { EKA2L1.toast('已保存'); })
+            .catch(function () { EKA2L1.toast('保存失败，详见控制台', 3500); });
+    };
+
+    window.wipeAll = function () {
+        if (!confirm('确定要清除全部数据吗？\n设备固件、已装游戏和所有存档都会被删除，且无法恢复。')) return;
+        try { localStorage.removeItem(APPS_CACHE_KEY); } catch (e) {}
+        var req = indexedDB.deleteDatabase('/eka2l1');
+        req.onsuccess = req.onerror = req.onblocked = function () { location.reload(); };
+    };
+
+    // ---- boot ----------------------------------------------------------------
+
+    var progressEl = document.getElementById('bootProgress');
+    var progressBar = document.getElementById('bootProgressBar');
+
+    function onProgress(pct, text) {
+        progressBar.style.width = pct + '%';
+        if (text) setStatus('yellow', text);
+    }
+
+    EKA2L1.boot({
+        canvas: document.getElementById('canvas'),
+        onProgress: onProgress
+    }).then(function () {
+        coreReady = true;
+        progressBar.style.width = '100%';
+        progressEl.classList.add('done');
+
+        // Activate the persisted device if one exists (no install).
+        var result = EKA2L1.initDevice('', '');
+        if (result === 0) {
+            deviceReady = true;
+            setStatus('green', '就绪');
+            setDeviceStatusText('已安装，数据已持久化');
+            refreshApps();
+        } else {
+            setStatus('yellow', '未安装设备');
+            setDeviceStatusText('未安装 — 需要 ROM（可选 RPKG）');
+            document.getElementById('onboardCard').style.display = '';
+        }
+
+        // The library page never runs guest code: keep the core paused so the
+        // RAF loop stays cheap while the user browses.
+        EKA2L1.setPaused(true);
+        document.getElementById('deviceInstallBtn').disabled = !romFile;
+    }).catch(function (err) {
+        console.error('[EKA2L1] boot failed:', err);
+        setStatus('red', '启动失败，详见控制台');
+    });
+})();

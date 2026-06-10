@@ -93,13 +93,18 @@ if (EMSCRIPTEN)
         "SHELL:-s ASSERTIONS=0"
     )
 
+    # Emit plain eka2l1.js (+ .wasm/.data); the UI is served from the static
+    # two-page frontend in pages/ (index.html = library/installer,
+    # run.html = player), which loads the module via <script src="eka2l1.js">.
     set_target_properties(eka2l1_wasm PROPERTIES
         OUTPUT_NAME "eka2l1"
-        SUFFIX ".html"
+        SUFFIX ".js"
     )
 
-    # Emscripten processes {{{ SCRIPT }}} in the shell template to produce the final HTML
-    target_link_options(eka2l1_wasm PRIVATE
-        "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
+    # Copy the static frontend next to the build output. Runs on every build
+    # so page/script edits land without reconfiguring.
+    add_custom_command(TARGET eka2l1_wasm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/pages" "${WASM_STAGE_DIR}"
+        COMMENT "Copying web frontend pages"
     )
 endif()
