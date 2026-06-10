@@ -46,6 +46,9 @@
     hal_com = std::make_unique<hal_name>(sys); \
     sys->add_new_hal(cage, hal_com);
 
+// Debug probe defined in kernel/svc.cpp.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1::epoc {
     static constexpr std::uint32_t HAL_CONTRAST_MAX = 100;
 
@@ -262,7 +265,13 @@ namespace eka2l1::epoc {
                 return epoc::error_not_found;
             }
 
-            *a1 = static_cast<int>(scr->disp_mode);
+            // EDisplayHalMode returns the driver's mode *index* (pairs with
+            // EDisplayHalSpecifiedModeInfo), not a TDisplayMode value. Nokia's
+            // S60 hal.dll/scdv map index 0 to the 64K-colour mode and index 1
+            // to the 16M-class mode, and reject anything else with
+            // KErrNotSupported, which killed direct-screen-access games when
+            // this returned the raw TDisplayMode enum.
+            *a1 = (epoc::get_bpp_from_display_mode(scr->disp_mode) > 16) ? 1 : 0;
             return 0;
         }
 
@@ -408,6 +417,12 @@ namespace eka2l1::epoc {
         if (ret == -1) {
             LOG_WARN(SYSTEM, "Unimplemented HAL function, cagetory: 0x{:x}, function: 0x{:x}",
                 cage, func);
+        }
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(SYSTEM, "[probe] HAL cage=0x{:X} dev={} func={} -> ret={} a1={}",
+                cage & 0xFFFF, cage >> 16, func, ret,
+                (a1 && (ret == 0)) ? *a1 : 0);
         }
 
         return ret;

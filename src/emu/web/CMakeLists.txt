@@ -53,6 +53,22 @@ if (EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.hsb" "${WASM_STAGE_DIR}/resources/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/../drivers/resources/defaultbank.sf2" "${WASM_STAGE_DIR}/resources/"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/miscs/" "${WASM_STAGE_DIR}/miscs/"
+        # HLE patch libraries (prebuilt Symbian DLLs + .map files). The desktop
+        # build stages these into bin/patch; without them the guest runs the
+        # ROM's original scdv/mediaclient/etc., whose hardware paths the
+        # emulator only partially implements (e.g. DSA games died at startup).
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/patch"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/avkonfep/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/audiooutputrouting/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/scdv/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/ecam/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/vibractrl/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/backlightctrl/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/mediaclientaudio/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/mediaclientaudiostream/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/mediaclientvideo/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/postingsurfacefactory/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/goommonitor/group" "${WASM_STAGE_DIR}/patch/"
         COMMENT "Staging resources for Emscripten file packaging"
     )
 
@@ -83,6 +99,7 @@ if (EMSCRIPTEN)
         "SHELL:-s MAX_WEBGL_VERSION=2"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
+        "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
         # Performance build: max link-time optimization, no debug info, no
         # runtime assertions. Trade-off: crash backtraces become unsymbolized
         # address offsets. For debugging, temporarily restore -O2 -g2 and

@@ -50,6 +50,10 @@
 #include <ctime>
 #include <utils/err.h>
 
+// Debug probe: when set (from the frontend), every guest Leave / thread kill /
+// process kill logs at WARN with a guest backtrace. Off by default.
+bool eka2l1_leave_probe = false;
+
 namespace eka2l1::epoc {
     static security_policy server_exclamation_point_name_policy({ cap_prot_serv });
     static security_policy kill_process_policy({ cap_power_mgmt });
@@ -580,6 +584,12 @@ namespace eka2l1::epoc {
 
                 return;
             }
+        }
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[probe] process_kill target={} etype={} reason={} from thread={}",
+                pr->name(), static_cast<int>(etype), reason, kern->crr_thread()->name());
+            kern->crr_thread()->dump_panic_context();
         }
 
         pr->kill(etype, category ? category->to_std_string(kern->crr_process()) : u"None", reason);
@@ -1304,6 +1314,13 @@ namespace eka2l1::epoc {
         // was the fatal (uncaught) one.
         LOG_TRACE(KERNEL, "Leave code={} thread={}",
             static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->name());
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[probe] Leave code={} depth={} thread={} trap_handler=0x{:08X}",
+                static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->get_leave_depth(),
+                thr->name(), current_local_data(kern)->trap_handler.ptr_address());
+            thr->dump_panic_context();
+        }
 
         thr->increase_leave_depth();
 
@@ -2247,6 +2264,12 @@ namespace eka2l1::epoc {
 
         if (reason_des) {
             exit_category = reason_des.get(pr)->to_std_string(pr);
+        }
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[probe] thread_kill target={} etype={} reason={} from thread={}",
+                thr->name(), static_cast<int>(etype), reason, kern->crr_thread()->name());
+            kern->crr_thread()->dump_panic_context();
         }
 
         thr->kill(etype, common::utf8_to_ucs2(exit_category), reason);
@@ -5646,6 +5669,133 @@ namespace eka2l1::epoc {
         return logical_channel_do_request(kern, h, func, status, args);
     }
 
+    // Mirror of EKA2's TChannelCreateInfo8 (the structure RBusLogicalChannel::DoCreate
+    // builds on the user stack and passes to Exec::ChannelCreate).
+    struct eka2_channel_create_info {
+        epoc::version ver_;                  // +0x0  (major:u8, minor:u8, build:u16)
+        std::int32_t unit_;                  // +0x4
+        eka2l1::ptr<epoc::desc8> pdd_name_;  // +0x8  physical device name (optional)
+        eka2l1::ptr<epoc::desc8> info_;      // +0xC  extra data descriptor (optional)
+    };
+
+    // EExecChannelCreate (slow exec, EKA2). RBusLogicalChannel::DoCreate calls this to
+    // open a kernel logical channel (LDD). On hardware the LDD/PDD must already be
+    // loaded; here we lazily instantiate the matching factory from ldd::collection the
+    // same way the EKA1 add-logical-device path does, so callers that skip DeviceLoad
+    // (the screen driver opens the videodriver channel this way) still work.
+    BRIDGE_FUNC(std::int32_t, channel_create, eka2l1::ptr<epoc::desc8> device_name_des,
+        eka2l1::ptr<eka2_channel_create_info> create_info_ptr, std::int32_t owner_type_raw) {
+        kernel::process *crr_pr = kern->crr_process();
+
+        epoc::desc8 *device_name = device_name_des.get(crr_pr);
+        if (!device_name) {
+            return epoc::error_argument;
+        }
+
+        const std::string ldd_name = common::lowercase_string(device_name->to_std_string(crr_pr));
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[probe] ChannelCreate device='{}'", ldd_name);
+        }
+
+        ldd::factory *existing = kern->get_by_name<ldd::factory>(ldd_name);
+        if (!existing) {
+            auto factory_func = kern->suitable_ldd_instantiate_func(ldd_name.c_str());
+            ldd::factory_instance factory_inst = factory_func ? factory_func(kern->get_system()) : nullptr;
+
+            if (!factory_inst) {
+                LOG_ERROR(KERNEL, "ChannelCreate: no LDD factory named '{}'", ldd_name);
+                return epoc::error_not_found;
+            }
+
+            existing = kern->add_object(factory_inst);
+            existing->install();
+        }
+
+        epoc::version ver{ 0 };
+        eka2_channel_create_info *create_info = create_info_ptr.get(crr_pr);
+        if (create_info) {
+            ver = create_info->ver_;
+        }
+
+        auto chn = existing->make_channel(ver);
+        if (!chn) {
+            return epoc::error_general;
+        }
+
+        ldd::channel *added_chn = kern->add_object(chn);
+        if (!added_chn) {
+            return epoc::error_general;
+        }
+
+        added_chn->set_owner(crr_pr);
+
+        const kernel::owner_type owner = (owner_type_raw == 0) ? kernel::owner_type::thread
+                                                              : kernel::owner_type::process;
+        const kernel::handle h = kern->open_handle(added_chn, owner);
+        if (h == kernel::INVALID_HANDLE) {
+            return epoc::error_general;
+        }
+
+        return static_cast<std::int32_t>(h);
+    }
+
+    // EExecChannelRequest (slow exec, EKA2). Both RBusLogicalChannel::DoControl and
+    // ::DoRequest funnel through this single call; the kernel tells them apart by the
+    // sign of the function number (control >= 0, request encoded as ~aReqNo < 0).
+    BRIDGE_FUNC(std::int32_t, channel_request, const kernel::handle h, const std::int32_t func,
+        eka2l1::ptr<void> arg1, eka2l1::ptr<void> arg2) {
+        if (func >= 0) {
+            return logical_channel_do_control(kern, h, func, arg1, arg2);
+        }
+
+        // Request: arg1 = &TRequestStatus, arg2 = TAny*[2] argument array.
+        const std::int32_t req_no = ~func;
+        const std::uint32_t *args = arg2.cast<std::uint32_t>().get(kern->crr_process());
+
+        static const std::uint32_t empty_args[2] = { 0, 0 };
+        return logical_channel_do_request(kern, h, req_no, arg1.cast<epoc::request_status>(),
+            args ? args : empty_args);
+    }
+
+    // EExecDeviceLoad (E32Loader::DeviceLoad / User::LoadLogicalDevice). Loads a kernel
+    // device driver by file name. EKA2L1 has no real .LDD/.PDD binaries — instead the
+    // matching factory is pulled from ldd::collection. We resolve it the same way the
+    // EKA1 add-logical-device path does and report KErrAlreadyExists when it is already
+    // present, which callers treat as success (e.g. the screen driver loads
+    // "displaydriver" before opening its channel).
+    BRIDGE_FUNC(std::int32_t, device_load, eka2l1::ptr<epoc::desc8> filename_des, std::int32_t /*type*/) {
+        kernel::process *crr_pr = kern->crr_process();
+        epoc::desc8 *filename = filename_des.get(crr_pr);
+        if (!filename) {
+            return epoc::error_argument;
+        }
+
+        const std::string path = filename->to_std_string(crr_pr);
+        const std::string ldd_name = common::lowercase_string(
+            eka2l1::replace_extension(eka2l1::filename(path), ""));
+
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[probe] DeviceLoad '{}' (from '{}')", ldd_name, path);
+        }
+
+        if (kern->get_by_name<ldd::factory>(ldd_name)) {
+            return epoc::error_already_exists;
+        }
+
+        auto factory_func = kern->suitable_ldd_instantiate_func(ldd_name.c_str());
+        ldd::factory_instance factory_inst = factory_func ? factory_func(kern->get_system()) : nullptr;
+        if (!factory_inst) {
+            LOG_ERROR(KERNEL, "DeviceLoad: no LDD factory named '{}'", ldd_name);
+            return epoc::error_not_found;
+        }
+
+        ldd::factory *added = kern->add_object(factory_inst);
+        added->install();
+        added->increase_access_count();
+        return epoc::error_none;
+    }
+
     BRIDGE_FUNC(void, restore_thread_exception_state) {
         kern->crr_thread()->restore_before_exception_state();
     }
@@ -5857,6 +6007,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x02, chunk_size),
         BRIDGE_REGISTER(0x03, chunk_max_size),
         BRIDGE_REGISTER(0x05, tick_count),
+        BRIDGE_REGISTER(0x0A, channel_request),
         BRIDGE_REGISTER(0x0B, math_rand),
         BRIDGE_REGISTER(0x0C, imb_range),
         BRIDGE_REGISTER(0x0E, library_lookup),
@@ -5943,6 +6094,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x7E, server_create),
         BRIDGE_REGISTER(0x7F, session_create),
         BRIDGE_REGISTER(0x80, session_create_from_handle),
+        BRIDGE_REGISTER(0x82, device_load),
+        BRIDGE_REGISTER(0x83, channel_create),
         BRIDGE_REGISTER(0x84, timer_create),
         BRIDGE_REGISTER(0x85, timer_after), // Actually TimerHighRes
         BRIDGE_REGISTER(0x86, after), // Actually AfterHighRes
@@ -6027,6 +6180,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x02, chunk_size),
         BRIDGE_REGISTER(0x03, chunk_max_size),
         BRIDGE_REGISTER(0x05, tick_count),
+        BRIDGE_REGISTER(0x0A, channel_request),
         BRIDGE_REGISTER(0x0B, math_rand),
         BRIDGE_REGISTER(0x0C, imb_range),
         BRIDGE_REGISTER(0x0E, library_lookup),
@@ -6115,6 +6269,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x7D, server_create),
         BRIDGE_REGISTER(0x7E, session_create),
         BRIDGE_REGISTER(0x7F, session_create_from_handle),
+        BRIDGE_REGISTER(0x81, device_load),
+        BRIDGE_REGISTER(0x82, channel_create),
         BRIDGE_REGISTER(0x83, timer_create),
         BRIDGE_REGISTER(0x84, timer_after), // Actually TimerHighRes
         BRIDGE_REGISTER(0x85, after), // Actually AfterHighRes

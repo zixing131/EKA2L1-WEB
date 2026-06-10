@@ -1557,6 +1557,17 @@ static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {
 extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
 extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
 
+// Debug probe (defined in kernel/svc.cpp): when enabled, every guest Leave /
+// thread kill / process kill / unimplemented SVC logs a guest backtrace at
+// WARN level. For chasing apps that die silently during init.
+extern bool eka2l1_leave_probe;
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_leave_probe(int enabled) {
+    eka2l1_leave_probe = (enabled != 0);
+    std::printf("[probe] leave probe %s\n", enabled ? "ON" : "OFF");
+}
+
 /**
  * Dump every guest thread (state, PC/LR/SP, wait object, owning module) plus
  * emulator progress counters to the console. Call it twice a few seconds

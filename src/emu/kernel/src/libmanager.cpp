@@ -45,6 +45,9 @@
 
 #include <cctype>
 
+// Defined in svc.cpp; debug probe toggled by the frontend.
+extern bool eka2l1_leave_probe;
+
 namespace eka2l1::hle {
     static std::array<std::u16string, 2> LDD_SKIP_LOAD_LIST = {
         u"VideoDriver.LDD",
@@ -1065,6 +1068,10 @@ namespace eka2l1::hle {
 
         if (res == svc_funcs_.end()) {
             LOG_ERROR(KERNEL, "Unimplement system call: 0x{:X}!", svcnum);
+
+            if (eka2l1_leave_probe && kern_->crr_thread()) {
+                kern_->crr_thread()->dump_panic_context();
+            }
 
             kern_->unlock();
             return false;

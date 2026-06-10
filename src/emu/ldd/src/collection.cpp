@@ -44,6 +44,7 @@ namespace eka2l1::ldd {
     FACTORY_DECLARE(ecomm_factory)
     FACTORY_DECLARE(hal_factory)
     FACTORY_DECLARE(video_driver_factory)
+    FACTORY_DECLARE(display_driver_factory)
     FACTORY_DECLARE(ekeyb_factory)
     FACTORY_DECLARE(old_camera_factory)
 
@@ -52,6 +53,9 @@ namespace eka2l1::ldd {
         FACTORY_REGISTER("ecomm", ecomm_factory),
         FACTORY_REGISTER("dhal", hal_factory),
         FACTORY_REGISTER("videodriver", video_driver_factory),
+        // S60 3rd-edition scdv (CFbsDrawDevice direct screen access) opens the
+        // screen LDD as "DisplayDriver" via RBusLogicalChannel::DoCreate.
+        FACTORY_REGISTER("displaydriver", display_driver_factory),
         FACTORY_REGISTER("ekeyb", ekeyb_factory),
         FACTORY_REGISTER("cameraldd", old_camera_factory),
     };
