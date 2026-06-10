@@ -216,6 +216,30 @@ namespace eka2l1 {
             return item;
         }
 
+        /**
+         * \brief Pop without waiting. Returns nullopt if the queue is empty or aborted.
+         *
+         * Needed when producer and consumer can share one thread (e.g. the browser
+         * main thread on WASM), where a blocking pop would deadlock.
+         */
+        std::optional<T> try_pop() {
+            T item{ T() };
+
+            {
+                std::unique_lock<std::mutex> ulock(queue_mut_);
+
+                if (abort_ || queue_.empty()) {
+                    return std::nullopt;
+                }
+
+                item = queue_.front();
+                queue_.pop();
+            }
+
+            queue_cond_.notify_one();
+            return item;
+        }
+
         void abort() {
             abort_ = true;
             queue_cond_.notify_all();

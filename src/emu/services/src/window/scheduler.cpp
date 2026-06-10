@@ -22,12 +22,22 @@
 #include <services/window/scheduler.h>
 #include <services/window/screen.h>
 
+#include <common/log.h>
+
+#include <atomic>
 #include <cassert>
 
 namespace eka2l1::epoc {
     static void on_anim_due(std::uint64_t userdata, const int cycles_late) {
         anim_due_callback_data *callback = reinterpret_cast<anim_due_callback_data *>(userdata);
+#ifdef __EMSCRIPTEN__
+        // Runs on the ntimer thread. Redrawing here performs synchronous GPU
+        // waits while holding the kernel lock — deadlock against the browser
+        // main thread. Defer to the web main loop instead.
+        callback->sched->defer_due_animation(callback->screen_number);
+#else
         callback->sched->invoke_due_animation(callback->driver, callback->screen_number);
+#endif
     }
 
     static void on_scan_callback(std::uint64_t userdata, const int cycles_late) {
@@ -87,6 +97,15 @@ namespace eka2l1::epoc {
     }
 
     void animation_scheduler::schedule(drivers::graphics_driver *driver, screen *scr, const std::uint64_t time) {
+#ifdef __EMSCRIPTEN__
+        // WASM render-path diagnostic: confirm clients actually request redraws.
+        static std::atomic<int> s_sched_probe{ 0 };
+        const int sched_probe_count = ++s_sched_probe;
+        if (sched_probe_count <= 3) {
+            LOG_WARN(SERVICE_WINDOW, "anim_scheduler::schedule #{} screen={} time={}",
+                sched_probe_count, scr ? scr->number : -1, time);
+        }
+#endif
         const std::lock_guard<std::mutex> guard(lock_);
 
         // Get screen number
@@ -183,9 +202,17 @@ namespace eka2l1::epoc {
                         // Invoke the due right away.
                         scr_state.time_expected_redraw = now;
 
+#ifdef __EMSCRIPTEN__
+                        // Caller thread is unknown (service handler or timer
+                        // callback); always defer to the web main loop where
+                        // GL dispatch is safe.
+                        scr_state.flags = screen_state::scheduled;
+                        defer_due_animation(screen_number);
+#else
                         lock_.unlock();
                         invoke_due_animation(driver, screen_number);
                         lock_.lock();
+#endif
                     } else {
                         scr_state.time_expected_redraw = now + until_due;
                         scr_state.flags = screen_state::scheduled;
@@ -200,9 +227,17 @@ namespace eka2l1::epoc {
         lock_.lock();
 
         anim_schedule *sched = get_scheduled_screen_update(screen_number);
-        epoc::screen *scr = sched->scr;
 
-        assert(sched && "The returned schedule should not be nullptr");
+        // The schedule may have been cancelled (unschedule/cancel_all) between
+        // the due event firing and this call — especially with the WASM
+        // deferred-redraw path. Nothing to do then.
+        if (!sched) {
+            states_[screen_number].flags = screen_state::inactive;
+            lock_.unlock();
+            return;
+        }
+
+        epoc::screen *scr = sched->scr;
 
         sched->scheduled = false;
 
@@ -252,4 +287,34 @@ namespace eka2l1::epoc {
             callback_scheduled_ = true;
         }
     }
+
+#ifdef __EMSCRIPTEN__
+    void animation_scheduler::defer_due_animation(const int screen_number) {
+        wasm_pending_redraws_ |= (1u << screen_number);
+    }
+
+    void animation_scheduler::flush_pending_redraws() {
+        const std::uint32_t pending = wasm_pending_redraws_.exchange(0);
+        if (!pending) {
+            return;
+        }
+
+        for (int screen_number = 0; screen_number < 32; screen_number++) {
+            if (pending & (1u << screen_number)) {
+                drivers::graphics_driver *driver = nullptr;
+                {
+                    const std::lock_guard<std::mutex> guard(lock_);
+                    if (static_cast<std::size_t>(screen_number) >= callback_datas_.size()) {
+                        continue;
+                    }
+                    driver = callback_datas_[screen_number].driver;
+                }
+
+                if (driver) {
+                    invoke_due_animation(driver, screen_number);
+                }
+            }
+        }
+    }
+#endif
 }

@@ -22,6 +22,10 @@
 #include <drivers/graphics/graphics.h>
 #include <drivers/itc.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/threading.h>
+#endif
+
 #include <chrono>
 #include <cstring>
 
@@ -37,6 +41,22 @@ namespace eka2l1::drivers {
 
         cmd_list.size_ = 1;
         *cmd_list.base_ = cmd;
+
+#ifdef __EMSCRIPTEN__
+        // On the browser main thread the submit dispatches inline (see
+        // ogl_graphics_driver::submit_command_list) and finish() runs before
+        // submit returns. Holding mut_ here would self-deadlock when finish()
+        // locks it, and there is nothing to wait on afterwards.
+        if (emscripten_is_main_runtime_thread()) {
+            drv->submit_command_list(cmd_list);
+
+            if (status == -100) {
+                drv->wait_for(&status);
+            }
+
+            return status;
+        }
+#endif
 
         std::unique_lock<std::mutex> ulock(drv->mut_);
         drv->submit_command_list(cmd_list);

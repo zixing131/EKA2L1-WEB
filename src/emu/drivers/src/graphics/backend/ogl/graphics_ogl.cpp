@@ -34,6 +34,7 @@
 #include <EGL/egl.h>
 #elif EKA2L1_PLATFORM(WASM)
 #include <SDL2/SDL.h>
+#include <emscripten/threading.h>
 #endif
 
 #define IMGUI_IMPL_OPENGL_LOADER_GLAD
@@ -102,7 +103,15 @@ namespace eka2l1::drivers {
         context_->make_current();
 
         init_gl_graphics_library(context_->gl_mode());
+#ifdef __EMSCRIPTEN__
+        // On WASM producers (OS services, timer thread) and the consumer (the
+        // per-frame pump on the browser main thread) can share a thread. A full
+        // queue would make push() block forever, deadlocking the page. Make the
+        // cap effectively unbounded; pump() drains it every frame anyway.
+        list_queue.max_pending_count_ = 1 << 20;
+#else
         list_queue.max_pending_count_ = 128;
+#endif
 
         context_->set_swap_interval(1);
 
@@ -1731,13 +1740,35 @@ namespace eka2l1::drivers {
 
             return;
         }
+
+#ifdef __EMSCRIPTEN__
+        // The browser main thread owns the WebGL context and is also the queue
+        // consumer (pump()). Synchronous submit-then-wait calls made on it
+        // (e.g. create_bitmap during screen::redraw) would deadlock: wait_for
+        // can never be satisfied because pump() runs later on this same
+        // thread. Dispatch inline instead — GL is current here. Drain earlier
+        // worker-thread submissions first to preserve ordering.
+        if (emscripten_is_main_runtime_thread()) {
+            pump();
+
+            for (std::size_t i = 0; i < list.size_; i++) {
+                dispatch(list.base_[i]);
+            }
+
+            delete[] list.base_;
+            return;
+        }
+#endif
         list_queue.push(list);
     }
 
     void ogl_graphics_driver::display(command &cmd) {
         context_->swap_buffers();
 
-        disp_hook_();
+        if (disp_hook_) {
+            disp_hook_();
+        }
+
         finish(cmd.status_, 0);
     }
 
@@ -1927,6 +1958,27 @@ namespace eka2l1::drivers {
         }
     }
 
+    std::size_t ogl_graphics_driver::pump() {
+        std::size_t processed = 0;
+
+        while (!should_stop) {
+            std::optional<command_list> list = list_queue.try_pop();
+
+            if (!list) {
+                break;
+            }
+
+            for (std::size_t i = 0; i < list->size_; i++) {
+                dispatch(list->base_[i]);
+            }
+
+            delete[] list->base_;
+            processed++;
+        }
+
+        return processed;
+    }
+
     void ogl_graphics_driver::abort() {
         list_queue.abort();
         should_stop = true;
@@ -1939,6 +1991,24 @@ namespace eka2l1::drivers {
             return;
         }
 
+#ifdef __EMSCRIPTEN__
+        // On the browser main thread, blocking would deadlock (we are the
+        // queue consumer) and Atomics.wait is forbidden anyway. With inline
+        // dispatch in submit_command_list the status is normally already set;
+        // drain stragglers from worker threads otherwise.
+        if (emscripten_is_main_runtime_thread()) {
+            while ((*status == -100) && !should_stop) {
+                if (pump() == 0) {
+                    break;
+                }
+            }
+
+            if (*status == -100) {
+                LOG_ERROR(DRIVER_GRAPHICS, "wait_for on main thread: status still pending after queue drain");
+            }
+            return;
+        }
+#endif
         driver::wait_for(status);
     }
 

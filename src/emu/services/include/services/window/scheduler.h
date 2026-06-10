@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -90,6 +91,15 @@ namespace eka2l1::epoc {
         bool callback_scheduled_;
         std::mutex lock_;
 
+#ifdef __EMSCRIPTEN__
+        // On WASM the redraw must not run on the ntimer thread: it performs
+        // synchronous GPU calls (create_bitmap, ...) while holding the kernel
+        // lock, deadlocking against the browser main thread which owns both
+        // the GL context and the command queue pump. Timer callbacks only set
+        // a pending bit here; the web main loop calls flush_pending_redraws().
+        std::atomic<std::uint32_t> wasm_pending_redraws_{ 0 };
+#endif
+
         void schedule_scans(drivers::graphics_driver *driver);
 
     public:
@@ -132,5 +142,19 @@ namespace eka2l1::epoc {
          * \param screen_number The number of the screen.
          */
         void unschedule(const int screen_number);
+
+#ifdef __EMSCRIPTEN__
+        /**
+         * \brief Mark a screen redraw as due; it will run on the next
+         * flush_pending_redraws() call from the browser main loop.
+         */
+        void defer_due_animation(const int screen_number);
+
+        /**
+         * \brief Execute all deferred redraws. Must be called from the
+         * browser main thread (it dispatches GL inline).
+         */
+        void flush_pending_redraws();
+#endif
     };
 }

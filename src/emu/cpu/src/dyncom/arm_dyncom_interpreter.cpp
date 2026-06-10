@@ -836,6 +836,13 @@ static unsigned int InterpreterTranslateInstruction(ARMul_State *cpu, const std:
 // 100% CPU (profile showed __emplace_unique_key_args dominating samples).
 static constexpr std::size_t INSTRUCTION_CACHE_FLUSH_THRESHOLD = 256 * 1024;
 
+#ifdef __EMSCRIPTEN__
+#include <atomic>
+// WASM diagnostic: how many new basic blocks get translated. A guest making
+// progress keeps reaching new code; a guest stuck in a loop translates none.
+std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
+#endif
+
 static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
     if (cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD) {
         cpu->instruction_cache.clear();
@@ -871,6 +878,9 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     };
 
     cpu->instruction_cache[pc_start] = bb_start;
+#ifdef __EMSCRIPTEN__
+    eka2l1_wasm_guest_blocks_translated++;
+#endif
 
     return KEEP_GOING;
 }

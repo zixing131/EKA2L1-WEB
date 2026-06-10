@@ -24,6 +24,7 @@
 #include <services/window/screen.h>
 #include <services/window/window.h>
 
+#include <common/log.h>
 #include <common/rgb.h>
 #include <common/time.h>
 #include <config/app_settings.h>
@@ -31,6 +32,7 @@
 
 #include <kernel/kernel.h>
 #include <kernel/timing.h>
+#include <atomic>
 #include <thread>
 
 namespace eka2l1::epoc {
@@ -204,6 +206,15 @@ namespace eka2l1::epoc {
     }
 
     void screen::redraw(drivers::graphics_driver *driver) {
+#ifdef __EMSCRIPTEN__
+        // WASM render-path diagnostic: confirm composition actually runs.
+        static std::atomic<int> s_redraw_probe{ 0 };
+        const int redraw_probe_count = ++s_redraw_probe;
+        if (redraw_probe_count <= 3) {
+            LOG_WARN(SERVICE_WINDOW, "screen::redraw #{} screen={} texture={}",
+                redraw_probe_count, number, screen_texture);
+        }
+#endif
         if (!screen_texture) {
             set_screen_mode(nullptr, driver, crr_mode);
         }

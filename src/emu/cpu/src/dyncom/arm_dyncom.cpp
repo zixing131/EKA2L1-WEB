@@ -23,6 +23,13 @@
 
 #include <common/log.h>
 
+#ifdef __EMSCRIPTEN__
+#include <atomic>
+// WASM diagnostic: cumulative guest instructions executed, sampled by the web
+// frontend heartbeat to tell "slow progress" from "stuck in a loop".
+std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total{ 0 };
+#endif
+
 namespace eka2l1::arm {
     dyncom_core::dyncom_core(arm::exclusive_monitor *monitor, const std::size_t page_bits)
         : monitor_(monitor)
@@ -40,6 +47,9 @@ namespace eka2l1::arm {
         state_->NumInstrsToExecute = instruction_count;
 
         InterpreterMainLoop(state_.get(), ticks_executed_);
+#ifdef __EMSCRIPTEN__
+        eka2l1_wasm_guest_instrs_total += ticks_executed_;
+#endif
     }
 
     void dyncom_core::stop() {

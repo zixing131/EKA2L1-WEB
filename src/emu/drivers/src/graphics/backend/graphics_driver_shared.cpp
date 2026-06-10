@@ -34,6 +34,45 @@ namespace eka2l1::drivers {
         internal_format = texture_format::rgba;
         data_type = texture_data_type::ubyte;
 
+#ifdef __EMSCRIPTEN__
+        // WebGL2 supports neither BGRA formats nor texture swizzling, so all
+        // combos must be plain RGB(A). BGR(A) source data gets its R/B
+        // channels reordered CPU-side in update_bitmap() before upload.
+        switch (bpp) {
+        case 8:
+            format = texture_format::r;
+            internal_format = texture_format::r8;
+            break;
+
+        case 12:
+            format = texture_format::rgba;
+            internal_format = texture_format::rgba4;
+            data_type = texture_data_type::ushort_4_4_4_4;
+            break;
+
+        case 16:
+            format = texture_format::rgb;
+            internal_format = texture_format::rgb;
+            data_type = texture_data_type::ushort_5_6_5;
+            break;
+
+        case 24:
+            format = texture_format::rgb;
+            internal_format = texture_format::rgb;
+            break;
+
+        case 32:
+            format = texture_format::rgba;
+            internal_format = texture_format::rgba;
+            break;
+
+        default:
+            break;
+        }
+
+        return;
+#endif
+
         switch (bpp) {
         case 8:
             format = texture_format::r;
@@ -95,10 +134,13 @@ namespace eka2l1::drivers {
         texture->set_filter_minmag(false, drivers::filter_option::linear);
         texture->set_filter_minmag(true, drivers::filter_option::linear);
 
+#ifndef __EMSCRIPTEN__
+        // WebGL2 removed TEXTURE_SWIZZLE_*.
         if (bpp == 12) {
             texture->set_channel_swizzle({ channel_swizzle::green, channel_swizzle::blue,
                 channel_swizzle::alpha, channel_swizzle::one });
         }
+#endif
 
         return texture;
     }
@@ -226,9 +268,31 @@ namespace eka2l1::drivers {
 
         translate_bpp_to_format(bmp->bpp, internal_format, data_format, data_type, is_stricted());
 
+#ifdef __EMSCRIPTEN__
+        // WebGL2 has neither BGRA pixel formats nor texture swizzling: the
+        // guest's BGR(A) data must be reordered to RGB(A) on the CPU before
+        // the upload (matches the RGB(A) formats from translate_bpp_to_format).
+        if (data && ((bmp->bpp == 32) || (bmp->bpp == 24))) {
+            std::uint8_t *bytes = reinterpret_cast<std::uint8_t *>(const_cast<void *>(data));
+            const std::size_t pixel_size = bmp->bpp / 8;
+            const std::size_t stride_pixels = pixels_per_line ? pixels_per_line : static_cast<std::size_t>(dim.x);
+            const std::size_t row_bytes = stride_pixels * pixel_size;
+
+            for (int y = 0; y < dim.y; y++) {
+                std::uint8_t *row = bytes + (static_cast<std::size_t>(y) * row_bytes);
+                for (int x = 0; x < dim.x; x++) {
+                    std::swap(row[x * pixel_size], row[x * pixel_size + 2]);
+                }
+            }
+        }
+#endif
+
         bmp->tex->update_data(this, 0, eka2l1::vec3(offset.x, offset.y, 0), eka2l1::vec3(dim.x, dim.y, 0), pixels_per_line,
             data_format, data_type, data, 0, 4);
 
+#ifndef __EMSCRIPTEN__
+        // WebGL2 removed TEXTURE_SWIZZLE_*; calling it only raises GL errors
+        // there. BGR(A) ordering is handled CPU-side above instead.
         if (bmp->bpp == 12) {
             bmp->tex->set_channel_swizzle({ channel_swizzle::green, channel_swizzle::blue,
                 channel_swizzle::alpha, channel_swizzle::one });
@@ -270,6 +334,7 @@ namespace eka2l1::drivers {
                 break;
             }
         }
+#endif
     }
 
     void shared_graphics_driver::update_bitmap(command &cmd) {

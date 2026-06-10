@@ -141,6 +141,19 @@ namespace eka2l1::drivers {
         }
 
         /**
+         * \brief Process all currently pending command lists without blocking.
+         *
+         * Alternative to run() for platforms where the driver can not own a
+         * dedicated thread (WASM: GL is only usable on the browser main thread,
+         * which must never block). Call this once per frame from the host loop.
+         *
+         * \returns Number of command lists processed.
+         */
+        virtual std::size_t pump() {
+            return 0;
+        }
+
+        /**
          * \brief Set a hook when display function is called.
          *
          * On Vulkan, display may be done using vkQueueDisplayKHR, then you can hook to do things like for example,
