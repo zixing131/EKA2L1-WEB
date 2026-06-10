@@ -691,6 +691,16 @@ static bool init_sdl() {
         return false;
     }
 
+#ifdef __EMSCRIPTEN__
+    // Attach SDL's keyboard listeners to the canvas instead of the whole
+    // window (the default). The default handler preventDefault()s every
+    // keystroke on the page, which swallows plain (non-IME) typing into HTML
+    // inputs — e.g. English text in the library page's search box. With the
+    // canvas as the target, the emulator only captures keys while the canvas
+    // has focus (the player page focuses it when gameplay starts).
+    SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
+#endif
+
     // Set OpenGL ES attributes for WebGL2
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
