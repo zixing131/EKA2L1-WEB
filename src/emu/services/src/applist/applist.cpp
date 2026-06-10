@@ -92,7 +92,15 @@ namespace eka2l1 {
         , drive_change_handle_(0)
         , fbsserv(nullptr)
         , fsserv(nullptr)
+#ifdef __EMSCRIPTEN__
+        // The web build loads registries synchronously (the pool's wait()
+        // deadlocks the browser main thread), so don't spawn a worker per
+        // hardware thread just to sit idle — each one costs a Web Worker plus
+        // a wasm stack, which counts against iOS Safari's per-tab memory cap.
+        , loading_thread_pool_(1) {
+#else
         , loading_thread_pool_(std::thread::hardware_concurrency() <= 0 ? 4 : std::thread::hardware_concurrency()) {
+#endif
     }
 
     applist_server::~applist_server() {

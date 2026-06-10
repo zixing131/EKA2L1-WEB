@@ -76,21 +76,24 @@ if (EMSCRIPTEN)
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
-        # 256MB start, grow on demand. iOS Safari kills the tab around ~1.2GB
-        # commit; a 512MB upfront heap + a ROM install (whole-file buffers +
-        # extraction + IndexedDB sync) blew past that and the page "refreshed"
-        # mid-install, leaving a half-persisted device.
-        "SHELL:-s INITIAL_MEMORY=268435456"
+        # 160MB start, grow on demand (in-place for shared memory, no copy).
+        # iOS Safari kills the tab well under ~1.2GB commit, and a ROM install
+        # peaks at baseline + RPKG in MEMFS + extracted Z drive + IndexedDB
+        # sync copies. 256MB was sized for the old 131MB dyncom translation
+        # arena; with that trimmed to 32MB on WASM the same headroom fits in
+        # 160MB, leaving ~100MB more for the install spike.
+        "SHELL:-s INITIAL_MEMORY=167772160"
         "SHELL:-s MAXIMUM_MEMORY=2147483648"
         "SHELL:-s STACK_SIZE=8388608"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=1"
         "SHELL:-s USE_FREETYPE=1"
         "SHELL:-s USE_PTHREADS=1"
-        # Pooled workers cost real memory on iOS (JS worker + wasm stack each);
-        # 16 covers the emulator's steady-state thread count, and runtime
-        # creation still works for stragglers since nothing blocks on spawn.
-        "SHELL:-s PTHREAD_POOL_SIZE=16"
+        # Pooled workers cost real memory on iOS (JS worker + wasm stack each).
+        # Census after pruning the idle applist pool: ntimer + applist loader +
+        # spdlog + slack = well under 8, and runtime creation still works for
+        # stragglers since nothing blocks on spawn.
+        "SHELL:-s PTHREAD_POOL_SIZE=8"
         # 1MB per worker stack (allocated from the wasm heap). The old 64KB
         # default overflowed; 1MB keeps 16x headroom over that crash without
         # 32MB+ of standing stacks.

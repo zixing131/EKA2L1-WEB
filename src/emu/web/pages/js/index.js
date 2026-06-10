@@ -10,9 +10,11 @@
     'use strict';
 
     var APPS_CACHE_KEY = 'eka2l1_apps_cache';
+    var HAS_DEVICE_KEY = 'eka2l1_has_device';
 
     var coreReady = false;
     var deviceReady = false;
+    var hasDevice = false; // assigned in the boot section below
     var apps = [];
 
     // ---- tabs --------------------------------------------------------------
@@ -268,7 +270,9 @@
         var zone = document.getElementById('romZone');
         zone.textContent = romFile ? '✓ ' + romFile.name : '📁 点击选择 ROM 文件';
         zone.classList.toggle('picked', !!romFile);
-        document.getElementById('deviceInstallBtn').disabled = !romFile || !coreReady;
+        // Not gated on coreReady: on a fresh visit the core boots lazily
+        // inside installDevice(), after the files are already picked.
+        document.getElementById('deviceInstallBtn').disabled = !romFile;
     });
 
     document.getElementById('rpkgInput').addEventListener('change', function () {
@@ -279,17 +283,23 @@
     });
 
     window.installDevice = function () {
-        if (!romFile || !coreReady) return;
+        if (!romFile) return;
 
         var btn = document.getElementById('deviceInstallBtn');
         btn.disabled = true;
         btn.textContent = '正在安装…';
-        setStatus('yellow', '安装设备中…');
 
         var romPath = '/eka2l1/rom_upload.rom';
         var rpkgPath = '/eka2l1/rpkg_upload.rpkg';
 
-        EKA2L1.writeFileToVFS(romFile, romPath)
+        // Boot the core only now (fresh visits don't boot at page load): the
+        // file picking is already done, so the high-memory phase no longer
+        // overlaps with the iOS Files picker backgrounding the tab.
+        ensureCore()
+            .then(function () {
+                setStatus('yellow', '安装设备中…');
+                return EKA2L1.writeFileToVFS(romFile, romPath);
+            })
             .then(function () {
                 return rpkgFile ? EKA2L1.writeFileToVFS(rpkgFile, rpkgPath) : null;
             })
@@ -314,6 +324,7 @@
                 return EKA2L1.save();
             })
             .then(function () {
+                try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
                 refreshApps();
                 EKA2L1.setPaused(true);
                 showError(null);
@@ -338,7 +349,11 @@
     // ---- SIS install ---------------------------------------------------------
 
     window.pickSis = function () {
-        if (!coreReady) { EKA2L1.toast('核心还在启动中，请稍候'); return; }
+        if (!coreReady) {
+            if (!hasDevice) { EKA2L1.toast('请先安装设备 ROM'); openDeviceSheet(); return; }
+            EKA2L1.toast('核心还在启动中，请稍候');
+            return;
+        }
         if (!deviceReady) { EKA2L1.toast('请先安装设备 ROM'); openDeviceSheet(); return; }
         document.getElementById('sisInput').click();
     };
@@ -394,6 +409,7 @@
         try {
             localStorage.removeItem(APPS_CACHE_KEY);
             localStorage.removeItem(ICONS_CACHE_KEY);
+            localStorage.removeItem(HAS_DEVICE_KEY);
         } catch (e) {}
         var req = indexedDB.deleteDatabase('/eka2l1');
         req.onsuccess = req.onerror = req.onblocked = function () { location.reload(); };
@@ -409,34 +425,65 @@
         if (text) setStatus('yellow', text);
     }
 
-    EKA2L1.boot({
-        canvas: document.getElementById('canvas'),
-        onProgress: onProgress
-    }).then(function () {
-        coreReady = true;
-        progressBar.style.width = '100%';
-        progressEl.classList.add('done');
+    var bootPromise = null;
 
-        // Activate the persisted device if one exists (no install).
-        var result = EKA2L1.initDevice('', '');
-        if (result === 0) {
-            deviceReady = true;
-            setStatus('green', '就绪');
-            setDeviceStatusText('已安装，数据已持久化');
-            refreshApps();
-        } else {
-            setStatus('yellow', '未安装设备');
-            setDeviceStatusText('未安装 — 需要 ROM（可选 RPKG）');
-            document.getElementById('onboardCard').style.display = '';
-        }
+    /**
+     * Boot the core on demand (idempotent). iOS Safari evicts high-memory
+     * tabs while the Files document picker has the page backgrounded — with
+     * the core booted that was enough to get the tab killed and reloaded
+     * ("立即刷新"), losing the picked files. So on a fresh visit nothing is
+     * booted until the user actually taps install; only when a device is
+     * known to exist does the page boot at load (needed for the app list).
+     */
+    function ensureCore() {
+        if (bootPromise) return bootPromise;
+        bootPromise = EKA2L1.boot({
+            canvas: document.getElementById('canvas'),
+            onProgress: onProgress
+        }).then(function () {
+            coreReady = true;
+            progressBar.style.width = '100%';
+            progressEl.classList.add('done');
 
-        // The library page never runs guest code: keep the core paused so the
-        // RAF loop stays cheap while the user browses.
-        EKA2L1.setPaused(true);
-        document.getElementById('deviceInstallBtn').disabled = !romFile;
-    }).catch(function (err) {
-        console.error('[EKA2L1] boot failed:', err);
-        setStatus('red', '启动失败');
-        showError('模拟器核心启动失败：\n' + (err && err.message ? err.message : err));
-    });
+            // Activate the persisted device if one exists (no install).
+            var result = EKA2L1.initDevice('', '');
+            if (result === 0) {
+                deviceReady = true;
+                try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
+                setStatus('green', '就绪');
+                setDeviceStatusText('已安装，数据已持久化');
+                refreshApps();
+            } else {
+                setStatus('yellow', '未安装设备');
+                setDeviceStatusText('未安装 — 需要 ROM（可选 RPKG）');
+                document.getElementById('onboardCard').style.display = '';
+            }
+
+            // The library page never runs guest code: keep the core paused so
+            // the RAF loop stays cheap while the user browses.
+            EKA2L1.setPaused(true);
+        });
+        bootPromise.catch(function (err) {
+            bootPromise = null; // allow a retry on the next install attempt
+            console.error('[EKA2L1] boot failed:', err);
+            setStatus('red', '启动失败');
+            showError('模拟器核心启动失败：\n' + (err && err.message ? err.message : err));
+        });
+        return bootPromise;
+    }
+
+    try {
+        // The explicit flag is written on install/activation; the app cache
+        // doubles as evidence for devices installed before the flag existed.
+        hasDevice = (localStorage.getItem(HAS_DEVICE_KEY) === '1') || (apps.length > 0);
+    } catch (e) {}
+
+    if (hasDevice) {
+        ensureCore();
+    } else {
+        // Fresh visit: stay near-zero-footprint until an install starts.
+        setStatus('yellow', '未安装设备');
+        setDeviceStatusText('未安装 — 需要 ROM（可选 RPKG）');
+        document.getElementById('onboardCard').style.display = '';
+    }
 })();

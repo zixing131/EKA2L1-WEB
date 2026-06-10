@@ -31,7 +31,17 @@ namespace eka2l1::arm {
     class exclusive_monitor;
 }
 
+// Translation-cache arena, an inline member of ARMul_State — the whole size is
+// malloc'd up front when the core is created. Overflow is safe: the
+// interpreter flushes and restarts the cache when the high-water mark nears
+// the end (see TRANS_CACHE_FLUSH_MARGIN), so this only sets how often that
+// happens. iOS Safari kills the tab well under ~1.2GB, so the web build trades
+// rare flushes for ~100MB less baseline footprint.
+#ifdef __EMSCRIPTEN__
+#define TRANS_CACHE_SIZE (32 * 1024 * 1024)
+#else
 #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
+#endif
 
 // Signal levels
 enum { LOW = 0,
