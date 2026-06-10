@@ -126,6 +126,31 @@ using namespace eka2l1;
 // SDL2-based Emu Window for Web
 // ============================================================================
 
+// SDL button index (1/2/3) -> drivers::mouse_button (left=0, right=1, middle=2).
+// The window server only treats mouse_button_left as the touch pointer
+// (button1down); passing the raw SDL index made every click a right-click.
+static int sdl_mouse_button_to_driver(const Uint8 sdl_button) {
+    switch (sdl_button) {
+    case SDL_BUTTON_RIGHT:
+        return eka2l1::drivers::mouse_button_right;
+    case SDL_BUTTON_MIDDLE:
+        return eka2l1::drivers::mouse_button_middle;
+    case SDL_BUTTON_LEFT:
+    default:
+        return eka2l1::drivers::mouse_button_left;
+    }
+}
+
+static int sdl_mouse_state_to_driver(const Uint32 state) {
+    if (state & SDL_BUTTON_LMASK)
+        return eka2l1::drivers::mouse_button_left;
+    if (state & SDL_BUTTON_RMASK)
+        return eka2l1::drivers::mouse_button_right;
+    if (state & SDL_BUTTON_MMASK)
+        return eka2l1::drivers::mouse_button_middle;
+    return eka2l1::drivers::mouse_button_none;
+}
+
 class sdl_web_window : public eka2l1::drivers::emu_window {
 private:
     SDL_Window *window_;
@@ -133,6 +158,33 @@ private:
     bool should_quit_;
     eka2l1::vec2 window_size_;
     std::array<std::uint32_t, eka2l1::MAX_SYMBIAN_SUPPORTED_POINTERS> active_pointers_;
+
+    // Map an SDL finger id to a small stable pointer slot (Symbian pointer
+    // numbers must stay < MAX_SYMBIAN_SUPPORTED_POINTERS; browser touch
+    // identifiers grow unbounded). Returns -1 when no slot matches/frees.
+    int finger_slot_acquire(const SDL_FingerID id) {
+        const std::uint32_t key = static_cast<std::uint32_t>(id) + 1;
+        for (std::size_t i = 0; i < active_pointers_.size(); i++) {
+            if (active_pointers_[i] == key)
+                return static_cast<int>(i);
+        }
+        for (std::size_t i = 0; i < active_pointers_.size(); i++) {
+            if (active_pointers_[i] == 0) {
+                active_pointers_[i] = key;
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    int finger_slot_find(const SDL_FingerID id) {
+        const std::uint32_t key = static_cast<std::uint32_t>(id) + 1;
+        for (std::size_t i = 0; i < active_pointers_.size(); i++) {
+            if (active_pointers_[i] == key)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
 
 public:
     sdl_web_window(SDL_Window *win)
@@ -173,32 +225,30 @@ public:
             }
 
             case SDL_MOUSEMOTION: {
-                if (raw_mouse_event) {
-                    int button = (event.motion.state == 0) ? -1 :
-                        eka2l1::common::find_most_significant_bit_one(event.motion.state);
+                // Touch taps also synthesize mouse events (which == SDL_TOUCH_MOUSEID);
+                // skip those — the SDL_FINGER* path below delivers them once.
+                if (raw_mouse_event && (event.motion.which != SDL_TOUCH_MOUSEID)) {
                     raw_mouse_event(userdata_,
                         eka2l1::vec3(event.motion.x, event.motion.y, 0),
-                        button, 1, 0);
+                        sdl_mouse_state_to_driver(event.motion.state), 1, 0);
                 }
                 break;
             }
 
             case SDL_MOUSEBUTTONDOWN: {
-                if (raw_mouse_event) {
-                    int button = eka2l1::common::find_most_significant_bit_one(event.button.button);
+                if (raw_mouse_event && (event.button.which != SDL_TOUCH_MOUSEID)) {
                     raw_mouse_event(userdata_,
                         eka2l1::vec3(event.button.x, event.button.y, 0),
-                        button, 0, 0);
+                        sdl_mouse_button_to_driver(event.button.button), 0, 0);
                 }
                 break;
             }
 
             case SDL_MOUSEBUTTONUP: {
-                if (raw_mouse_event) {
-                    int button = eka2l1::common::find_most_significant_bit_one(event.button.button);
+                if (raw_mouse_event && (event.button.which != SDL_TOUCH_MOUSEID)) {
                     raw_mouse_event(userdata_,
                         eka2l1::vec3(event.button.x, event.button.y, 0),
-                        button, 2, 0);
+                        sdl_mouse_button_to_driver(event.button.button), 2, 0);
                 }
                 break;
             }
@@ -212,6 +262,11 @@ public:
 
             case SDL_FINGERDOWN: {
                 if (raw_mouse_event) {
+                    const int slot = finger_slot_acquire(event.tfinger.fingerId);
+                    if (slot < 0) {
+                        break;
+                    }
+
                     int screen_w = 0, screen_h = 0;
                     SDL_GetWindowSize(window_, &screen_w, &screen_h);
                     raw_mouse_event(userdata_,
@@ -219,13 +274,18 @@ public:
                             static_cast<int>(event.tfinger.x * screen_w),
                             static_cast<int>(event.tfinger.y * screen_h),
                             static_cast<int>(event.tfinger.pressure * eka2l1::PRESSURE_MAX_NUM)),
-                        0, 0, static_cast<int>(event.tfinger.fingerId));
+                        eka2l1::drivers::mouse_button_left, 0, slot);
                 }
                 break;
             }
 
             case SDL_FINGERMOTION: {
                 if (raw_mouse_event) {
+                    const int slot = finger_slot_find(event.tfinger.fingerId);
+                    if (slot < 0) {
+                        break;
+                    }
+
                     int screen_w = 0, screen_h = 0;
                     SDL_GetWindowSize(window_, &screen_w, &screen_h);
                     raw_mouse_event(userdata_,
@@ -233,16 +293,30 @@ public:
                             static_cast<int>(event.tfinger.x * screen_w),
                             static_cast<int>(event.tfinger.y * screen_h),
                             static_cast<int>(event.tfinger.pressure * eka2l1::PRESSURE_MAX_NUM)),
-                        0, 1, static_cast<int>(event.tfinger.fingerId));
+                        eka2l1::drivers::mouse_button_left, 1, slot);
                 }
                 break;
             }
 
             case SDL_FINGERUP: {
                 if (raw_mouse_event) {
+                    const int slot = finger_slot_find(event.tfinger.fingerId);
+                    if (slot < 0) {
+                        break;
+                    }
+                    active_pointers_[slot] = 0;
+
+                    // Release must carry the lift position: apps cancel a tap
+                    // when the pointer-up lands outside the pressed control,
+                    // which is what the old (0,0) release did to every tap.
+                    int screen_w = 0, screen_h = 0;
+                    SDL_GetWindowSize(window_, &screen_w, &screen_h);
                     raw_mouse_event(userdata_,
-                        eka2l1::vec3(0, 0, 0),
-                        0, 2, static_cast<int>(event.tfinger.fingerId));
+                        eka2l1::vec3(
+                            static_cast<int>(event.tfinger.x * screen_w),
+                            static_cast<int>(event.tfinger.y * screen_h),
+                            0),
+                        eka2l1::drivers::mouse_button_left, 2, slot);
                 }
                 break;
             }
@@ -1048,6 +1122,20 @@ int wasm_install_package(const char *pkg_path) {
 
     if (result == 0) {
         LOG_INFO(FRONTEND_CMDLINE, "Package installed successfully");
+
+        // The applist server only scans registries at boot / drive changes, so
+        // a fresh install stays invisible to wasm_get_app_list until reload.
+        // Mirror the Qt frontend (force_refresh_applist): rescan right away —
+        // on WASM the rescan path is synchronous, safe on this thread.
+        eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+        if (kern) {
+            auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+                kern->get_by_name<eka2l1::service::server>(
+                    eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+            if (alserv) {
+                alserv->rescan_registries(g_state.symsys->get_io_system());
+            }
+        }
     } else {
         LOG_ERROR(FRONTEND_CMDLINE, "Package installation failed: {}", result);
     }
