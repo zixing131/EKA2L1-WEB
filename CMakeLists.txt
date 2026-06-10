@@ -72,6 +72,11 @@ if (EMSCRIPTEN)
     # like config/epoc/yaml-cpp are compiled with exception tables too.
     add_compile_options(-fexceptions)
     add_link_options("SHELL:-s DISABLE_EXCEPTION_CATCHING=0")
+    # Link-time optimization across every TU/static lib for the perf build.
+    # Both compile and link must carry -flto so the final wasm-ld step can do
+    # cross-module inlining (notably into the CPU interpreter hot loop).
+    add_compile_options(-flto)
+    add_link_options(-flto)
 endif()
 
 add_subdirectory(src/patch)

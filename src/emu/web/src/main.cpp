@@ -822,8 +822,8 @@ static void main_loop() {
     // spend most of the frame on the guest. Once content is on screen, back
     // off so DOM events stay responsive.
     const bool boot_phase = (s_redraw_cb_count.load() == 0);
-    const double FRAME_CPU_BUDGET_MS = boot_phase ? 12.0 : 4.0;
-    const int MAX_SLICES_PER_FRAME = boot_phase ? 64 : 16;
+    const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : 8.0;
+    const int MAX_SLICES_PER_FRAME = boot_phase ? 96 : 32;
 
     const double frame_start = emscripten_get_now();
     int slices = 0;

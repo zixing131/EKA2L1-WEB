@@ -83,10 +83,14 @@ if (EMSCRIPTEN)
         "SHELL:-s MAX_WEBGL_VERSION=2"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
-        -O2
-        -g2
+        # Performance build: max link-time optimization, no debug info, no
+        # runtime assertions. Trade-off: crash backtraces become unsymbolized
+        # address offsets. For debugging, temporarily restore -O2 -g2 and
+        # ASSERTIONS=1.
+        -O3
+        -g0
         "--closure=0"
-        "SHELL:-s ASSERTIONS=1"
+        "SHELL:-s ASSERTIONS=0"
     )
 
     set_target_properties(eka2l1_wasm PROPERTIES
