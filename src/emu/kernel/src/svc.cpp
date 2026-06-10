@@ -1296,7 +1296,14 @@ namespace eka2l1::epoc {
 
     BRIDGE_FUNC(eka2l1::ptr<void>, leave_start) {
         kernel::thread *thr = kern->crr_thread();
-        LOG_TRACE(KERNEL, "Leave started! Guess leave code: {}", static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)));
+
+        // TRACE, not WARN: leaves are Symbian's normal error-propagation
+        // mechanism and fire constantly, so this must stay off the default
+        // (warn-level) web console. Lower the log level when chasing an app
+        // that dies during init — the code + thread narrow down which leave
+        // was the fatal (uncaught) one.
+        LOG_TRACE(KERNEL, "Leave code={} thread={}",
+            static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->name());
 
         thr->increase_leave_depth();
 
