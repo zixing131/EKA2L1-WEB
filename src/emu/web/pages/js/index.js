@@ -674,6 +674,8 @@
         var totalBytes = files.reduce(function (acc, f) { return acc + f.size; }, 0);
         setStatus('yellow', '上传 ' + files.length + ' 个文件…');
 
+        var writtenPaths = [];
+        var stageName = '写入模拟器内存';
         var chain = Promise.resolve();
         files.forEach(function (f, i) {
             chain = chain.then(function () {
@@ -685,12 +687,24 @@
                     if (total > 4 * 1048576) {
                         setStatus('yellow', label + ' ' + Math.floor(done * 100 / total) + '%');
                     }
-                });
+                }).then(function (p) { writtenPaths.push(p); });
             });
         });
 
         chain.then(function () {
+            stageName = '写入浏览器存储';
             setStatus('yellow', '写入浏览器存储…');
+            // Persist just the uploaded files: a full-mount syncfs walks and
+            // reconciles the whole device tree, which is slow and has been
+            // seen OOM-killing the tab on iOS Safari for large uploads.
+            if (EKA2L1.savePaths) {
+                return EKA2L1.savePaths(writtenPaths, function (done, total, bytes) {
+                    setStatus('yellow', '写入浏览器存储… ' + Math.floor(bytes / 1048576) + 'MB');
+                }).catch(function (e) {
+                    console.warn('[EKA2L1] savePaths failed, falling back to full syncfs:', e);
+                    return EKA2L1.save();
+                });
+            }
             return EKA2L1.save();
         }).then(function () {
             setStatus('green', '就绪');
@@ -701,7 +715,8 @@
         }).catch(function (err) {
             console.error('[EKA2L1] upload failed:', err);
             setStatus('red', '上传失败');
-            showError('文件上传失败：\n' + (err.message || err));
+            var detail = (err && err.name ? err.name + ': ' : '') + ((err && err.message) || err);
+            showError('文件上传失败（阶段：' + stageName + '）：\n' + detail);
         });
     });
 

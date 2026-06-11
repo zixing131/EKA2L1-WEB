@@ -322,6 +322,94 @@
         });
     };
 
+    /**
+     * Persist only the given VFS file paths (ancestor directories are added
+     * automatically) using the same IndexedDB record format as FS.syncfs.
+     * Unlike EKA2L1.save() this doesn't reconcile the whole ~300MB mount, so
+     * uploading a single 30MB game stays fast and memory-bounded — full-mount
+     * syncfs spikes are what get the tab killed on iOS Safari.
+     */
+    EKA2L1.savePaths = function (filePaths, onProgress) {
+        var FS = EKA2L1.module.FS;
+        var MOUNT = '/eka2l1';
+        var STORE = 'FILE_DATA';
+        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
+        var BATCH_BYTES = 4 * 1024 * 1024;
+
+        // Expand to ancestors so a restore can rebuild the directory tree.
+        var wanted = {};
+        (filePaths || []).forEach(function (p) {
+            var parts = p.split('/');
+            for (var i = 3; i <= parts.length; i++) { // '' / 'eka2l1' / ...
+                var sub = parts.slice(0, i).join('/');
+                if (sub.indexOf(MOUNT) === 0) wanted[sub] = 1;
+            }
+        });
+        var paths = Object.keys(wanted).sort();
+        if (!paths.length) return Promise.resolve({ entries: 0, bytes: 0 });
+
+        return new Promise(function (resolve, reject) {
+            var req;
+            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
+            req.onupgradeneeded = function (e) {
+                var db = e.target.result;
+                var st = db.objectStoreNames.contains(STORE)
+                    ? e.target.transaction.objectStore(STORE)
+                    : db.createObjectStore(STORE);
+                if (!st.indexNames.contains('timestamp')) {
+                    st.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
+            req.onsuccess = function () { resolve(req.result); };
+        }).then(function (db) {
+            var i = 0;
+            var written = 0;
+            var bytesDone = 0;
+
+            function nextBatch() {
+                if (i >= paths.length) {
+                    db.close();
+                    return Promise.resolve({ entries: written, bytes: bytesDone });
+                }
+                return new Promise(function (res, rej) {
+                    var tx = db.transaction([STORE], 'readwrite');
+                    tx.onerror = tx.onabort = function (e) {
+                        rej((e.target && e.target.error) || new Error('IndexedDB 写入失败'));
+                        if (e.preventDefault) e.preventDefault();
+                    };
+                    tx.oncomplete = function () { res(); };
+
+                    var store = tx.objectStore(STORE);
+                    var bytes = 0;
+                    while (i < paths.length && bytes < BATCH_BYTES) {
+                        var p = paths[i++];
+                        var st = FS.lstat(p);
+                        var entry = { timestamp: st.mtime, mode: st.mode };
+                        if (FS.isFile(st.mode)) {
+                            entry.contents = FS.readFile(p);
+                            bytes += entry.contents.length;
+                        } else if (FS.isLink(st.mode)) {
+                            entry.link = FS.readlink(p);
+                        }
+                        store.put(entry, p);
+                        written++;
+                    }
+                    bytesDone += bytes;
+                }).then(function () {
+                    if (onProgress) onProgress(written, paths.length, bytesDone);
+                    // Macrotask yield between batches (Safari GC headroom).
+                    return new Promise(function (r) { setTimeout(r, 0); });
+                }).then(nextBatch);
+            }
+
+            return nextBatch().catch(function (err) {
+                try { db.close(); } catch (e) {}
+                throw err;
+            });
+        });
+    };
+
     // ---- C API wrappers ----------------------------------------------------
 
     function ccall(name, ret, argTypes, args) {
