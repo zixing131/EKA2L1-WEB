@@ -1294,6 +1294,21 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
     // Register HLE dispatch libraries, init services, start the bootload.
     g_state.symsys->initialize_user_parties();
 
+    // Load the SIS registry from disk. Desktop/Android frontends do this in
+    // their stage-two init; without it every package "vanishes" after a page
+    // reload — installed apps still run (applist has its own registry) but
+    // RSisRegistry lookups fail, which breaks self-checking suites like the
+    // N-Gage 2.0 launcher (stuck at splash querying its own package).
+    {
+        static bool registries_loaded = false;
+        if (!registries_loaded) {
+            registries_loaded = true;
+            if (eka2l1::manager::packages *pkgmngr = g_state.symsys->get_packages()) {
+                pkgmngr->load_registries();
+            }
+        }
+    }
+
     // Hook the window server: screen redraw callbacks (composition + present)
     // and the input event queue target. Must re-run after every set_device()
     // since reset() recreates the kernel and all services.
@@ -1417,6 +1432,11 @@ const char *wasm_get_packages() {
         if (pkgs) {
             for (auto ite = pkgs->begin(); ite != pkgs->end(); ite++) {
                 eka2l1::package::object &obj = ite->second;
+                // ROM stubs / preinstalled firmware packages are loaded into
+                // the registry too; uninstalling those would break the device.
+                if (obj.in_rom || obj.is_preinstalled()) {
+                    continue;
+                }
                 if (json.size() > 1) {
                     json += ",";
                 }

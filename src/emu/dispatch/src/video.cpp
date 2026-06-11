@@ -181,14 +181,22 @@ namespace eka2l1::dispatch {
 
     bool epoc_video_player::open_file(const std::u16string &real_path) {
         if (!video_player_) {
-            return false;
+            // No decode backend: pretend the open succeeded. The clip then
+            // behaves as a zero-length video — play() completes the done
+            // notification immediately — so apps that gate startup on an
+            // intro video (the N-Gage 2.0 launcher loops retrying the open
+            // when it gets not-supported) simply skip it and move on.
+            LOG_WARN(HLE_DISPATCHER, "No video backend: pretending '{}' opened (clip will complete instantly)",
+                common::ucs2_to_utf8(real_path));
+            return true;
         }
         return video_player_->open_file(common::ucs2_to_utf8(real_path));
     }
 
     bool epoc_video_player::open_with_custom_stream(std::unique_ptr<common::ro_stream> &stream) {
         if (!video_player_) {
-            return false;
+            LOG_WARN(HLE_DISPATCHER, "No video backend: pretending stream video opened (clip will complete instantly)");
+            return true;
         }
         if (video_player_->open_custom_io(*stream)) {
             custom_stream_ = std::move(stream);
