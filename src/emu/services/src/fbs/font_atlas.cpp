@@ -20,6 +20,7 @@
 #include <services/fbs/font_store.h>
 
 #include <common/algorithm.h>
+#include <common/log.h>
 #include <common/time.h>
 
 #include <unordered_map>
@@ -145,13 +146,20 @@ namespace eka2l1::epoc {
             }
 
             if (std::find(unique_char.begin(), unique_char.end(), chr) == unique_char.end()) {
+                // Move-to-front MRU: each atlas resident appears exactly once,
+                // so the rebuild below can treat the list as "who is in the
+                // atlas, most recent first". The old insert-then-chop-tail kept
+                // duplicates and silently dropped residents that were still in
+                // characters_ — after a rebuild those drew stale rects from
+                // repacked atlas regions (fragmented glyph debris).
+                auto existing = std::find(last_use_.begin(), last_use_.end(), static_cast<int>(chr));
+                if (existing != last_use_.end()) {
+                    last_use_.erase(existing);
+                }
+
                 last_use_.insert(last_use_.begin(), chr);
                 unique_char.push_back(chr);
             }
-        }
-
-        if (unique_char.size() <= last_use_.size()) {
-            last_use_.erase(last_use_.end() - unique_char.size(), last_use_.end());
         }
 
         if (!to_rast.empty()) {
@@ -160,27 +168,42 @@ namespace eka2l1::epoc {
 
             if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, to_rast.data(), static_cast<char16_t>(to_rast.size()), metric_identifier_,
                     cinfos.get())) {
-                // The atlas is full. Rebuild it from the most recently used glyphs.
-                adapter_->end_get_atlas(pack_handle_);
-                pack_handle_ = adapter_->begin_get_atlas(atlas_data_.get(), { width, width });
-
-                if (pack_handle_ == -1) {
-                    return false;
-                }
-
-                const std::size_t keep = (characters_.size() > 5) ? (characters_.size() - 5) : characters_.size();
-                const std::size_t take = std::min(keep, last_use_.size());
-
-                if (take == 0) {
-                    return false;
-                }
+                // The atlas is full. Rebuild it from the most recently used
+                // glyphs (the requested ones are at the front of the MRU).
+                // Halve the resident set until a rebuild fits: a failed pack
+                // attempt mutates the packer state, so restart the atlas for
+                // every retry.
+                std::size_t take = std::min(characters_.size() + to_rast.size(), last_use_.size());
+                bool rebuilt = false;
 
                 auto evict_cinfos = std::make_unique<adapter::character_info[]>(take);
 
-                if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, &last_use_[0], static_cast<char16_t>(take),
-                        metric_identifier_, evict_cinfos.get())) {
+                while (take > 0) {
+                    adapter_->end_get_atlas(pack_handle_);
+                    pack_handle_ = adapter_->begin_get_atlas(atlas_data_.get(), { width, width });
+
+                    if (pack_handle_ == -1) {
+                        return false;
+                    }
+
+                    if (adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, &last_use_[0], static_cast<char16_t>(take),
+                            metric_identifier_, evict_cinfos.get())) {
+                        rebuilt = true;
+                        break;
+                    }
+
+                    take /= 2;
+                }
+
+                if (!rebuilt) {
                     return false;
                 }
+
+                // The atlas now holds exactly the first `take` MRU glyphs:
+                // anything else would point at repacked regions, so drop it.
+                // Evicted characters get re-rasterized on their next use.
+                characters_.clear();
+                last_use_.resize(take);
 
                 for (std::size_t i = 0; i < take; i++) {
                     characters_[last_use_[i]] = evict_cinfos[i];
@@ -222,7 +245,7 @@ namespace eka2l1::epoc {
         for (auto &chr : text) {
             bool to_fallback = false;
 
-            if (store_ && !is_control_char(chr) && !adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_)) {
+            if (store_ && !is_control_char(chr) && !store_->can_really_draw(adapter_, typeface_idx_, chr, metric_identifier_)) {
                 auto known = fallback_chars.find(chr);
 
                 if (known != fallback_chars.end()) {

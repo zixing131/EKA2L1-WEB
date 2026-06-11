@@ -423,8 +423,12 @@ namespace eka2l1::epoc::adapter {
         const bool want_mono = (face->size->metrics.y_ppem != 0)
             && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD);
 
+        // Plain grayscale AA for scalable glyphs: LCD subpixel rendering writes
+        // colored fringes into the atlas, which on dense CJK strokes reads as
+        // broken multicolored text (the emulated panel has no known subpixel
+        // order to benefit from it anyway).
         const FT_Int32 load_flags = want_mono ? (FT_LOAD_DEFAULT | FT_LOAD_TARGET_MONO) : FT_LOAD_DEFAULT;
-        const FT_Render_Mode render_mode = want_mono ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_LCD;
+        const FT_Render_Mode render_mode = want_mono ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_NORMAL;
 
         std::vector<stbrp_rect> pack_rects(num_code);
 

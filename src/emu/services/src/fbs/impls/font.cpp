@@ -802,7 +802,7 @@ namespace eka2l1 {
         // glyph from any loaded font that covers the codepoint (e.g. a bundled CJK
         // fallback), sized to this font instance's design height. Glyph-index mode
         // (high bit set) is face-specific, so no fallback is possible there.
-        if (!(codepoint & 0x80000000) && !info->adapter->does_glyph_exist(info->idx, codepoint, metric_identifier)) {
+        if (!(codepoint & 0x80000000) && !server<fbs_server>()->persistent_font_store.can_really_draw(info->adapter, info->idx, codepoint, metric_identifier)) {
             epoc::open_font_info *fallback = server<fbs_server>()->persistent_font_store.seek_the_open_font_with_character(
                 codepoint, info->adapter);
 

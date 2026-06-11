@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/log.h>
 #include <services/fbs/font_store.h>
 
 namespace eka2l1::epoc {
@@ -121,6 +122,106 @@ namespace eka2l1::epoc {
         glyph_fallback_cache.clear();
     }
 
+    bool font_store::is_cjk_placeholder_font(epoc::adapter::font_file_adapter_base *adapter, const std::size_t face_idx) {
+        const auto key = std::make_pair(adapter, face_idx);
+        auto cached = cjk_placeholder_cache.find(key);
+
+        if (cached != cjk_placeholder_cache.end()) {
+            return cached->second;
+        }
+
+        // Unrelated han characters shared by the JIS and GB repertoires (stub
+        // fonts on western firmware keep a full CJK cmap but render the same
+        // box for everything). A genuine CJK font renders them all distinct;
+        // when every claimed probe comes out byte-identical, it's a stub.
+        static constexpr std::uint32_t probe_codepoints[] = {
+            0x4E2D, // 中
+            0x4F53, // 体
+            0x56FD, // 国
+            0x65E5, // 日
+            0x84DD, // 蓝 (GB-only: also catches partial JIS fonts when present)
+        };
+
+        std::uint32_t probe_metric = 0;
+        bool placeholder = false;
+        std::size_t rendered = 0;
+        bool all_identical = true;
+        std::vector<std::uint8_t> first_render;
+
+        if (adapter->get_nearest_supported_metric(face_idx, 16, &probe_metric, true).has_value()) {
+            auto render_probe = [&](const std::uint32_t codepoint, std::vector<std::uint8_t> &out) -> bool {
+                int width = 0;
+                int height = 0;
+                std::uint32_t data_size = 0;
+                epoc::glyph_bitmap_type type = epoc::glyph_bitmap_type::default_glyph_bitmap;
+                epoc::open_font_character_metric metric;
+
+                std::uint8_t *data = adapter->get_glyph_bitmap(face_idx, codepoint, probe_metric, &width, &height,
+                    data_size, &type, metric);
+
+                if (!data || !data_size) {
+                    return false;
+                }
+
+                out.assign(data, data + data_size);
+                out.push_back(static_cast<std::uint8_t>(width));
+                out.push_back(static_cast<std::uint8_t>(height));
+
+                adapter->free_glyph_bitmap(data);
+                return true;
+            };
+
+            for (const std::uint32_t codepoint : probe_codepoints) {
+                if (!adapter->has_character(face_idx, static_cast<std::int32_t>(codepoint), 0)) {
+                    continue;
+                }
+
+                std::vector<std::uint8_t> render;
+                if (!render_probe(codepoint, render)) {
+                    continue;
+                }
+
+                if (rendered == 0) {
+                    first_render = std::move(render);
+                } else if (render != first_render) {
+                    all_identical = false;
+                }
+
+                rendered++;
+            }
+
+            placeholder = (rendered >= 2) && all_identical;
+        }
+
+        if (placeholder) {
+            LOG_INFO(SERVICE_FBS, "Font face {} of adapter 0x{:X} claims CJK coverage but renders placeholder boxes "
+                                  "({} probes identical), rerouting its han glyphs to the fallback",
+                face_idx, reinterpret_cast<std::uintptr_t>(adapter), rendered);
+        }
+
+        cjk_placeholder_cache.emplace(key, placeholder);
+        return placeholder;
+    }
+
+    static inline bool codepoint_is_cjk_text(const std::uint32_t codepoint) {
+        // CJK punctuation/kana/han + hangul + fullwidth forms: everything a
+        // placeholder-outline UI font fakes with the same box glyph.
+        return (codepoint >= 0x2E00) && (codepoint < 0xFFF0);
+    }
+
+    bool font_store::can_really_draw(epoc::adapter::font_file_adapter_base *adapter, const std::size_t face_idx,
+        const std::uint32_t codepoint, const std::uint32_t metric_identifier) {
+        if (!adapter->does_glyph_exist(face_idx, codepoint, metric_identifier)) {
+            return false;
+        }
+
+        if (codepoint_is_cjk_text(codepoint) && is_cjk_placeholder_font(adapter, face_idx)) {
+            return false;
+        }
+
+        return true;
+    }
+
     open_font_info *font_store::seek_the_open_font_with_character(const std::uint32_t codepoint, epoc::adapter::font_file_adapter_base *exclude_adapter) {
         // Two passes: wide-coverage host fallback fonts first, then everything
         // else. Symbol fonts never serve text fallback (their cmaps claim text
@@ -143,6 +244,10 @@ namespace eka2l1::epoc {
                     }
 
                     if (info.adapter->has_character(info.idx, static_cast<std::int32_t>(codepoint), 0)) {
+                        if (codepoint_is_cjk_text(codepoint) && is_cjk_placeholder_font(info.adapter, info.idx)) {
+                            continue; // its "coverage" is the same box for every han char
+                        }
+
                         return static_cast<std::int32_t>(i);
                     }
                 }

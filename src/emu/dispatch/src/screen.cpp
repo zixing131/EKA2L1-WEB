@@ -270,8 +270,11 @@ namespace eka2l1::dispatch {
     // and low 16-bit halves of a pixel almost never match (it requires R==B
     // and X==G), while 565 streams have equal neighbouring pixels in every
     // flat run — measured ~15% of nonzero slots in-game vs ~0% for real
-    // 32bpp frames.
-    static bool dsa_content_looks_rgb565(const std::uint8_t *data, const eka2l1::vec2 cur_size) {
+    // 32bpp frames. All-zero (black) and all-one (white) slots are ambiguous
+    // — they match in both encodings (launch transitions flash a pure white
+    // frame, which is how Snakes got misdetected) — so they don't count.
+    // Returns +1 looks-565, -1 looks-32bpp, 0 inconclusive (blank/flat frame).
+    static int dsa_classify_rgb565(const std::uint8_t *data, const eka2l1::vec2 cur_size) {
         const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
         const std::size_t total = static_cast<std::size_t>(cur_size.x) * cur_size.y;
 
@@ -280,7 +283,13 @@ namespace eka2l1::dispatch {
 
         for (std::size_t i = 0; i < total; i += 5) { // ~20% sample
             const std::uint32_t v = slots[i];
-            if (!v) {
+            if (!v || (v == 0xFFFFFFFFu)) {
+                continue;
+            }
+            // Grayscale slots (all four bytes equal) are not 565 evidence:
+            // doubled 565 pairs match as 0xXYXY with X != Y in real content.
+            const std::uint32_t b = v & 0xFF;
+            if (v == (b * 0x01010101u)) {
                 continue;
             }
             nonzero++;
@@ -289,7 +298,11 @@ namespace eka2l1::dispatch {
             }
         }
 
-        return (nonzero > 1000) && (pair_eq * 20 >= nonzero); // >5%
+        if (nonzero <= 1000) {
+            return 0;
+        }
+
+        return (pair_eq * 20 >= nonzero) ? 1 : -1; // >5%
     }
 
     BRIDGE_FUNC_DISPATCHER(void, update_screen, const std::uint32_t screen_number, const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
@@ -348,23 +361,36 @@ namespace eka2l1::dispatch {
                 static std::map<epoc::screen *, int> rgb565_verdicts;
                 int &verdict565 = rgb565_verdicts[scr];
 #ifdef __EMSCRIPTEN__
-                if (eka2l1::arm::dyncom_jit::force_dsa565 && (verdict565 >= 0)) {
-                    verdict565 = -1; // debug override (?dsa565=1)
+                if (eka2l1::arm::dyncom_jit::force_dsa565) {
+                    verdict565 = -1; // debug override (?dsa565=1), pins the lock
                 }
 #endif
+                const int cls565 = dsa_classify_rgb565(reinterpret_cast<const std::uint8_t *>(data_ptr), screen_size);
+
                 if (verdict565 >= 0) {
-                    if (dsa_content_looks_rgb565(reinterpret_cast<const std::uint8_t *>(data_ptr), screen_size)) {
+                    if (cls565 > 0) {
                         if (++verdict565 >= 2) {
                             LOG_INFO(HLE_DISPATCHER, "DSA content detected as RGB565 in a 32bpp chunk, converting on upload");
                             verdict565 = -1;
                         }
-                    } else {
+                    } else if (cls565 < 0) {
+                        verdict565 = 0;
+                    }
+                } else {
+                    // Locked on: keep watching the raw frames so a transient
+                    // misdetection (e.g. on a launch transition) heals itself.
+                    // Two conclusive 32bpp frames in a row disengage; blank or
+                    // ambiguous frames keep the current state.
+                    if (cls565 > 0) {
+                        verdict565 = -1;
+                    } else if ((cls565 < 0) && (--verdict565 <= -3)) {
+                        LOG_INFO(HLE_DISPATCHER, "DSA RGB565 conversion disengaged (content looks 32bpp again)");
                         verdict565 = 0;
                     }
                 }
 
                 static std::vector<std::uint32_t> rgb565_converted;
-                if (verdict565 == -1) {
+                if (verdict565 <= -1) {
                     const std::size_t total_px = static_cast<std::size_t>(screen_size.x) * screen_size.y;
                     rgb565_converted.resize(total_px);
                     const std::uint16_t *src = reinterpret_cast<const std::uint16_t *>(data_ptr);
@@ -373,7 +399,14 @@ namespace eka2l1::dispatch {
                         const std::uint32_t r = ((p >> 11) & 0x1F) * 255 / 31;
                         const std::uint32_t g = ((p >> 5) & 0x3F) * 255 / 63;
                         const std::uint32_t b = (p & 0x1F) * 255 / 31;
+#ifdef __EMSCRIPTEN__
+                        // The shared update_bitmap path swaps R/B in place for
+                        // every 32bpp upload on WASM; pre-swap so it comes out
+                        // as natural RGBA on screen.
+                        rgb565_converted[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+#else
                         rgb565_converted[i] = 0xFF000000u | (b << 16) | (g << 8) | r;
+#endif
                     }
                     data_ptr = reinterpret_cast<const char *>(rgb565_converted.data());
                 }

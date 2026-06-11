@@ -283,31 +283,54 @@ namespace eka2l1::drivers {
             static std::map<drivers::handle, int> verdicts;
             int &verdict = verdicts[h];
 
-            if (verdict >= 0) {
+            {
                 const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
                 const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
                 std::uint32_t nonzero = 0, pair_eq = 0;
                 for (std::size_t i = 0; i < total; i += 5) {
                     const std::uint32_t v = slots[i];
                     if (!v || (v == 0xFFFFFFFFu)) {
-                        continue; // skip blank black/white fills
+                        continue; // blank black/white fills are ambiguous in both encodings
+                    }
+                    // All four bytes equal = grayscale RGBA (the font atlases are
+                    // exactly this), not 565 evidence: a doubled 565 pair matches
+                    // as 0xXYXY with X != Y in real content.
+                    const std::uint32_t b = v & 0xFF;
+                    if (v == (b * 0x01010101u)) {
+                        continue;
                     }
                     nonzero++;
                     if ((v >> 16) == (v & 0xFFFF)) {
                         pair_eq++;
                     }
                 }
-                if ((nonzero > 1000) && (pair_eq * 20 >= nonzero)) {
-                    if (++verdict >= 2) {
-                        LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
-                        verdict = -1;
+
+                // +1 looks-565, -1 looks-32bpp, 0 inconclusive (blank/flat frame)
+                const int cls = (nonzero <= 1000) ? 0 : ((pair_eq * 20 >= nonzero) ? 1 : -1);
+
+                if (verdict >= 0) {
+                    if (cls > 0) {
+                        if (++verdict >= 2) {
+                            LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
+                            verdict = -1;
+                        }
+                    } else if (cls < 0) {
+                        verdict = 0;
                     }
-                } else if (nonzero > 1000) {
-                    verdict = 0;
+                } else {
+                    // Locked on: a transient misdetection (e.g. a launch
+                    // transition frame) heals after two conclusive 32bpp
+                    // frames; blank or ambiguous uploads keep the state.
+                    if (cls > 0) {
+                        verdict = -1;
+                    } else if ((cls < 0) && (--verdict <= -3)) {
+                        LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} RGB565 conversion disengaged (content looks 32bpp again)", dim.x, dim.y);
+                        verdict = 0;
+                    }
                 }
             }
 
-            if (verdict == -1) {
+            if (verdict <= -1) {
                 static std::vector<std::uint32_t> conv;
                 const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
                 conv.resize(total);

@@ -24,7 +24,9 @@
 
 #include <utils/consts.h>
 
+#include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace eka2l1 {
@@ -58,6 +60,10 @@ namespace eka2l1::epoc {
         // codepoint -> index into open_font_store (or -1 when nothing covers it)
         std::unordered_map<std::uint32_t, std::int32_t> glyph_fallback_cache;
 
+        // (adapter, face) -> "claims CJK in its cmap but renders the same
+        // placeholder box for every han character" (see is_cjk_placeholder_font)
+        std::map<std::pair<epoc::adapter::font_file_adapter_base *, std::size_t>, bool> cjk_placeholder_cache;
+
         eka2l1::io_system *io;
 
     protected:
@@ -75,6 +81,25 @@ namespace eka2l1::epoc {
         open_font_info *seek_the_font_by_uid(const epoc::uid the_uid, epoc::open_font_metrics &target_metric, std::uint32_t *metric_identifier = nullptr);
         open_font_info *seek_the_open_font_with_character(const std::uint32_t codepoint, epoc::adapter::font_file_adapter_base *exclude_adapter);
         epoc::typeface_support *get_typeface_support(const std::uint32_t index);
+
+        /**
+         * \brief Detect fonts whose cmap claims CJK coverage but whose outlines are
+         *        a single placeholder box (e.g. ROM UI fonts on western firmware).
+         *
+         * Such fonts defeat the does_glyph_exist gate of the per-character glyph
+         * fallback: the glyph "exists", then rasterizes as an identical filled box
+         * for every han codepoint. Render two unrelated probe characters and call
+         * the font a placeholder when the bitmaps come out byte-identical.
+         * Results are cached per (adapter, face).
+         */
+        bool is_cjk_placeholder_font(epoc::adapter::font_file_adapter_base *adapter, const std::size_t face_idx);
+
+        /**
+         * \brief True when this font can really draw the given character: the cmap
+         *        has it and, for han/fullwidth text, the font is not a placeholder.
+         */
+        bool can_really_draw(epoc::adapter::font_file_adapter_base *adapter, const std::size_t face_idx,
+            const std::uint32_t codepoint, const std::uint32_t metric_identifier);
 
         const std::size_t number_of_fonts() const {
             return open_font_store.size();
