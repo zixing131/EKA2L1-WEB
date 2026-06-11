@@ -28,15 +28,23 @@
 #include <emscripten.h>
 
 // ============================================================================
-// JS glue. One AudioContext shared by all streams; each stream schedules
-// AudioBuffer chunks back-to-back on its own timeline so the browser mixes
-// and resamples everything. All calls happen on the browser main thread.
+// JS glue. One AudioContext shared by all streams.
+//
+// Preferred path: an AudioWorklet whose processor reads interleaved S16 PCM
+// straight out of a ring buffer living in the (shared) WASM heap. The audio
+// thread drains the ring in real time, so sound keeps playing even when the
+// browser main thread is busy running the emulator — the main thread only
+// has to top the ring up once per frame (or slower, up to the ring size).
+//
+// Fallback path (worklet unavailable / not ready yet): schedule AudioBuffer
+// chunks back-to-back, which needs main-thread service every ~150ms and
+// stutters under load.
 // ============================================================================
 
 // clang-format off
 EM_JS(void, ek_webaudio_init, (), {
     if (window.__ekAudio) return;
-    var A = { ctx: null, streams: {} };
+    var A = { ctx: null, streams: {}, nodes: {}, workletReady: 0, workletFailed: 0 };
     window.__ekAudio = A;
 
     // Autoplay policy: contexts start suspended until a user gesture. Resume
@@ -49,7 +57,145 @@ EM_JS(void, ek_webaudio_init, (), {
     ['pointerdown', 'touchstart', 'keydown'].forEach(function (evt) {
         document.addEventListener(evt, resume, { capture: true, passive: true });
     });
+
+    A.ensureCtx = function () {
+        if (!A.ctx) {
+            try {
+                A.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                return null;
+            }
+            A.loadWorklet();
+        }
+        return A.ctx;
+    };
+
+    // The processor source is inlined and loaded via a blob URL so deployment
+    // stays a single-file affair. Control block (Int32Array, 4 words):
+    //   [0] write position in frames (monotonic, uint32 wrap)
+    //   [1] read position in frames (monotonic, uint32 wrap)
+    //   [2] volume, 16.16 fixed point
+    //   [3] flags: bit0 = stream dead, processor should self-destruct
+    var PROC_SRC = ''
+        + 'class EkRing extends AudioWorkletProcessor {\n'
+        + '  constructor(o) {\n'
+        + '    super();\n'
+        + '    var d = o.processorOptions;\n'
+        + '    this.c = new Int32Array(d.sab, d.ctrl, 4);\n'
+        + '    this.r = new Int16Array(d.sab, d.ring, d.ringLen);\n'
+        + '    this.ch = d.ch;\n'
+        + '    this.rf = (d.ringLen / d.ch) | 0;\n'
+        + '    this.step = d.rate / sampleRate;\n'
+        + '    this.pos = 0;\n'
+        + '  }\n'
+        + '  process(inputs, outputs) {\n'
+        + '    if (Atomics.load(this.c, 3) & 1) return false;\n'
+        + '    var out = outputs[0];\n'
+        + '    var n = out[0].length;\n'
+        + '    var rd = Atomics.load(this.c, 1) >>> 0;\n'
+        + '    var wr = Atomics.load(this.c, 0) >>> 0;\n'
+        + '    var vol = (Atomics.load(this.c, 2) >>> 0) / (65536 * 32768);\n'
+        + '    var avail = (wr - rd) >>> 0;\n'
+        + '    if (avail > this.rf) avail = this.rf;\n'
+        + '    var pos = this.pos, step = this.step;\n'
+        + '    var produced = 0;\n'
+        + '    for (var f = 0; f < n; f++) {\n'
+        + '      var ip = Math.floor(pos);\n'
+        + '      if (ip + 1 >= avail) break;\n'
+        + '      var fr = pos - ip;\n'
+        + '      var i0 = ((rd + ip) % this.rf) * this.ch;\n'
+        + '      var i1 = ((rd + ip + 1) % this.rf) * this.ch;\n'
+        + '      for (var c = 0; c < out.length; c++) {\n'
+        + '        var sc = c < this.ch ? c : (this.ch - 1);\n'
+        + '        var s = this.r[i0 + sc] + (this.r[i1 + sc] - this.r[i0 + sc]) * fr;\n'
+        + '        out[c][f] = s * vol;\n'
+        + '      }\n'
+        + '      pos += step;\n'
+        + '      produced = f + 1;\n'
+        + '    }\n'
+        + '    for (var c2 = 0; c2 < out.length; c2++) {\n'
+        + '      for (var f2 = produced; f2 < n; f2++) out[c2][f2] = 0;\n'
+        + '    }\n'
+        + '    var consumed = Math.floor(pos);\n'
+        + '    if (consumed > 0) {\n'
+        + '      Atomics.store(this.c, 1, (rd + consumed) | 0);\n'
+        + '      pos -= consumed;\n'
+        + '    }\n'
+        + '    this.pos = pos;\n'
+        + '    return true;\n'
+        + '  }\n'
+        + '}\n'
+        + 'registerProcessor(\'ek-ring\', EkRing);\n';
+
+    A.loadWorklet = function () {
+        if (!A.ctx || !A.ctx.audioWorklet || A.workletReady || A.workletFailed) {
+            if (!A.ctx || !A.ctx.audioWorklet) A.workletFailed = 1;
+            return;
+        }
+        var url = URL.createObjectURL(new Blob([PROC_SRC], { type: 'application/javascript' }));
+        A.ctx.audioWorklet.addModule(url).then(function () {
+            A.workletReady = 1;
+            URL.revokeObjectURL(url);
+        }, function (e) {
+            console.warn('[EKA2L1] AudioWorklet unavailable, falling back to buffer scheduling:', e);
+            A.workletFailed = 1;
+            URL.revokeObjectURL(url);
+        });
+    };
 });
+
+// 1 = the worklet module is loaded and nodes can be created.
+EM_JS(int, ek_webaudio_worklet_state, (), {
+    var A = window.__ekAudio;
+    if (!A) return 0;
+    A.ensureCtx();
+    if (A.workletReady) return 1;
+    return A.workletFailed ? 2 : 0;
+});
+
+// Create the worklet node for one stream, wired to the ring in the WASM heap.
+EM_JS(int, ek_webaudio_make_node, (int id, const void *ctrl_ptr, const void *ring_ptr,
+    int ring_len_elems, int channels, int rate), {
+    var A = window.__ekAudio;
+    if (!A || !A.workletReady) return 0;
+    var ctx = A.ensureCtx();
+    if (!ctx) return 0;
+    try {
+        var node = new AudioWorkletNode(ctx, 'ek-ring', {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [channels],
+            processorOptions: {
+                sab: HEAP16.buffer,
+                ctrl: ctrl_ptr,
+                ring: ring_ptr,
+                ringLen: ring_len_elems,
+                ch: channels,
+                rate: rate
+            }
+        });
+        node.connect(ctx.destination);
+        A.nodes[id] = node;
+        return 1;
+    } catch (e) {
+        console.warn('[EKA2L1] AudioWorkletNode creation failed:', e);
+        A.workletFailed = 1;
+        A.workletReady = 0;
+        return 0;
+    }
+});
+
+EM_JS(void, ek_webaudio_node_drop, (int id), {
+    var A = window.__ekAudio;
+    if (!A) return;
+    var node = A.nodes[id];
+    if (node) {
+        try { node.disconnect(); } catch (e) {}
+        delete A.nodes[id];
+    }
+});
+
+// ---- Legacy buffer-scheduling path (fallback) ----
 
 // Queue one chunk of interleaved S16 PCM for a stream. Returns the seconds of
 // audio buffered ahead of the playhead after queuing (negative ctx = huge so
@@ -58,12 +204,8 @@ EM_JS(double, ek_webaudio_queue, (int id, const short *ptr, int frames, int chan
     var A = window.__ekAudio;
     if (!A) return 1e9;
 
-    if (!A.ctx) {
-        try {
-            A.ctx = new (window.AudioContext || window.webkitAudioContext)();
-        } catch (e) {
-            return 1e9;
-        }
+    if (!A.ensureCtx()) {
+        return 1e9;
     }
     if (A.ctx.state === 'suspended') {
         A.ctx.resume();
@@ -112,16 +254,35 @@ EM_JS(void, ek_webaudio_drop, (int id), {
 // clang-format on
 
 namespace eka2l1::drivers {
-    // Keep roughly this much audio scheduled per stream. Big enough to ride
-    // out a slow frame, small enough to keep latency tolerable for games.
+    // Fallback path: keep roughly this much audio scheduled per stream.
     static constexpr double TARGET_BUFFERED_SECS = 0.15;
+
+    // Worklet path: ring capacity. The audio thread drains in real time, so
+    // this is pure headroom against main-thread stalls, not added latency —
+    // playback latency is one worklet quantum.
+    static constexpr unsigned RING_SECONDS_DIV = 2; // sample_rate / 2 = 0.5s
 
     class web_audio_output_stream : public audio_output_stream {
         friend class web_audio_driver;
 
+        // Shared with the worklet processor (Int32Array view over the heap).
+        struct ring_control {
+            std::atomic<std::uint32_t> write_frames;
+            std::atomic<std::uint32_t> read_frames;
+            std::atomic<std::uint32_t> volume_q16;
+            std::atomic<std::uint32_t> flags; // bit0 = dead
+        };
+
+        static_assert(sizeof(ring_control) == 16, "worklet expects 4 i32 control words");
+
         web_audio_driver *web_driver_;
         data_callback callback_;
         std::vector<std::int16_t> chunk_buf_;
+
+        std::unique_ptr<ring_control> ctrl_;
+        std::vector<std::int16_t> ring_buf_;
+        std::uint32_t ring_frames_;
+        bool node_made_;
 
         int id_;
         float volume_;
@@ -136,17 +297,30 @@ namespace eka2l1::drivers {
             : audio_output_stream(driver, sample_rate, channels)
             , web_driver_(driver)
             , callback_(callback)
+            , ctrl_(std::make_unique<ring_control>())
+            , ring_frames_(sample_rate / RING_SECONDS_DIV)
+            , node_made_(false)
             , id_(next_id_++)
             , volume_(1.0f)
             , playing_(false)
             , frames_pulled_(0) {
-            // 50ms chunks: 2-4 pulls fill the schedule, then 1 pull per frame.
+            // 50ms pull chunks for both paths.
             chunk_buf_.resize((sample_rate / 20) * channels);
+            ring_buf_.resize(ring_frames_ * channels);
+
+            ctrl_->write_frames.store(0, std::memory_order_relaxed);
+            ctrl_->read_frames.store(0, std::memory_order_relaxed);
+            ctrl_->volume_q16.store(1 << 16, std::memory_order_relaxed);
+            ctrl_->flags.store(0, std::memory_order_relaxed);
         }
 
         ~web_audio_output_stream() override {
             playing_ = false;
+            if (ctrl_) {
+                ctrl_->flags.store(1, std::memory_order_release); // processor self-destructs
+            }
             web_driver_->unregister_stream(this);
+            ek_webaudio_node_drop(id_);
             ek_webaudio_drop(id_);
         }
 
@@ -186,17 +360,67 @@ namespace eka2l1::drivers {
             return true;
         }
 
-        // Pull PCM from the emulated side and hand it to Web Audio until the
-        // stream has TARGET_BUFFERED_SECS scheduled. Runs on the main thread.
+        // Top up the ring (worklet path) or the schedule (fallback path) from
+        // the emulated side. Runs on the browser main thread once per frame.
         void pump(const float master_volume_factor) {
             if (!playing_) {
                 return;
             }
 
-            double ahead = ek_webaudio_ahead(id_);
             const std::size_t chunk_frames = chunk_buf_.size() / channels;
 
-            // Bound iterations: never spend more than a few chunks per frame.
+            if (!node_made_ && (ek_webaudio_worklet_state() == 1)) {
+                node_made_ = (ek_webaudio_make_node(id_, ctrl_.get(), ring_buf_.data(),
+                                  static_cast<int>(ring_buf_.size()), channels,
+                                  static_cast<int>(sample_rate))
+                    != 0);
+            }
+
+            if (node_made_) {
+                const float vol = std::clamp(volume_ * master_volume_factor, 0.0f, 4.0f);
+                ctrl_->volume_q16.store(static_cast<std::uint32_t>(vol * 65536.0f),
+                    std::memory_order_relaxed);
+
+                for (int guard = 0; guard < 12; guard++) {
+                    const std::uint32_t wr = ctrl_->write_frames.load(std::memory_order_relaxed);
+                    const std::uint32_t rd = ctrl_->read_frames.load(std::memory_order_acquire);
+                    const std::uint32_t used = wr - rd;
+
+                    if (ring_frames_ - used < chunk_frames) {
+                        break; // ring is full
+                    }
+
+                    const std::size_t produced = callback_(chunk_buf_.data(), chunk_frames);
+                    if (produced == 0) {
+                        break;
+                    }
+
+                    if (produced < chunk_frames) {
+                        std::memset(chunk_buf_.data() + produced * channels, 0,
+                            (chunk_frames - produced) * channels * sizeof(std::int16_t));
+                    }
+
+                    // Copy into the ring, possibly split across the wrap point.
+                    const std::uint32_t start = wr % ring_frames_;
+                    const std::uint32_t first = std::min<std::uint32_t>(
+                        static_cast<std::uint32_t>(chunk_frames), ring_frames_ - start);
+                    std::memcpy(ring_buf_.data() + static_cast<std::size_t>(start) * channels,
+                        chunk_buf_.data(), static_cast<std::size_t>(first) * channels * sizeof(std::int16_t));
+                    if (first < chunk_frames) {
+                        std::memcpy(ring_buf_.data(), chunk_buf_.data() + static_cast<std::size_t>(first) * channels,
+                            (chunk_frames - first) * channels * sizeof(std::int16_t));
+                    }
+
+                    ctrl_->write_frames.store(wr + static_cast<std::uint32_t>(chunk_frames),
+                        std::memory_order_release);
+                    frames_pulled_ += chunk_frames;
+                }
+                return;
+            }
+
+            // Fallback: schedule AudioBuffer chunks.
+            double ahead = ek_webaudio_ahead(id_);
+
             for (int guard = 0; (ahead < TARGET_BUFFERED_SECS) && (guard < 8); guard++) {
                 const std::size_t produced = callback_(chunk_buf_.data(), chunk_frames);
                 if (produced == 0) {
@@ -241,8 +465,8 @@ namespace eka2l1::drivers {
     }
 
     std::uint32_t web_audio_driver::native_sample_rate() {
-        // Web Audio resamples AudioBuffers of any rate; reporting a fixed rate
-        // avoids creating the AudioContext before the first user gesture.
+        // Both paths accept any stream rate (the worklet resamples linearly,
+        // the fallback lets the browser resample AudioBuffers).
         return 44100;
     }
 

@@ -45,6 +45,14 @@ namespace eka2l1::dispatch {
         , rotation_(ROTATION_TYPE_NONE)
         , postings_(posting_target_free_check_func, posting_target_free_func) {
         video_player_ = drivers::new_best_video_player(auddrv);
+        if (!video_player_) {
+            // No video backend on this platform (e.g. WASM has no ffmpeg).
+            // Callers go through the null checks below and report
+            // not-supported instead of dereferencing a null player: the
+            // N-Gage 2.0 launcher opens its intro video at startup and used
+            // to die here (null vtable fetch -> garbage indirect call).
+            return;
+        }
         video_player_->set_image_frame_available_callback([](void *userdata, const std::uint8_t *data, const std::size_t data_size) {
             epoc_video_player *self = reinterpret_cast<epoc_video_player*>(userdata);
             if (self) {
@@ -128,23 +136,31 @@ namespace eka2l1::dispatch {
     }
 
     std::uint32_t epoc_video_player::max_volume() const {
-        return video_player_->max_volume();
+        return video_player_ ? video_player_->max_volume() : 10;
     }
 
     std::uint32_t epoc_video_player::current_volume() const {
-        return video_player_->volume();
+        return video_player_ ? video_player_->volume() : 0;
     }
 
     bool epoc_video_player::set_volume(const std::uint32_t vol) {
-        return video_player_->set_volume(vol);
+        return video_player_ ? video_player_->set_volume(vol) : false;
     }
 
     void epoc_video_player::play(const std::uint64_t *range) {
+        if (!video_player_) {
+            // Nothing will ever produce frames; finish "playback" right away
+            // so apps waiting on the done notification continue.
+            on_play_done(0);
+            return;
+        }
         video_player_->play(range);
     }
 
     void epoc_video_player::close() {
-        video_player_->close();
+        if (video_player_) {
+            video_player_->close();
+        }
 
         if (image_handle_) {
             drivers::graphics_command_builder builder;
@@ -158,14 +174,22 @@ namespace eka2l1::dispatch {
     }
     
     void epoc_video_player::stop() {
-        video_player_->stop();
+        if (video_player_) {
+            video_player_->stop();
+        }
     }
 
     bool epoc_video_player::open_file(const std::u16string &real_path) {
+        if (!video_player_) {
+            return false;
+        }
         return video_player_->open_file(common::ucs2_to_utf8(real_path));
     }
 
     bool epoc_video_player::open_with_custom_stream(std::unique_ptr<common::ro_stream> &stream) {
+        if (!video_player_) {
+            return false;
+        }
         if (video_player_->open_custom_io(*stream)) {
             custom_stream_ = std::move(stream);
             return true;
@@ -179,6 +203,9 @@ namespace eka2l1::dispatch {
     }
 
     void epoc_video_player::post_new_image(const std::uint8_t *buffer_data, const std::size_t buffer_size) {
+        if (!video_player_) {
+            return;
+        }
         const eka2l1::vec2 vid_size = video_player_->get_video_size();
         const eka2l1::vec3 vid_size_v3 = eka2l1::vec3(vid_size.x, vid_size.y, 0);
 

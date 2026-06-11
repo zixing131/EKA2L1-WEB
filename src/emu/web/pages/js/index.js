@@ -63,7 +63,7 @@
 
     // ---- icons ----------------------------------------------------------------
 
-    var ICONS_CACHE_KEY = 'eka2l1_icons_cache';
+    var ICONS_CACHE_KEY = 'eka2l1_icons_cache_v2'; // v2: SVG namespace fix
     var ICONS_CACHE_LIMIT = 3.5 * 1024 * 1024; // stay well under the LS quota
 
     var iconCache = {}; // uid -> dataURL ('' = known to have no icon)
@@ -239,6 +239,8 @@
         apps.sort(function (a, b) { return (a.name || '').localeCompare(b.name || '', 'zh'); });
         try { localStorage.setItem(APPS_CACHE_KEY, JSON.stringify(apps)); } catch (e) {}
         renderGameList();
+        if (window.renderDeviceList) renderDeviceList();
+        if (window.renderPkgList) renderPkgList();
     }
 
     // Render instantly from the last session's cache while the core boots.
@@ -527,6 +529,171 @@
                 showError('SIS 安装失败：\n' + (err.message || err));
                 EKA2L1.toast(err.message || '安装失败，详见上方提示', 4000);
             });
+    });
+
+    // ---- device list (multi-ROM) ---------------------------------------------
+
+    window.renderDeviceList = function () {
+        var box = document.getElementById('deviceList');
+        if (!box) return;
+        if (!coreReady) { box.innerHTML = ''; return; }
+
+        var devices = [];
+        try {
+            devices = JSON.parse(EKA2L1.module.ccall('wasm_get_devices', 'string', [], [])) || [];
+        } catch (e) { devices = []; }
+
+        box.innerHTML = '';
+        devices.forEach(function (d) {
+            var row = document.createElement('div');
+            row.className = 'pref-item';
+            var info = document.createElement('div');
+            info.style.flex = '1';
+            info.innerHTML = '<div class="pref-label">' + (d.name || '设备 ' + d.index) + '</div>'
+                + '<div class="pref-sub">' + (d.firmware || '') + (d.current ? ' · 当前设备' : '') + '</div>';
+            row.appendChild(info);
+            if (!d.current) {
+                var btn = document.createElement('button');
+                btn.className = 'btn';
+                btn.textContent = '切换';
+                btn.addEventListener('click', function () {
+                    if (!confirm('切换到「' + (d.name || d.index) + '」？\n模拟器将重新启动。')) return;
+                    var r = EKA2L1.module.ccall('wasm_set_device', 'number', ['number'], [d.index]);
+                    if (r !== 0) { EKA2L1.toast('切换失败（' + r + '）'); return; }
+                    EKA2L1.save().catch(function () {}).then(function () { location.reload(); });
+                });
+                row.appendChild(btn);
+            }
+            box.appendChild(row);
+        });
+    };
+
+    // ---- package manager (uninstall) ------------------------------------------
+
+    window.renderPkgList = function () {
+        var box = document.getElementById('pkgList');
+        if (!box) return;
+        if (!coreReady || !deviceReady) {
+            box.innerHTML = '<div class="pref-item"><div class="pref-sub">启动核心后可查看已安装的应用包</div></div>';
+            return;
+        }
+
+        var pkgs = [];
+        try {
+            pkgs = JSON.parse(EKA2L1.module.ccall('wasm_get_packages', 'string', [], [])) || [];
+        } catch (e) { pkgs = []; }
+
+        if (!pkgs.length) {
+            box.innerHTML = '<div class="pref-item"><div class="pref-sub">没有用户安装的应用包</div></div>';
+            return;
+        }
+
+        box.innerHTML = '';
+        pkgs.forEach(function (p) {
+            var row = document.createElement('div');
+            row.className = 'pref-item';
+            var info = document.createElement('div');
+            info.style.flex = '1';
+            info.style.minWidth = '0';
+            info.innerHTML = '<div class="pref-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.name || ('0x' + (p.uid >>> 0).toString(16))) + '</div>'
+                + '<div class="pref-sub">' + (p.vendor || '') + '</div>';
+            row.appendChild(info);
+            var btn = document.createElement('button');
+            btn.className = 'btn btn-danger';
+            btn.textContent = '卸载';
+            btn.addEventListener('click', function () {
+                if (!confirm('卸载「' + p.name + '」？\n应用与其文件将被删除。')) return;
+                btn.disabled = true;
+                btn.textContent = '卸载中…';
+                setTimeout(function () {
+                    var r = EKA2L1.module.ccall('wasm_uninstall_package', 'number', ['number'], [p.uid >>> 0]);
+                    if (r !== 0) {
+                        EKA2L1.toast('卸载失败（' + r + '）');
+                        btn.disabled = false;
+                        btn.textContent = '卸载';
+                        return;
+                    }
+                    EKA2L1.save().catch(function () {}).then(function () {
+                        refreshApps();
+                        renderPkgList();
+                        EKA2L1.toast('已卸载 ' + p.name);
+                    });
+                }, 30);
+            });
+            row.appendChild(btn);
+            box.appendChild(row);
+        });
+    };
+
+    // ---- file upload to virtual disk ------------------------------------------
+
+    window.onFileTargetChange = function () {
+        var sel = document.getElementById('fileUpTarget');
+        document.getElementById('fileUpCustomRow').style.display
+            = (sel.value === 'custom') ? '' : 'none';
+    };
+
+    function uploadTargetGuestPath() {
+        var sel = document.getElementById('fileUpTarget');
+        var raw = (sel.value === 'custom')
+            ? (document.getElementById('fileUpCustom').value || '')
+            : sel.value;
+        raw = raw.trim();
+        if (!raw) return null;
+        if (!/^[a-zA-Z]:[\\/]/.test(raw)) return null;
+        if (raw.indexOf('..') !== -1) return null;
+        return raw;
+    }
+
+    // e:\n-gage\ -> /eka2l1/drives/e/n-gage/   (drive letters c/d/e supported)
+    function guestPathToFs(guest) {
+        var drive = guest[0].toLowerCase();
+        if ('cde'.indexOf(drive) === -1) return null;
+        var rest = guest.substring(2).replace(/\\/g, '/').toLowerCase();
+        if (rest[0] !== '/') rest = '/' + rest;
+        if (rest[rest.length - 1] !== '/') rest += '/';
+        return '/eka2l1/drives/' + drive + rest;
+    }
+
+    window.pickUpload = function () {
+        if (!coreReady || !deviceReady) { EKA2L1.toast('请先安装设备 ROM'); return; }
+        var guest = uploadTargetGuestPath();
+        if (!guest) { EKA2L1.toast('请输入有效路径，例如 e:\\games\\'); return; }
+        document.getElementById('fileUpInput').click();
+    };
+
+    document.getElementById('fileUpInput').addEventListener('change', function () {
+        var files = Array.prototype.slice.call(this.files || []);
+        this.value = '';
+        if (!files.length) return;
+
+        var guest = uploadTargetGuestPath();
+        var fsDir = guest && guestPathToFs(guest);
+        if (!fsDir) { EKA2L1.toast('目标路径无效'); return; }
+
+        var totalBytes = files.reduce(function (acc, f) { return acc + f.size; }, 0);
+        setStatus('yellow', '上传 ' + files.length + ' 个文件…');
+
+        var chain = Promise.resolve();
+        files.forEach(function (f, i) {
+            chain = chain.then(function () {
+                setStatus('yellow', '上传 ' + (i + 1) + '/' + files.length + '：' + f.name);
+                // Keep the original filename: Symbian path lookup is
+                // case-insensitive on the emulator side.
+                return EKA2L1.writeFileToVFS(f, fsDir + f.name);
+            });
+        });
+
+        chain.then(function () {
+            return EKA2L1.save();
+        }).then(function () {
+            setStatus('green', '就绪');
+            EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + Math.ceil(totalBytes / 1048576) + 'MB）到 ' + guest);
+        }).catch(function (err) {
+            console.error('[EKA2L1] upload failed:', err);
+            setStatus('red', '上传失败');
+            showError('文件上传失败：\n' + (err.message || err));
+        });
     });
 
     // ---- settings ------------------------------------------------------------

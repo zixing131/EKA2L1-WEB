@@ -100,14 +100,47 @@
                     <div class="pref-label">固件状态</div>
                     <div class="pref-sub" id="deviceStatusText">检测中…</div>
                 </div>
-                <button class="btn" onclick="openDeviceSheet()">安装 ROM</button>
+                <button class="btn" onclick="openDeviceSheet()">安装新 ROM</button>
             </div>
+            <div id="deviceList"></div>
             <div class="pref-item">
                 <div style="flex:1">
                     <div class="pref-label">安装 SIS 游戏包</div>
                     <div class="pref-sub">.sis / .sisx，安装到 E 盘</div>
                 </div>
                 <button class="btn" onclick="pickSis()">选择文件</button>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">应用管理</div>
+            <div id="pkgList">
+                <div class="pref-item"><div class="pref-sub">启动核心后可查看已安装的应用包</div></div>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">文件管理</div>
+            <div class="pref-item">
+                <span class="pref-label">上传到</span>
+                <select id="fileUpTarget" onchange="onFileTargetChange()">
+                    <option value="e:\n-gage\">E:\n-gage\（N-Gage 游戏）</option>
+                    <option value="e:\">E:\（存储卡根目录）</option>
+                    <option value="c:\data\">C:\Data\</option>
+                    <option value="e:\sounds\digital\">E:\Sounds\Digital\（铃声）</option>
+                    <option value="custom">自定义路径…</option>
+                </select>
+            </div>
+            <div class="pref-item" id="fileUpCustomRow" style="display:none">
+                <span class="pref-label">路径</span>
+                <input type="text" id="fileUpCustom" placeholder="例如 e:\games\" style="flex:1;min-width:0;padding:8px 10px;border-radius:10px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit">
+            </div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">上传文件到虚拟磁盘</div>
+                    <div class="pref-sub">可多选。N-Gage 游戏（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
+                </div>
+                <button class="btn" onclick="pickUpload()">选择文件</button>
             </div>
         </div>
 
@@ -240,6 +273,7 @@
 <input type="file" id="sisInput" style="display:none">
 <input type="file" id="romInput" style="display:none">
 <input type="file" id="rpkgInput" style="display:none">
+<input type="file" id="fileUpInput" style="display:none" multiple>
 
 <!-- SDL needs a canvas even on the library page; keep it offscreen -->
 <canvas id="canvas" tabindex="-1" style="position:fixed;left:-9999px;top:0;width:1px;height:1px"></canvas>

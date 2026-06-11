@@ -62,6 +62,7 @@
 
 #include <system/epoc.h>
 #include <system/devices.h>
+#include <package/manager.h>
 #include <system/installation/rpkg.h>
 #include <cpu/dyncom/arm_dyncom_jit.h>
 #include <system/installation/common.h>
@@ -781,8 +782,13 @@ static bool init_emulator() {
     const std::string storage_path = "/eka2l1";
     g_state.conf.storage = storage_path;
 
-    // Load config (may return early if config.yml doesn't exist yet – that's fine)
+    // Load config (may return early if config.yml doesn't exist yet – that's fine).
+    // config::serialize/deserialize use a CWD-relative "config.yml"; chdir into
+    // the persisted storage dir so settings (current device, volumes…) survive
+    // page reloads via IDBFS.
+    chdir(g_state.conf.storage.c_str());
     g_state.conf.deserialize();
+    chdir("/");
     // Re-enforce storage path in case deserialize() loaded a stale relative path.
     g_state.conf.storage = storage_path;
 
@@ -1032,6 +1038,24 @@ static std::vector<std::uint8_t> g_rpkg_stream_buf;
 static std::string g_rpkg_stream_rom_target;
 
 EMSCRIPTEN_KEEPALIVE
+static std::string json_escape(const std::string &in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        if (c == '\\') { out += "\\\\"; }
+        else if (c == '"') { out += "\\\""; }
+        else if (static_cast<unsigned char>(c) < 0x20) { out += ' '; }
+        else { out += c; }
+    }
+    return out;
+}
+
+static void wasm_save_config() {
+    chdir(g_state.conf.storage.c_str());
+    g_state.conf.serialize(false);
+    chdir("/");
+}
+
 std::uint8_t *wasm_rpkg_stream_buffer(int size) {
     if (size <= 0) {
         return nullptr;
@@ -1110,6 +1134,11 @@ int wasm_rpkg_stream_finish() {
     // install_rpkg's callers rely on this to persist devices.yml.
     g_state.symsys->get_device_manager()->save_devices();
 
+    // The new device becomes the active one (activated by the follow-up
+    // wasm_init_with_rom("", "") call).
+    g_state.conf.device = static_cast<int>(g_state.symsys->get_device_manager()->total()) - 1;
+    wasm_save_config();
+
     LOG_INFO(FRONTEND_CMDLINE, "Streaming RPKG install done: firmcode={}", firmware_code);
     return 0;
 }
@@ -1165,7 +1194,9 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
             yml_check.valid() ? static_cast<int>(yml_check.size()) : -1);
     }
 
-    if (dvcmngr->total() == 0) {
+    const bool want_install = (rom_path[0] != '\0');
+
+    if (want_install || (dvcmngr->total() == 0)) {
         // Validate ROM file exists and is readable.
         {
             common::ro_std_file_stream check_stream(std::string(rom_path), true);
@@ -1237,11 +1268,21 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
         // list is lost on every page reload.
         dvcmngr->save_devices();
         LOG_INFO(FRONTEND_CMDLINE, "{} device(s) now registered, devices.yml saved", dvcmngr->total());
+
+        // A freshly installed ROM becomes the active device.
+        g_state.conf.device = static_cast<int>(dvcmngr->total()) - 1;
+        wasm_save_config();
+    }
+
+    // Activate the configured device (clamped: devices.yml may have changed).
+    int dev_index = g_state.conf.device;
+    if ((dev_index < 0) || (dev_index >= static_cast<int>(dvcmngr->total()))) {
+        dev_index = 0;
     }
 
     // Triggers reset(): memory model init, ROM load, dispatcher + service setup.
-    if (!g_state.symsys->set_device(0)) {
-        LOG_ERROR(FRONTEND_CMDLINE, "set_device(0) failed");
+    if (!g_state.symsys->set_device(static_cast<std::uint8_t>(dev_index))) {
+        LOG_ERROR(FRONTEND_CMDLINE, "set_device({}) failed", dev_index);
         return -4;
     }
 
@@ -1308,6 +1349,125 @@ int wasm_install_package(const char *pkg_path) {
     }
 
     return result;
+}
+
+/**
+ * JSON list of installed devices (ROMs): [{"index":0,"name":"...","firmware":"...","current":1}]
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_get_devices() {
+    static std::string json;
+    json = "[";
+
+    if (g_state.symsys) {
+        eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
+        if (dvcmngr) {
+            for (std::size_t i = 0; i < dvcmngr->total(); i++) {
+                eka2l1::device *dvc = dvcmngr->get(static_cast<std::uint8_t>(i));
+                if (!dvc) {
+                    continue;
+                }
+                if (json.size() > 1) {
+                    json += ",";
+                }
+                json += "{\"index\":" + std::to_string(i);
+                json += ",\"name\":\"" + json_escape(dvc->model) + "\"";
+                json += ",\"firmware\":\"" + json_escape(dvc->firmware_code) + "\"";
+                json += ",\"current\":";
+                json += (static_cast<int>(i) == g_state.conf.device) ? '1' : '0';
+                json += "}";
+            }
+        }
+    }
+
+    json += "]";
+    return json.c_str();
+}
+
+/**
+ * Persist the device to boot. Page must be reloaded afterwards: switching
+ * devices means a full kernel reset, which is only safe from a fresh boot.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_set_device(int index) {
+    if (!g_state.symsys) {
+        return -1;
+    }
+
+    eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
+    if (!dvcmngr || (index < 0) || (index >= static_cast<int>(dvcmngr->total()))) {
+        return -2;
+    }
+
+    g_state.conf.device = index;
+    wasm_save_config();
+    return 0;
+}
+
+/**
+ * JSON list of installed SIS packages: [{"uid":1234,"name":"...","vendor":"..."}]
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_get_packages() {
+    static std::string json;
+    json = "[";
+
+    if (g_state.symsys) {
+        eka2l1::manager::packages *pkgs = g_state.symsys->get_packages();
+        if (pkgs) {
+            for (auto ite = pkgs->begin(); ite != pkgs->end(); ite++) {
+                eka2l1::package::object &obj = ite->second;
+                if (json.size() > 1) {
+                    json += ",";
+                }
+                json += "{\"uid\":" + std::to_string(static_cast<std::uint32_t>(obj.uid));
+                json += ",\"name\":\"" + json_escape(eka2l1::common::ucs2_to_utf8(obj.package_name)) + "\"";
+                json += ",\"vendor\":\"" + json_escape(eka2l1::common::ucs2_to_utf8(obj.vendor_localized_name)) + "\"";
+                json += "}";
+            }
+        }
+    }
+
+    json += "]";
+    return json.c_str();
+}
+
+/**
+ * Uninstall a SIS package by its package UID. Returns 0 on success.
+ * The caller should persist (IDBFS sync) and refresh the app list afterwards.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_uninstall_package(unsigned int uid) {
+    if (!g_state.symsys) {
+        return -1;
+    }
+
+    eka2l1::manager::packages *pkgs = g_state.symsys->get_packages();
+    if (!pkgs) {
+        return -2;
+    }
+
+    eka2l1::package::object *obj = pkgs->package(static_cast<eka2l1::manager::uid>(uid));
+    if (!obj) {
+        return -3;
+    }
+
+    if (!pkgs->uninstall_package(*obj)) {
+        return -4;
+    }
+
+    // Mirror install: rescan app registries so the list updates immediately.
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (kern) {
+        auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+        if (alserv) {
+            alserv->rescan_registries(g_state.symsys->get_io_system());
+        }
+    }
+
+    return 0;
 }
 
 /**
@@ -1474,10 +1634,37 @@ const char *wasm_get_app_icon(int uid) {
         if (svg_ok) {
             eka2l1::common::ro_std_file_stream svg_in(TMP_SVG, true);
             if (svg_in.valid() && svg_in.size() > 0) {
-                std::vector<std::uint8_t> svg_data(svg_in.size());
-                svg_in.read(svg_data.data(), svg_data.size());
+                std::string svg_text(svg_in.size(), '\0');
+                svg_in.read(svg_text.data(), svg_text.size());
+
+                // Symbian-era SVGs (SVG Tiny / 2000-03 DTD) routinely omit the
+                // xmlns declarations. Browsers parse image/svg+xml as strict
+                // XML: a missing default namespace renders nothing, and a
+                // missing xlink prefix (used by embedded <image> bitmaps,
+                // e.g. PyS60 app icons) is a hard parse error. Patch them in.
+                const std::size_t tag_pos = svg_text.find("<svg");
+                if (tag_pos != std::string::npos) {
+                    const std::size_t tag_end = svg_text.find('>', tag_pos);
+                    const std::string head = svg_text.substr(
+                        tag_pos, (tag_end == std::string::npos) ? std::string::npos : (tag_end - tag_pos));
+
+                    std::string inject;
+                    if (head.find("xmlns=") == std::string::npos) {
+                        inject += " xmlns=\"http://www.w3.org/2000/svg\"";
+                    }
+                    if ((svg_text.find("xlink:") != std::string::npos)
+                        && (head.find("xmlns:xlink=") == std::string::npos)) {
+                        inject += " xmlns:xlink=\"http://www.w3.org/1999/xlink\"";
+                    }
+                    if (!inject.empty()) {
+                        svg_text.insert(tag_pos + 4, inject);
+                    }
+                }
+
                 s_icon_json = "{\"type\":\"svg\",\"data\":\""
-                    + eka2l1::crypt::base64_encode(svg_data.data(), svg_data.size()) + "\"}";
+                    + eka2l1::crypt::base64_encode(reinterpret_cast<const std::uint8_t *>(svg_text.data()),
+                          svg_text.size())
+                    + "\"}";
             }
         }
 
@@ -1818,10 +2005,11 @@ void wasm_debug_dump() {
     {
         const std::uint64_t total = eka2l1_wasm_guest_instrs_total.load();
         const std::uint64_t jit = eka2l1::arm::dyncom_jit::stat_jit_instrs;
-        std::printf("[dump] jit: default=%d compiled=%u rejected=%u jit_instrs=%llu (%.1f%% of guest)\n",
+        std::printf("[dump] jit: default=%d compiled=%u rejected=%u chained=%u jit_instrs=%llu (%.1f%% of guest)\n",
             eka2l1::arm::dyncom_jit::enabled_default,
             eka2l1::arm::dyncom_jit::stat_compiled,
             eka2l1::arm::dyncom_jit::stat_rejected,
+            eka2l1::arm::dyncom_jit::stat_chained,
             static_cast<unsigned long long>(jit),
             total ? (100.0 * static_cast<double>(jit) / static_cast<double>(total)) : 0.0);
 
