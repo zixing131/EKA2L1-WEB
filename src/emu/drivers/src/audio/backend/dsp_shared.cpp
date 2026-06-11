@@ -187,7 +187,16 @@ namespace eka2l1::drivers {
             std::memset(&buffer[frame_wrote * channels_], 0, (frame_count - frame_wrote) * channels_ * sizeof(std::int16_t));
         }
 
+#ifdef __EMSCRIPTEN__
+        // The web backend pre-pulls ahead of real time into a ring buffer; an
+        // honest count lets it commit only real frames instead of baking the
+        // zero-padded tail (audible as crackle) into the stream. Desktop
+        // backends (cubeb) pull at device rate and treat a short return as
+        // end-of-stream, so they keep the padded full count.
+        return frame_wrote;
+#else
         return frame_count;
+#endif
     }
 
     std::uint64_t dsp_output_stream_shared::position() {

@@ -87,6 +87,8 @@ EM_JS(void, ek_webaudio_init, (), {
         + '    this.rf = (d.ringLen / d.ch) | 0;\n'
         + '    this.step = d.rate / sampleRate;\n'
         + '    this.pos = 0;\n'
+        + '    this.g = 1;\n'                 /* declick: ramp-in gain after starvation */
+        + '    this.tail = new Float32Array(8);\n' /* declick: decaying tail per channel */
         + '  }\n'
         + '  process(inputs, outputs) {\n'
         + '    if (Atomics.load(this.c, 3) & 1) return false;\n'
@@ -102,19 +104,27 @@ EM_JS(void, ek_webaudio_init, (), {
         + '    for (var f = 0; f < n; f++) {\n'
         + '      var ip = Math.floor(pos);\n'
         + '      if (ip + 1 >= avail) break;\n'
+        + '      if (this.g < 1) this.g = Math.min(1, this.g + 0.005);\n'
         + '      var fr = pos - ip;\n'
         + '      var i0 = ((rd + ip) % this.rf) * this.ch;\n'
         + '      var i1 = ((rd + ip + 1) % this.rf) * this.ch;\n'
         + '      for (var c = 0; c < out.length; c++) {\n'
         + '        var sc = c < this.ch ? c : (this.ch - 1);\n'
         + '        var s = this.r[i0 + sc] + (this.r[i1 + sc] - this.r[i0 + sc]) * fr;\n'
-        + '        out[c][f] = s * vol;\n'
+        + '        out[c][f] = s * vol * this.g;\n'
+        + '        this.tail[c] = out[c][f];\n'
         + '      }\n'
         + '      pos += step;\n'
         + '      produced = f + 1;\n'
         + '    }\n'
-        + '    for (var c2 = 0; c2 < out.length; c2++) {\n'
-        + '      for (var f2 = produced; f2 < n; f2++) out[c2][f2] = 0;\n'
+        + '    if (produced < n) {\n'
+        + '      for (var f2 = produced; f2 < n; f2++) {\n'
+        + '        for (var c2 = 0; c2 < out.length; c2++) {\n'
+        + '          this.tail[c2] *= 0.94;\n'
+        + '          out[c2][f2] = this.tail[c2];\n'
+        + '        }\n'
+        + '      }\n'
+        + '      this.g = 0;\n'
         + '    }\n'
         + '    var consumed = Math.floor(pos);\n'
         + '    if (consumed > 0) {\n'
@@ -395,25 +405,27 @@ namespace eka2l1::drivers {
                         break;
                     }
 
-                    if (produced < chunk_frames) {
-                        std::memset(chunk_buf_.data() + produced * channels, 0,
-                            (chunk_frames - produced) * channels * sizeof(std::int16_t));
-                    }
-
-                    // Copy into the ring, possibly split across the wrap point.
+                    // Commit only the frames the source really produced. We pull
+                    // ahead of real time, so a short read just means "queue ran
+                    // dry for now" — padding it with silence would bake an
+                    // audible gap (crackle) into the stream.
                     const std::uint32_t start = wr % ring_frames_;
                     const std::uint32_t first = std::min<std::uint32_t>(
-                        static_cast<std::uint32_t>(chunk_frames), ring_frames_ - start);
+                        static_cast<std::uint32_t>(produced), ring_frames_ - start);
                     std::memcpy(ring_buf_.data() + static_cast<std::size_t>(start) * channels,
                         chunk_buf_.data(), static_cast<std::size_t>(first) * channels * sizeof(std::int16_t));
-                    if (first < chunk_frames) {
+                    if (first < produced) {
                         std::memcpy(ring_buf_.data(), chunk_buf_.data() + static_cast<std::size_t>(first) * channels,
-                            (chunk_frames - first) * channels * sizeof(std::int16_t));
+                            (produced - first) * channels * sizeof(std::int16_t));
                     }
 
-                    ctrl_->write_frames.store(wr + static_cast<std::uint32_t>(chunk_frames),
+                    ctrl_->write_frames.store(wr + static_cast<std::uint32_t>(produced),
                         std::memory_order_release);
-                    frames_pulled_ += chunk_frames;
+                    frames_pulled_ += produced;
+
+                    if (produced < chunk_frames) {
+                        break;
+                    }
                 }
                 return;
             }
@@ -427,15 +439,14 @@ namespace eka2l1::drivers {
                     break;
                 }
 
-                if (produced < chunk_frames) {
-                    std::memset(chunk_buf_.data() + produced * channels, 0,
-                        (chunk_frames - produced) * channels * sizeof(std::int16_t));
-                }
-
-                frames_pulled_ += chunk_frames;
-                ahead = ek_webaudio_queue(id_, chunk_buf_.data(), static_cast<int>(chunk_frames),
+                frames_pulled_ += produced;
+                ahead = ek_webaudio_queue(id_, chunk_buf_.data(), static_cast<int>(produced),
                     channels, static_cast<int>(sample_rate),
                     static_cast<double>(volume_) * master_volume_factor);
+
+                if (produced < chunk_frames) {
+                    break;
+                }
             }
         }
     };
