@@ -368,6 +368,12 @@ namespace eka2l1 {
 
         epoc::font_store persistent_font_store;
 
+        // OR-union of the unicode coverage of all fallback host fonts. Reported
+        // coverage of every font is widened by this (get_face_attrib), so guest
+        // UI code doesn't locally replace "unsupported" chars with boxes before
+        // the glyph-level fallback in rasterize_glyph ever gets a chance.
+        std::uint32_t fallback_coverage_[4] = { 0, 0, 0, 0 };
+
         void load_fonts(eka2l1::io_system *io);
 
         std::atomic<service::uid> connection_id_counter{ 0x1234 }; // Easier to debug

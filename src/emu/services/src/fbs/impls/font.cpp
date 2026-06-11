@@ -759,7 +759,19 @@ namespace eka2l1 {
             return;
         }
 
-        ctx->write_data_to_descriptor_argument(1, font->of_info.face_attrib);
+        // Widen the advertised unicode coverage with the fallback fonts'. Guest
+        // UI code (Avkon/FORM) checks coverage locally and substitutes its own
+        // placeholder boxes for "unsupported" chars without ever asking the
+        // server - hiding the glyph-level fallback. With the union reported,
+        // those chars go through DrawText -> rasterize_glyph -> fallback.
+        epoc::open_font_face_attrib attrib_to_report = font->of_info.face_attrib;
+        fbs_server *serv = server<fbs_server>();
+
+        for (int i = 0; i < 4; i++) {
+            attrib_to_report.coverage[i] |= serv->fallback_coverage_[i];
+        }
+
+        ctx->write_data_to_descriptor_argument(1, attrib_to_report);
         ctx->complete(true);
     }
 
@@ -1212,7 +1224,9 @@ namespace eka2l1 {
         // detail is off so we classify by extension rather than dir_entry::type.
         static const char *FALLBACK_FONT_FOLDER = ".//fonts//";
 
-        auto load_with_filter = [this](const char *filter, epoc::adapter::font_file_adapter_kind adapter_kind) {
+        std::int32_t first_fallback_index = -1;
+
+        auto load_with_filter = [this, &first_fallback_index](const char *filter, epoc::adapter::font_file_adapter_kind adapter_kind) {
             auto iterator = common::make_directory_iterator(FALLBACK_FONT_FOLDER, filter);
 
             if (!iterator || !iterator->is_valid()) {
@@ -1240,7 +1254,22 @@ namespace eka2l1 {
                 fseek(f, 0, SEEK_SET);
 
                 if (!buf.empty() && (fread(buf.data(), 1, buf.size(), f) == buf.size())) {
+                    const std::size_t fonts_before = persistent_font_store.number_of_fonts();
                     persistent_font_store.add_fonts(buf, adapter_kind);
+
+                    // Widen the advertised coverage by what the new fonts bring in.
+                    for (std::size_t i = fonts_before; i < persistent_font_store.number_of_fonts(); i++) {
+                        if (epoc::open_font_info *new_info = persistent_font_store.get_open_font_info(i)) {
+                            for (int word = 0; word < 4; word++) {
+                                fallback_coverage_[word] |= new_info->face_attrib.coverage[word];
+                            }
+
+                            if (first_fallback_index < 0) {
+                                first_fallback_index = static_cast<std::int32_t>(i);
+                            }
+                        }
+                    }
+
                     LOG_INFO(SERVICE_FBS, "Loaded fallback host font: {}", full_path);
                 }
 
@@ -1250,5 +1279,14 @@ namespace eka2l1 {
 
         load_with_filter("*.ttf", epoc::adapter::font_file_adapter_kind::freetype);
         load_with_filter("*.gdr", epoc::adapter::font_file_adapter_kind::gdr);
+
+        // Let the wide-coverage fallback font impersonate every ROM family
+        // (insertion-shadowing, exact-name lookups hit it first). This mirrors
+        // CJK firmware where the system font itself covers Latin + CJK; without
+        // it, custom-drawn apps locally test the ROM font for glyph support and
+        // paint their own placeholder boxes without ever consulting the server.
+        if (first_fallback_index >= 0) {
+            persistent_font_store.shadow_existing_fonts_with(static_cast<std::size_t>(first_fallback_index));
+        }
     }
 }

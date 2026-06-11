@@ -17,10 +17,12 @@
 * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <common/algorithm.h>
 #include <common/cvt.h>
 #include <common/log.h>
 
 #include <services/fbs/adapter/freetype_font_adapter.h>
+#include <climits>
 #include <memory>
 
 #include <freetype/tttables.h>
@@ -257,20 +259,78 @@ namespace eka2l1::epoc::adapter {
 
         // Fonts with embedded bitmap strikes (EBDT/EBLC, e.g. the S60 CJK fallback
         // S60SC.ttf) make FreeType return a 1bpp packed bitmap when a strike matches
-        // the requested ppem. The rest of fbs treats the buffer as 8bpp grayscale and
-        // copies width*rows bytes, so a mono buffer (pitch = (width+7)/8) is read as
-        // garbage -> tofu. Expand mono to 8bpp here so the output is always grayscale.
+        // the requested ppem. Re-encode it as Symbian's run-length monochrome glyph
+        // stream (same as the GDR adapter): the guest blitter accepts that at any
+        // display depth, while 8bpp antialiased glyphs are dropped on low-depth
+        // offscreen bitmaps (custom-drawn UIs) and raw mono would be misread.
         if (bitmap.buffer && (bitmap.pixel_mode == FT_PIXEL_MODE_MONO)) {
-            mono_expand_scratch_.assign(static_cast<std::size_t>(bitmap.width) * bitmap.rows, 0);
+            const int mono_width = static_cast<int>(bitmap.width);
+            const int mono_height = static_cast<int>(bitmap.rows);
 
-            for (unsigned int row = 0; row < bitmap.rows; row++) {
-                const std::uint8_t *src_row = bitmap.buffer + static_cast<std::ptrdiff_t>(row) * bitmap.pitch;
-                std::uint8_t *dst_row = mono_expand_scratch_.data() + static_cast<std::size_t>(row) * bitmap.width;
+            // Worst case: every line is its own non-repeat section (5 bits header
+            // per line) + payload. Round up generously.
+            const std::size_t worst_bits = static_cast<std::size_t>(mono_height) * (5 + mono_width) + 32;
+            mono_expand_scratch_.assign((worst_bits + 7) / 8 + 4, 0);
 
-                for (unsigned int col = 0; col < bitmap.width; col++) {
-                    const std::uint8_t bit = src_row[col >> 3] & (0x80 >> (col & 7));
-                    dst_row[col] = bit ? 0xFF : 0x00;
+            std::uint32_t total_bit_write = 0;
+            auto write_bit = [&](const int bit) {
+                mono_expand_scratch_[total_bit_write >> 3] |= static_cast<std::uint8_t>((bit & 1) << (total_bit_write & 7));
+                total_bit_write++;
+            };
+
+            auto src_bit = [&](const int row, const int col) -> int {
+                const std::uint8_t byte = bitmap.buffer[static_cast<std::ptrdiff_t>(row) * bitmap.pitch + (col >> 3)];
+                return (byte >> (7 - (col & 7))) & 1;
+            };
+
+            auto lines_equal = [&](const int row1, const int row2) {
+                for (int col = 0; col < mono_width; col++) {
+                    if (src_bit(row1, col) != src_bit(row2, col)) {
+                        return false;
+                    }
                 }
+                return true;
+            };
+
+            int line = 0;
+
+            while (line < mono_height) {
+                bool repeat = false;
+                int count = 1;
+
+                if (line + 1 < mono_height) {
+                    repeat = lines_equal(line, line + 1);
+                    count = 2;
+
+                    while ((count < 15) && (line + count < mono_height)
+                        && (lines_equal(repeat ? line : (line + count - 1), line + count) == repeat)) {
+                        count++;
+                    }
+
+                    if (!repeat) {
+                        count--;
+                    }
+                }
+
+                write_bit(repeat ? 0 : 1);
+                write_bit(count & 1);
+                write_bit((count >> 1) & 1);
+                write_bit((count >> 2) & 1);
+                write_bit((count >> 3) & 1);
+
+                for (int j = 0; j < (repeat ? 1 : count); j++) {
+                    for (int col = 0; col < mono_width; col++) {
+                        write_bit(src_bit(line + j, col));
+                    }
+                }
+
+                line += count;
+            }
+
+            total_size = ((total_bit_write + 31) >> 5) * 4;
+
+            if (bmp_type) {
+                *bmp_type = glyph_bitmap_type::monochrome_glyph_bitmap;
             }
 
             character_metric.width = ft_convention_to_int_pixel(glyph->metrics.width);
@@ -281,7 +341,7 @@ namespace eka2l1::epoc::adapter {
             character_metric.vertical_bearing_x = ft_convention_to_int_pixel(glyph->metrics.vertBearingX);
             character_metric.vertical_bearing_y = ft_convention_to_int_pixel(glyph->metrics.vertBearingY);
             character_metric.vertical_advance = ft_convention_to_int_pixel(glyph->metrics.vertAdvance);
-            character_metric.bitmap_type = glyph_bitmap_type::antialised_glyph_bitmap;
+            character_metric.bitmap_type = glyph_bitmap_type::monochrome_glyph_bitmap;
 
             return mono_expand_scratch_.data();
         }
@@ -475,6 +535,30 @@ namespace eka2l1::epoc::adapter {
             derive_design_height_from_max_height(face, targeted_font_size);
 
         auto fake_design_height = is_design_font_size ? targeted_font_size : adjusted_font_size;
+
+        // Fonts with embedded bitmap strikes (EBDT/EBLC, e.g. the S60 CJK system
+        // font) are bitmap designs first: their TrueType outlines are low-quality
+        // auto-traced placeholders that render as solid blobs. Snap the pixel size
+        // to the nearest strike so FreeType always serves the hand-made bitmaps.
+        // Outline-only fonts (num_fixed_sizes == 0) are unaffected.
+        if (face->num_fixed_sizes > 0) {
+            int best_strike = 0;
+            int best_delta = INT_MAX;
+
+            for (int i = 0; i < face->num_fixed_sizes; i++) {
+                const int strike_ppem = static_cast<int>(face->available_sizes[i].y_ppem >> 6);
+                const int delta = common::abs(strike_ppem - adjusted_font_size);
+
+                if (delta < best_delta) {
+                    best_delta = delta;
+                    best_strike = strike_ppem;
+                }
+            }
+
+            if (best_strike > 0) {
+                adjusted_font_size = best_strike;
+            }
+        }
 
         if (!set_font_size(face_index, adjusted_font_size)) {
             return std::nullopt;

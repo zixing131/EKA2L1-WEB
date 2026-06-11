@@ -148,6 +148,57 @@ namespace eka2l1::epoc {
         return (found_index < 0) ? nullptr : &open_font_store[found_index];
     }
 
+    void font_store::shadow_existing_fonts_with(const std::size_t source_index) {
+        if (source_index >= open_font_store.size()) {
+            return;
+        }
+
+        // Collect target names first: inserting invalidates iterators/indices.
+        std::vector<std::pair<std::u16string, std::u16string>> names_to_shadow;
+        const std::u16string source_name = open_font_store[source_index].face_attrib.name.to_std_string(nullptr);
+
+        for (auto &info : open_font_store) {
+            if (info.face_attrib.style & epoc::open_font_face_attrib::symbol) {
+                continue;
+            }
+
+            const std::u16string name = info.face_attrib.name.to_std_string(nullptr);
+
+            if (name == source_name) {
+                continue;
+            }
+
+            bool seen = false;
+            for (auto &pair : names_to_shadow) {
+                if (pair.first == name) {
+                    seen = true;
+                    break;
+                }
+            }
+
+            if (!seen) {
+                names_to_shadow.emplace_back(name, info.face_attrib.fam_name.to_std_string(nullptr));
+            }
+        }
+
+        const open_font_info source_copy = open_font_store[source_index];
+        std::vector<open_font_info> shadows;
+        shadows.reserve(names_to_shadow.size());
+
+        for (auto &pair : names_to_shadow) {
+            open_font_info shadow = source_copy;
+            shadow.face_attrib.name.assign(nullptr, pair.first);
+            shadow.face_attrib.fam_name.assign(nullptr, pair.second);
+            shadow.face_attrib.local_full_name.assign(nullptr, pair.first);
+            shadow.face_attrib.local_full_fam_name.assign(nullptr, pair.second);
+            shadow.family = pair.second;
+            shadows.push_back(std::move(shadow));
+        }
+
+        open_font_store.insert(open_font_store.begin(), shadows.begin(), shadows.end());
+        glyph_fallback_cache.clear();
+    }
+
     open_font_info *font_store::seek_the_font_by_uid(const epoc::uid the_uid, open_font_metrics &target_metric, std::uint32_t *metric_identifier) {
         for (auto &info : open_font_store) {
             if (std::optional<open_font_metrics> result = info.adapter->get_metric_with_uid(info.idx, the_uid, metric_identifier)) {

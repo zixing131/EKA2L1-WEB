@@ -129,6 +129,14 @@
             createEKA2L1Module({
                 canvas: opts.canvas,
                 noInitialRun: true, // callMain() manually after IDBFS restore
+                // Cache-bust the heavyweight side files (.wasm/.data): static
+                // hosts serve them with long max-age, so without a version tag
+                // deploys keep serving the old emulator (and its packaged
+                // fonts) to returning visitors.
+                locateFile: function (path, prefix) {
+                    var v = (typeof window !== 'undefined' && window.EKA2L1_BUILD_ID) || '';
+                    return prefix + path + (v ? ('?v=' + v) : '');
+                },
                 print: function (t) { console.log('[EKA2L1]', t); },
                 printErr: function (t) { console.error('[EKA2L1]', t); },
                 monitorRunDependencies: function (left) {

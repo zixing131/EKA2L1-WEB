@@ -73,6 +73,21 @@ namespace eka2l1::epoc {
             return open_font_store.size();
         }
 
+        open_font_info *get_open_font_info(const std::size_t index) {
+            return (index < open_font_store.size()) ? &open_font_store[index] : nullptr;
+        }
+
+        /**
+         * @brief Make a wide-coverage font impersonate every other loaded family.
+         *
+         * For each distinct non-symbol family already in the store, a clone of
+         * the given font is inserted *in front* with that family's names, so
+         * exact-name lookups resolve to the wide font (mirrors CJK firmware,
+         * where the system font carries both Latin and CJK and all glyph
+         * availability checks in guest code naturally pass).
+         */
+        void shadow_existing_fonts_with(const std::size_t source_index);
+
         const std::size_t number_of_typefaces() const {
             return typefaces.size();
         }

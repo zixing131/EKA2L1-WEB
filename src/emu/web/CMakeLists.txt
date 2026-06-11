@@ -164,10 +164,15 @@ if (EMSCRIPTEN)
         SUFFIX ".js"
     )
 
-    # Copy the static frontend next to the build output. Runs on every build
-    # so page/script edits land without reconfiguring.
+    # Copy the static frontend next to the build output and stamp asset
+    # references with a content hash (?v=...) so browser/CDN caches refresh on
+    # deploy. Runs on every build so page/script edits land without
+    # reconfiguring.
     add_custom_command(TARGET eka2l1_wasm POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/pages" "${WASM_STAGE_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+            -DPAGES_DIR=${CMAKE_CURRENT_SOURCE_DIR}/pages
+            -DSTAGE_DIR=${WASM_STAGE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/stamp_pages.cmake
         COMMENT "Copying web frontend pages"
     )
 endif()
