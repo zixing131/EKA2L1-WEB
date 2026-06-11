@@ -490,6 +490,35 @@ namespace eka2l1 {
     }
 
     void device_manager::save_devices() {
+#ifdef __EMSCRIPTEN__
+        // Same Emscripten yaml-cpp Emitter hazard as config.yml (stringstream
+        // can emit heap garbage there): write the YAML by hand. This file has
+        // been seen corrupted in the wild ("unknown escape character").
+        auto sq = [](const std::string &v) {
+            std::string out = "'";
+            for (char c : v) {
+                out += c;
+                if (c == '\'') {
+                    out += '\''; // YAML single-quote escaping
+                }
+            }
+            out += "'";
+            return out;
+        };
+
+        std::string out;
+        for (const auto &device : devices) {
+            out += sq(device.firmware_code) + ":\n";
+            out += "  platver: " + sq(epocver_to_string(device.ver)) + "\n";
+            out += "  manufacturer: " + sq(device.manufacturer) + "\n";
+            out += "  firmcode: " + sq(device.firmware_code) + "\n";
+            out += "  model: " + sq(device.model) + "\n";
+            out += "  machine-uid: " + std::to_string(device.machine_uid) + "\n";
+        }
+
+        common::wo_std_file_stream outdevicefile(add_path(conf->storage, "devices.yml"), true);
+        outdevicefile.write(out.data(), out.size());
+#else
         YAML::Emitter emitter;
         emitter << YAML::BeginMap;
 
@@ -510,7 +539,7 @@ namespace eka2l1 {
 
         common::wo_std_file_stream outdevicefile(add_path(conf->storage, "devices.yml"), true);
         outdevicefile.write(emitter.c_str(), emitter.size());
-
+#endif
         return;
     }
 

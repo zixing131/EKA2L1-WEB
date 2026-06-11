@@ -399,7 +399,7 @@
      * copy) pushed the tab over the memory limit and got it killed mid-install.
      * Resolves with the target path.
      */
-    EKA2L1.writeFileToVFS = function (file, targetPath) {
+    EKA2L1.writeFileToVFS = function (file, targetPath, onProgress) {
         var FS = EKA2L1.module.FS;
         var CHUNK = 8 * 1024 * 1024;
 
@@ -419,6 +419,7 @@
                 var data = new Uint8Array(buf);
                 FS.write(stream, data, 0, data.length, offset);
                 offset += data.length;
+                if (onProgress) onProgress(offset, file.size);
                 return writeNext();
             });
         }

@@ -186,6 +186,70 @@ namespace eka2l1::config {
         }
     }
 
+#ifdef __EMSCRIPTEN__
+    // yaml-cpp's Emitter goes through std::stringstream, which intermittently
+    // writes heap garbage on Emscripten (the locale tables it consults are
+    // stubs). A corrupted config.yml then fails YAML::Load on the next boot
+    // and deserialize()'s catch block overwrites it with defaults — observed
+    // as "switching devices never sticks". Emit the YAML by hand instead:
+    // snprintf/std::to_string are reliable here, and the parse side (used for
+    // reading) has never misbehaved.
+    namespace {
+        void emit_yaml_scalar(std::string &out, const char *name, const bool &val) {
+            out += name;
+            out += val ? ": true\n" : ": false\n";
+        }
+
+        void emit_yaml_scalar(std::string &out, const char *name, const std::string &val) {
+            out += name;
+            out += ": \"";
+            for (char c : val) {
+                if ((c == '\\') || (c == '"')) {
+                    out += '\\';
+                }
+                out += c;
+            }
+            out += "\"\n";
+        }
+
+        template <typename T>
+        void emit_yaml_scalar(std::string &out, const char *name, const T &val) {
+            out += name;
+            out += ": ";
+            out += std::to_string(val);
+            out += '\n';
+        }
+    }
+
+    void state::serialize(const bool with_bindings) {
+        audio_master_volume = common::clamp(0, 100, audio_master_volume);
+        screen_buffer_sync_string = get_string_from_screen_buffer_sync_option(screen_buffer_sync);
+        midi_backend_string = get_string_from_midi_backend(midi_backend);
+
+        std::string out;
+        out.reserve(4096);
+
+#define OPTION(name, variable, default) emit_yaml_scalar(out, #name, variable);
+#include <config/options.inl>
+#undef OPTION
+
+        out += "internet-bluetooth-friends: []\n";
+
+        {
+            common::wo_std_file_stream file("config.yml", true);
+            file.write(out.data(), out.size());
+        }
+
+        if (with_bindings) {
+            common::create_directories("bindings");
+            keybinds.serialize(fmt::format("bindings/{}.yml", current_keybind_profile));
+        }
+
+        if (current_mmc_id.empty()) {
+            current_mmc_id = mmc_id;
+        }
+    }
+#else
     void state::serialize(const bool with_bindings) {
         audio_master_volume = common::clamp(0, 100, audio_master_volume);
         screen_buffer_sync_string = get_string_from_screen_buffer_sync_option(screen_buffer_sync);
@@ -231,6 +295,7 @@ namespace eka2l1::config {
             current_mmc_id = mmc_id;
         }
     }
+#endif
 
     void state::deserialize(const bool with_bindings) {
         YAML::Node node;

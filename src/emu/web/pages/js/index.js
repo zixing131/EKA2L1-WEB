@@ -677,18 +677,27 @@
         var chain = Promise.resolve();
         files.forEach(function (f, i) {
             chain = chain.then(function () {
-                setStatus('yellow', '上传 ' + (i + 1) + '/' + files.length + '：' + f.name);
+                var label = '上传 ' + (i + 1) + '/' + files.length + '：' + f.name;
+                setStatus('yellow', label);
                 // Keep the original filename: Symbian path lookup is
                 // case-insensitive on the emulator side.
-                return EKA2L1.writeFileToVFS(f, fsDir + f.name);
+                return EKA2L1.writeFileToVFS(f, fsDir + f.name, function (done, total) {
+                    if (total > 4 * 1048576) {
+                        setStatus('yellow', label + ' ' + Math.floor(done * 100 / total) + '%');
+                    }
+                });
             });
         });
 
         chain.then(function () {
+            setStatus('yellow', '写入浏览器存储…');
             return EKA2L1.save();
         }).then(function () {
             setStatus('green', '就绪');
-            EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + Math.ceil(totalBytes / 1048576) + 'MB）到 ' + guest);
+            var hint = (guest.toLowerCase().indexOf('n-gage') !== -1)
+                ? '。N-Gage 游戏需重新进入游戏页，在「Games」应用中完成安装'
+                : '';
+            EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + Math.ceil(totalBytes / 1048576) + 'MB）到 ' + guest + hint, 5000);
         }).catch(function (err) {
             console.error('[EKA2L1] upload failed:', err);
             setStatus('red', '上传失败');
