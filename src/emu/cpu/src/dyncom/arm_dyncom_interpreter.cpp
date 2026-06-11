@@ -1837,6 +1837,7 @@ DISPATCH : {
 #ifdef __EMSCRIPTEN__
         if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
             if (bl_entry.jit_idx > 0) {
+                cpu->jit_chain_depth = 0; // defensive: chain calls keep it balanced
                 const int executed = eka2l1::arm::dyncom_jit::call(bl_entry.jit_idx, cpu);
                 if (executed > 0) {
                     eka2l1::arm::dyncom_jit::stat_jit_instrs += static_cast<std::uint32_t>(executed);

@@ -372,6 +372,11 @@ public:
     std::unordered_map<std::uint32_t, std::int32_t> jit_block_map;
     bool jit_enabled = false;
 
+    // Cross-block chaining recursion depth: compiled blocks call each other
+    // directly (call_indirect) when the branch target was already compiled;
+    // this caps the wasm call stack. Reset by DISPATCH before each outer call.
+    std::uint32_t jit_chain_depth = 0;
+
     eka2l1::arm::r12l1::tlb *jit_tlb() const {
         return mem_cache_direct;
     }

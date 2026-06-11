@@ -45,7 +45,10 @@
 EM_JS(int, dyncom_wasmjit_install, (const unsigned char *bytes, int len, int reuse_idx), {
     try {
         var mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));
-        var inst = new WebAssembly.Instance(mod, { env: { memory: wasmMemory } });
+        var inst = new WebAssembly.Instance(mod, { env: {
+            memory: wasmMemory,
+            __indirect_function_table: wasmTable
+        } });
         var idx = (reuse_idx >= 0) ? reuse_idx : wasmTable.grow(1);
         wasmTable.set(idx, inst.exports.f);
         return idx;
@@ -62,6 +65,7 @@ namespace eka2l1::arm::dyncom_jit {
     std::uint32_t stat_compiled = 0;
     std::uint32_t stat_rejected = 0;
     std::uint64_t stat_jit_instrs = 0;
+    std::uint32_t stat_chained = 0; // terminators emitted as direct block->block calls
     // First unsupported instruction kind per compile attempt: tells us exactly
     // which instruction to teach the JIT next.
     std::uint32_t stat_blocker_hist[224] = {};
@@ -111,6 +115,7 @@ namespace eka2l1::arm::dyncom_jit {
             IF = 0x04,
             ELSE_OP = 0x05,
             LOOP = 0x03,
+            CALL_INDIRECT = 0x11,
             BR = 0x0C,
             BR_IF = 0x0D,
             END = 0x0B,
@@ -263,6 +268,7 @@ namespace eka2l1::arm::dyncom_jit {
         constexpr unsigned JIT_MAX_INSTS = 200;
         constexpr unsigned JIT_MIN_PREFIX = 4;
         constexpr std::uint32_t JIT_LOOP_INSTR_CAP = 4096;
+        constexpr std::uint32_t JIT_CHAIN_DEPTH_CAP = 8;
 
         class block_compiler {
         public:
@@ -338,6 +344,73 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.local_get(L_STATE); w_.local_get(l); w_.store_u32(off_reg(15));
                 emit_executed_value(executed_extra);
                 w_.ret();
+            }
+
+            // Constant-target terminator: if the target block is already
+            // compiled, call it directly instead of returning to DISPATCH.
+            // Saves the dispatcher round trip (budget checks + lookaside +
+            // call_indirect from C++) on every block transition of hot paths.
+            // Depth-capped via state->jit_chain_depth so the wasm call stack
+            // stays bounded; at the cap it degrades to a normal exit.
+            // Safe across invalidation: table slots are only released by the
+            // full invalidate_translation_cache(), which drops caller and
+            // callee together (a stale chain can never be reached).
+            void emit_chain_or_exit(std::uint32_t target, std::uint32_t executed_extra) {
+                std::int32_t callee = 0;
+                const auto ite = cpu_->jit_block_map.find(target);
+                if ((ite != cpu_->jit_block_map.end()) && (ite->second > 0) && (target != pc_start_)) {
+                    callee = ite->second;
+                }
+                if (callee <= 0) {
+                    emit_exit_const_pc(target, executed_extra);
+                    return;
+                }
+
+                stat_chained++;
+                emit_flag_writeback();
+
+                // if (state->jit_chain_depth < CAP)
+                w_.local_get(L_STATE);
+                w_.load_u32(offsetof(ARMul_State, jit_chain_depth));
+                w_.const_i32(JIT_CHAIN_DEPTH_CAP);
+                w_.u8(op::I32_LT_U);
+                w_.if_void();
+                {
+                    // state->jit_chain_depth++
+                    w_.local_get(L_STATE);
+                    w_.local_get(L_STATE);
+                    w_.load_u32(offsetof(ARMul_State, jit_chain_depth));
+                    w_.const_i32(1);
+                    w_.u8(op::I32_ADD);
+                    w_.store_u32(offsetof(ARMul_State, jit_chain_depth));
+
+                    // result = callee(state)
+                    w_.local_get(L_STATE);
+                    w_.const_i32(callee);
+                    w_.u8(op::CALL_INDIRECT);
+                    w_.uleb(0); // type index: (i32) -> i32
+                    w_.uleb(0); // table index
+                    w_.local_set(L_T0);
+
+                    // state->jit_chain_depth--
+                    w_.local_get(L_STATE);
+                    w_.local_get(L_STATE);
+                    w_.load_u32(offsetof(ARMul_State, jit_chain_depth));
+                    w_.const_i32(1);
+                    w_.u8(op::I32_SUB);
+                    w_.store_u32(offsetof(ARMul_State, jit_chain_depth));
+
+                    // return L_EXEC + extra + result  (callee already set R15/flags)
+                    emit_executed_value(executed_extra);
+                    w_.local_get(L_T0);
+                    w_.u8(op::I32_ADD);
+                    w_.ret();
+                }
+                w_.end();
+
+                // Depth cap reached: plain exit (flag writeback above is
+                // idempotent, the one inside emit_exit_const_pc is harmless).
+                emit_exit_const_pc(target, executed_extra);
             }
 
             // Self-loop back-edge: bump L_EXEC by this iteration's count and
@@ -1146,7 +1219,7 @@ namespace eka2l1::arm::dyncom_jit {
             if (self_loop) {
                 emit_loop_back_edge(count_ + 1, guarded ? 1 : 0);
             } else {
-                emit_exit_const_pc(target, count_ + 1);
+                emit_chain_or_exit(target, count_ + 1);
             }
             if (guarded) {
                 w_.end();
@@ -1194,7 +1267,7 @@ namespace eka2l1::arm::dyncom_jit {
             if (target == pc_start_) {
                 emit_loop_back_edge(count_ + 1, 0);
             } else {
-                emit_exit_const_pc(target, count_ + 1);
+                emit_chain_or_exit(target, count_ + 1);
             }
         }
 
@@ -1206,7 +1279,7 @@ namespace eka2l1::arm::dyncom_jit {
             if (target == pc_start_) {
                 emit_loop_back_edge(count_ + 1, 1);
             } else {
-                emit_exit_const_pc(target, count_ + 1);
+                emit_chain_or_exit(target, count_ + 1);
             }
             w_.end();
             emit_exit_const_pc(pc_ + 2, count_ + 1);
@@ -1336,16 +1409,26 @@ namespace eka2l1::arm::dyncom_jit {
                 s.u8(0x60); s.uleb(1); s.u8(0x7F); s.uleb(1); s.u8(0x7F);
                 m.u8(0x01); m.uleb(s.b.size()); m.b.insert(m.b.end(), s.b.begin(), s.b.end());
             }
-            // import section: env.memory (shared, max 65536 pages)
+            // import section: env.memory (shared) + env.__indirect_function_table
+            // (the program's shared funcref table, so call_indirect can jump
+            // straight into other compiled blocks for cross-block chaining).
             {
+                static const char TBL_NAME[] = "__indirect_function_table";
                 wasm_writer s;
-                s.uleb(1);
+                s.uleb(2);
                 s.uleb(3); s.b.insert(s.b.end(), { 'e', 'n', 'v' });
                 s.uleb(6); s.b.insert(s.b.end(), { 'm', 'e', 'm', 'o', 'r', 'y' });
                 s.u8(0x02); // memory import
                 s.u8(0x03); // limits: min+max, shared
                 s.uleb(0);
                 s.uleb(65536);
+                s.uleb(3); s.b.insert(s.b.end(), { 'e', 'n', 'v' });
+                s.uleb(sizeof(TBL_NAME) - 1);
+                s.b.insert(s.b.end(), TBL_NAME, TBL_NAME + sizeof(TBL_NAME) - 1);
+                s.u8(0x01); // table import
+                s.u8(0x70); // funcref
+                s.u8(0x00); // limits: min only
+                s.uleb(0);
                 m.u8(0x02); m.uleb(s.b.size()); m.b.insert(m.b.end(), s.b.begin(), s.b.end());
             }
             // function section
