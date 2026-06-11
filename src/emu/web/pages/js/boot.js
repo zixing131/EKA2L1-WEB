@@ -167,6 +167,10 @@
                         if (q.get('jit') === '0') {
                             mod.ccall('wasm_set_jit', null, ['number'], [0]);
                         }
+                        if (q.get('dsa565')) {
+                            mod.ccall('wasm_set_dsa565', null, ['number'],
+                                [parseInt(q.get('dsa565'), 10) || 0]);
+                        }
                         if (q.get('jitlimit')) {
                             mod.ccall('wasm_set_jit_limit', null, ['number'],
                                 [parseInt(q.get('jitlimit'), 10) || 0]);

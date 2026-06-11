@@ -38,6 +38,7 @@
 // Emscripten-specific headers
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <set>
 #include <unistd.h>
 
 // EKA2L1 headers
@@ -1037,7 +1038,6 @@ static std::unique_ptr<eka2l1::loader::rpkg_stream_installer> g_rpkg_stream;
 static std::vector<std::uint8_t> g_rpkg_stream_buf;
 static std::string g_rpkg_stream_rom_target;
 
-EMSCRIPTEN_KEEPALIVE
 static std::string json_escape(const std::string &in) {
     std::string out;
     out.reserve(in.size());
@@ -1056,6 +1056,7 @@ static void wasm_save_config() {
     chdir("/");
 }
 
+EMSCRIPTEN_KEEPALIVE
 std::uint8_t *wasm_rpkg_stream_buffer(int size) {
     if (size <= 0) {
         return nullptr;
@@ -1080,10 +1081,8 @@ int wasm_rpkg_stream_begin() {
     }
 
     eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
-    if (dvcmngr->total() > 0) {
-        // Same encoding wasm_init_with_rom uses for "device already exists".
-        return -(1000 + static_cast<int>(eka2l1::device_installation_already_exist));
-    }
+    // Multi-ROM: installing while devices exist is fine — the installer
+    // itself rejects a true duplicate (same firmware code) in finalize.
 
     const std::string &storage = g_state.conf.storage;
     eka2l1::common::create_directories(eka2l1::add_path(storage, "roms/"));
@@ -1370,6 +1369,11 @@ int wasm_install_package(const char *pkg_path) {
  * JSON list of installed devices (ROMs): [{"index":0,"name":"...","firmware":"...","current":1}]
  */
 EMSCRIPTEN_KEEPALIVE
+void wasm_set_dsa565(int v) {
+    eka2l1::arm::dyncom_jit::force_dsa565 = v;
+}
+
+EMSCRIPTEN_KEEPALIVE
 const char *wasm_get_devices() {
     static std::string json;
     json = "[";
@@ -1430,11 +1434,18 @@ const char *wasm_get_packages() {
     if (g_state.symsys) {
         eka2l1::manager::packages *pkgs = g_state.symsys->get_packages();
         if (pkgs) {
+            std::set<std::uint32_t> seen_uids;
             for (auto ite = pkgs->begin(); ite != pkgs->end(); ite++) {
                 eka2l1::package::object &obj = ite->second;
                 // ROM stubs / preinstalled firmware packages are loaded into
                 // the registry too; uninstalling those would break the device.
                 if (obj.in_rom || obj.is_preinstalled()) {
+                    continue;
+                }
+                // The registry is a multimap (augmentations share the UID);
+                // showing one row per UID keeps the manager readable and
+                // uninstall_package removes by UID anyway.
+                if (!seen_uids.insert(static_cast<std::uint32_t>(obj.uid)).second) {
                     continue;
                 }
                 if (json.size() > 1) {

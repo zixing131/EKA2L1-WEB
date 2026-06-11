@@ -51,6 +51,7 @@ namespace eka2l1::arm::dyncom_jit {
     extern std::uint32_t stat_rejected;
     extern std::uint64_t stat_jit_instrs;
     extern std::uint32_t stat_chained;
+    extern int force_dsa565; // debug: force DSA 565-in-32 conversion
     extern std::uint32_t stat_blocker_hist[224];
 
     /**

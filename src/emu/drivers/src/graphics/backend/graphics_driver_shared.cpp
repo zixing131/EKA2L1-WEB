@@ -22,6 +22,8 @@
 #include <common/platform.h>
 
 #include <drivers/graphics/backend/graphics_driver_shared.h>
+#include <cstdio>
+#include <map>
 #include <drivers/graphics/buffer.h>
 #include <drivers/graphics/shader.h>
 
@@ -267,6 +269,64 @@ namespace eka2l1::drivers {
         texture_data_type data_type = texture_data_type::ubyte;
 
         translate_bpp_to_format(bmp->bpp, internal_format, data_format, data_type, is_stricted());
+
+#ifdef __EMSCRIPTEN__
+        // N-Gage 2.0 games write RGB565 straight into their 32bpp window
+        // backing bitmap (their RGA path takes the raw Bits() pointer and
+        // assumes the 64K-colour layout of real hardware). Presented as-is,
+        // two 16-bit pixels land in each 32-bit slot and the screen turns to
+        // coloured noise. Fingerprint per upload: in legit XRGB8888 content
+        // the two 16-bit halves of a pixel almost never match (needs R==B и
+        // X==G), while 565 streams match on every flat-colour pixel pair.
+        // Once a bitmap trips the detector twice it stays converted.
+        if (data && (bmp->bpp == 32) && (dim.x >= 100) && (dim.y >= 100) && (offset.x == 0) && (offset.y == 0)) {
+            static std::map<drivers::handle, int> verdicts;
+            int &verdict = verdicts[h];
+
+            if (verdict >= 0) {
+                const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
+                const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
+                std::uint32_t nonzero = 0, pair_eq = 0;
+                for (std::size_t i = 0; i < total; i += 5) {
+                    const std::uint32_t v = slots[i];
+                    if (!v || (v == 0xFFFFFFFFu)) {
+                        continue; // skip blank black/white fills
+                    }
+                    nonzero++;
+                    if ((v >> 16) == (v & 0xFFFF)) {
+                        pair_eq++;
+                    }
+                }
+                if ((nonzero > 1000) && (pair_eq * 20 >= nonzero)) {
+                    if (++verdict >= 2) {
+                        LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
+                        verdict = -1;
+                    }
+                } else if (nonzero > 1000) {
+                    verdict = 0;
+                }
+            }
+
+            if (verdict == -1) {
+                static std::vector<std::uint32_t> conv;
+                const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
+                conv.resize(total);
+                const std::uint16_t *src = reinterpret_cast<const std::uint16_t *>(data);
+                for (std::size_t i = 0; i < total; i++) {
+                    const std::uint16_t px = src[i];
+                    const std::uint32_t r = ((px >> 11) & 0x1F) * 255 / 31;
+                    const std::uint32_t g = ((px >> 5) & 0x3F) * 255 / 63;
+                    const std::uint32_t b = (px & 0x1F) * 255 / 31;
+                    conv[i] = 0xFF000000u | (b << 16) | (g << 8) | r;
+                }
+                data = conv.data();
+                // Data is now RGBA in natural byte order: skip the BGR swap below.
+                bmp->tex->update_data(this, 0, eka2l1::vec3(offset.x, offset.y, 0), eka2l1::vec3(dim.x, dim.y, 0), pixels_per_line,
+                    data_format, data_type, data, 0, 4);
+                return;
+            }
+        }
+#endif
 
 #ifdef __EMSCRIPTEN__
         // WebGL2 has neither BGRA pixel formats nor texture swizzling: the

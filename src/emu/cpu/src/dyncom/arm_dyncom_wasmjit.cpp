@@ -66,6 +66,7 @@ namespace eka2l1::arm::dyncom_jit {
     std::uint32_t stat_rejected = 0;
     std::uint64_t stat_jit_instrs = 0;
     std::uint32_t stat_chained = 0; // terminators emitted as direct block->block calls
+    int force_dsa565 = 0;
     // First unsupported instruction kind per compile attempt: tells us exactly
     // which instruction to teach the JIT next.
     std::uint32_t stat_blocker_hist[224] = {};

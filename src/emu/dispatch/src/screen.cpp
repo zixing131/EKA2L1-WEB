@@ -20,6 +20,9 @@
 #include <common/log.h>
 #include <config/config.h>
 #include <dispatch/dispatcher.h>
+#ifdef __EMSCRIPTEN__
+#include <cpu/dyncom/arm_dyncom_jit.h>
+#endif
 #include <dispatch/screen.h>
 
 #include <drivers/graphics/graphics.h>
@@ -142,7 +145,7 @@ namespace eka2l1::dispatch {
             data_format = drivers::texture_format::rgb;
             internal_format = drivers::texture_format::rgb;
             type = drivers::texture_data_type::ushort_5_6_5;
-            line_stride = ((size.x * 2) + 1) / 4 * 4; 
+            line_stride = ((size.x * 2) + 3) / 4 * 4;
 
             break;
 
@@ -183,13 +186,37 @@ namespace eka2l1::dispatch {
             builder.set_texture_filter(info.transfer_texture_, false, drivers::filter_option::linear);
         }
 
+#ifdef __EMSCRIPTEN__
+        // WebGL2 has no texture swizzling: the BGRX posting data (X888 LE)
+        // must get its R/B channels swapped CPU-side before the upload, or
+        // everything presents purple (N-Gage launcher/game menus post through
+        // this path). The buffer belongs to the guest, so convert a copy.
+        if (format == FORMAT_RGB32_X888_LE) {
+            static std::vector<std::uint8_t> swizzled;
+            const std::size_t total = static_cast<std::size_t>(line_stride) * size.y;
+            swizzled.resize(total);
+
+            const std::uint8_t *src = data;
+            for (std::size_t i = 0; i + 3 < total; i += 4) {
+                swizzled[i] = src[i + 2];
+                swizzled[i + 1] = src[i + 1];
+                swizzled[i + 2] = src[i];
+                swizzled[i + 3] = 0xFF;
+            }
+
+            data = swizzled.data();
+        }
+#endif
+
         builder.update_texture(info.transfer_texture_, reinterpret_cast<const char*>(data), line_stride * size.y, 0, data_format, type, eka2l1::vec3(0, 0, 0),
             eka2l1::vec3(size.x, size.y, 0), 0);
 
+#ifndef __EMSCRIPTEN__
         if (format == FORMAT_RGB32_X888_LE) {
             builder.set_swizzle(info.transfer_texture_, drivers::channel_swizzle::blue, drivers::channel_swizzle::green,
                 drivers::channel_swizzle::red, drivers::channel_swizzle::one);
         }
+#endif
 
         return info.transfer_texture_;
     }
@@ -233,6 +260,36 @@ namespace eka2l1::dispatch {
         // diff_cur must show actual content (not a blank/flat frame), and the
         // alternate stride must be clearly more coherent.
         return (diff_cur > 2048) && (diff_alt * 2 < diff_cur);
+    }
+
+    // N-Gage 2.0 games (Tomb Raider Underworld et al.) blit RGB565 frames
+    // into the screen chunk even when the active wsini mode is 32bpp: their
+    // fast-blit path trusts the mode the game picked for its backbuffer, two
+    // 16-bit pixels land in every 32-bit slot and the presented image turns
+    // to half-width noise. Fingerprint: in legit XRGB8888 content the high
+    // and low 16-bit halves of a pixel almost never match (it requires R==B
+    // and X==G), while 565 streams have equal neighbouring pixels in every
+    // flat run — measured ~15% of nonzero slots in-game vs ~0% for real
+    // 32bpp frames.
+    static bool dsa_content_looks_rgb565(const std::uint8_t *data, const eka2l1::vec2 cur_size) {
+        const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
+        const std::size_t total = static_cast<std::size_t>(cur_size.x) * cur_size.y;
+
+        std::uint32_t nonzero = 0;
+        std::uint32_t pair_eq = 0;
+
+        for (std::size_t i = 0; i < total; i += 5) { // ~20% sample
+            const std::uint32_t v = slots[i];
+            if (!v) {
+                continue;
+            }
+            nonzero++;
+            if ((v >> 16) == (v & 0xFFFF)) {
+                pair_eq++;
+            }
+        }
+
+        return (nonzero > 1000) && (pair_eq * 20 >= nonzero); // >5%
     }
 
     BRIDGE_FUNC_DISPATCHER(void, update_screen, const std::uint32_t screen_number, const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
@@ -285,6 +342,40 @@ namespace eka2l1::dispatch {
                     } else {
                         verdict_count = 0;
                     }
+                }
+
+                // RGB565-in-32bpp auto-correction (see fingerprint above).
+                static std::map<epoc::screen *, int> rgb565_verdicts;
+                int &verdict565 = rgb565_verdicts[scr];
+#ifdef __EMSCRIPTEN__
+                if (eka2l1::arm::dyncom_jit::force_dsa565 && (verdict565 >= 0)) {
+                    verdict565 = -1; // debug override (?dsa565=1)
+                }
+#endif
+                if (verdict565 >= 0) {
+                    if (dsa_content_looks_rgb565(reinterpret_cast<const std::uint8_t *>(data_ptr), screen_size)) {
+                        if (++verdict565 >= 2) {
+                            LOG_INFO(HLE_DISPATCHER, "DSA content detected as RGB565 in a 32bpp chunk, converting on upload");
+                            verdict565 = -1;
+                        }
+                    } else {
+                        verdict565 = 0;
+                    }
+                }
+
+                static std::vector<std::uint32_t> rgb565_converted;
+                if (verdict565 == -1) {
+                    const std::size_t total_px = static_cast<std::size_t>(screen_size.x) * screen_size.y;
+                    rgb565_converted.resize(total_px);
+                    const std::uint16_t *src = reinterpret_cast<const std::uint16_t *>(data_ptr);
+                    for (std::size_t i = 0; i < total_px; i++) {
+                        const std::uint16_t p = src[i];
+                        const std::uint32_t r = ((p >> 11) & 0x1F) * 255 / 31;
+                        const std::uint32_t g = ((p >> 5) & 0x3F) * 255 / 63;
+                        const std::uint32_t b = (p & 0x1F) * 255 / 31;
+                        rgb565_converted[i] = 0xFF000000u | (b << 16) | (g << 8) | r;
+                    }
+                    data_ptr = reinterpret_cast<const char *>(rgb565_converted.data());
                 }
 
                 std::uint64_t next_vsync_us = 0;
@@ -415,6 +506,7 @@ namespace eka2l1::dispatch {
 
     BRIDGE_FUNC_DISPATCHER(void, flexible_post, std::int32_t screen_index, std::uint8_t *data, std::int32_t size_x,
         std::int32_t size_y, std::int32_t format, posting_info *info) {
+
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         drivers::graphics_driver *driver = sys->get_graphics_driver();
         kernel_system *kern = sys->get_kernel_system();
