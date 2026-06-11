@@ -17,8 +17,10 @@
 
 #include <drivers/graphics/graphics.h>
 #include <services/fbs/font_atlas.h>
+#include <services/fbs/font_store.h>
 
 #include <common/algorithm.h>
+#include <common/log.h>
 #include <common/time.h>
 
 #include <unordered_set>
@@ -28,15 +30,16 @@ namespace eka2l1::epoc {
         : atlas_handle_(0)
         , atlas_data_(nullptr)
         , pack_handle_(0)
+        , store_(nullptr)
         , fallback_adapter_(nullptr)
         , fallback_idx_(0)
         , fallback_metric_identifier_(0)
-        , fallback_metric_resolved_(false) {
+        , fallback_resolved_(false) {
     }
 
     font_atlas::font_atlas(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
         const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier,
-        adapter::font_file_adapter_base *fallback_adapter, const std::size_t fallback_idx)
+        font_store *store)
         : atlas_handle_(0)
         , adapter_(adapter)
         , metric_identifier_(metric_identifier)
@@ -44,16 +47,17 @@ namespace eka2l1::epoc {
         , initial_range_(initial_start, initial_char_count)
         , typeface_idx_(typeface_idx)
         , pack_handle_(0)
-        , fallback_adapter_(fallback_adapter)
-        , fallback_idx_(fallback_idx)
+        , store_(store)
+        , fallback_adapter_(nullptr)
+        , fallback_idx_(0)
         , fallback_metric_identifier_(0)
-        , fallback_metric_resolved_(false) {
+        , fallback_resolved_(false) {
         atlas_data_ = nullptr;
     }
 
     void font_atlas::init(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
         const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier,
-        adapter::font_file_adapter_base *fallback_adapter, const std::size_t fallback_idx) {
+        font_store *store) {
         adapter_ = adapter;
         atlas_handle_ = 0;
         metric_identifier_ = metric_identifier;
@@ -62,10 +66,11 @@ namespace eka2l1::epoc {
         typeface_idx_ = typeface_idx;
         pack_handle_ = 0;
 
-        fallback_adapter_ = fallback_adapter;
-        fallback_idx_ = fallback_idx;
+        store_ = store;
+        fallback_adapter_ = nullptr;
+        fallback_idx_ = 0;
         fallback_metric_identifier_ = 0;
-        fallback_metric_resolved_ = false;
+        fallback_resolved_ = false;
         fallback_.reset();
 
         atlas_data_.reset();
@@ -214,18 +219,11 @@ namespace eka2l1::epoc {
             return (chr >= 0x200c && chr <= 0x200f) || (chr >= 0x202a && chr <= 0x202e) || (chr >= 0xfffe && chr <= 0xffff);
         };
 
-        // Resolve a font size for the fallback font that matches this atlas.
-        if (fallback_adapter_ && !fallback_metric_resolved_) {
-            fallback_metric_resolved_ = true;
-            if (!fallback_adapter_->get_nearest_supported_metric(fallback_idx_, static_cast<std::uint16_t>(size_),
-                    &fallback_metric_identifier_, true).has_value()) {
-                fallback_adapter_ = nullptr; // no usable size, disable fallback
-            }
-        }
-
-        // Split the text: glyphs the bound font can't draw but the fallback font
+        // Split the text: glyphs the bound font can't draw but a fallback font
         // can are routed to the secondary atlas. Everything else (including the
         // bound font's own notdef for truly missing glyphs) stays on the primary.
+        // The fallback font is resolved from the store the first time it is needed
+        // (any loaded font that covers the glyph - typically the host CJK font).
         std::u16string primary_text;
         std::u16string fallback_text;
         std::unordered_set<char16_t> fallback_chars;
@@ -233,10 +231,22 @@ namespace eka2l1::epoc {
         for (auto &chr : text) {
             bool to_fallback = false;
 
-            if (fallback_adapter_ && !is_control_char(chr)
-                && !adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_)
-                && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_)) {
-                to_fallback = true;
+            if (store_ && !is_control_char(chr) && !adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_)) {
+                if (!fallback_resolved_) {
+                    fallback_resolved_ = true;
+
+                    if (epoc::open_font_info *fb = store_->seek_the_open_font_with_character(chr, adapter_)) {
+                        if (fb->adapter->get_nearest_supported_metric(fb->idx, static_cast<std::uint16_t>(size_),
+                                &fallback_metric_identifier_, true).has_value()) {
+                            fallback_adapter_ = fb->adapter;
+                            fallback_idx_ = fb->idx;
+                        }
+                    }
+                }
+
+                if (fallback_adapter_ && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_)) {
+                    to_fallback = true;
+                }
             }
 
             if (to_fallback) {
@@ -245,6 +255,17 @@ namespace eka2l1::epoc {
                 }
             } else {
                 primary_text.push_back(chr);
+            }
+
+            // [CJKPROBE] Temporary diagnostic: log per-glyph routing for CJK-range
+            // codepoints to find why some render as .notdef boxes. Remove once fixed.
+            if (chr >= 0x2E80) {
+                const bool bound_has = adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_);
+                const bool fb_has = (fallback_adapter_ != nullptr)
+                    && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_);
+                LOG_INFO(SERVICE_FBS, "[CJKPROBE] U+{:04X} size={} bound_has={} fb_set={} fb_has={} -> {}",
+                    static_cast<std::uint32_t>(chr), size_, bound_has, (fallback_adapter_ != nullptr), fb_has,
+                    to_fallback ? "FALLBACK" : "primary(box?)");
             }
         }
 

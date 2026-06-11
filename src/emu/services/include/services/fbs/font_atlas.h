@@ -34,6 +34,8 @@ namespace eka2l1::drivers {
 }
 
 namespace eka2l1::epoc {
+    class font_store;
+
 #define ESTIMATE_MAX_CHAR_IN_ATLAS_WIDTH 50
 
     /**
@@ -58,14 +60,16 @@ namespace eka2l1::epoc {
         std::int32_t pack_handle_;
 
         // Per-glyph fallback: glyphs the bound font cannot draw are rendered from
-        // this wide-coverage font into a secondary atlas (lazily created on first
-        // use). Mirrors the client-side rasterize_glyph fallback so server-drawn
-        // text (DrawText / lists / titles) shows CJK regardless of which ROM font
-        // the layout bound. Null adapter means no fallback for this font.
+        // a wide-coverage font into a secondary atlas (lazily created on first use).
+        // The fallback font is resolved straight from the font store at draw time,
+        // mirroring the client-side rasterize_glyph fallback, so server-drawn text
+        // (DrawText / lists / titles) shows CJK regardless of which font the layout
+        // bound - including app fonts loaded at runtime. Null store disables it.
+        font_store *store_;
         adapter::font_file_adapter_base *fallback_adapter_;
         std::size_t fallback_idx_;
         std::uint32_t fallback_metric_identifier_;
-        bool fallback_metric_resolved_;
+        bool fallback_resolved_;
         std::unique_ptr<font_atlas> fallback_;
 
     private:
@@ -79,11 +83,11 @@ namespace eka2l1::epoc {
 
         explicit font_atlas(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
             const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_,
-            adapter::font_file_adapter_base *fallback_adapter = nullptr, const std::size_t fallback_idx = 0);
+            font_store *store = nullptr);
 
         void init(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
             const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_,
-            adapter::font_file_adapter_base *fallback_adapter = nullptr, const std::size_t fallback_idx = 0);
+            font_store *store = nullptr);
 
         void destroy(drivers::graphics_driver *driver);
 

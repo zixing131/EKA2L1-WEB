@@ -1,12 +1,12 @@
-S60SC.ttf
+DroidSansFallback.ttf
 
-Series 60 Simplified Chinese system font (family "Sans MT SC 936_S60C").
-Contains both embedded bitmap strikes (12/14/16/18/20 ppem, matching the
-original S60 on-device look) and scalable outlines for other sizes.
+Droid Sans Fallback (family "Droid Sans Fallback").
+A pure-outline (scalable) pan-CJK font with no embedded bitmap strikes,
+so FreeType always returns clean grayscale glyphs at any pixel size.
 
 Purpose in EKA2L1 web build: glyph-level fallback font so CJK text in
 Symbian apps renders even when the device ROM fonts lack those glyphs
 (e.g. western S60v5 firmware such as the Nokia 5320 ROM).
 
-This is a system font extracted from S60 devices; it is bundled here only
-to reproduce the original device behaviour for Chinese-language apps.
+License: Apache License 2.0 (part of the Android Open Source Project).
+See https://www.apache.org/licenses/LICENSE-2.0

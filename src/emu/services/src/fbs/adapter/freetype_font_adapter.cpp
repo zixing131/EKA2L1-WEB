@@ -92,6 +92,20 @@ namespace eka2l1::epoc::adapter {
         return ft_lib_raii_->lib_;
     }
 
+    // At or below this pixel size, scalable fonts (e.g. the bundled CJK fallback
+    // Droid Sans Fallback) are rendered with FreeType's monochrome hinter rather
+    // than antialiased / LCD output. Two reasons, both seen as fragmented "tofu"
+    // on small softkey / dialog-title text:
+    //   1) The guest blitter silently drops 8bpp AA glyphs when the destination
+    //      is a low display-depth offscreen bitmap (custom-drawn Avkon chrome).
+    //   2) Dense CJK outlines below ~16ppem antialias into an illegible smear;
+    //      the b/w hinter snaps stems to the pixel grid. This is exactly what
+    //      S60's embedded bitmap strikes (12-20ppem) used to provide before the
+    //      fallback font was swapped to a pure-outline one.
+    // The resulting 1bpp glyph flows through the existing MONO->RLE path, which
+    // the guest accepts at any display depth.
+    static constexpr std::uint32_t SMALL_GLYPH_MONO_PPEM_THRESHOLD = 15;
+
     freetype_font_adapter::freetype_font_adapter(std::vector<std::uint8_t> &data)
         : data_(data)
         , is_valid_(false) {
@@ -234,7 +248,15 @@ namespace eka2l1::epoc::adapter {
             return nullptr;
         }
 
-        auto err = FT_Load_Glyph(face, glyph_index, FT_LOAD_RENDER);
+        // Small scalable glyphs: render through the monochrome hinter so they
+        // survive low display-depth blits and stay legible (see threshold note).
+        // Fonts with embedded strikes already return MONO and are unaffected.
+        FT_Int32 load_flags = FT_LOAD_RENDER;
+        if ((face->size->metrics.y_ppem != 0) && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD)) {
+            load_flags |= FT_LOAD_TARGET_MONO;
+        }
+
+        auto err = FT_Load_Glyph(face, glyph_index, load_flags);
         if (err) {
             LOG_ERROR(SERVICE_FBS, "Failed to load glyph for face to get glyph bitmap, error: {}", FT_Error_String(err));
             return nullptr;
@@ -395,6 +417,12 @@ namespace eka2l1::epoc::adapter {
             return false;
         }
 
+        // Mirror the offscreen path: render small scalable glyphs as monochrome
+        // (b/w hinter) instead of LCD. The atlas upload already has a MONO branch;
+        // this keeps tiny CJK fallback text crisp instead of an aliased LCD smear.
+        const bool want_mono = (face->size->metrics.y_ppem != 0)
+            && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD);
+
         std::vector<stbrp_rect> pack_rects(num_code);
 
         for (auto i = 0; i < num_code; i++) {
@@ -420,14 +448,14 @@ namespace eka2l1::epoc::adapter {
         // Render and put bitmap to atlas
         for (auto i = 0; i < num_code; i++) {
             const char16_t char_code = unicode_point ? unicode_point[i] : static_cast<char16_t>(start_code + i);
-            auto err = FT_Load_Char(face, char_code, FT_LOAD_DEFAULT);
+            auto err = FT_Load_Char(face, char_code, want_mono ? (FT_LOAD_DEFAULT | FT_LOAD_TARGET_MONO) : FT_LOAD_DEFAULT);
 
             if (err) {
                 LOG_WARN(SERVICE_FBS, "Failed to load character code 0x{:X} for face to get glyph atlas, error: {}",
                     static_cast<int>(char_code), FT_Error_String(err));
             }
 
-            err = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_LCD);
+            err = FT_Render_Glyph(face->glyph, want_mono ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_LCD);
             if (err) {
                 LOG_WARN(SERVICE_FBS, "Failed to render character code 0x{:X} for face to get glyph atlas, error: {}",
                 static_cast<int>(char_code), FT_Error_String(err));

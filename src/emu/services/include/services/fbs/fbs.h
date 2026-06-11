@@ -398,6 +398,12 @@ namespace eka2l1 {
 
         void connect(service::ipc_context &context) override;
 
+        // Used by the server text atlas to borrow per-glyph fallbacks for
+        // codepoints the bound font cannot draw (e.g. CJK on western firmware).
+        epoc::font_store *get_persistent_font_store() {
+            return &persistent_font_store;
+        }
+
         /**
          * @brief       Check if a bitmap is considered to be large bitmap.
          * 

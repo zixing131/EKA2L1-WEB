@@ -148,48 +148,6 @@ namespace eka2l1::epoc {
         return (found_index < 0) ? nullptr : &open_font_store[found_index];
     }
 
-    void font_store::assign_fallback_for_glyphless_fonts(const std::size_t source_index, const std::uint32_t *probe_codepoints,
-        const std::size_t probe_count) {
-        if (source_index >= open_font_store.size()) {
-            return;
-        }
-
-        epoc::adapter::font_file_adapter_base *const fallback_adapter = open_font_store[source_index].adapter;
-        const std::size_t fallback_idx = open_font_store[source_index].idx;
-
-        for (auto &info : open_font_store) {
-            // Never let a font fall back to itself.
-            if ((info.adapter == fallback_adapter) && (info.idx == fallback_idx)) {
-                continue;
-            }
-
-            if (info.face_attrib.style & epoc::open_font_face_attrib::symbol) {
-                continue;
-            }
-
-            bool missing_glyph = false;
-            for (std::size_t i = 0; i < probe_count; i++) {
-                if (!info.adapter->has_character(info.idx, static_cast<std::int32_t>(probe_codepoints[i]), 0)) {
-                    missing_glyph = true;
-                    break;
-                }
-            }
-
-            if (!missing_glyph) {
-                continue;
-            }
-
-            // Non-destructive: keep the font's own adapter/idx (and therefore its
-            // UID, bitmap data and native metrics) untouched, only record where to
-            // borrow the glyphs it cannot draw. The text atlas and rasterizer use
-            // this for per-glyph fallback; by-UID/by-name/native paths are unaffected.
-            info.fallback_adapter = fallback_adapter;
-            info.fallback_idx = fallback_idx;
-        }
-
-        glyph_fallback_cache.clear();
-    }
-
     open_font_info *font_store::seek_the_font_by_uid(const epoc::uid the_uid, open_font_metrics &target_metric, std::uint32_t *metric_identifier) {
         for (auto &info : open_font_store) {
             if (std::optional<open_font_metrics> result = info.adapter->get_metric_with_uid(info.idx, the_uid, metric_identifier)) {

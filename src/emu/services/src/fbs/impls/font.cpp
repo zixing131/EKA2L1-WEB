@@ -1224,9 +1224,7 @@ namespace eka2l1 {
         // detail is off so we classify by extension rather than dir_entry::type.
         static const char *FALLBACK_FONT_FOLDER = ".//fonts//";
 
-        std::int32_t first_fallback_index = -1;
-
-        auto load_with_filter = [this, &first_fallback_index](const char *filter, epoc::adapter::font_file_adapter_kind adapter_kind) {
+        auto load_with_filter = [this](const char *filter, epoc::adapter::font_file_adapter_kind adapter_kind) {
             auto iterator = common::make_directory_iterator(FALLBACK_FONT_FOLDER, filter);
 
             if (!iterator || !iterator->is_valid()) {
@@ -1263,10 +1261,6 @@ namespace eka2l1 {
                             for (int word = 0; word < 4; word++) {
                                 fallback_coverage_[word] |= new_info->face_attrib.coverage[word];
                             }
-
-                            if (first_fallback_index < 0) {
-                                first_fallback_index = static_cast<std::int32_t>(i);
-                            }
                         }
                     }
 
@@ -1280,18 +1274,10 @@ namespace eka2l1 {
         load_with_filter("*.ttf", epoc::adapter::font_file_adapter_kind::freetype);
         load_with_filter("*.gdr", epoc::adapter::font_file_adapter_kind::gdr);
 
-        // Give every ROM font that can't draw CJK a per-glyph fallback to the
-        // wide-coverage host font, without touching the font itself. The wserv
-        // text atlas and the glyph rasterizer then borrow individual CJK glyphs
-        // from it while by-name/by-UID/native paths keep using the real ROM font
-        // (an in-place rebind here destroyed system-font UID lookups: freetype
-        // reports no UID, so by-UID requests for rebound GDR fonts failed).
-        // Probes: 中 (any CJK) and 蓝 (simplified-only — catches Japanese
-        // fonts that carry kanji but miss simplified-Chinese codepoints).
-        if (first_fallback_index >= 0) {
-            static const std::uint32_t cjk_probes[] = { 0x4E2D, 0x84DD };
-            persistent_font_store.assign_fallback_for_glyphless_fonts(static_cast<std::size_t>(first_fallback_index),
-                cjk_probes, sizeof(cjk_probes) / sizeof(cjk_probes[0]));
-        }
+        // No per-font rebind here: the server text atlas resolves a per-glyph
+        // fallback straight from the store at draw time (seek_the_open_font_with_character),
+        // so glyphs the bound font can't draw - CJK on western firmware, or fonts an
+        // app loads at runtime (e.g. X-plore's own UI font) - are borrowed from these
+        // host fonts regardless of how the font was bound.
     }
 }
