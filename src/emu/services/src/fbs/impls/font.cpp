@@ -23,7 +23,9 @@
 
 #include <services/fbs/fbs.h>
 
+#include <common/algorithm.h>
 #include <common/cvt.h>
+#include <common/fileutils.h>
 #include <common/log.h>
 #include <common/path.h>
 #include <common/vecx.h>
@@ -778,16 +780,38 @@ namespace eka2l1 {
         int rasterized_height = 0;
 
         const epoc::open_font_info *info = &(font->of_info);
+        std::uint32_t metric_identifier = font->of_info.metric_identifier;
         epoc::glyph_bitmap_type bitmap_type = epoc::glyph_bitmap_type::default_glyph_bitmap;
         std::uint32_t bitmap_data_size = 0;
         epoc::open_font_character_metric char_metric;
 
+        // Glyph-level fallback: when the bound font has no glyph for this character,
+        // freetype would otherwise silently rasterize the .notdef tofu box. Borrow the
+        // glyph from any loaded font that covers the codepoint (e.g. a bundled CJK
+        // fallback), sized to this font instance's design height. Glyph-index mode
+        // (high bit set) is face-specific, so no fallback is possible there.
+        if (!(codepoint & 0x80000000) && !info->adapter->does_glyph_exist(info->idx, codepoint, metric_identifier)) {
+            epoc::open_font_info *fallback = server<fbs_server>()->persistent_font_store.seek_the_open_font_with_character(
+                codepoint, info->adapter);
+
+            if (fallback) {
+                std::uint32_t fallback_metric_identifier = 0;
+
+                if (fallback->adapter->get_nearest_supported_metric(fallback->idx,
+                        static_cast<std::uint16_t>(font->of_info.metrics.design_height),
+                        &fallback_metric_identifier, true).has_value()) {
+                    info = fallback;
+                    metric_identifier = fallback_metric_identifier;
+                }
+            }
+        }
+
         // Get server font handle
         // The returned bitmap is 8bpp single channel. Luckily Symbian likes this (at least in v3 and upper).
-        std::uint8_t *bitmap_data = info->adapter->get_glyph_bitmap(info->idx, codepoint, font->of_info.metric_identifier,
+        std::uint8_t *bitmap_data = info->adapter->get_glyph_bitmap(info->idx, codepoint, metric_identifier,
             &rasterized_width, &rasterized_height, bitmap_data_size, &bitmap_type, char_metric);
 
-        if (!bitmap_data && !info->adapter->does_glyph_exist(info->idx, codepoint, info->metric_identifier)) {
+        if (!bitmap_data && !info->adapter->does_glyph_exist(info->idx, codepoint, metric_identifier)) {
             // The glyph is not available. Let the client know. With code 0, we already use '?'
             // On S^3, it expect us to return false here.
             // On lower version, it expect us to return nullptr, so use 0 here is for the best.
@@ -909,8 +933,17 @@ namespace eka2l1 {
             return;
         }
 
-        const std::int32_t result = static_cast<std::int32_t>(font->of_info.adapter->has_character(font->of_info.idx, code.value(), font->of_info.metric_identifier));
-        ctx->complete(result);
+        bool result = font->of_info.adapter->has_character(font->of_info.idx, code.value(), font->of_info.metric_identifier);
+
+        // Mirror the rasterize_glyph fallback: report covered if any loaded font can
+        // supply the glyph, so clients don't substitute '?' before even asking.
+        if (!result && (code.value() > 0)) {
+            result = (server<fbs_server>()->persistent_font_store.seek_the_open_font_with_character(
+                          static_cast<std::uint32_t>(code.value()), font->of_info.adapter)
+                != nullptr);
+        }
+
+        ctx->complete(static_cast<std::int32_t>(result));
     }
 
     void fbscli::get_font_shaping(service::ipc_context *ctx) {
@@ -1166,5 +1199,56 @@ namespace eka2l1 {
                 // TODO: Implement FS callback
             }
         }
+
+        load_fallback_host_fonts();
+    }
+
+    void fbs_server::load_fallback_host_fonts() {
+        // Host-side "fonts" folder next to the emulator binary (on WASM these are
+        // preloaded into MEMFS). They back the glyph-level fallback for codepoints
+        // the ROM fonts lack (typically CJK on western firmware). Mirrors how the
+        // HLE patch libraries are loaded (relative path + wildcard filter); a
+        // wildcard is required so the iterator resolves the directory, and entry
+        // detail is off so we classify by extension rather than dir_entry::type.
+        static const char *FALLBACK_FONT_FOLDER = ".//fonts//";
+
+        auto load_with_filter = [this](const char *filter, epoc::adapter::font_file_adapter_kind adapter_kind) {
+            auto iterator = common::make_directory_iterator(FALLBACK_FONT_FOLDER, filter);
+
+            if (!iterator || !iterator->is_valid()) {
+                return;
+            }
+
+            common::dir_entry entry;
+
+            while (iterator->next_entry(entry) == 0) {
+                if ((entry.name == ".") || (entry.name == "..")) {
+                    continue;
+                }
+
+                const std::string full_path = eka2l1::add_path(FALLBACK_FONT_FOLDER, entry.name);
+                FILE *f = common::open_c_file(full_path, "rb");
+
+                if (!f) {
+                    continue;
+                }
+
+                std::vector<std::uint8_t> buf;
+
+                fseek(f, 0, SEEK_END);
+                buf.resize(static_cast<std::size_t>(ftell(f)));
+                fseek(f, 0, SEEK_SET);
+
+                if (!buf.empty() && (fread(buf.data(), 1, buf.size(), f) == buf.size())) {
+                    persistent_font_store.add_fonts(buf, adapter_kind);
+                    LOG_INFO(SERVICE_FBS, "Loaded fallback host font: {}", full_path);
+                }
+
+                fclose(f);
+            }
+        };
+
+        load_with_filter("*.ttf", epoc::adapter::font_file_adapter_kind::freetype);
+        load_with_filter("*.gdr", epoc::adapter::font_file_adapter_kind::gdr);
     }
 }

@@ -255,6 +255,37 @@ namespace eka2l1::epoc::adapter {
             *bmp_type = glyph_bitmap_type::antialised_glyph_bitmap;
         }
 
+        // Fonts with embedded bitmap strikes (EBDT/EBLC, e.g. the S60 CJK fallback
+        // S60SC.ttf) make FreeType return a 1bpp packed bitmap when a strike matches
+        // the requested ppem. The rest of fbs treats the buffer as 8bpp grayscale and
+        // copies width*rows bytes, so a mono buffer (pitch = (width+7)/8) is read as
+        // garbage -> tofu. Expand mono to 8bpp here so the output is always grayscale.
+        if (bitmap.buffer && (bitmap.pixel_mode == FT_PIXEL_MODE_MONO)) {
+            mono_expand_scratch_.assign(static_cast<std::size_t>(bitmap.width) * bitmap.rows, 0);
+
+            for (unsigned int row = 0; row < bitmap.rows; row++) {
+                const std::uint8_t *src_row = bitmap.buffer + static_cast<std::ptrdiff_t>(row) * bitmap.pitch;
+                std::uint8_t *dst_row = mono_expand_scratch_.data() + static_cast<std::size_t>(row) * bitmap.width;
+
+                for (unsigned int col = 0; col < bitmap.width; col++) {
+                    const std::uint8_t bit = src_row[col >> 3] & (0x80 >> (col & 7));
+                    dst_row[col] = bit ? 0xFF : 0x00;
+                }
+            }
+
+            character_metric.width = ft_convention_to_int_pixel(glyph->metrics.width);
+            character_metric.height = ft_convention_to_int_pixel(glyph->metrics.height);
+            character_metric.horizontal_bearing_x = ft_convention_to_int_pixel(glyph->metrics.horiBearingX);
+            character_metric.horizontal_bearing_y = ft_convention_to_int_pixel(glyph->metrics.horiBearingY);
+            character_metric.horizontal_advance = ft_convention_to_int_pixel(glyph->metrics.horiAdvance);
+            character_metric.vertical_bearing_x = ft_convention_to_int_pixel(glyph->metrics.vertBearingX);
+            character_metric.vertical_bearing_y = ft_convention_to_int_pixel(glyph->metrics.vertBearingY);
+            character_metric.vertical_advance = ft_convention_to_int_pixel(glyph->metrics.vertAdvance);
+            character_metric.bitmap_type = glyph_bitmap_type::antialised_glyph_bitmap;
+
+            return mono_expand_scratch_.data();
+        }
+
         character_metric.width = ft_convention_to_int_pixel(glyph->metrics.width);
         character_metric.height = ft_convention_to_int_pixel(glyph->metrics.height);
         character_metric.horizontal_bearing_x = ft_convention_to_int_pixel(glyph->metrics.horiBearingX);

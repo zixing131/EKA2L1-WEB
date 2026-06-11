@@ -49,6 +49,9 @@ namespace eka2l1::epoc {
         std::vector<epoc::adapter::font_file_adapter_instance> font_adapters;
         std::vector<epoc::typeface_support> typefaces;
 
+        // codepoint -> index into open_font_store (or -1 when nothing covers it)
+        std::unordered_map<std::uint32_t, std::int32_t> glyph_fallback_cache;
+
         eka2l1::io_system *io;
 
     protected:
@@ -63,6 +66,7 @@ namespace eka2l1::epoc {
 
         open_font_info *seek_the_open_font(epoc::font_spec_base &spec);
         open_font_info *seek_the_font_by_uid(const epoc::uid the_uid, epoc::open_font_metrics &target_metric, std::uint32_t *metric_identifier = nullptr);
+        open_font_info *seek_the_open_font_with_character(const std::uint32_t codepoint, epoc::adapter::font_file_adapter_base *exclude_adapter);
         epoc::typeface_support *get_typeface_support(const std::uint32_t index);
 
         const std::size_t number_of_fonts() const {

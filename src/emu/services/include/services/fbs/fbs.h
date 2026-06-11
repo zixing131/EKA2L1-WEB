@@ -379,6 +379,7 @@ namespace eka2l1 {
 
     protected:
         void load_fonts_from_directory(eka2l1::io_system *io, eka2l1::directory *dir);
+        void load_fallback_host_fonts();
         void initialize_server();
 
         bool add_single_font(eka2l1::io_system *io, const std::u16string &path);

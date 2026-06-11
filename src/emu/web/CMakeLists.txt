@@ -70,6 +70,13 @@ if (EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/mediaclientvideo/group" "${WASM_STAGE_DIR}/patch/"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/postingsurfacefactory/group" "${WASM_STAGE_DIR}/patch/"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/goommonitor/group" "${WASM_STAGE_DIR}/patch/"
+        # Glyph-fallback fonts (CJK): fbs loads host-side "fonts/" after the ROM
+        # scan, so Chinese text renders even on firmware without CJK glyphs.
+        # Wipe first so swapping the fallback font doesn't leave a stale copy in
+        # the packaged data (copy_directory merges, it doesn't mirror).
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${WASM_STAGE_DIR}/fonts"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/fonts"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts" "${WASM_STAGE_DIR}/fonts/"
         COMMENT "Staging resources for Emscripten file packaging"
     )
 
@@ -121,6 +128,7 @@ if (EMSCRIPTEN)
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
+        "SHELL:--preload-file ${WASM_STAGE_DIR}/fonts@fonts"
         # Performance build: max link-time optimization.
         -O3
         "--closure=0"

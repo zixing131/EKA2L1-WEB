@@ -46,6 +46,12 @@ namespace eka2l1::epoc::adapter {
        common::identity_container<std::unique_ptr<atlas_pack_state>> pack_states_;
        std::vector<std::uint32_t> current_font_sizes_;
 
+       // Scratch buffer for converting FreeType's 1bpp embedded-bitmap glyphs
+       // (FT_PIXEL_MODE_MONO, used by fonts with EBDT strikes like S60SC) into the
+       // 8bpp grayscale the rest of fbs expects. Reused per get_glyph_bitmap call;
+       // the caller copies the data out before the next call (single-threaded fbs).
+       std::vector<std::uint8_t> mono_expand_scratch_;
+
    protected:
        std::uint32_t get_glyph_advance(const std::size_t face_index, const std::uint32_t codepoint, const std::uint32_t metric_identifier, const bool vertical = false) override;
        bool set_font_size(const std::size_t face_index, const std::uint32_t size);
