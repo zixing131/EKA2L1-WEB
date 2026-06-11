@@ -847,6 +847,7 @@ namespace eka2l1 {
         auto imgs = lib_mngr_->try_search_and_parse(corrected_path, &full_path);
 
         if (!imgs.first && !imgs.second) {
+            LOG_ERROR(KERNEL, "Can't find or parse executable to spawn: {}", common::ucs2_to_utf8(corrected_path));
             return nullptr;
         }
 

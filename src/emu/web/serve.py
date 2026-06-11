@@ -26,7 +26,7 @@ import os
 import socket
 import subprocess
 import sys
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 
 class COOPCOEPHandler(SimpleHTTPRequestHandler):
@@ -92,7 +92,7 @@ def main():
     directory = args[1] if len(args) > 1 else "."
 
     scheme = "https" if use_tls else "http"
-    server = HTTPServer(("", port), COOPCOEPHandler)
+    server = ThreadingHTTPServer(("", port), COOPCOEPHandler)
 
     if use_tls:
         import ssl

@@ -593,6 +593,12 @@ namespace eka2l1 {
                     break;
                 }
 
+                // EOpRun (pkg "FR"): the file still lands on disk like a normal
+                // install; only the run-at-install/uninstall hook is extra (and
+                // is not emulated here). Dropping the copy breaks packages whose
+                // main EXE is marked FR,RI: the _reg resource installs, but the
+                // binary never exists, so every launch fails with no error.
+                case ss_op::run:
                 case ss_op::undefined:
                 case ss_op::install: {
                     if (!skip_next_file) {
