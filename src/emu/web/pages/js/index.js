@@ -321,6 +321,37 @@
         }).catch(function () { return null; });
     }
 
+    // Batched IndexedDB persist with stage markers. Replaces FS.syncfs, whose
+    // single whole-mount transaction is itself enough to get iOS tabs killed.
+    function stagedSaveWithMarkers() {
+        setStatus('yellow', '保存到浏览器…');
+        setInstallStage('保存:准备');
+        return EKA2L1.saveInitialStaged(function (done, total, bytesDone, bytesTotal) {
+            var pct = total ? Math.floor(done * 100 / total) : 0;
+            setStatus('yellow', '保存到浏览器 ' + pct + '%…');
+            setInstallStage('保存:批次 ' + done + '/' + total + ' ('
+                + Math.floor(bytesDone / 1048576) + '/' + Math.floor(bytesTotal / 1048576) + 'MB)');
+        }, function (sub) {
+            setInstallStage('保存:' + sub);
+        }).then(function (stats) {
+            appendInstallInfo('镜像 ' + Math.floor((stats.bytesTotal || 0) / 1048576)
+                + 'MB ' + stats.entries + ' 项');
+        }).catch(function (err) {
+            console.warn('[EKA2L1] staged save failed:', err);
+            // The one-shot syncfs clones EVERYTHING into a single IndexedDB
+            // transaction — exactly the spike that kills iOS tabs. Only fall
+            // back when the image is small enough to plausibly survive it.
+            var bt = err ? err.bytesTotal : undefined;
+            if (typeof bt === 'number' && bt > 200 * 1048576) {
+                throw new Error('分批保存失败：' + (err.message || err) + '\n镜像约 '
+                    + Math.floor(bt / 1048576) + 'MB，跳过整体保存回退（避免被系统终止）。'
+                    + '请重试一次；若反复失败请截图反馈。');
+            }
+            setInstallStage('保存:兼容syncfs');
+            return EKA2L1.save();
+        });
+    }
+
     window.installDevice = function () {
         if (!romFile) return;
 
@@ -356,7 +387,15 @@
                     // EKA2 streaming path: the RPKG is parsed/extracted as the
                     // chunks arrive and never lands in MEMFS, and the ROM goes
                     // straight to its final location — no temp copies at all.
-                    // This cuts the iOS install peak by the full package size.
+                    //
+                    // Order matters for iOS: PERSIST BEFORE ACTIVATING. The
+                    // activation (initDevice) is a full emulator boot — it
+                    // loads the 60MB+ ROM and grows the wasm heap by hundreds
+                    // of MB. Doing the IndexedDB save while that is resident
+                    // was what pushed iPhones over the jetsam limit at the
+                    // first write batch. Saving first runs at the memory
+                    // floor, and once the flag is set even a kill during
+                    // activation self-heals on the next page load.
                     setInstallStage('流式安装 RPKG');
                     return EKA2L1.streamInstallRpkg(rpkgFile, function (done, total) {
                         var pct = Math.floor(done * 100 / total);
@@ -367,17 +406,25 @@
                         setInstallStage('写入 ROM');
                         return EKA2L1.writeFileToVFS(romFile, romTarget);
                     }).then(function () {
+                        return stagedSaveWithMarkers();
+                    }).then(function () {
+                        // Durably persisted: from here a reload always recovers.
+                        try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
                         setStatus('yellow', '激活设备…');
                         setInstallStage('激活设备');
+                        return new Promise(function (resolve) { setTimeout(resolve, 60); });
+                    }).then(function () {
                         var result = EKA2L1.initDevice('', '');
                         if (result !== 0) {
                             throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
                         }
+                        deviceReady = true;
                     });
                 }
 
                 // Classic path (EKA1 ROM-only, or streaming unavailable):
-                // stage the uploads in MEMFS, then install.
+                // stage the uploads in MEMFS, then install+activate in one C
+                // call (cannot be split), then persist.
                 setStatus('yellow', '写入 ROM…');
                 setInstallStage('写入 ROM');
                 return EKA2L1.writeFileToVFS(romFile, romPath)
@@ -398,52 +445,21 @@
                         if (result !== 0) {
                             throw new Error('安装失败：' + EKA2L1.decodeInstallError(result));
                         }
+                        deviceReady = true;
                         // The installer copied the ROM into roms/<firmcode>/; drop
                         // the uploads so they don't bloat IndexedDB on every sync.
                         try { EKA2L1.module.FS.unlink(romPath); } catch (e) {}
                         try { EKA2L1.module.FS.unlink(rpkgPath); } catch (e) {}
+                    })
+                    .then(function () {
+                        return stagedSaveWithMarkers();
+                    })
+                    .then(function () {
+                        try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
                     });
             })
             .then(function () {
-                deviceReady = true;
-                setStatus('yellow', '保存到浏览器…');
-                setInstallStage('保存:准备');
-                // Persist FIRST: if the browser kills the tab during the
-                // post-install work (iOS memory pressure), the device must
-                // already be safe in IndexedDB or it comes back half-broken.
-                //
-                // Batched writer instead of FS.syncfs: syncfs clones the whole
-                // extracted set into ONE IndexedDB transaction, which is
-                // itself enough to get the tab killed on iOS.
-                return EKA2L1.saveInitialStaged(function (done, total, bytesDone, bytesTotal) {
-                    var pct = total ? Math.floor(done * 100 / total) : 0;
-                    setStatus('yellow', '保存到浏览器 ' + pct + '%…');
-                    setInstallStage('保存:批次 ' + done + '/' + total + ' ('
-                        + Math.floor(bytesDone / 1048576) + '/' + Math.floor(bytesTotal / 1048576) + 'MB)');
-                }, function (sub) {
-                    setInstallStage('保存:' + sub);
-                }).then(function (stats) {
-                    appendInstallInfo('镜像 ' + Math.floor((stats.bytesTotal || 0) / 1048576)
-                        + 'MB ' + stats.entries + ' 项');
-                }).catch(function (err) {
-                    console.warn('[EKA2L1] staged save failed:', err);
-                    // The one-shot syncfs clones EVERYTHING into a single
-                    // IndexedDB transaction — exactly the spike that kills
-                    // iOS tabs. Only fall back when the image is small
-                    // enough to plausibly survive it.
-                    var bt = err ? err.bytesTotal : undefined;
-                    if (typeof bt === 'number' && bt > 200 * 1048576) {
-                        throw new Error('分批保存失败：' + (err.message || err) + '\n镜像约 '
-                            + Math.floor(bt / 1048576) + 'MB，跳过整体保存回退（避免被系统终止）。'
-                            + '请重试一次；若反复失败请截图反馈。');
-                    }
-                    setInstallStage('保存:兼容syncfs');
-                    return EKA2L1.save();
-                });
-            })
-            .then(function () {
                 setInstallStage(null);
-                try { localStorage.setItem(HAS_DEVICE_KEY, '1'); } catch (e) {}
                 refreshApps();
                 EKA2L1.setPaused(true);
                 showError(null);
