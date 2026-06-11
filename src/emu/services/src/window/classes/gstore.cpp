@@ -322,7 +322,7 @@ namespace eka2l1::epoc {
 
         if (text_font->atlas.atlas_handle_ == 0) {
             text_font->atlas.init(text_font->of_info.adapter, text_font->of_info.idx, 0x20, 0xFF - 0x20,
-                scaled_font_size, metric_identifier);
+                scaled_font_size, metric_identifier, text_font->of_info.fallback_adapter, text_font->of_info.fallback_idx);
         }
 
         eka2l1::rect scaled_text_box = cmd.text_box_;

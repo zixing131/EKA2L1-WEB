@@ -41,6 +41,15 @@ namespace eka2l1::epoc {
         epoc::open_font_metrics metrics;
 
         std::uint32_t metric_identifier;
+
+        // Per-glyph fallback source. When this font's own adapter has no glyph
+        // for a codepoint, both the server text atlas and the glyph rasterizer
+        // borrow it from this wide-coverage font instead of drawing notdef. Set
+        // at startup for glyph-poor fonts; null when no fallback is needed.
+        // Kept separate from adapter/idx so the font's own identity (name, UID,
+        // bitmap data, native metrics) stays intact for by-UID / native lookups.
+        epoc::adapter::font_file_adapter_base *fallback_adapter = nullptr;
+        std::size_t fallback_idx = 0;
     };
 
     // A set of fonts
@@ -78,16 +87,18 @@ namespace eka2l1::epoc {
         }
 
         /**
-         * @brief Rebind glyph-poor fonts to a wide-coverage source font in place.
+         * @brief Give glyph-poor fonts a wide-coverage fallback, non-destructively.
          *
-         * Every non-symbol entry that lacks any of the probe codepoints is
-         * rewritten to use the source font's adapter/face while keeping its
-         * public names and style flags. All binding paths (exact-name lookup,
-         * spec scoring, typeface enumeration, font-object caching) then hand
-         * out a font that can actually draw those scripts (mirrors CJK
-         * firmware, where the system fonts carry both Latin and CJK).
+         * Every non-symbol entry that lacks any of the probe codepoints records
+         * the source font as its per-glyph fallback (open_font_info::fallback_*),
+         * without touching its own adapter/face/UID/metrics. The text atlas and
+         * the glyph rasterizer then borrow individual glyphs the font cannot draw
+         * (typically CJK on western firmware) while every other path - by-name,
+         * by-UID, spec scoring, native bitmap rendering - keeps using the real
+         * font. This replaces the earlier in-place rebind, which destroyed the
+         * original font identity and broke by-UID system-font lookups.
          */
-        void substitute_glyphless_fonts_with(const std::size_t source_index, const std::uint32_t *probe_codepoints,
+        void assign_fallback_for_glyphless_fonts(const std::size_t source_index, const std::uint32_t *probe_codepoints,
             const std::size_t probe_count);
 
         const std::size_t number_of_typefaces() const {

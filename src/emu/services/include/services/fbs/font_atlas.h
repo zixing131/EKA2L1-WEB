@@ -57,14 +57,33 @@ namespace eka2l1::epoc {
         std::size_t typeface_idx_;
         std::int32_t pack_handle_;
 
+        // Per-glyph fallback: glyphs the bound font cannot draw are rendered from
+        // this wide-coverage font into a secondary atlas (lazily created on first
+        // use). Mirrors the client-side rasterize_glyph fallback so server-drawn
+        // text (DrawText / lists / titles) shows CJK regardless of which ROM font
+        // the layout bound. Null adapter means no fallback for this font.
+        adapter::font_file_adapter_base *fallback_adapter_;
+        std::size_t fallback_idx_;
+        std::uint32_t fallback_metric_identifier_;
+        bool fallback_metric_resolved_;
+        std::unique_ptr<font_atlas> fallback_;
+
+    private:
+        // Ensure the given characters are rasterized into this atlas (creating the
+        // backing bitmap on first call). Shared by the primary and fallback atlas.
+        bool prepare_glyphs(const std::u16string &chars, drivers::graphics_driver *driver,
+            drivers::graphics_command_builder &upload_builder);
+
     public:
         explicit font_atlas();
 
         explicit font_atlas(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
-            const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_);
+            const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_,
+            adapter::font_file_adapter_base *fallback_adapter = nullptr, const std::size_t fallback_idx = 0);
 
         void init(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
-            const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_);
+            const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier_,
+            adapter::font_file_adapter_base *fallback_adapter = nullptr, const std::size_t fallback_idx = 0);
 
         void destroy(drivers::graphics_driver *driver);
 

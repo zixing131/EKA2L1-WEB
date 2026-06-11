@@ -21,27 +21,39 @@
 #include <common/algorithm.h>
 #include <common/time.h>
 
+#include <unordered_set>
+
 namespace eka2l1::epoc {
     font_atlas::font_atlas()
         : atlas_handle_(0)
         , atlas_data_(nullptr)
-        , pack_handle_(0) {
+        , pack_handle_(0)
+        , fallback_adapter_(nullptr)
+        , fallback_idx_(0)
+        , fallback_metric_identifier_(0)
+        , fallback_metric_resolved_(false) {
     }
 
     font_atlas::font_atlas(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
-        const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier)
+        const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier,
+        adapter::font_file_adapter_base *fallback_adapter, const std::size_t fallback_idx)
         : atlas_handle_(0)
         , adapter_(adapter)
         , metric_identifier_(metric_identifier)
         , size_(font_size)
         , initial_range_(initial_start, initial_char_count)
         , typeface_idx_(typeface_idx)
-        , atlas_data_(nullptr)
-        , pack_handle_(0) {
+        , pack_handle_(0)
+        , fallback_adapter_(fallback_adapter)
+        , fallback_idx_(fallback_idx)
+        , fallback_metric_identifier_(0)
+        , fallback_metric_resolved_(false) {
+        atlas_data_ = nullptr;
     }
 
     void font_atlas::init(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
-        const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier) {
+        const char16_t initial_char_count, const int font_size, const std::uint32_t metric_identifier,
+        adapter::font_file_adapter_base *fallback_adapter, const std::size_t fallback_idx) {
         adapter_ = adapter;
         atlas_handle_ = 0;
         metric_identifier_ = metric_identifier;
@@ -50,10 +62,21 @@ namespace eka2l1::epoc {
         typeface_idx_ = typeface_idx;
         pack_handle_ = 0;
 
+        fallback_adapter_ = fallback_adapter;
+        fallback_idx_ = fallback_idx;
+        fallback_metric_identifier_ = 0;
+        fallback_metric_resolved_ = false;
+        fallback_.reset();
+
         atlas_data_.reset();
     }
 
     void font_atlas::destroy(drivers::graphics_driver *driver) {
+        if (fallback_) {
+            fallback_->destroy(driver);
+            fallback_.reset();
+        }
+
         if (atlas_handle_) {
             drivers::graphics_command_builder builder;
             builder.destroy_bitmap(atlas_handle_);
@@ -77,12 +100,13 @@ namespace eka2l1::epoc {
         return common::align(ESTIMATE_MAX_CHAR_IN_ATLAS_WIDTH * size_, 1024);
     }
 
-    bool font_atlas::draw_text(const std::u16string &text, const eka2l1::rect &text_box, const epoc::text_alignment alignment, drivers::graphics_driver *driver, drivers::graphics_command_builder &builder, const eka2l1::vec2f scale_vector) {
+    bool font_atlas::prepare_glyphs(const std::u16string &chars, drivers::graphics_driver *driver,
+        drivers::graphics_command_builder &upload_builder) {
         const int width = get_atlas_width();
-        drivers::graphics_command_builder upload_builder;
+        const int atlas_byte_size = width * width * adapter_->get_atlas_bitmap_bits_per_pixel() / 8;
 
         if (!atlas_data_) {
-            atlas_data_ = std::make_unique<std::uint8_t[]>(width * width * adapter_->get_atlas_bitmap_bits_per_pixel() / 8);
+            atlas_data_ = std::make_unique<std::uint8_t[]>(atlas_byte_size);
             auto cinfos = std::make_unique<adapter::character_info[]>(initial_range_.second);
 
             pack_handle_ = adapter_->begin_get_atlas(atlas_data_.get(), { width, width });
@@ -91,22 +115,24 @@ namespace eka2l1::epoc {
                 return false;
             }
 
-            if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, initial_range_.first, nullptr, initial_range_.second,
-                    metric_identifier_, cinfos.get())) {
-                return false;
-            }
+            if (initial_range_.second > 0) {
+                if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, initial_range_.first, nullptr, initial_range_.second,
+                        metric_identifier_, cinfos.get())) {
+                    return false;
+                }
 
-            // initialize the last used list and character map
-            for (char16_t i = 0; i < initial_range_.second; i++) {
-                last_use_.push_back(initial_range_.first + i);
-                characters_.emplace(initial_range_.first + i, cinfos[i]);
+                // initialize the last used list and character map
+                for (char16_t i = 0; i < initial_range_.second; i++) {
+                    last_use_.push_back(initial_range_.first + i);
+                    characters_.emplace(initial_range_.first + i, cinfos[i]);
+                }
             }
 
             // Submit the bitmap through another queue, in case the command list above never got submitted
             atlas_handle_ = drivers::create_bitmap(driver, { width, width },  adapter_->get_atlas_bitmap_bits_per_pixel());
 
             upload_builder.update_bitmap(atlas_handle_, reinterpret_cast<const char *>(atlas_data_.get()),
-                width * width * adapter_->get_atlas_bitmap_bits_per_pixel() / 8, { 0, 0 }, { width, width });
+                atlas_byte_size, { 0, 0 }, { width, width });
             upload_builder.set_texture_filter(atlas_handle_, false, drivers::filter_option::nearest);
         }
 
@@ -115,7 +141,7 @@ namespace eka2l1::epoc {
 
         // Iterate through characters, and filter out characters which is not available in the atlas.
         // Add character to last used, too.
-        for (auto &chr : text) {
+        for (auto &chr : chars) {
             if (characters_.find(chr) == characters_.end()) {
                 if (!std::binary_search(to_rast.begin(), to_rast.end(), chr)) {
                     to_rast.push_back(chr);
@@ -129,7 +155,9 @@ namespace eka2l1::epoc {
             }
         }
 
-        last_use_.erase(last_use_.end() - unique_char.size(), last_use_.end());
+        if (unique_char.size() <= last_use_.size()) {
+            last_use_.erase(last_use_.end() - unique_char.size(), last_use_.end());
+        }
 
         if (!to_rast.empty()) {
             // Try to rasterize these
@@ -137,7 +165,7 @@ namespace eka2l1::epoc {
 
             if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, to_rast.data(), static_cast<char16_t>(to_rast.size()), metric_identifier_,
                     cinfos.get())) {
-                // Try to redo the atlas, getting latest use characters.
+                // The atlas is full. Rebuild it from the most recently used glyphs.
                 adapter_->end_get_atlas(pack_handle_);
                 pack_handle_ = adapter_->begin_get_atlas(atlas_data_.get(), { width, width });
 
@@ -145,14 +173,26 @@ namespace eka2l1::epoc {
                     return false;
                 }
 
-                if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, &last_use_[0], static_cast<char16_t>(characters_.size() - 5),
-                        metric_identifier_, cinfos.get())) {
+                const std::size_t keep = (characters_.size() > 5) ? (characters_.size() - 5) : characters_.size();
+                const std::size_t take = std::min(keep, last_use_.size());
+
+                if (take == 0) {
                     return false;
                 }
 
-                for (std::size_t i = 0; i < characters_.size() - 5; i++) {
-                    characters_[last_use_[i]] = cinfos[i];
+                auto evict_cinfos = std::make_unique<adapter::character_info[]>(take);
+
+                if (!adapter_->get_glyph_atlas(pack_handle_, typeface_idx_, 0, &last_use_[0], static_cast<char16_t>(take),
+                        metric_identifier_, evict_cinfos.get())) {
+                    return false;
                 }
+
+                for (std::size_t i = 0; i < take; i++) {
+                    characters_[last_use_[i]] = evict_cinfos[i];
+                }
+
+                upload_builder.update_bitmap(atlas_handle_, reinterpret_cast<const char *>(atlas_data_.get()),
+                    atlas_byte_size, { 0, 0 }, { width, width });
             } else {
                 // Update the characters
                 for (char16_t i = 0; i < static_cast<char16_t>(to_rast.size()); i++) {
@@ -160,9 +200,86 @@ namespace eka2l1::epoc {
                 }
 
                 upload_builder.update_bitmap(atlas_handle_, reinterpret_cast<const char *>(atlas_data_.get()),
-                    width * width * adapter_->get_atlas_bitmap_bits_per_pixel() / 8, { 0, 0 }, { width, width });
+                    atlas_byte_size, { 0, 0 }, { width, width });
             }
         }
+
+        return true;
+    }
+
+    bool font_atlas::draw_text(const std::u16string &text, const eka2l1::rect &text_box, const epoc::text_alignment alignment, drivers::graphics_driver *driver, drivers::graphics_command_builder &builder, const eka2l1::vec2f scale_vector) {
+        drivers::graphics_command_builder upload_builder;
+
+        auto is_control_char = [](const char16_t chr) {
+            return (chr >= 0x200c && chr <= 0x200f) || (chr >= 0x202a && chr <= 0x202e) || (chr >= 0xfffe && chr <= 0xffff);
+        };
+
+        // Resolve a font size for the fallback font that matches this atlas.
+        if (fallback_adapter_ && !fallback_metric_resolved_) {
+            fallback_metric_resolved_ = true;
+            if (!fallback_adapter_->get_nearest_supported_metric(fallback_idx_, static_cast<std::uint16_t>(size_),
+                    &fallback_metric_identifier_, true).has_value()) {
+                fallback_adapter_ = nullptr; // no usable size, disable fallback
+            }
+        }
+
+        // Split the text: glyphs the bound font can't draw but the fallback font
+        // can are routed to the secondary atlas. Everything else (including the
+        // bound font's own notdef for truly missing glyphs) stays on the primary.
+        std::u16string primary_text;
+        std::u16string fallback_text;
+        std::unordered_set<char16_t> fallback_chars;
+
+        for (auto &chr : text) {
+            bool to_fallback = false;
+
+            if (fallback_adapter_ && !is_control_char(chr)
+                && !adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_)
+                && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_)) {
+                to_fallback = true;
+            }
+
+            if (to_fallback) {
+                if (fallback_chars.insert(chr).second) {
+                    fallback_text.push_back(chr);
+                }
+            } else {
+                primary_text.push_back(chr);
+            }
+        }
+
+        if (!prepare_glyphs(primary_text, driver, upload_builder)) {
+            return false;
+        }
+
+        if (!fallback_text.empty()) {
+            if (!fallback_) {
+                fallback_ = std::make_unique<font_atlas>();
+                // Seed the fallback atlas with the same initial range so its LRU
+                // bookkeeping matches the primary's; only CJK glyphs are routed here.
+                fallback_->init(fallback_adapter_, fallback_idx_, initial_range_.first, initial_range_.second,
+                    size_, fallback_metric_identifier_);
+            }
+
+            fallback_->prepare_glyphs(fallback_text, driver, upload_builder);
+        }
+
+        // Pick the atlas that actually holds a character's glyph.
+        auto resolve_glyph = [&](const char16_t chr) -> std::pair<font_atlas *, adapter::character_info *> {
+            if (fallback_ && (fallback_chars.find(chr) != fallback_chars.end())) {
+                auto it = fallback_->characters_.find(chr);
+                if (it != fallback_->characters_.end()) {
+                    return { fallback_.get(), &it->second };
+                }
+            }
+
+            auto it = characters_.find(chr);
+            if (it != characters_.end()) {
+                return { this, &it->second };
+            }
+
+            return { nullptr, nullptr };
+        };
 
         eka2l1::vec2 cur_pos = text_box.top;
 
@@ -172,7 +289,10 @@ namespace eka2l1::epoc {
             float size_length = 0;
 
             for (auto &chr : text) {
-                size_length += static_cast<int>(characters_[chr].xadv * scale_vector[0]);
+                auto resolved = resolve_glyph(chr);
+                if (resolved.second) {
+                    size_length += static_cast<int>(resolved.second->xadv * scale_vector[0]);
+                }
             }
 
             if (alignment == epoc::text_alignment::right) {
@@ -189,15 +309,21 @@ namespace eka2l1::epoc {
 
         // Start to render these texts.
         for (auto &chr : text) {
-            if ((chr >= 0x200c && chr <= 0x200f) || (chr >= 0x202a && chr <= 0x202e) || (chr >= 0xfffe && chr <= 0xffff)) {
+            if (is_control_char(chr)) {
                 // Skip control characters
                 // TODO: Handle them properly
                 continue;
             }
 
-            eka2l1::rect source_rect;
-            adapter::character_info &info = characters_[chr];
+            auto resolved = resolve_glyph(chr);
+            if (!resolved.second) {
+                continue;
+            }
 
+            adapter::character_info &info = *resolved.second;
+            const drivers::handle glyph_atlas_handle = resolved.first->atlas_handle_;
+
+            eka2l1::rect source_rect;
             source_rect.top = { info.x0, info.y0 };
             source_rect.size = eka2l1::object_size(info.x1 - info.x0, info.y1 - info.y0);
 
@@ -209,7 +335,7 @@ namespace eka2l1::epoc {
             dest_rect.size.y = static_cast<int>((info.yoff2 - info.yoff) * scale_vector[1]);
 
             if ((dest_rect.size.x != 0) && (dest_rect.size.y != 0) && (source_rect.size.x != 0) && (source_rect.size.y != 0)) {
-                builder.draw_bitmap(atlas_handle_, 0, dest_rect, source_rect, eka2l1::vec2(0, 0), 0.0f,
+                builder.draw_bitmap(glyph_atlas_handle, 0, dest_rect, source_rect, eka2l1::vec2(0, 0), 0.0f,
                     drivers::bitmap_draw_flag_use_brush);
             }
 

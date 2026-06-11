@@ -148,17 +148,18 @@ namespace eka2l1::epoc {
         return (found_index < 0) ? nullptr : &open_font_store[found_index];
     }
 
-    void font_store::substitute_glyphless_fonts_with(const std::size_t source_index, const std::uint32_t *probe_codepoints,
+    void font_store::assign_fallback_for_glyphless_fonts(const std::size_t source_index, const std::uint32_t *probe_codepoints,
         const std::size_t probe_count) {
         if (source_index >= open_font_store.size()) {
             return;
         }
 
-        // Take a copy: the source entry itself lives in the store we mutate.
-        const open_font_info source_copy = open_font_store[source_index];
+        epoc::adapter::font_file_adapter_base *const fallback_adapter = open_font_store[source_index].adapter;
+        const std::size_t fallback_idx = open_font_store[source_index].idx;
 
         for (auto &info : open_font_store) {
-            if ((info.adapter == source_copy.adapter) && (info.idx == source_copy.idx)) {
+            // Never let a font fall back to itself.
+            if ((info.adapter == fallback_adapter) && (info.idx == fallback_idx)) {
                 continue;
             }
 
@@ -178,23 +179,12 @@ namespace eka2l1::epoc {
                 continue;
             }
 
-            // Rebind this entry to the wide-coverage source font, but keep the
-            // public identity (names + style flags) so by-name lookups, style
-            // matching and typeface enumeration still behave as before. Simply
-            // adding renamed clones is not enough: spec-based scoring prefers
-            // the multi-script ROM originals (more coverage bits), and the
-            // wserv text atlas draws straight from the bound adapter with no
-            // per-glyph fallback, so any binding that resolves to the original
-            // ends up as notdef boxes for CJK text.
-            open_font_info replacement = source_copy;
-            replacement.face_attrib.name.assign(nullptr, info.face_attrib.name.to_std_string(nullptr));
-            replacement.face_attrib.fam_name.assign(nullptr, info.face_attrib.fam_name.to_std_string(nullptr));
-            replacement.face_attrib.local_full_name.assign(nullptr, info.face_attrib.local_full_name.to_std_string(nullptr));
-            replacement.face_attrib.local_full_fam_name.assign(nullptr, info.face_attrib.local_full_fam_name.to_std_string(nullptr));
-            replacement.face_attrib.style = info.face_attrib.style;
-            replacement.family = info.family;
-
-            info = std::move(replacement);
+            // Non-destructive: keep the font's own adapter/idx (and therefore its
+            // UID, bitmap data and native metrics) untouched, only record where to
+            // borrow the glyphs it cannot draw. The text atlas and rasterizer use
+            // this for per-glyph fallback; by-UID/by-name/native paths are unaffected.
+            info.fallback_adapter = fallback_adapter;
+            info.fallback_idx = fallback_idx;
         }
 
         glyph_fallback_cache.clear();
