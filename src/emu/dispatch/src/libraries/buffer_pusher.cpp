@@ -38,11 +38,12 @@ namespace eka2l1::dispatch {
         buffers_.push_back(info);
     }
 
-    void graphics_buffer_pusher::initialize(const std::size_t size_per_buffer) {
+    void graphics_buffer_pusher::initialize(const std::size_t size_per_buffer, const bool is_index_buffer) {
         if (!size_per_buffer) {
             return;
         }
         size_per_buffer_ = size_per_buffer;
+        is_index_buffer_ = is_index_buffer;
         add_buffer();
     }
 
@@ -96,7 +97,9 @@ namespace eka2l1::dispatch {
         }
 
         if (!buffers_[current_buffer_].buffer_) {
-            buffers_[current_buffer_].buffer_ = drivers::create_buffer(drv, nullptr, size_per_buffer_, static_cast<drivers::buffer_upload_hint>(drivers::buffer_upload_dynamic | drivers::buffer_upload_draw));
+            buffers_[current_buffer_].buffer_ = drivers::create_buffer(drv, nullptr, size_per_buffer_,
+                static_cast<drivers::buffer_upload_hint>(drivers::buffer_upload_dynamic | drivers::buffer_upload_draw
+                    | (is_index_buffer_ ? drivers::buffer_upload_index : 0)));
         }
 
         if (!buffers_[current_buffer_].data_) {

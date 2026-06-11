@@ -29,8 +29,10 @@ namespace eka2l1::drivers {
     class ogl_buffer : public buffer {
         GLuint buffer_;
         GLuint last_buffer_;
+        GLuint last_vao_;
 
         GLenum usage_hint_gl_;
+        bool is_index_;
 
         std::size_t size_;
 

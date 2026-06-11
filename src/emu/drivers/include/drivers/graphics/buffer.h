@@ -34,7 +34,14 @@ namespace eka2l1::drivers {
 
         buffer_upload_draw = 1 << 10,
         buffer_upload_read = 1 << 11,
-        buffer_upload_copy = 1 << 12
+        buffer_upload_copy = 1 << 12,
+
+        // The buffer will be used as an index (element array) buffer. WebGL
+        // type-locks buffers to element vs non-element on their FIRST bind
+        // (any other target, even COPY_WRITE, counts as non-element), so the
+        // backend must know the role from creation and only ever touch index
+        // buffers through GL_ELEMENT_ARRAY_BUFFER.
+        buffer_upload_index = 1 << 13
     };
 
     class buffer : public graphics_object {

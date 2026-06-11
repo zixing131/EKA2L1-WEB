@@ -22,6 +22,8 @@
 #include <dispatch/libraries/gles_shared/gles_shared.h>
 #include <dispatch/libraries/gles2/consts.h>
 #include <services/window/screen.h>
+#include <cstring>
+#include <vector>
 
 #include <dispatch/dispatcher.h>
 #include <drivers/graphics/graphics.h>
@@ -434,7 +436,17 @@ namespace eka2l1::dispatch {
             break;
 
         case GL_FIXED_EMU:
+#ifdef __EMSCRIPTEN__
+            // WebGL has no GL_FIXED vertex attributes (glVertexAttribPointer
+            // raises INVALID_ENUM and the geometry silently vanishes — e.g.
+            // Jelly Chase rendered nothing but its clear colour). Client-side
+            // arrays are converted to float at copy time in
+            // retrieve_vertex_buffer_slot(); declaring float here matches
+            // that (same 4-byte stride, so the layout is untouched).
+            res = drivers::data_format::sfloat;
+#else
             res = drivers::data_format::fixed;
+#endif
             break;
 
         case GL_UNSIGNED_BYTE_EMU:
@@ -1237,6 +1249,28 @@ namespace eka2l1::dispatch {
                 vertex_buffer_pusher_.initialize(common::MB(4));
             }
 
+#ifdef __EMSCRIPTEN__
+            // WebGL: convert GL_FIXED lanes (16.16) to float in the staging
+            // copy. Each attribute gets its own slice here, and fixed/float
+            // are both 4 bytes, so only this attribute's components within
+            // each stride window are rewritten.
+            std::vector<std::uint8_t> fixed_converted;
+            if (attrib.data_type_ == GL_FIXED_EMU) {
+                fixed_converted.assign(data_raw, data_raw + total_buffer_size);
+                const std::uint32_t comp_count = attrib.size_;
+                for (std::size_t e = 0; (e * stride + comp_count * 4) <= total_buffer_size; e++) {
+                    std::uint8_t *elem = fixed_converted.data() + e * stride;
+                    for (std::uint32_t c = 0; c < comp_count; c++) {
+                        std::int32_t raw_fixed;
+                        std::memcpy(&raw_fixed, elem + c * 4, 4);
+                        const float as_float = static_cast<float>(raw_fixed) / 65536.0f;
+                        std::memcpy(elem + c * 4, &as_float, 4);
+                    }
+                }
+                data_raw = fixed_converted.data();
+            }
+#endif
+
             std::size_t offset_big = 0;
             buffer_handle_drv = vertex_buffer_pusher_.push_buffer(drv, data_raw, total_buffer_size, offset_big);
 
@@ -1246,6 +1280,16 @@ namespace eka2l1::dispatch {
                 attrib_not_persistent = true;
             }
         } else {
+#ifdef __EMSCRIPTEN__
+            if (attrib.data_type_ == GL_FIXED_EMU) {
+                static bool warned_fixed_vbo = false;
+                if (!warned_fixed_vbo) {
+                    warned_fixed_vbo = true;
+                    LOG_WARN(HLE_DISPATCHER, "GL_FIXED attribute sourced from a VBO: WebGL cannot "
+                                             "consume it and buffer contents are typeless at upload; geometry may be wrong");
+                }
+            }
+#endif
             offset = static_cast<int>(attrib.offset_);
             if (first_index_real) {
                 offset += first_index_real * get_gl_attrib_stride(attrib);
@@ -2448,6 +2492,12 @@ namespace eka2l1::dispatch {
             return;
         }
 
+        if (target != GL_ARRAY_BUFFER_EMU) {
+            // Element buffers must be role-tagged from creation (WebGL
+            // type-locks the first binding; see drivers buffer_upload_index).
+            upload_hint = static_cast<drivers::buffer_upload_hint>(upload_hint | drivers::buffer_upload_index);
+        }
+
         bool need_reinstantiate = true;
 
         if (buffer->handle_value() == 0) {
@@ -3198,7 +3248,7 @@ namespace eka2l1::dispatch {
             }
 
             if (!ctx->index_buffer_pusher_.is_initialized()) {
-                ctx->index_buffer_pusher_.initialize(common::MB(2));
+                ctx->index_buffer_pusher_.initialize(common::MB(2), true);
             }
 
             std::size_t offset_bytes = 0;

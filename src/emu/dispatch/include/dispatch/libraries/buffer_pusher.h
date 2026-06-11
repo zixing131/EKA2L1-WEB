@@ -40,6 +40,7 @@ namespace eka2l1::dispatch {
         std::vector<buffer_info> buffers_;
         std::uint8_t current_buffer_;
         std::size_t size_per_buffer_;
+        bool is_index_buffer_ = false;
 
         void add_buffer();
 
@@ -50,7 +51,7 @@ namespace eka2l1::dispatch {
             return (size_per_buffer_ != 0);
         }
 
-        void initialize(const std::size_t size_per_buffer);
+        void initialize(const std::size_t size_per_buffer, const bool is_index_buffer = false);
         void destroy(drivers::graphics_command_builder &builder);
         void done_frame();
 
