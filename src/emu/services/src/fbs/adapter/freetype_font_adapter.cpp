@@ -439,19 +439,34 @@ namespace eka2l1::epoc::adapter {
             auto &rect = pack_rects[i];
             auto dest = pack_state_ptr->atlas_base_ + (rect.x + 5) * 4 + (rect.y + 5) * pack_state_ptr->atlas_size_.x * 4;
 
+            // Fonts with embedded bitmap strikes (e.g. CJK fonts like S60SC.ttf)
+            // come out of FT_Render_Glyph still as packed 1bpp MONO — FreeType
+            // does not convert bitmap glyphs to the requested LCD mode. Reading
+            // them as 3-byte LCD triplets paints colored noise into the atlas.
+            const bool is_mono = (bitmap.pixel_mode == FT_PIXEL_MODE_MONO);
+            const std::uint32_t pixel_width = is_mono ? bitmap.width : (bitmap.width / 3);
+
             for (auto y = 0; y < bitmap.rows; y++) {
-                for (auto x = 0; x < bitmap.width / 3; x++) {
-                    auto average = static_cast<float>(bitmap.buffer[x * 3 + y * bitmap.pitch] +
-                        bitmap.buffer[x * 3 + y * bitmap.pitch + 1] +
-                        bitmap.buffer[x * 3 + y * bitmap.pitch + 2]) / 3.0f;
+                for (auto x = 0u; x < pixel_width; x++) {
+                    eka2l1::vec4 color;
 
-                    eka2l1::vec4 color(bitmap.buffer[x * 3 + y * bitmap.pitch], bitmap.buffer[x * 3 + y * bitmap.pitch + 1],
-                       bitmap.buffer[x * 3 + y * bitmap.pitch +2], static_cast<std::uint8_t>(average));
+                    if (is_mono) {
+                        const bool on = bitmap.buffer[y * bitmap.pitch + (x >> 3)] & (0x80 >> (x & 7));
+                        const std::uint8_t lum = on ? 255 : 0;
+                        color = eka2l1::vec4(lum, lum, lum, lum);
+                    } else {
+                        auto average = static_cast<float>(bitmap.buffer[x * 3 + y * bitmap.pitch] +
+                            bitmap.buffer[x * 3 + y * bitmap.pitch + 1] +
+                            bitmap.buffer[x * 3 + y * bitmap.pitch + 2]) / 3.0f;
 
-                    float max = (static_cast<float>(std::max({ color.x, color.y, color.z })) / 255.0f);
-                    int min = std::min({ color.x, color.y, color.z });
+                        color = eka2l1::vec4(bitmap.buffer[x * 3 + y * bitmap.pitch], bitmap.buffer[x * 3 + y * bitmap.pitch + 1],
+                           bitmap.buffer[x * 3 + y * bitmap.pitch +2], static_cast<std::uint8_t>(average));
 
-                    color = color * max + eka2l1::vec4(color.x, color.y, color.z, min) * (1.0f - max);
+                        float max = (static_cast<float>(std::max({ color.x, color.y, color.z })) / 255.0f);
+                        int min = std::min({ color.x, color.y, color.z });
+
+                        color = color * max + eka2l1::vec4(color.x, color.y, color.z, min) * (1.0f - max);
+                    }
 
                     dest[x * 4 + y * pack_state_ptr->atlas_size_.x * 4 + 0] = color.x;
                     dest[x * 4 + y * pack_state_ptr->atlas_size_.x * 4 + 1] = color.y;
@@ -463,7 +478,7 @@ namespace eka2l1::epoc::adapter {
 
             info[i].x0 = rect.x + 5;
             info[i].y0 = rect.y + 5;
-            info[i].x1 = rect.x + 5 + bitmap.width / 3;
+            info[i].x1 = rect.x + 5 + pixel_width;
             info[i].y1 = rect.y + 5 + bitmap.rows;
             info[i].xadv = ft_convention_to_float(glyph->metrics.horiAdvance);
             info[i].xoff = static_cast<float>(glyph->bitmap_left);

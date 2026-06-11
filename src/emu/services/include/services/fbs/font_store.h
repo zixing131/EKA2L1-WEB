@@ -78,15 +78,17 @@ namespace eka2l1::epoc {
         }
 
         /**
-         * @brief Make a wide-coverage font impersonate every other loaded family.
+         * @brief Rebind glyph-poor fonts to a wide-coverage source font in place.
          *
-         * For each distinct non-symbol family already in the store, a clone of
-         * the given font is inserted *in front* with that family's names, so
-         * exact-name lookups resolve to the wide font (mirrors CJK firmware,
-         * where the system font carries both Latin and CJK and all glyph
-         * availability checks in guest code naturally pass).
+         * Every non-symbol entry that lacks any of the probe codepoints is
+         * rewritten to use the source font's adapter/face while keeping its
+         * public names and style flags. All binding paths (exact-name lookup,
+         * spec scoring, typeface enumeration, font-object caching) then hand
+         * out a font that can actually draw those scripts (mirrors CJK
+         * firmware, where the system fonts carry both Latin and CJK).
          */
-        void shadow_existing_fonts_with(const std::size_t source_index);
+        void substitute_glyphless_fonts_with(const std::size_t source_index, const std::uint32_t *probe_codepoints,
+            const std::size_t probe_count);
 
         const std::size_t number_of_typefaces() const {
             return typefaces.size();

@@ -148,54 +148,55 @@ namespace eka2l1::epoc {
         return (found_index < 0) ? nullptr : &open_font_store[found_index];
     }
 
-    void font_store::shadow_existing_fonts_with(const std::size_t source_index) {
+    void font_store::substitute_glyphless_fonts_with(const std::size_t source_index, const std::uint32_t *probe_codepoints,
+        const std::size_t probe_count) {
         if (source_index >= open_font_store.size()) {
             return;
         }
 
-        // Collect target names first: inserting invalidates iterators/indices.
-        std::vector<std::pair<std::u16string, std::u16string>> names_to_shadow;
-        const std::u16string source_name = open_font_store[source_index].face_attrib.name.to_std_string(nullptr);
+        // Take a copy: the source entry itself lives in the store we mutate.
+        const open_font_info source_copy = open_font_store[source_index];
 
         for (auto &info : open_font_store) {
+            if ((info.adapter == source_copy.adapter) && (info.idx == source_copy.idx)) {
+                continue;
+            }
+
             if (info.face_attrib.style & epoc::open_font_face_attrib::symbol) {
                 continue;
             }
 
-            const std::u16string name = info.face_attrib.name.to_std_string(nullptr);
-
-            if (name == source_name) {
-                continue;
-            }
-
-            bool seen = false;
-            for (auto &pair : names_to_shadow) {
-                if (pair.first == name) {
-                    seen = true;
+            bool missing_glyph = false;
+            for (std::size_t i = 0; i < probe_count; i++) {
+                if (!info.adapter->has_character(info.idx, static_cast<std::int32_t>(probe_codepoints[i]), 0)) {
+                    missing_glyph = true;
                     break;
                 }
             }
 
-            if (!seen) {
-                names_to_shadow.emplace_back(name, info.face_attrib.fam_name.to_std_string(nullptr));
+            if (!missing_glyph) {
+                continue;
             }
+
+            // Rebind this entry to the wide-coverage source font, but keep the
+            // public identity (names + style flags) so by-name lookups, style
+            // matching and typeface enumeration still behave as before. Simply
+            // adding renamed clones is not enough: spec-based scoring prefers
+            // the multi-script ROM originals (more coverage bits), and the
+            // wserv text atlas draws straight from the bound adapter with no
+            // per-glyph fallback, so any binding that resolves to the original
+            // ends up as notdef boxes for CJK text.
+            open_font_info replacement = source_copy;
+            replacement.face_attrib.name.assign(nullptr, info.face_attrib.name.to_std_string(nullptr));
+            replacement.face_attrib.fam_name.assign(nullptr, info.face_attrib.fam_name.to_std_string(nullptr));
+            replacement.face_attrib.local_full_name.assign(nullptr, info.face_attrib.local_full_name.to_std_string(nullptr));
+            replacement.face_attrib.local_full_fam_name.assign(nullptr, info.face_attrib.local_full_fam_name.to_std_string(nullptr));
+            replacement.face_attrib.style = info.face_attrib.style;
+            replacement.family = info.family;
+
+            info = std::move(replacement);
         }
 
-        const open_font_info source_copy = open_font_store[source_index];
-        std::vector<open_font_info> shadows;
-        shadows.reserve(names_to_shadow.size());
-
-        for (auto &pair : names_to_shadow) {
-            open_font_info shadow = source_copy;
-            shadow.face_attrib.name.assign(nullptr, pair.first);
-            shadow.face_attrib.fam_name.assign(nullptr, pair.second);
-            shadow.face_attrib.local_full_name.assign(nullptr, pair.first);
-            shadow.face_attrib.local_full_fam_name.assign(nullptr, pair.second);
-            shadow.family = pair.second;
-            shadows.push_back(std::move(shadow));
-        }
-
-        open_font_store.insert(open_font_store.begin(), shadows.begin(), shadows.end());
         glyph_fallback_cache.clear();
     }
 

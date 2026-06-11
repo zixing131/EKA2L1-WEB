@@ -1280,13 +1280,19 @@ namespace eka2l1 {
         load_with_filter("*.ttf", epoc::adapter::font_file_adapter_kind::freetype);
         load_with_filter("*.gdr", epoc::adapter::font_file_adapter_kind::gdr);
 
-        // Let the wide-coverage fallback font impersonate every ROM family
-        // (insertion-shadowing, exact-name lookups hit it first). This mirrors
-        // CJK firmware where the system font itself covers Latin + CJK; without
-        // it, custom-drawn apps locally test the ROM font for glyph support and
-        // paint their own placeholder boxes without ever consulting the server.
+        // Rebind every ROM font that can't draw CJK to the wide-coverage
+        // fallback font, keeping the public font names. This mirrors CJK
+        // firmware where the system fonts themselves cover Latin + CJK. Plain
+        // renamed-clone shadowing is not enough: spec scoring prefers the
+        // multi-script ROM originals (more coverage bits) and the wserv text
+        // atlas draws from the bound adapter with no per-glyph fallback, so
+        // CJK text bound to an original turns into notdef boxes.
+        // Probes: 中 (any CJK) and 蓝 (simplified-only — catches Japanese
+        // fonts that carry kanji but miss simplified-Chinese codepoints).
         if (first_fallback_index >= 0) {
-            persistent_font_store.shadow_existing_fonts_with(static_cast<std::size_t>(first_fallback_index));
+            static const std::uint32_t cjk_probes[] = { 0x4E2D, 0x84DD };
+            persistent_font_store.substitute_glyphless_fonts_with(static_cast<std::size_t>(first_fallback_index),
+                cjk_probes, sizeof(cjk_probes) / sizeof(cjk_probes[0]));
         }
     }
 }
