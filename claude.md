@@ -303,3 +303,83 @@ python3 ../../src/emu/web/serve.py 8080 .
 - [ ] 持久化是否在刷新后正常恢复（用户验证中）
 - [ ] `__syscall_mprotect` 警告 = Emscripten 层调 mprotect，**不是** EKA2L1 调的；现在 EKA2L1 这边不调了，Emscripten 那边的警告可能来自 libc 内部（如线程栈分配），数量应大幅减少
 - [ ] 长时间运行时 CPU 性能：dyncom 解释器在 WASM 上很慢，主循环每帧能跑的 ticks 数有限，复杂 app 可能很卡
+
+---
+
+## 第 28 轮（2026-06-12，commit 85fac43fa）：RGB565 检测误伤双案 + 占位字体
+
+### 错误 20：snakes.sis（3D 贪吃蛇）花屏 —— 565 检测被启动白屏锁死
+
+**现象** 之前正常，现在菜单/游戏全是红蓝噪点竖纹。guest 帧缓冲转储完全正常 → 病在呈现路径。
+
+**定位方法** dev-test 每秒转储 chunk，离线复算启发式：t=1s 的启动过渡帧 99.4% 纯白
+0xFFFFFFFF —— 白色满足 `hi16==lo16`，而 screen.cpp 的 DSA 层 565 检测只排除了 0
+（update_bitmap 层的副本排除了白，screen.cpp 这份漏了）→ 连续 2 帧白屏即永久锁死
+verdict=-1 → 之后所有正常 32bpp 帧被按 565 拆成两个像素。蓝色竖纹 = 灰启动画
+0x404040 拆成 0x4040（暗红）/0x0040（近黑）再被 WASM 上传层 R/B 交换。
+
+**修复**（screen.cpp + graphics_driver_shared.cpp 两层）
+- 排除 0xFFFFFFFF 与四字节全等（纯灰）槽位（见错误 21）
+- 改三态判定：looks-565 / looks-32bpp / 空帧不计（白屏不再推进判定）
+- 锁可逆：锁死后继续监视原始帧，连续 2 个确凿 32bpp 帧自动解锁
+- screen.cpp 的转换输出按 WASM R/B 交换预先反转字节序（修真 565 内容的偏色）
+
+### 错误 21：字体"彩色碎块"残留真根因 —— 565 检测吃掉字体图集
+
+**现象** 第 27 轮修复后管家对话框正常，但 19px 副行/图标标签仍是黑条+彩色碎屑；
+X-plore 中文仍碎。
+
+**定位** 探针证明 19px 文本逐字回退路由完全正确（Droid 回退图集 ok=true），但屏幕
+仍碎 → 放大像素：黑条内是水平彩色条纹 = 纹理数据被 565 转换的杂讯。**字体图集是
+灰度 RGBA（每像素 v,v,v,v）→ uint32 = 0xVVVVVVVV → hi16==lo16 恒成立 → update_bitmap
+层把图集纹理判成 565 帧并转换！** 21px 图集因采样非零数恰 ≤1000（inconclusive）逃过，
+19px 中招；S60SC 点阵图集只有 0/纯白（被排除）故当年正常、第 26 轮换 Droid 灰度 AA
+后恶化 —— 所有历史症状归一到这一个根因。
+
+**修复** 四字节全等（纯灰）不计入 565 证据：真实 565 翻倍匹配是 0xXYXY（X≠Y），
+灰度图集是 0xVVVV。两层检测同步加固。
+
+### 错误 22：占位字体骗过 does_glyph_exist（管家部分字体黑盒的前置原因）
+
+西文 5320 ROM 的 Heisei Kaku Gothic 等字体 **cmap 声称覆盖 CJK 但所有汉字轮廓都是
+同一个占位盒**（省空间阉割），`does_glyph_exist` 返回 true → 第 27 轮的逐字回退永不
+触发 → 主图集画出一排占位盒。两个探针字（中/蓝）也被它骗过（有 中 缺简体专属的 蓝
+→ 旧检测因"两字必须都在"而跳过）。
+
+**修复**（font_store）`is_cjk_placeholder_font`：渲染 中/体/国/日/蓝 中该字体声称的
+探针字（≥2 个），**全部逐字节相同 ⇒ 占位字体**（真字体不可能两字形 bit 级一致），
+按 (adapter,face) 缓存；`can_really_draw` = cmap 有 + 非占位，接入 draw_text /
+rasterize_glyph / seek 三处。
+
+### 附带加固
+
+- font_atlas LRU 改真"移到前端"去重（原 insert+尾部砍断会积累重复、静默驱逐仍在
+  characters_ 里的字形）；重建路径 `characters_.clear()` 后只回填实际重打包的字形
+  （原先残留陈旧坐标 → churn 后画出图集错误区域 = 碎块），打包失败按容量减半重试。
+- wserv 图集 freetype 渲染 LCD→NORMAL 灰度 AA（LCD 子像素在 CJK 密集笔画上呈彩边）。
+
+### 验证（headless dev-test 截图）
+
+snakes 菜单+3D 游戏 ✓、天地道转置+中文对话 ✓、管家标题/对话框/19px 副行/全角标点 ✓、
+X-plore 英文界面+目录浏览 ✓。
+
+### 已知遗留
+
+- **X-plore 展开含 CJK 文件名的盘符 → 主线程永卡 requestSema**（某异步请求未
+  complete；ASCII 名+相同扩展名正常 → 纯 CJK 文件名触发；与字体无关）。
+  复现：`dev-test.html?game=xplore&cjkfiles=2&script=lsk@6,down@10,down@13,right@16`。
+- 测试基建：build_wasm_test/bin/dev-test.html 重写（?game=snakes/guanjia/xplore/2048、
+  ?script=KEY@sec 定时按键、?cjkfiles=1/2/3/4 预置 E: 测试文件）；运行脚本
+  /tmp/eka2l1-test/run-test.sh（serve 8086 + headless Chrome + 截图/帧缓冲提取）。
+  build_wasm_prof 是旧构建（Jun 11），本轮一直用 build_wasm_test。
+
+### 教训
+
+1. **指纹检测必须考虑"合法内容撞指纹"**：hi16==lo16 同时命中 565 翻倍、纯白、纯灰
+   —— 而灰度恰是字体图集的全部内容。加判别时先问"什么正常数据也长这样"。
+2. **永久锁死的启发式必须可逆**：任何"连续 N 帧判定后锁死"的检测都要留解锁路径，
+   否则一个启动过渡帧就能毒化整个会话。
+3. **同一启发式复制两份 = 漏修两次**：screen.cpp 与 update_bitmap 层的白色排除
+   不一致就是本轮第一案。
+4. **cmap 不可信**：字体声称有字形 ≠ 字形是真的。渲染同一性（两字 bit 级相同）是
+   廉价且零误报的占位字体判据。
