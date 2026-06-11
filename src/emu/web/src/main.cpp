@@ -63,6 +63,7 @@
 #include <system/epoc.h>
 #include <system/devices.h>
 #include <system/installation/rpkg.h>
+#include <cpu/dyncom/arm_dyncom_jit.h>
 #include <system/installation/common.h>
 
 #include <services/applist/applist.h>
@@ -1777,6 +1778,24 @@ void wasm_set_leave_probe(int enabled) {
 }
 
 /**
+ * Enable/disable the dyncom hot-block wasm JIT. Call before the device is
+ * activated (the flag is latched when the CPU core is created); used by the
+ * frontend's ?jit=0 escape hatch.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_jit(int enabled) {
+    eka2l1::arm::dyncom_jit::enabled_default = (enabled != 0);
+    std::printf("[jit] dyncom wasm JIT default %s\n", enabled ? "ON" : "OFF");
+}
+
+// Bisect aid: compile at most `limit` blocks (?jitlimit=N).
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_jit_limit(int limit) {
+    eka2l1::arm::dyncom_jit::compile_limit = limit;
+    std::printf("[jit] compile limit = %d\n", limit);
+}
+
+/**
  * Dump every guest thread (state, PC/LR/SP, wait object, owning module) plus
  * emulator progress counters to the console. Call it twice a few seconds
  * apart when something hangs:
@@ -1792,6 +1811,10 @@ void wasm_debug_dump() {
         static_cast<unsigned long long>(eka2l1_wasm_guest_blocks_translated.load()),
         static_cast<unsigned long long>(s_redraw_cb_count.load()),
         g_state.paused ? 1 : 0);
+    std::printf("[dump] jit: default=%d compiled=%u rejected=%u\n",
+        eka2l1::arm::dyncom_jit::enabled_default,
+        eka2l1::arm::dyncom_jit::stat_compiled,
+        eka2l1::arm::dyncom_jit::stat_rejected);
 
     if (!g_state.symsys) {
         std::printf("[dump] system not created\n");

@@ -103,6 +103,9 @@ if (EMSCRIPTEN)
         # HEAPU8: the streaming RPKG installer copies picked-file chunks
         # directly into the wasm heap from JS.
         "SHELL:-s EXPORTED_RUNTIME_METHODS=[\"FS\",\"ccall\",\"cwrap\",\"getValue\",\"setValue\",\"UTF8ToString\",\"stringToUTF8\",\"callMain\",\"HEAPU8\"]"
+        # The dyncom wasm JIT installs runtime-compiled block functions into
+        # the shared indirect table (wasmTable.grow in EM_JS).
+        "SHELL:-s ALLOW_TABLE_GROWTH=1"
         "SHELL:-s EXPORT_NAME=createEKA2L1Module"
         "SHELL:-s MODULARIZE=1"
         "SHELL:-s FORCE_FILESYSTEM=1"

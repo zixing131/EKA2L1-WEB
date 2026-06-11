@@ -2014,3 +2014,50 @@ const transop_fp_t arm_instruction_trans[] = {
 };
 
 const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / sizeof(transop_fp_t);
+
+// ---- wasm JIT support ------------------------------------------------------
+//
+// The web JIT compiles from the translated arm_inst stream and therefore has
+// to agree with this table about what each arm_inst::idx means. Resolve the
+// indices it cares about against the table itself at static-init time, so a
+// reorder up there can never silently desync the JIT.
+#include <cpu/dyncom/arm_dyncom_jit.h>
+
+namespace eka2l1::arm::dyncom_jit {
+    static int trans_index_of(transop_fp_t fn) {
+        for (std::size_t i = 0; i < arm_instruction_trans_len; i++) {
+            if (arm_instruction_trans[i] == fn) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    const trans_indices indices = {
+        trans_index_of(INTERPRETER_TRANSLATE(cmp)),
+        trans_index_of(INTERPRETER_TRANSLATE(tst)),
+        trans_index_of(INTERPRETER_TRANSLATE(teq)),
+        trans_index_of(INTERPRETER_TRANSLATE(cmn)),
+        trans_index_of(INTERPRETER_TRANSLATE(and)),
+        trans_index_of(INTERPRETER_TRANSLATE(bic)),
+        trans_index_of(INTERPRETER_TRANSLATE(eor)),
+        trans_index_of(INTERPRETER_TRANSLATE(add)),
+        trans_index_of(INTERPRETER_TRANSLATE(rsb)),
+        trans_index_of(INTERPRETER_TRANSLATE(rsc)),
+        trans_index_of(INTERPRETER_TRANSLATE(sbc)),
+        trans_index_of(INTERPRETER_TRANSLATE(adc)),
+        trans_index_of(INTERPRETER_TRANSLATE(sub)),
+        trans_index_of(INTERPRETER_TRANSLATE(orr)),
+        trans_index_of(INTERPRETER_TRANSLATE(mov)),
+        trans_index_of(INTERPRETER_TRANSLATE(mvn)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldrb)),
+        trans_index_of(INTERPRETER_TRANSLATE(strb)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldr)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldrcond)),
+        trans_index_of(INTERPRETER_TRANSLATE(str)),
+        trans_index_of(INTERPRETER_TRANSLATE(bbl)),
+        trans_index_of(INTERPRETER_TRANSLATE(bx)),
+        trans_index_of(INTERPRETER_TRANSLATE(b_2_thumb)),
+        trans_index_of(INTERPRETER_TRANSLATE(b_cond_thumb)),
+    };
+}

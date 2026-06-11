@@ -1076,6 +1076,10 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
     const std::uint64_t wasm_dyncom_deadline_us = eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
         + WASM_DYNCOM_RUN_BUDGET_US;
     bool wasm_dyncom_deadline_hit = false;
+    // Instructions executed by JIT-compiled blocks since the last wall-clock
+    // check (the interpreter's own check keys off num_instrs alignment, which
+    // jit blocks jump right past).
+    std::uint32_t jit_yield_acc = 0;
 #endif
 
 #define CRn inst_cream->crn
@@ -1818,7 +1822,49 @@ DISPATCH : {
             bl_entry.pc = dispatch_pc;
             bl_entry.generation = cpu->block_lookup_generation;
             bl_entry.ptr = ptr;
+            bl_entry.jit_count = 0;
+            bl_entry.jit_idx = 0;
+#ifdef __EMSCRIPTEN__
+            if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
+                auto jit_it = cpu->jit_block_map.find(dispatch_pc);
+                if (jit_it != cpu->jit_block_map.end()) {
+                    bl_entry.jit_idx = jit_it->second;
+                }
+            }
+#endif
         }
+
+#ifdef __EMSCRIPTEN__
+        if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
+            if (bl_entry.jit_idx > 0) {
+                const int executed = eka2l1::arm::dyncom_jit::call(bl_entry.jit_idx, cpu);
+                if (executed > 0) {
+                    num_instrs += static_cast<std::uint32_t>(executed);
+                    if (num_instrs >= cpu->NumInstrsToExecute)
+                        goto END;
+                    jit_yield_acc += static_cast<std::uint32_t>(executed);
+                    if (jit_yield_acc >= 0x2000) {
+                        jit_yield_acc = 0;
+                        if (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
+                            >= wasm_dyncom_deadline_us) {
+                            wasm_dyncom_deadline_hit = true;
+                            goto END;
+                        }
+                    }
+                    goto DISPATCH;
+                }
+                // executed == 0: the block bailed on its first instruction
+                // (e.g. TLB miss). Fall through to the interpreter for this
+                // run so the slow path can make progress.
+            } else if (bl_entry.jit_idx == 0) {
+                if (++bl_entry.jit_count >= 128) {
+                    const std::int32_t verdict = eka2l1::arm::dyncom_jit::try_compile(cpu, dispatch_pc, ptr);
+                    bl_entry.jit_idx = verdict;
+                    cpu->jit_block_map[dispatch_pc] = verdict;
+                }
+            }
+        }
+#endif
     }
 
     inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr];

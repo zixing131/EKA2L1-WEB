@@ -160,6 +160,19 @@
                         }
                     }
 
+                    // Escape hatches: ?jit=0 turns the dyncom wasm JIT off,
+                    // ?jitlimit=N caps how many blocks get compiled (bisect).
+                    try {
+                        var q = new URLSearchParams(location.search);
+                        if (q.get('jit') === '0') {
+                            mod.ccall('wasm_set_jit', null, ['number'], [0]);
+                        }
+                        if (q.get('jitlimit')) {
+                            mod.ccall('wasm_set_jit_limit', null, ['number'],
+                                [parseInt(q.get('jitlimit'), 10) || 0]);
+                        }
+                    } catch (e) {}
+
                     EKA2L1.ready = true;
                     onProgress(92, '核心已启动');
                     resolve(mod);

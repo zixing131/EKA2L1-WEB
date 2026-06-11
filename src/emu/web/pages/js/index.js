@@ -294,6 +294,25 @@
         } catch (e) {}
     }
 
+    // iOS Safari's private browsing keeps IndexedDB in MEMORY: installing a
+    // firmware there both fails to persist and doubles the RAM bill (which is
+    // exactly the "保存到浏览器" jetsam signature, even on 12GB devices). The
+    // quota estimate exposes it — private windows report a tiny quota.
+    function checkStorageHealth() {
+        if (!navigator.storage || !navigator.storage.estimate) {
+            return Promise.resolve(null);
+        }
+        return navigator.storage.estimate().then(function (est) {
+            var quotaMB = Math.floor((est.quota || 0) / 1048576);
+            if (quotaMB && quotaMB < 300) {
+                return '浏览器存储配额仅 ' + quotaMB + 'MB——疑似无痕/隐私浏览模式。\n' +
+                    'iOS 无痕模式的存储位于内存中，安装设备固件必然失败或被系统终止。\n' +
+                    '请改用普通（非无痕）窗口打开本页后重试。';
+            }
+            return null;
+        }).catch(function () { return null; });
+    }
+
     window.installDevice = function () {
         if (!romFile) return;
 
@@ -308,7 +327,13 @@
         // file picking is already done, so the high-memory phase no longer
         // overlaps with the iOS Files picker backgrounding the tab.
         setInstallStage('启动核心');
-        ensureCore()
+        checkStorageHealth()
+            .then(function (problem) {
+                if (problem) {
+                    throw new Error(problem);
+                }
+                return ensureCore();
+            })
             .then(function () {
                 if (rpkgFile && EKA2L1.canStreamRpkg()) {
                     // EKA2 streaming path: the RPKG is parsed/extracted as the

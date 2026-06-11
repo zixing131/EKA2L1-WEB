@@ -25,6 +25,10 @@
 #include <cpu/12l1r/tlb.h>
 #include <cpu/dyncom/arm_regformat.h>
 
+#ifdef __EMSCRIPTEN__
+#include <cpu/dyncom/arm_dyncom_jit.h>
+#endif
+
 namespace eka2l1::arm {
     class dyncom_core;
     class core;
@@ -328,6 +332,11 @@ public:
         std::uint32_t pc;
         std::uint32_t generation;
         std::size_t ptr;
+        // wasm JIT bookkeeping (zero on (re)fill): execution counter towards
+        // the compile threshold, and the resolved verdict: 0 = unknown,
+        // -2 = uncompilable, > 0 = function-table index of the compiled block.
+        std::uint32_t jit_count;
+        std::int32_t jit_idx;
     };
     static constexpr std::size_t BLOCK_LOOKUP_SIZE = 1 << 13;
     std::array<block_lookup_entry, BLOCK_LOOKUP_SIZE> block_lookup{};
@@ -358,6 +367,15 @@ public:
         return (code_page_bitmap[(addr >> 12) >> 6] & (1ull << ((addr >> 12) & 63))) != 0;
     }
 
+    // wasm JIT: compiled-block verdicts by guest pc (0 never stored; -2 =
+    // uncompilable, > 0 = table index). The lookaside entries cache these.
+    std::unordered_map<std::uint32_t, std::int32_t> jit_block_map;
+    bool jit_enabled = false;
+
+    eka2l1::arm::r12l1::tlb *jit_tlb() const {
+        return mem_cache_direct;
+    }
+
     // Drop every cached translation. Replaces the old pattern of clearing
     // instruction_cache/trans_cache_buf_top at each call site so the lookaside
     // and the code-page bitmap can never get out of sync with them.
@@ -366,6 +384,16 @@ public:
         trans_cache_buf_top = 0;
         ++block_lookup_generation;
         code_page_bitmap.fill(0);
+#ifdef __EMSCRIPTEN__
+        // Compiled blocks were built from the dropped translations: release
+        // their table slots for reuse and forget the verdicts.
+        for (const auto &kv : jit_block_map) {
+            if (kv.second > 0) {
+                eka2l1::arm::dyncom_jit::release_index(kv.second);
+            }
+        }
+        jit_block_map.clear();
+#endif
     }
 
 private:
