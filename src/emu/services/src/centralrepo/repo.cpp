@@ -745,4 +745,17 @@ namespace eka2l1 {
         LOG_TRACE(SERVICE_CENREP, "TransactionCancel stubbed");
         ctx->complete(epoc::error_none);
     }
+
+    void central_repo_client_subsession::commit_transaction(service::ipc_context *ctx) {
+        // Transactions are stubbed (start/cancel above): every set/create already
+        // lands directly, so committing is a no-op. The key-info output (number of
+        // failed keys, error key id) is all-zero = success. Leaving this opcode
+        // unhandled hangs clients hard: RRepository::CommitTransaction is a
+        // synchronous IPC (WeChat blocks its main thread on it at startup).
+        const std::uint32_t key_info = 0;
+        ctx->write_data_to_descriptor_argument<std::uint32_t>(0, key_info);
+
+        LOG_TRACE(SERVICE_CENREP, "TransactionCommit stubbed");
+        ctx->complete(epoc::error_none);
+    }
 }

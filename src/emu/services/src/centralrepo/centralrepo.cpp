@@ -252,6 +252,9 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_notify_cancel_all, "CenRep::NofCancelAll");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_start, "CenRep::TransactionStart");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_cancel, "CenRep::TransactionCancel");
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_commit, "CenRep::TransactionCommit");
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_state, "CenRep::TransactionState");
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_fail, "CenRep::TransactionFail");
     }
 
     void central_repo_client_session::init(service::ipc_context *ctx) {
@@ -584,6 +587,24 @@ namespace eka2l1 {
 
         case cen_rep_transaction_cancel:
             cancel_transaction(ctx);
+            break;
+
+        case cen_rep_transaction_commit:
+            commit_transaction(ctx);
+            break;
+
+        case cen_rep_transaction_state: {
+            // No transaction tracking: report state 0 (no failure). Leaving
+            // these opcodes unanswered hangs synchronous clients (WeChat
+            // blocks its UI thread on CommitTransaction at startup).
+            const std::int32_t state = 0;
+            ctx->write_data_to_descriptor_argument<std::int32_t>(0, state);
+            ctx->complete(epoc::error_none);
+            break;
+        }
+
+        case cen_rep_transaction_fail:
+            ctx->complete(epoc::error_none);
             break;
 
         case cen_rep_get_find_res:
