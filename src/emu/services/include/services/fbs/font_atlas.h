@@ -60,17 +60,23 @@ namespace eka2l1::epoc {
         std::int32_t pack_handle_;
 
         // Per-glyph fallback: glyphs the bound font cannot draw are rendered from
-        // a wide-coverage font into a secondary atlas (lazily created on first use).
-        // The fallback font is resolved straight from the font store at draw time,
-        // mirroring the client-side rasterize_glyph fallback, so server-drawn text
-        // (DrawText / lists / titles) shows CJK regardless of which font the layout
-        // bound - including app fonts loaded at runtime. Null store disables it.
+        // another loaded font into a secondary atlas (lazily created on first use).
+        // The fallback font is resolved from the font store per character at draw
+        // time, mirroring the client-side rasterize_glyph fallback, so server-drawn
+        // text (DrawText / lists / titles) shows CJK regardless of which font the
+        // layout bound - including app fonts loaded at runtime. Different characters
+        // may resolve to different fonts (each gets its own source entry below);
+        // locking onto a single source left every character it didn't cover as a
+        // notdef box. Null store disables the fallback entirely.
+        struct fallback_source {
+            adapter::font_file_adapter_base *adapter_;
+            std::size_t idx_;
+            std::uint32_t metric_identifier_;
+            std::unique_ptr<font_atlas> atlas_;
+        };
+
         font_store *store_;
-        adapter::font_file_adapter_base *fallback_adapter_;
-        std::size_t fallback_idx_;
-        std::uint32_t fallback_metric_identifier_;
-        bool fallback_resolved_;
-        std::unique_ptr<font_atlas> fallback_;
+        std::vector<fallback_source> fallback_sources_;
 
     private:
         // Ensure the given characters are rasterized into this atlas (creating the

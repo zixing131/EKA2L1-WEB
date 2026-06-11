@@ -20,21 +20,16 @@
 #include <services/fbs/font_store.h>
 
 #include <common/algorithm.h>
-#include <common/log.h>
 #include <common/time.h>
 
-#include <unordered_set>
+#include <unordered_map>
 
 namespace eka2l1::epoc {
     font_atlas::font_atlas()
         : atlas_handle_(0)
         , atlas_data_(nullptr)
         , pack_handle_(0)
-        , store_(nullptr)
-        , fallback_adapter_(nullptr)
-        , fallback_idx_(0)
-        , fallback_metric_identifier_(0)
-        , fallback_resolved_(false) {
+        , store_(nullptr) {
     }
 
     font_atlas::font_atlas(adapter::font_file_adapter_base *adapter, const std::size_t typeface_idx, const char16_t initial_start,
@@ -47,11 +42,7 @@ namespace eka2l1::epoc {
         , initial_range_(initial_start, initial_char_count)
         , typeface_idx_(typeface_idx)
         , pack_handle_(0)
-        , store_(store)
-        , fallback_adapter_(nullptr)
-        , fallback_idx_(0)
-        , fallback_metric_identifier_(0)
-        , fallback_resolved_(false) {
+        , store_(store) {
         atlas_data_ = nullptr;
     }
 
@@ -67,20 +58,19 @@ namespace eka2l1::epoc {
         pack_handle_ = 0;
 
         store_ = store;
-        fallback_adapter_ = nullptr;
-        fallback_idx_ = 0;
-        fallback_metric_identifier_ = 0;
-        fallback_resolved_ = false;
-        fallback_.reset();
+        fallback_sources_.clear();
 
         atlas_data_.reset();
     }
 
     void font_atlas::destroy(drivers::graphics_driver *driver) {
-        if (fallback_) {
-            fallback_->destroy(driver);
-            fallback_.reset();
+        for (auto &source : fallback_sources_) {
+            if (source.atlas_) {
+                source.atlas_->destroy(driver);
+            }
         }
+
+        fallback_sources_.clear();
 
         if (atlas_handle_) {
             drivers::graphics_command_builder builder;
@@ -219,53 +209,60 @@ namespace eka2l1::epoc {
             return (chr >= 0x200c && chr <= 0x200f) || (chr >= 0x202a && chr <= 0x202e) || (chr >= 0xfffe && chr <= 0xffff);
         };
 
-        // Split the text: glyphs the bound font can't draw but a fallback font
-        // can are routed to the secondary atlas. Everything else (including the
+        // Split the text: glyphs the bound font can't draw but another loaded font
+        // can are routed to a secondary atlas. Everything else (including the
         // bound font's own notdef for truly missing glyphs) stays on the primary.
-        // The fallback font is resolved from the store the first time it is needed
-        // (any loaded font that covers the glyph - typically the host CJK font).
+        // Resolved per character: different characters may borrow from different
+        // fonts (e.g. a ROM font with partial CJK plus the bundled wide-coverage
+        // host font), each with its own atlas.
         std::u16string primary_text;
-        std::u16string fallback_text;
-        std::unordered_set<char16_t> fallback_chars;
+        std::vector<std::u16string> fallback_texts;
+        std::unordered_map<char16_t, std::size_t> fallback_chars;
 
         for (auto &chr : text) {
             bool to_fallback = false;
 
             if (store_ && !is_control_char(chr) && !adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_)) {
-                if (!fallback_resolved_) {
-                    fallback_resolved_ = true;
+                auto known = fallback_chars.find(chr);
 
-                    if (epoc::open_font_info *fb = store_->seek_the_open_font_with_character(chr, adapter_)) {
-                        if (fb->adapter->get_nearest_supported_metric(fb->idx, static_cast<std::uint16_t>(size_),
-                                &fallback_metric_identifier_, true).has_value()) {
-                            fallback_adapter_ = fb->adapter;
-                            fallback_idx_ = fb->idx;
+                if (known != fallback_chars.end()) {
+                    to_fallback = true;
+                } else if (epoc::open_font_info *fb = store_->seek_the_open_font_with_character(chr, adapter_)) {
+                    std::size_t source_index = 0;
+
+                    for (; source_index < fallback_sources_.size(); source_index++) {
+                        if ((fallback_sources_[source_index].adapter_ == fb->adapter)
+                            && (fallback_sources_[source_index].idx_ == fb->idx)) {
+                            break;
                         }
                     }
-                }
 
-                if (fallback_adapter_ && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_)) {
-                    to_fallback = true;
+                    if (source_index == fallback_sources_.size()) {
+                        std::uint32_t fb_metric_identifier = 0;
+
+                        if (fb->adapter->get_nearest_supported_metric(fb->idx, static_cast<std::uint16_t>(size_),
+                                &fb_metric_identifier, true).has_value()) {
+                            fallback_sources_.push_back({ fb->adapter, fb->idx, fb_metric_identifier, nullptr });
+                        } else {
+                            source_index = static_cast<std::size_t>(-1);
+                        }
+                    }
+
+                    if (source_index != static_cast<std::size_t>(-1)) {
+                        fallback_chars.emplace(chr, source_index);
+
+                        if (fallback_texts.size() < fallback_sources_.size()) {
+                            fallback_texts.resize(fallback_sources_.size());
+                        }
+
+                        fallback_texts[source_index].push_back(chr);
+                        to_fallback = true;
+                    }
                 }
             }
 
-            if (to_fallback) {
-                if (fallback_chars.insert(chr).second) {
-                    fallback_text.push_back(chr);
-                }
-            } else {
+            if (!to_fallback) {
                 primary_text.push_back(chr);
-            }
-
-            // [CJKPROBE] Temporary diagnostic: log per-glyph routing for CJK-range
-            // codepoints to find why some render as .notdef boxes. Remove once fixed.
-            if (chr >= 0x2E80) {
-                const bool bound_has = adapter_->does_glyph_exist(typeface_idx_, chr, metric_identifier_);
-                const bool fb_has = (fallback_adapter_ != nullptr)
-                    && fallback_adapter_->does_glyph_exist(fallback_idx_, chr, fallback_metric_identifier_);
-                LOG_INFO(SERVICE_FBS, "[CJKPROBE] U+{:04X} size={} bound_has={} fb_set={} fb_has={} -> {}",
-                    static_cast<std::uint32_t>(chr), size_, bound_has, (fallback_adapter_ != nullptr), fb_has,
-                    to_fallback ? "FALLBACK" : "primary(box?)");
             }
         }
 
@@ -273,24 +270,34 @@ namespace eka2l1::epoc {
             return false;
         }
 
-        if (!fallback_text.empty()) {
-            if (!fallback_) {
-                fallback_ = std::make_unique<font_atlas>();
-                // Seed the fallback atlas with the same initial range so its LRU
-                // bookkeeping matches the primary's; only CJK glyphs are routed here.
-                fallback_->init(fallback_adapter_, fallback_idx_, initial_range_.first, initial_range_.second,
-                    size_, fallback_metric_identifier_);
+        for (std::size_t i = 0; i < fallback_texts.size(); i++) {
+            if (fallback_texts[i].empty()) {
+                continue;
             }
 
-            fallback_->prepare_glyphs(fallback_text, driver, upload_builder);
+            fallback_source &source = fallback_sources_[i];
+
+            if (!source.atlas_) {
+                source.atlas_ = std::make_unique<font_atlas>();
+                // No seed range: only the borrowed glyphs live here.
+                source.atlas_->init(source.adapter_, source.idx_, 0, 0, size_, source.metric_identifier_);
+            }
+
+            source.atlas_->prepare_glyphs(fallback_texts[i], driver, upload_builder);
         }
 
         // Pick the atlas that actually holds a character's glyph.
         auto resolve_glyph = [&](const char16_t chr) -> std::pair<font_atlas *, adapter::character_info *> {
-            if (fallback_ && (fallback_chars.find(chr) != fallback_chars.end())) {
-                auto it = fallback_->characters_.find(chr);
-                if (it != fallback_->characters_.end()) {
-                    return { fallback_.get(), &it->second };
+            auto fb_it = fallback_chars.find(chr);
+
+            if (fb_it != fallback_chars.end()) {
+                font_atlas *fb_atlas = fallback_sources_[fb_it->second].atlas_.get();
+
+                if (fb_atlas) {
+                    auto it = fb_atlas->characters_.find(chr);
+                    if (it != fb_atlas->characters_.end()) {
+                        return { fb_atlas, &it->second };
+                    }
                 }
             }
 

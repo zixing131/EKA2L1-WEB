@@ -41,6 +41,12 @@ namespace eka2l1::epoc {
         epoc::open_font_metrics metrics;
 
         std::uint32_t metric_identifier;
+
+        // True for host-side fallback fonts (wide-coverage, e.g. the bundled CJK
+        // font). seek_the_open_font_with_character prefers these over ROM fonts
+        // so borrowed glyphs come from one consistent, fully-covering font instead
+        // of whichever partial ROM font happens to sit first in the store.
+        bool prefer_for_glyph_fallback = false;
     };
 
     // A set of fonts
@@ -62,7 +68,8 @@ namespace eka2l1::epoc {
             : io(io) {
         }
 
-        void add_fonts(std::vector<std::uint8_t> &buf, const epoc::adapter::font_file_adapter_kind adapter_kind);
+        void add_fonts(std::vector<std::uint8_t> &buf, const epoc::adapter::font_file_adapter_kind adapter_kind,
+            const bool prefer_for_glyph_fallback = false);
 
         open_font_info *seek_the_open_font(epoc::font_spec_base &spec);
         open_font_info *seek_the_font_by_uid(const epoc::uid the_uid, epoc::open_font_metrics &target_metric, std::uint32_t *metric_identifier = nullptr);

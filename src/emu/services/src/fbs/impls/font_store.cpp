@@ -20,7 +20,8 @@
 #include <services/fbs/font_store.h>
 
 namespace eka2l1::epoc {
-    void font_store::add_fonts(std::vector<std::uint8_t> &buf, const epoc::adapter::font_file_adapter_kind adapter_kind) {
+    void font_store::add_fonts(std::vector<std::uint8_t> &buf, const epoc::adapter::font_file_adapter_kind adapter_kind,
+        const bool prefer_for_glyph_fallback) {
         auto adapter = epoc::adapter::make_font_file_adapter(adapter_kind, buf);
 
         if (!adapter->is_valid()) {
@@ -57,6 +58,7 @@ namespace eka2l1::epoc {
                 info.idx = static_cast<std::int32_t>(i);
                 info.face_attrib = attrib;
                 info.adapter = adapter.get();
+                info.prefer_for_glyph_fallback = prefer_for_glyph_fallback;
 
                 open_font_store.push_back(std::move(info));
             }
@@ -120,32 +122,61 @@ namespace eka2l1::epoc {
     }
 
     open_font_info *font_store::seek_the_open_font_with_character(const std::uint32_t codepoint, epoc::adapter::font_file_adapter_base *exclude_adapter) {
+        // Two passes: wide-coverage host fallback fonts first, then everything
+        // else. Symbol fonts never serve text fallback (their cmaps claim text
+        // codepoints but map them to dingbats).
+        auto search = [this, codepoint](epoc::adapter::font_file_adapter_base *exclude) -> std::int32_t {
+            for (int prefer_pass = 1; prefer_pass >= 0; prefer_pass--) {
+                for (std::size_t i = 0; i < open_font_store.size(); i++) {
+                    open_font_info &info = open_font_store[i];
+
+                    if (info.prefer_for_glyph_fallback != static_cast<bool>(prefer_pass)) {
+                        continue;
+                    }
+
+                    if (info.adapter == exclude) {
+                        continue;
+                    }
+
+                    if (info.face_attrib.style & epoc::open_font_face_attrib::symbol) {
+                        continue;
+                    }
+
+                    if (info.adapter->has_character(info.idx, static_cast<std::int32_t>(codepoint), 0)) {
+                        return static_cast<std::int32_t>(i);
+                    }
+                }
+            }
+
+            return -1;
+        };
+
+        // The cache stores the unrestricted best match: results that depend on the
+        // caller's excluded adapter must not be served to (or recorded for) callers
+        // with a different exclusion.
+        std::int32_t found_index = -1;
         auto cached = glyph_fallback_cache.find(codepoint);
+
         if (cached != glyph_fallback_cache.end()) {
-            if (cached->second < 0) {
+            found_index = cached->second;
+        } else {
+            found_index = search(nullptr);
+            glyph_fallback_cache.emplace(codepoint, found_index);
+        }
+
+        if (found_index < 0) {
+            return nullptr;
+        }
+
+        if (open_font_store[found_index].adapter == exclude_adapter) {
+            found_index = search(exclude_adapter);
+
+            if (found_index < 0) {
                 return nullptr;
             }
-
-            return &open_font_store[cached->second];
         }
 
-        std::int32_t found_index = -1;
-
-        for (std::size_t i = 0; i < open_font_store.size(); i++) {
-            open_font_info &info = open_font_store[i];
-
-            if (info.adapter == exclude_adapter) {
-                continue;
-            }
-
-            if (info.adapter->has_character(info.idx, static_cast<std::int32_t>(codepoint), 0)) {
-                found_index = static_cast<std::int32_t>(i);
-                break;
-            }
-        }
-
-        glyph_fallback_cache.emplace(codepoint, found_index);
-        return (found_index < 0) ? nullptr : &open_font_store[found_index];
+        return &open_font_store[found_index];
     }
 
     open_font_info *font_store::seek_the_font_by_uid(const epoc::uid the_uid, open_font_metrics &target_metric, std::uint32_t *metric_identifier) {

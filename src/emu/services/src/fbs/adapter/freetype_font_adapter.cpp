@@ -423,21 +423,35 @@ namespace eka2l1::epoc::adapter {
         const bool want_mono = (face->size->metrics.y_ppem != 0)
             && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD);
 
+        const FT_Int32 load_flags = want_mono ? (FT_LOAD_DEFAULT | FT_LOAD_TARGET_MONO) : FT_LOAD_DEFAULT;
+        const FT_Render_Mode render_mode = want_mono ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_LCD;
+
         std::vector<stbrp_rect> pack_rects(num_code);
 
+        // Measure pass: render each glyph exactly as the render pass below will.
+        // FT_LOAD_BITMAP_METRICS_ONLY only yields dimensions for fonts with
+        // embedded bitmap strikes; for outline fonts it leaves the slot bitmap
+        // empty (0x0), so every rect packed to the same spot and the rendered
+        // glyphs overwrote each other (fragmented "broken" text).
         for (auto i = 0; i < num_code; i++) {
             const char16_t char_code = unicode_point ? unicode_point[i] : static_cast<char16_t>(start_code + i);
-            auto err = FT_Load_Char(face, char_code, FT_LOAD_BITMAP_METRICS_ONLY);
+            auto err = FT_Load_Char(face, char_code, load_flags);
 
             if (err) {
                 LOG_WARN(SERVICE_FBS, "Failed to load character code 0x{:X} for face to get glyph atlas, error: {}",
                     static_cast<int>(char_code), FT_Error_String(err));
+            } else {
+                FT_Render_Glyph(face->glyph, render_mode);
             }
+
+            const auto &measured = face->glyph->bitmap;
+            const std::uint32_t measured_pixel_width = (measured.pixel_mode == FT_PIXEL_MODE_LCD)
+                ? (measured.width / 3) : measured.width;
 
             pack_rects[i].x = 0;
             pack_rects[i].y = 0;
-            pack_rects[i].w = face->glyph->bitmap.width + 10;
-            pack_rects[i].h = face->glyph->bitmap.rows + 10;
+            pack_rects[i].w = measured_pixel_width + 10;
+            pack_rects[i].h = measured.rows + 10;
         }
 
         if (!stbrp_pack_rects(&pack_state_ptr->atlas_context_, pack_rects.data(), static_cast<int>(pack_rects.size()))) {
@@ -448,14 +462,14 @@ namespace eka2l1::epoc::adapter {
         // Render and put bitmap to atlas
         for (auto i = 0; i < num_code; i++) {
             const char16_t char_code = unicode_point ? unicode_point[i] : static_cast<char16_t>(start_code + i);
-            auto err = FT_Load_Char(face, char_code, want_mono ? (FT_LOAD_DEFAULT | FT_LOAD_TARGET_MONO) : FT_LOAD_DEFAULT);
+            auto err = FT_Load_Char(face, char_code, load_flags);
 
             if (err) {
                 LOG_WARN(SERVICE_FBS, "Failed to load character code 0x{:X} for face to get glyph atlas, error: {}",
                     static_cast<int>(char_code), FT_Error_String(err));
             }
 
-            err = FT_Render_Glyph(face->glyph, want_mono ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_LCD);
+            err = FT_Render_Glyph(face->glyph, render_mode);
             if (err) {
                 LOG_WARN(SERVICE_FBS, "Failed to render character code 0x{:X} for face to get glyph atlas, error: {}",
                 static_cast<int>(char_code), FT_Error_String(err));
@@ -472,7 +486,7 @@ namespace eka2l1::epoc::adapter {
             // does not convert bitmap glyphs to the requested LCD mode. Reading
             // them as 3-byte LCD triplets paints colored noise into the atlas.
             const bool is_mono = (bitmap.pixel_mode == FT_PIXEL_MODE_MONO);
-            const std::uint32_t pixel_width = is_mono ? bitmap.width : (bitmap.width / 3);
+            const std::uint32_t pixel_width = (bitmap.pixel_mode == FT_PIXEL_MODE_LCD) ? (bitmap.width / 3) : bitmap.width;
 
             for (auto y = 0; y < bitmap.rows; y++) {
                 for (auto x = 0u; x < pixel_width; x++) {
@@ -481,6 +495,9 @@ namespace eka2l1::epoc::adapter {
                     if (is_mono) {
                         const bool on = bitmap.buffer[y * bitmap.pitch + (x >> 3)] & (0x80 >> (x & 7));
                         const std::uint8_t lum = on ? 255 : 0;
+                        color = eka2l1::vec4(lum, lum, lum, lum);
+                    } else if (bitmap.pixel_mode == FT_PIXEL_MODE_GRAY) {
+                        const std::uint8_t lum = bitmap.buffer[y * bitmap.pitch + x];
                         color = eka2l1::vec4(lum, lum, lum, lum);
                     } else {
                         auto average = static_cast<float>(bitmap.buffer[x * 3 + y * bitmap.pitch] +

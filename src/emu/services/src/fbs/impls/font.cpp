@@ -1253,7 +1253,7 @@ namespace eka2l1 {
 
                 if (!buf.empty() && (fread(buf.data(), 1, buf.size(), f) == buf.size())) {
                     const std::size_t fonts_before = persistent_font_store.number_of_fonts();
-                    persistent_font_store.add_fonts(buf, adapter_kind);
+                    persistent_font_store.add_fonts(buf, adapter_kind, true);
 
                     // Widen the advertised coverage by what the new fonts bring in.
                     for (std::size_t i = fonts_before; i < persistent_font_store.number_of_fonts(); i++) {
