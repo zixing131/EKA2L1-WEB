@@ -219,13 +219,16 @@
      * later FS.syncfs reconcile sees everything as already clean.
      * Falls back must be handled by the caller (catch -> EKA2L1.save()).
      */
-    EKA2L1.saveInitialStaged = function (onProgress) {
+    EKA2L1.saveInitialStaged = function (onProgress, onStage) {
         var FS = EKA2L1.module.FS;
         var MOUNT = '/eka2l1';
         var STORE = 'FILE_DATA';
         var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
-        var BATCH_BYTES = 8 * 1024 * 1024;
+        var BATCH_BYTES = 4 * 1024 * 1024;
 
+        function stage(s) { if (onStage) { try { onStage(s); } catch (e) {} } }
+
+        stage('打开数据库');
         return new Promise(function (resolve, reject) {
             var req;
             try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
@@ -239,10 +242,13 @@
                     st.createIndex('timestamp', 'timestamp', { unique: false });
                 }
             };
+            req.onblocked = function () { stage('数据库被占用'); };
             req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
             req.onsuccess = function () { resolve(req.result); };
         }).then(function (db) {
+            stage('扫描文件');
             var paths = [];
+            var bytesTotal = 0;
             (function walk(dir) {
                 FS.readdir(dir).forEach(function (name) {
                     if (name === '.' || name === '..') return;
@@ -250,16 +256,19 @@
                     paths.push(p);
                     var st = FS.lstat(p);
                     if (FS.isDir(st.mode)) walk(p);
+                    else if (FS.isFile(st.mode)) bytesTotal += (st.size || 0);
                 });
             })(MOUNT);
+            stage('共 ' + paths.length + ' 项 ' + Math.floor(bytesTotal / 1048576) + 'MB');
 
             var i = 0;
             var written = 0;
+            var bytesDone = 0;
 
             function nextBatch() {
                 if (i >= paths.length) {
                     db.close();
-                    return Promise.resolve();
+                    return Promise.resolve({ entries: written, bytes: bytesDone, bytesTotal: bytesTotal });
                 }
                 return new Promise(function (res, rej) {
                     var tx = db.transaction([STORE], 'readwrite');
@@ -284,8 +293,9 @@
                         store.put(entry, p);
                         written++;
                     }
+                    bytesDone += bytes;
                 }).then(function () {
-                    if (onProgress) onProgress(written, paths.length);
+                    if (onProgress) onProgress(written, paths.length, bytesDone, bytesTotal);
                     // Macrotask yield: lets Safari GC the batch copies before
                     // the next one instead of accumulating them.
                     return new Promise(function (r) { setTimeout(r, 0); });
@@ -294,6 +304,7 @@
 
             return nextBatch().catch(function (err) {
                 try { db.close(); } catch (e) {}
+                err.bytesTotal = bytesTotal;
                 throw err;
             });
         });

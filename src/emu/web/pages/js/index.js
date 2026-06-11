@@ -286,11 +286,19 @@
     // error event, so persist the current install stage and report it on the
     // next load. Cleared on success and on handled (on-screen) errors.
     var STAGE_KEY = 'eka2l1_install_stage';
+    var INFO_KEY = 'eka2l1_install_info'; // file sizes/quota: shown next to the stage
 
     function setInstallStage(stage) {
         try {
             if (stage === null) localStorage.removeItem(STAGE_KEY);
             else localStorage.setItem(STAGE_KEY, stage);
+        } catch (e) {}
+    }
+
+    function appendInstallInfo(extra) {
+        try {
+            var cur = localStorage.getItem(INFO_KEY) || '';
+            localStorage.setItem(INFO_KEY, cur ? (cur + '；' + extra) : extra);
         } catch (e) {}
     }
 
@@ -326,6 +334,15 @@
         // Boot the core only now (fresh visits don't boot at page load): the
         // file picking is already done, so the high-memory phase no longer
         // overlaps with the iOS Files picker backgrounding the tab.
+        try { localStorage.removeItem(INFO_KEY); } catch (e) {}
+        appendInstallInfo('ROM ' + Math.floor(romFile.size / 1048576) + 'MB'
+            + (rpkgFile ? '，RPKG ' + Math.floor(rpkgFile.size / 1048576) + 'MB' : ''));
+        if (navigator.storage && navigator.storage.estimate) {
+            navigator.storage.estimate().then(function (est) {
+                appendInstallInfo('配额 ' + Math.floor((est.quota || 0) / 1048576)
+                    + 'MB 已用 ' + Math.floor((est.usage || 0) / 1048576) + 'MB');
+            }).catch(function () {});
+        }
         setInstallStage('启动核心');
         checkStorageHealth()
             .then(function (problem) {
@@ -390,20 +407,37 @@
             .then(function () {
                 deviceReady = true;
                 setStatus('yellow', '保存到浏览器…');
-                setInstallStage('保存到浏览器');
+                setInstallStage('保存:准备');
                 // Persist FIRST: if the browser kills the tab during the
                 // post-install work (iOS memory pressure), the device must
                 // already be safe in IndexedDB or it comes back half-broken.
                 //
                 // Batched writer instead of FS.syncfs: syncfs clones the whole
-                // ~100-300MB extracted set into ONE IndexedDB transaction,
-                // which is itself enough to get the tab killed on iOS.
-                return EKA2L1.saveInitialStaged(function (done, total) {
+                // extracted set into ONE IndexedDB transaction, which is
+                // itself enough to get the tab killed on iOS.
+                return EKA2L1.saveInitialStaged(function (done, total, bytesDone, bytesTotal) {
                     var pct = total ? Math.floor(done * 100 / total) : 0;
                     setStatus('yellow', '保存到浏览器 ' + pct + '%…');
-                    setInstallStage('保存到浏览器 ' + pct + '%');
+                    setInstallStage('保存:批次 ' + done + '/' + total + ' ('
+                        + Math.floor(bytesDone / 1048576) + '/' + Math.floor(bytesTotal / 1048576) + 'MB)');
+                }, function (sub) {
+                    setInstallStage('保存:' + sub);
+                }).then(function (stats) {
+                    appendInstallInfo('镜像 ' + Math.floor((stats.bytesTotal || 0) / 1048576)
+                        + 'MB ' + stats.entries + ' 项');
                 }).catch(function (err) {
-                    console.warn('[EKA2L1] staged save failed, falling back to syncfs:', err);
+                    console.warn('[EKA2L1] staged save failed:', err);
+                    // The one-shot syncfs clones EVERYTHING into a single
+                    // IndexedDB transaction — exactly the spike that kills
+                    // iOS tabs. Only fall back when the image is small
+                    // enough to plausibly survive it.
+                    var bt = err ? err.bytesTotal : undefined;
+                    if (typeof bt === 'number' && bt > 200 * 1048576) {
+                        throw new Error('分批保存失败：' + (err.message || err) + '\n镜像约 '
+                            + Math.floor(bt / 1048576) + 'MB，跳过整体保存回退（避免被系统终止）。'
+                            + '请重试一次；若反复失败请截图反馈。');
+                    }
+                    setInstallStage('保存:兼容syncfs');
                     return EKA2L1.save();
                 });
             })
@@ -564,8 +598,11 @@
     try {
         var lastStage = localStorage.getItem(STAGE_KEY);
         if (lastStage) {
+            var lastInfo = '';
+            try { lastInfo = localStorage.getItem(INFO_KEY) || ''; } catch (e2) {}
             localStorage.removeItem(STAGE_KEY);
             showError('上次安装在「' + lastStage + '」阶段中断（页面被系统终止后自动刷新）。\n' +
+                (lastInfo ? '现场：' + lastInfo + '\n' : '') +
                 'iPhone 上多为内存不足：请先关闭其它标签页和后台 App 再重试，' +
                 '安装期间保持本页在前台、不要锁屏。若反复中断在同一阶段，请截图反馈本提示。');
         }
