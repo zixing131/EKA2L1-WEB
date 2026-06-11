@@ -167,7 +167,9 @@
     window.renderGameList = function () {
         var listEl = document.getElementById('gameList');
         var filter = (document.getElementById('gameSearch').value || '').toLowerCase();
+        var showSys = localStorage.getItem('eka2l1_show_sys') === '1';
         var shown = apps.filter(function (a) {
+            if (!showSys && a.sys) return false;
             return !filter || (a.name || '').toLowerCase().indexOf(filter) !== -1;
         });
 
@@ -180,7 +182,9 @@
             empty.className = 'empty-state';
             empty.innerHTML = apps.length === 0
                 ? '<span class="big">🎮</span>暂无已安装的游戏。<br>点击右下角 + 安装 SIS 游戏包。'
-                : '没有匹配「' + filter + '」的游戏';
+                : (filter
+                    ? ('没有匹配「' + filter + '」的游戏')
+                    : '没有用户安装的应用。<br>系统应用已隐藏，可在「设置 → 系统应用」切换显示。');
             listEl.appendChild(empty);
             return;
         }
@@ -529,10 +533,16 @@
 
     var prefScale = document.getElementById('prefScale');
     var prefKeypad = document.getElementById('prefKeypad');
+    var prefShowSys = document.getElementById('prefShowSys');
     prefScale.value = localStorage.getItem('eka2l1_scale') || 'fit';
     prefKeypad.value = localStorage.getItem('eka2l1_keypad') || 'auto';
+    prefShowSys.value = localStorage.getItem('eka2l1_show_sys') || '0';
     prefScale.addEventListener('change', function () { localStorage.setItem('eka2l1_scale', this.value); });
     prefKeypad.addEventListener('change', function () { localStorage.setItem('eka2l1_keypad', this.value); });
+    prefShowSys.addEventListener('change', function () {
+        localStorage.setItem('eka2l1_show_sys', this.value);
+        renderGameList();
+    });
 
     window.manualSave = function () {
         if (!coreReady) { EKA2L1.toast('核心未就绪'); return; }

@@ -110,6 +110,9 @@ namespace eka2l1::arm::dyncom_jit {
             I64_CONST = 0x42,
             IF = 0x04,
             ELSE_OP = 0x05,
+            LOOP = 0x03,
+            BR = 0x0C,
+            BR_IF = 0x0D,
             END = 0x0B,
             RETURN = 0x0F,
             BLOCKTYPE_VOID = 0x40,
@@ -128,7 +131,8 @@ namespace eka2l1::arm::dyncom_jit {
         L_T2 = 7, // scratch (CLOBBERED by every TLB resolve!)
         L_ADDR = 8,
         L_T3 = 9, // survives TLB resolves (LDM/STM original Rn)
-        L_W64 = 10, // i64 scratch for AddWithCarry
+        L_EXEC = 10, // instructions completed in PRIOR loop iterations
+        L_W64 = 11, // i64 scratch for AddWithCarry
     };
 
     struct wasm_writer {
@@ -258,6 +262,7 @@ namespace eka2l1::arm::dyncom_jit {
 
         constexpr unsigned JIT_MAX_INSTS = 200;
         constexpr unsigned JIT_MIN_PREFIX = 4;
+        constexpr std::uint32_t JIT_LOOP_INSTR_CAP = 4096;
 
         class block_compiler {
         public:
@@ -312,18 +317,45 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.local_get(L_STATE); w_.local_get(L_V); w_.store_u32(offsetof(ARMul_State, VFlag));
             }
 
-            void emit_exit_const_pc(std::uint32_t next_pc, std::uint32_t executed) {
+            // executed = L_EXEC (prior loop iterations) + extra (this one)
+            void emit_executed_value(std::uint32_t extra) {
+                w_.local_get(L_EXEC);
+                if (extra) {
+                    w_.const_i32(extra);
+                    w_.u8(op::I32_ADD);
+                }
+            }
+
+            void emit_exit_const_pc(std::uint32_t next_pc, std::uint32_t executed_extra) {
                 emit_flag_writeback();
                 w_.local_get(L_STATE); w_.const_i32(next_pc); w_.store_u32(off_reg(15));
-                w_.const_i32(executed);
+                emit_executed_value(executed_extra);
                 w_.ret();
             }
 
-            void emit_exit_pc_from_local(std::uint8_t l, std::uint32_t executed) {
+            void emit_exit_pc_from_local(std::uint8_t l, std::uint32_t executed_extra) {
                 emit_flag_writeback();
                 w_.local_get(L_STATE); w_.local_get(l); w_.store_u32(off_reg(15));
-                w_.const_i32(executed);
+                emit_executed_value(executed_extra);
                 w_.ret();
+            }
+
+            // Self-loop back-edge: bump L_EXEC by this iteration's count and
+            // either branch back to the function-level `loop` (label depth
+            // `br_depth`) or — past the iteration budget — return to the
+            // dispatcher with Reg[15] = block start so interrupts/budget get
+            // serviced. Emitted in place of a taken-branch exit.
+            void emit_loop_back_edge(std::uint32_t iter_count, unsigned br_depth) {
+                w_.local_get(L_EXEC);
+                w_.const_i32(iter_count);
+                w_.u8(op::I32_ADD);
+                w_.local_set(L_EXEC);
+                w_.local_get(L_EXEC);
+                w_.const_i32(JIT_LOOP_INSTR_CAP);
+                w_.u8(op::I32_LT_U);
+                w_.u8(op::BR_IF);
+                w_.uleb(br_depth);
+                emit_exit_const_pc(pc_start_, 0);
             }
 
             void emit_cond_value(unsigned cond) {
@@ -1100,6 +1132,7 @@ namespace eka2l1::arm::dyncom_jit {
             const unsigned cond = base->cond;
             const bool guarded = (cond != ConditionCode::AL) && (cond != ConditionCode::NV);
             const std::uint32_t target = pc_ + 8 + static_cast<std::uint32_t>(c->signed_immed_24);
+            const bool self_loop = (target == pc_start_) && !c->L;
 
             if (guarded) {
                 emit_cond_value(cond);
@@ -1110,7 +1143,11 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.const_i32(pc_ + 4);
                 w_.store_u32(off_reg(14));
             }
-            emit_exit_const_pc(target, count_ + 1);
+            if (self_loop) {
+                emit_loop_back_edge(count_ + 1, guarded ? 1 : 0);
+            } else {
+                emit_exit_const_pc(target, count_ + 1);
+            }
             if (guarded) {
                 w_.end();
                 emit_exit_const_pc(pc_ + inst_size_, count_ + 1);
@@ -1153,14 +1190,24 @@ namespace eka2l1::arm::dyncom_jit {
 
         void block_compiler::emit_b2t(arm_inst *base) {
             b_2_thumb *c = (b_2_thumb *)base->component;
-            emit_exit_const_pc(pc_ + 4 + c->imm, count_ + 1);
+            const std::uint32_t target = pc_ + 4 + c->imm;
+            if (target == pc_start_) {
+                emit_loop_back_edge(count_ + 1, 0);
+            } else {
+                emit_exit_const_pc(target, count_ + 1);
+            }
         }
 
         void block_compiler::emit_bct(arm_inst *base) {
             b_cond_thumb *c = (b_cond_thumb *)base->component;
+            const std::uint32_t target = pc_ + 4 + c->imm;
             emit_cond_value(c->cond);
             w_.if_void();
-            emit_exit_const_pc(pc_ + 4 + c->imm, count_ + 1);
+            if (target == pc_start_) {
+                emit_loop_back_edge(count_ + 1, 1);
+            } else {
+                emit_exit_const_pc(target, count_ + 1);
+            }
             w_.end();
             emit_exit_const_pc(pc_ + 2, count_ + 1);
         }
@@ -1171,6 +1218,11 @@ namespace eka2l1::arm::dyncom_jit {
             w_.local_get(L_STATE); w_.load_u32(offsetof(ARMul_State, ZFlag)); w_.local_set(L_Z);
             w_.local_get(L_STATE); w_.load_u32(offsetof(ARMul_State, CFlag)); w_.local_set(L_C);
             w_.local_get(L_STATE); w_.load_u32(offsetof(ARMul_State, VFlag)); w_.local_set(L_V);
+
+            // Whole body lives inside a `loop` so a self-targeting terminator
+            // can iterate in place (br) instead of bouncing through DISPATCH.
+            w_.u8(op::LOOP);
+            w_.u8(op::BLOCKTYPE_VOID);
 
             bool terminated = false;
             std::size_t ptr = trans_ptr;
@@ -1270,6 +1322,8 @@ namespace eka2l1::arm::dyncom_jit {
                 emit_exit_const_pc(pc_, count_);
             }
 
+            w_.end(); // close the function-level loop
+
             // ---- wrap the body into a module --------------------------------
             wasm_writer m;
             const std::uint8_t header[8] = { 0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 };
@@ -1312,12 +1366,12 @@ namespace eka2l1::arm::dyncom_jit {
             {
                 wasm_writer body;
                 body.uleb(2); // two local groups
-                body.uleb(9); body.u8(0x7F); // 9 x i32 (L_N..L_T3)
+                body.uleb(10); body.u8(0x7F); // 10 x i32 (L_N..L_EXEC)
                 body.uleb(1); body.u8(0x7E); // 1 x i64 (L_W64)
                 body.b.insert(body.b.end(), w_.b.begin(), w_.b.end());
                 // Safety net: validator requires the function to end with a
                 // value or unreachable flow; emit a default exit.
-                body.const_i32(count_);
+                body.local_get(L_EXEC);
                 body.u8(op::END);
 
                 wasm_writer s;

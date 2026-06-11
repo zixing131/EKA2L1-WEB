@@ -1363,7 +1363,11 @@ const char *wasm_get_app_list() {
         json += std::to_string(reg.mandatory_info.uid);
         json += ",\"name\":\"";
         json += escaped;
-        json += "\"}";
+        // Registries living on the Z drive shipped with the firmware; ones
+        // landing on C/E came from user SIS installs.
+        json += "\",\"sys\":";
+        json += (reg.land_drive == drive_z) ? '1' : '0';
+        json += "}";
     }
 
     json += ']';
