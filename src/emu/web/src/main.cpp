@@ -1811,10 +1811,33 @@ void wasm_debug_dump() {
         static_cast<unsigned long long>(eka2l1_wasm_guest_blocks_translated.load()),
         static_cast<unsigned long long>(s_redraw_cb_count.load()),
         g_state.paused ? 1 : 0);
-    std::printf("[dump] jit: default=%d compiled=%u rejected=%u\n",
-        eka2l1::arm::dyncom_jit::enabled_default,
-        eka2l1::arm::dyncom_jit::stat_compiled,
-        eka2l1::arm::dyncom_jit::stat_rejected);
+    {
+        const std::uint64_t total = eka2l1_wasm_guest_instrs_total.load();
+        const std::uint64_t jit = eka2l1::arm::dyncom_jit::stat_jit_instrs;
+        std::printf("[dump] jit: default=%d compiled=%u rejected=%u jit_instrs=%llu (%.1f%% of guest)\n",
+            eka2l1::arm::dyncom_jit::enabled_default,
+            eka2l1::arm::dyncom_jit::stat_compiled,
+            eka2l1::arm::dyncom_jit::stat_rejected,
+            static_cast<unsigned long long>(jit),
+            total ? (100.0 * static_cast<double>(jit) / static_cast<double>(total)) : 0.0);
+
+        // Top compile blockers (first unsupported instruction kind seen).
+        std::printf("[dump] jit blockers:");
+        for (int rank = 0; rank < 10; rank++) {
+            std::uint32_t best = 0;
+            int best_idx = -1;
+            for (int i = 0; i < 224; i++) {
+                if (eka2l1::arm::dyncom_jit::stat_blocker_hist[i] > best) {
+                    best = eka2l1::arm::dyncom_jit::stat_blocker_hist[i];
+                    best_idx = i;
+                }
+            }
+            if (best_idx < 0 || best == 0) break;
+            std::printf(" idx%d=%u", best_idx, best);
+            eka2l1::arm::dyncom_jit::stat_blocker_hist[best_idx] = 0; // consume for ranking
+        }
+        std::printf("\n");
+    }
 
     if (!g_state.symsys) {
         std::printf("[dump] system not created\n");

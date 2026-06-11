@@ -29,10 +29,13 @@ namespace eka2l1::arm::dyncom_jit {
     struct trans_indices {
         int cmp, tst, teq, cmn;
         int and_, bic, eor, add, rsb, rsc, sbc, adc, sub, orr;
-        int mov, mvn;
+        int mov, mvn, cpy;
+        int mul, mla;
         int ldrb, strb, ldr, ldrcond, str;
+        int ldrh, strh, ldrsh, ldrsb;
+        int ldm1, ldm2, ldm3, stm1, stm2;
         int bbl, bx;
-        int b_2_thumb, b_cond_thumb;
+        int b_2_thumb, b_cond_thumb, bl_1_thumb, bl_2_thumb;
     };
 
     extern const trans_indices indices;
@@ -46,6 +49,8 @@ namespace eka2l1::arm::dyncom_jit {
     /// Compile counters for diagnostics.
     extern std::uint32_t stat_compiled;
     extern std::uint32_t stat_rejected;
+    extern std::uint64_t stat_jit_instrs;
+    extern std::uint32_t stat_blocker_hist[224];
 
     /**
      * Try to compile the translated block at trans-cache offset `trans_ptr`

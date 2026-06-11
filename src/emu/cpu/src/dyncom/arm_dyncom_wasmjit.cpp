@@ -61,6 +61,10 @@ namespace eka2l1::arm::dyncom_jit {
     int compile_limit = 0x7FFFFFFF; // bisect aid: stop compiling after N blocks
     std::uint32_t stat_compiled = 0;
     std::uint32_t stat_rejected = 0;
+    std::uint64_t stat_jit_instrs = 0;
+    // First unsupported instruction kind per compile attempt: tells us exactly
+    // which instruction to teach the JIT next.
+    std::uint32_t stat_blocker_hist[224] = {};
 
     static std::vector<std::int32_t> g_free_indices;
 
@@ -78,9 +82,15 @@ namespace eka2l1::arm::dyncom_jit {
             LOCAL_SET = 0x21,
             LOCAL_TEE = 0x22,
             I32_LOAD = 0x28,
+            I32_LOAD8_S = 0x2C,
             I32_LOAD8_U = 0x2D,
+            I32_LOAD16_S = 0x2E,
+            I32_LOAD16_U = 0x2F,
             I32_STORE = 0x36,
             I32_STORE8 = 0x3A,
+            I32_STORE16 = 0x3B,
+            I32_MUL = 0x6C,
+            I32_LT_U = 0x49,
             I32_CONST = 0x41,
             I32_EQZ = 0x45,
             I32_EQ = 0x46,
@@ -99,13 +109,14 @@ namespace eka2l1::arm::dyncom_jit {
             I64_EXTEND_I32_U = 0xAD,
             I64_CONST = 0x42,
             IF = 0x04,
+            ELSE_OP = 0x05,
             END = 0x0B,
             RETURN = 0x0F,
             BLOCKTYPE_VOID = 0x40,
         };
     }
 
-    // Locals. 0 is the state-pointer parameter; 1..8 are i32, 9 is i64.
+    // Locals. 0 is the state-pointer parameter; 1..9 are i32, 10 is i64.
     enum : std::uint8_t {
         L_STATE = 0,
         L_N = 1,
@@ -114,9 +125,10 @@ namespace eka2l1::arm::dyncom_jit {
         L_V = 4,
         L_T0 = 5, // lhs / result
         L_T1 = 6, // rhs / operand2
-        L_T2 = 7, // scratch (TLB entry, AWC result)
+        L_T2 = 7, // scratch (CLOBBERED by every TLB resolve!)
         L_ADDR = 8,
-        L_W64 = 9, // i64 scratch for AddWithCarry
+        L_T3 = 9, // survives TLB resolves (LDM/STM original Rn)
+        L_W64 = 10, // i64 scratch for AddWithCarry
     };
 
     struct wasm_writer {
@@ -151,6 +163,10 @@ namespace eka2l1::arm::dyncom_jit {
         // i32.load/store with byte alignment (guest addresses may be unaligned)
         void load_u32(std::uint32_t off) { u8(op::I32_LOAD); uleb(0); uleb(off); }
         void load_u8(std::uint32_t off) { u8(op::I32_LOAD8_U); uleb(0); uleb(off); }
+        void load_s8(std::uint32_t off) { u8(op::I32_LOAD8_S); uleb(0); uleb(off); }
+        void load_u16(std::uint32_t off) { u8(op::I32_LOAD16_U); uleb(0); uleb(off); }
+        void load_s16(std::uint32_t off) { u8(op::I32_LOAD16_S); uleb(0); uleb(off); }
+        void store_u16(std::uint32_t off) { u8(op::I32_STORE16); uleb(0); uleb(off); }
         void store_u32(std::uint32_t off) { u8(op::I32_STORE); uleb(0); uleb(off); }
         void store_u8(std::uint32_t off) { u8(op::I32_STORE8); uleb(0); uleb(off); }
         void if_void() { u8(op::IF); u8(op::BLOCKTYPE_VOID); }
@@ -168,13 +184,22 @@ namespace eka2l1::arm::dyncom_jit {
 
     struct inst_class {
         alu_kind alu = alu_kind::NONE;
+        bool cpy_no_flags = false; // CPY: MOV semantics, never touches flags
         bool is_ldst = false;
         bool ldst_load = false;
         bool ldst_byte = false;
+        bool ldst_half = false;
+        bool ldst_signed = false;
+        bool is_ldm = false;
+        bool is_stm = false;
+        bool is_mul = false;
+        bool mul_acc = false; // MLA
         bool is_bbl = false;
         bool is_bx = false;
         bool is_b2t = false;
         bool is_bct = false;
+        bool is_bl1t = false;
+        bool is_bl2t = false;
         int comp_size = -1;
     };
 
@@ -194,7 +219,10 @@ namespace eka2l1::arm::dyncom_jit {
         else if (i == ti.orr) { c.alu = alu_kind::ORR; c.comp_size = sizeof(orr_inst); }
         else if (i == ti.bic) { c.alu = alu_kind::BIC; c.comp_size = sizeof(bic_inst); }
         else if (i == ti.mov) { c.alu = alu_kind::MOV; c.comp_size = sizeof(mov_inst); }
+        else if (i == ti.cpy) { c.alu = alu_kind::MOV; c.cpy_no_flags = true; c.comp_size = sizeof(mov_inst); }
         else if (i == ti.mvn) { c.alu = alu_kind::MVN; c.comp_size = sizeof(mvn_inst); }
+        else if (i == ti.mul) { c.is_mul = true; c.comp_size = sizeof(mul_inst); }
+        else if (i == ti.mla) { c.is_mul = true; c.mul_acc = true; c.comp_size = sizeof(mla_inst); }
         else if (i == ti.cmp) { c.alu = alu_kind::CMP; c.comp_size = sizeof(cmp_inst); }
         else if (i == ti.cmn) { c.alu = alu_kind::CMN; c.comp_size = sizeof(cmn_inst); }
         else if (i == ti.tst) { c.alu = alu_kind::TST; c.comp_size = sizeof(tst_inst); }
@@ -203,10 +231,18 @@ namespace eka2l1::arm::dyncom_jit {
         else if (i == ti.ldrb) { c.is_ldst = true; c.ldst_load = true; c.ldst_byte = true; c.comp_size = sizeof(ldst_inst); }
         else if (i == ti.str) { c.is_ldst = true; c.comp_size = sizeof(ldst_inst); }
         else if (i == ti.strb) { c.is_ldst = true; c.ldst_byte = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.ldrh) { c.is_ldst = true; c.ldst_load = true; c.ldst_half = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.strh) { c.is_ldst = true; c.ldst_half = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.ldrsh) { c.is_ldst = true; c.ldst_load = true; c.ldst_half = true; c.ldst_signed = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.ldrsb) { c.is_ldst = true; c.ldst_load = true; c.ldst_byte = true; c.ldst_signed = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.ldm1 || i == ti.ldm2 || i == ti.ldm3) { c.is_ldm = true; c.comp_size = sizeof(ldst_inst); }
+        else if (i == ti.stm1 || i == ti.stm2) { c.is_stm = true; c.comp_size = sizeof(ldst_inst); }
         else if (i == ti.bbl) { c.is_bbl = true; c.comp_size = sizeof(bbl_inst); }
         else if (i == ti.bx) { c.is_bx = true; c.comp_size = sizeof(bx_inst); }
         else if (i == ti.b_2_thumb) { c.is_b2t = true; c.comp_size = sizeof(b_2_thumb); }
         else if (i == ti.b_cond_thumb) { c.is_bct = true; c.comp_size = sizeof(b_cond_thumb); }
+        else if (i == ti.bl_1_thumb) { c.is_bl1t = true; c.comp_size = sizeof(bl_1_thumb); }
+        else if (i == ti.bl_2_thumb) { c.is_bl2t = true; c.comp_size = sizeof(bl_2_thumb); }
 
         return c;
     }
@@ -487,12 +523,20 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.u8(op::I32_ADD);
             }
 
+            void emit_reg_read_wa(unsigned r);
+            void emit_ldm_word_load(int i, bool load_pc);
+            void emit_stm_word_store(int i, unsigned Rn);
+            void emit_flag_writeback_only_and_count(int extra);
             bool emit_alu(const inst_class &cls, arm_inst *base);
             bool emit_ldst(const inst_class &cls, arm_inst *base);
+            bool emit_ldm_stm(const inst_class &cls, arm_inst *base, bool &terminates);
+            void emit_mul(const inst_class &cls, arm_inst *base);
             void emit_bbl(arm_inst *base);
             void emit_bx(arm_inst *base);
             void emit_b2t(arm_inst *base);
             void emit_bct(arm_inst *base);
+            void emit_bl1t(arm_inst *base);
+            void emit_bl2t(arm_inst *base);
         };
 
         bool block_compiler::emit_alu(const inst_class &cls, arm_inst *base) {
@@ -506,7 +550,8 @@ namespace eka2l1::arm::dyncom_jit {
             case alu_kind::MOV:
             case alu_kind::MVN: {
                 mov_inst *c = (mov_inst *)base->component;
-                S = c->S; Rd = c->Rd; sht = c->shifter_operand; shtop = c->shtop_idx;
+                S = cls.cpy_no_flags ? 0 : c->S;
+                Rd = c->Rd; sht = c->shifter_operand; shtop = c->shtop_idx;
                 break;
             }
             case alu_kind::CMP:
@@ -664,20 +709,70 @@ namespace eka2l1::arm::dyncom_jit {
             return true;
         }
 
+        // Push the value of Reg[r] with the word-aligned-pc rule used by the
+        // addressing helpers (CHECK_READ_REG15_WA).
+        void block_compiler::emit_reg_read_wa(unsigned r) {
+            if (r == 15) {
+                w_.const_i32((pc_ & ~3u) + 2 * inst_size_);
+            } else {
+                w_.local_get(L_STATE);
+                w_.load_u32(off_reg(r));
+            }
+        }
+
         bool block_compiler::emit_ldst(const inst_class &cls, arm_inst *base) {
             ldst_inst *c = (ldst_inst *)base->component;
-            if (c->addr_mode != ADDRMODE_LNSW_IMM_OFFSET) {
-                return false;
-            }
 
             const std::uint32_t inst = c->inst;
             const unsigned Rn = (inst >> 16) & 0xF;
             const unsigned Rd = (inst >> 12) & 0xF;
-            const std::uint32_t off12 = inst & 0xFFF;
             const bool up = (inst >> 23) & 1;
 
-            // PC destinations/sources switch modes / need extra rules.
-            if (Rd == 15) {
+            // Word offsets (LDR/STR/LDRB/STRB family) vs the miscellaneous
+            // (halfword/signed) encoding, which splits its 8-bit immediate.
+            std::uint32_t imm_off = 0;
+            unsigned Rm = inst & 0xF;
+            bool writeback_pre = false, writeback_post = false, reg_offset = false;
+
+            switch (c->addr_mode) {
+            case ADDRMODE_LNSW_IMM_OFFSET:
+                imm_off = inst & 0xFFF;
+                break;
+            case ADDRMODE_LNSW_REG_OFFSET:
+                reg_offset = true;
+                break;
+            case ADDRMODE_LNSW_IMM_PRE:
+                imm_off = inst & 0xFFF;
+                writeback_pre = true;
+                break;
+            case ADDRMODE_LNSW_REG_PRE:
+                reg_offset = true;
+                writeback_pre = true;
+                break;
+            case ADDRMODE_LNSW_IMM_POST:
+                imm_off = inst & 0xFFF;
+                writeback_post = true;
+                break;
+            case ADDRMODE_LNSW_REG_POST:
+                reg_offset = true;
+                writeback_post = true;
+                break;
+            case ADDRMODE_MLNS_IMM_OFFSET:
+                imm_off = ((inst >> 4) & 0xF0) | (inst & 0xF);
+                break;
+            case ADDRMODE_MLNS_REG_OFFSET:
+                reg_offset = true;
+                break;
+            default:
+                return false; // scaled-register & misc pre/post: interpreter
+            }
+
+            // PC destinations/sources switch modes / need extra rules, and a
+            // PC base together with writeback makes no sense to compile.
+            if (Rd == 15 || (reg_offset && Rm == 15)) {
+                return false;
+            }
+            if ((writeback_pre || writeback_post) && Rn == 15) {
                 return false;
             }
 
@@ -688,36 +783,316 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.if_void();
             }
 
-            // addr = (Rn==15 ? (pc & ~3) + 2*size : Reg[Rn]) +/- off12
-            if (Rn == 15) {
-                const std::uint32_t base_val = (pc_ & ~3u) + 2 * inst_size_;
-                w_.const_i32(up ? (base_val + off12) : (base_val - off12));
+            // ADDR = access address (post-indexed accesses use the original Rn)
+            if (writeback_post) {
+                emit_reg_read_wa(Rn);
+                w_.local_set(L_ADDR);
             } else {
-                w_.local_get(L_STATE);
-                w_.load_u32(off_reg(Rn));
-                if (off12) {
-                    w_.const_i32(off12);
+                emit_reg_read_wa(Rn);
+                if (reg_offset) {
+                    emit_reg_read_wa(Rm);
+                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
+                } else if (imm_off) {
+                    w_.const_i32(imm_off);
                     w_.u8(up ? op::I32_ADD : op::I32_SUB);
                 }
+                w_.local_set(L_ADDR);
             }
-            w_.local_set(L_ADDR);
+
+            // Resolve the host pointer FIRST (bails happen before any side
+            // effect), capture it in T0, then do writeback + the access.
+            emit_tlb_host_addr_or_bail(cls.ldst_load
+                ? static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, read_addr))
+                : static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, write_addr)));
+            w_.local_set(L_T0); // host address
+
+            if (writeback_pre) {
+                // Rn = computed address (mirrors LnSWoUB *PreIndexed)
+                w_.local_get(L_STATE);
+                w_.local_get(L_ADDR);
+                w_.store_u32(off_reg(Rn));
+            } else if (writeback_post) {
+                // Rn = Rn +/- offset (mirrors LnSWoUB *PostIndexed; the
+                // access itself used the original Rn already in L_ADDR)
+                w_.local_get(L_STATE);
+                w_.local_get(L_ADDR);
+                if (reg_offset) {
+                    emit_reg_read_wa(Rm);
+                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
+                } else if (imm_off) {
+                    w_.const_i32(imm_off);
+                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
+                }
+                w_.store_u32(off_reg(Rn));
+            }
 
             if (cls.ldst_load) {
-                emit_tlb_host_addr_or_bail(offsetof(r12l1::tlb_entry, read_addr));
-                if (cls.ldst_byte) w_.load_u8(0); else w_.load_u32(0);
+                w_.local_get(L_T0);
+                if (cls.ldst_byte) {
+                    if (cls.ldst_signed) w_.load_s8(0); else w_.load_u8(0);
+                } else if (cls.ldst_half) {
+                    if (cls.ldst_signed) w_.load_s16(0); else w_.load_u16(0);
+                } else {
+                    w_.load_u32(0);
+                }
                 emit_reg_write(Rd);
             } else {
-                emit_tlb_host_addr_or_bail(offsetof(r12l1::tlb_entry, write_addr));
-                // stack: host addr; push value
+                w_.local_get(L_T0);
                 w_.local_get(L_STATE);
-                w_.load_u32(off_reg(Rd));
-                if (cls.ldst_byte) w_.store_u8(0); else w_.store_u32(0);
+                w_.load_u32(off_reg(Rd)); // Rd != 15 enforced above
+                if (cls.ldst_byte) w_.store_u8(0);
+                else if (cls.ldst_half) w_.store_u16(0);
+                else w_.store_u32(0);
             }
 
             if (guarded) {
                 w_.end();
             }
             return true;
+        }
+
+        // LDM/STM, plain-register form only (no S/user-bank bit). Strategy:
+        // pre-resolve the host pointers for the first and last byte of the
+        // whole range BEFORE any side effect (bail-idempotent), then perform
+        // writeback and the per-word accesses through the captured bases —
+        // immune to concurrent TLB invalidation mid-op.
+        bool block_compiler::emit_ldm_stm(const inst_class &cls, arm_inst *base, bool &terminates) {
+            ldst_inst *c = (ldst_inst *)base->component;
+            const std::uint32_t inst = c->inst;
+
+            if (inst & (1u << 22)) {
+                return false; // user-bank / SPSR forms: interpreter
+            }
+
+            const unsigned Rn = (inst >> 16) & 0xF;
+            const std::uint32_t list = inst & 0xFFFF;
+            if (list == 0 || Rn == 15) {
+                return false;
+            }
+            const bool load_pc = cls.is_ldm && (list & (1u << 15));
+            if (cls.is_stm && (list & (1u << 15))) {
+                // STM with PC stores pc+8: supported via constant below.
+            }
+
+            int count = 0;
+            for (int i = 0; i < 16; i++) {
+                if (list & (1u << i)) count++;
+            }
+            const std::uint32_t span = static_cast<std::uint32_t>(count) * 4;
+            const bool writeback = (inst >> 21) & 1;
+
+            const unsigned cond = base->cond;
+            const bool guarded = (cond != ConditionCode::AL) && (cond != ConditionCode::NV);
+            if (guarded) {
+                emit_cond_value(cond);
+                w_.if_void();
+            }
+
+            // start address per LdnStM mode
+            // IA: Rn        IB: Rn+4       DA: Rn-span+4     DB: Rn-span
+            std::int32_t start_delta = 0;
+            std::int32_t wb_delta = 0;
+            switch (c->addr_mode) {
+            case ADDRMODE_LDNSTM_INC_AFTER: start_delta = 0; wb_delta = static_cast<std::int32_t>(span); break;
+            case ADDRMODE_LDNSTM_INC_BEFORE: start_delta = 4; wb_delta = static_cast<std::int32_t>(span); break;
+            case ADDRMODE_LDNSTM_DEC_AFTER: start_delta = -static_cast<std::int32_t>(span) + 4; wb_delta = -static_cast<std::int32_t>(span); break;
+            case ADDRMODE_LDNSTM_DEC_BEFORE: start_delta = -static_cast<std::int32_t>(span); wb_delta = -static_cast<std::int32_t>(span); break;
+            default:
+                if (guarded) { /* caller rolls back via snapshot */ }
+                return false;
+            }
+
+            const std::uint32_t perm_off = cls.is_ldm
+                ? static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, read_addr))
+                : static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, write_addr));
+
+            // ADDR = start address; T3 = original Rn (STM stores the
+            // pre-writeback value for Rn per the interpreter's old_RN rule;
+            // T3 because every TLB resolve clobbers T2).
+            w_.local_get(L_STATE); w_.load_u32(off_reg(Rn)); w_.local_set(L_T3);
+            w_.local_get(L_T3);
+            if (start_delta) { w_.const_i32(static_cast<std::uint32_t>(start_delta)); w_.u8(op::I32_ADD); }
+            w_.local_set(L_ADDR);
+
+            // hostA = resolve(start) (bails if unmapped)
+            emit_tlb_host_addr_or_bail(perm_off);
+            w_.local_set(L_T0);
+            // keep the guest start address in T1 for per-word page checks
+            w_.local_get(L_ADDR); w_.local_set(L_T1);
+            w_.local_get(L_ADDR); w_.const_i32(span - 1); w_.u8(op::I32_ADD); w_.local_set(L_ADDR);
+            emit_tlb_host_addr_or_bail(perm_off);
+            // hostB currently points at start+span-1; rebase to the second page start
+            // hostB_base = hostB - ((start+span-1) & page_mask)
+            w_.local_get(L_ADDR); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
+            w_.u8(op::I32_SUB);
+            // (stack: hostB_pagebase)  boundary = (start+span-1) & ~page_mask
+            w_.local_set(L_ADDR); // ADDR = hostB page base (guest start addr no longer needed in ADDR)
+
+            // From here: T1 = guest start, T0 = hostA, ADDR = hostB page base.
+
+            // writeback BEFORE the accesses (mirrors get_addr-then-access; safe
+            // now that both pages are resolved and captured).
+            if (writeback) {
+                w_.local_get(L_STATE);
+                w_.local_get(L_T3);
+                w_.const_i32(static_cast<std::uint32_t>(wb_delta)); w_.u8(op::I32_ADD);
+                w_.store_u32(off_reg(Rn));
+            }
+
+            std::uint32_t word_index = 0;
+            for (int i = 0; i < 16; i++) {
+                if (!(list & (1u << i))) continue;
+                const std::uint32_t off = word_index * 4;
+                word_index++;
+
+                // host = (same page as start ? hostA : hostB_base + in-page offset)
+                // guest addr g = start + off; same-page iff (g & ~mask) == (start & ~mask)
+                // Emit: g = T1 + off; if ((g ^ T1) & ~mask) -> cross -> hostB_base + (g & mask) else hostA + off
+                // Simpler branch-free: cross = ((T1 & mask) + off) >= page_size
+                // host = cross ? (ADDR + (g & mask)) : (T0 + off)
+                w_.local_get(L_T1); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
+                w_.const_i32(off); w_.u8(op::I32_ADD);
+                w_.const_i32(page_mask_ + 1); w_.u8(op::I32_LT_U);
+                w_.if_void();
+                {
+                    if (cls.is_ldm) {
+                        w_.local_get(L_T0); w_.const_i32(off); w_.u8(op::I32_ADD);
+                        emit_ldm_word_load(i, load_pc);
+                    } else {
+                        w_.local_get(L_T0); w_.const_i32(off); w_.u8(op::I32_ADD);
+                        emit_stm_word_store(i, Rn);
+                    }
+                }
+                w_.u8(op::ELSE_OP);
+                {
+                    // host = hostB_base + ((T1 + off) & mask)
+                    w_.local_get(L_ADDR);
+                    w_.local_get(L_T1); w_.const_i32(off); w_.u8(op::I32_ADD);
+                    w_.const_i32(page_mask_); w_.u8(op::I32_AND);
+                    w_.u8(op::I32_ADD);
+                    if (cls.is_ldm) {
+                        emit_ldm_word_load(i, load_pc);
+                    } else {
+                        emit_stm_word_store(i, Rn);
+                    }
+                }
+                w_.end();
+            }
+
+            if (load_pc) {
+                // Reg15/TFlag were written by the PC word; end the block.
+                emit_flag_writeback_only_and_count(count);
+                terminates = !guarded;
+                if (guarded) {
+                    w_.end();
+                    // cond failed: fall through sequentially.
+                }
+                return true;
+            }
+
+            if (guarded) {
+                w_.end();
+            }
+            return true;
+        }
+
+        // helper: stack has host addr; load word into Reg[i] (or PC+TFlag)
+        void block_compiler::emit_ldm_word_load(int i, bool /*load_pc*/) {
+            if (i == 15) {
+                // ret = mem; TFlag = ret & 1; Reg15 = ret & ~1
+                w_.load_u32(0);
+                w_.local_set(L_T2);
+                w_.local_get(L_STATE);
+                w_.local_get(L_T2); w_.const_i32(1); w_.u8(op::I32_AND);
+                w_.store_u32(offsetof(ARMul_State, TFlag));
+                w_.local_get(L_STATE);
+                w_.local_get(L_T2); w_.const_i32(~1u); w_.u8(op::I32_AND);
+                w_.store_u32(off_reg(15));
+            } else {
+                w_.load_u32(0);
+                w_.local_set(L_T2);
+                w_.local_get(L_STATE);
+                w_.local_get(L_T2);
+                w_.store_u32(off_reg(static_cast<unsigned>(i)));
+            }
+        }
+
+        // helper: stack has host addr; store Reg[i] (original Rn from T2 is
+        // NOT used here: Rn's original value lives in... see caller note)
+        void block_compiler::emit_stm_word_store(int i, unsigned Rn) {
+            if (i == 15) {
+                w_.const_i32(pc_ + 8);
+            } else if (static_cast<unsigned>(i) == Rn) {
+                // interpreter stores old_RN: original Rn preserved in T3
+                w_.local_get(L_T3);
+            } else {
+                w_.local_get(L_STATE);
+                w_.load_u32(off_reg(static_cast<unsigned>(i)));
+            }
+            w_.store_u32(0);
+        }
+
+        // flags writeback + return count (used by LDM-with-PC terminator)
+        void block_compiler::emit_flag_writeback_only_and_count(int extra) {
+            emit_flag_writeback();
+            w_.const_i32(count_ + static_cast<std::uint32_t>(extra >= 0 ? 1 : 1));
+            w_.ret();
+        }
+
+        void block_compiler::emit_mul(const inst_class &cls, arm_inst *base) {
+            unsigned S, Rd, Rs, Rm, Rn = 0;
+            if (cls.mul_acc) {
+                mla_inst *c = (mla_inst *)base->component;
+                S = c->S; Rd = c->Rd; Rs = c->Rs; Rm = c->Rm; Rn = c->Rn;
+            } else {
+                mul_inst *c = (mul_inst *)base->component;
+                S = c->S; Rd = c->Rd; Rs = c->Rs; Rm = c->Rm;
+            }
+
+            const unsigned cond = base->cond;
+            const bool guarded = (cond != ConditionCode::AL) && (cond != ConditionCode::NV);
+            if (guarded) {
+                emit_cond_value(cond);
+                w_.if_void();
+            }
+
+            emit_reg_read_dp(Rm); // r15 -> pc-ish constant; harmless for UNPREDICTABLE encodings
+            emit_reg_read_dp(Rs);
+            w_.u8(op::I32_MUL);
+            if (cls.mul_acc) {
+                emit_reg_read_dp(Rn);
+                w_.u8(op::I32_ADD);
+            }
+            w_.local_set(L_T0);
+            if (S) {
+                emit_nz_from_t0();
+            }
+            w_.local_get(L_T0);
+            emit_reg_write(Rd);
+
+            if (guarded) {
+                w_.end();
+            }
+        }
+
+        void block_compiler::emit_bl1t(arm_inst *base) {
+            bl_1_thumb *c = (bl_1_thumb *)base->component;
+            // LR = pc + 4 + imm; continue to the next instruction.
+            w_.local_get(L_STATE);
+            w_.const_i32(pc_ + 4 + c->imm);
+            w_.store_u32(off_reg(14));
+        }
+
+        void block_compiler::emit_bl2t(arm_inst *base) {
+            bl_2_thumb *c = (bl_2_thumb *)base->component;
+            // tmp = (pc + 2) | 1; Reg15 = LR + imm; LR = tmp
+            w_.local_get(L_STATE); w_.load_u32(off_reg(14));
+            w_.const_i32(c->imm); w_.u8(op::I32_ADD);
+            w_.local_set(L_T0);
+            w_.local_get(L_STATE);
+            w_.const_i32((pc_ + 2) | 1);
+            w_.store_u32(off_reg(14));
+            emit_exit_pc_from_local(L_T0, count_ + 1);
         }
 
         void block_compiler::emit_bbl(arm_inst *base) {
@@ -805,6 +1180,7 @@ namespace eka2l1::arm::dyncom_jit {
                 const inst_class cls = classify(base->idx);
 
                 if (cls.comp_size < 0) {
+                    if (base->idx < 224) stat_blocker_hist[base->idx]++;
                     break; // unsupported: end the block before this inst
                 }
 
@@ -812,7 +1188,18 @@ namespace eka2l1::arm::dyncom_jit {
                 bool ok = true;
                 bool inst_terminates = false;
 
-                if (cls.alu != alu_kind::NONE) {
+                if (cls.is_ldm || cls.is_stm) {
+                    bool term = false;
+                    ok = emit_ldm_stm(cls, base, term);
+                    inst_terminates = term;
+                } else if (cls.is_mul) {
+                    emit_mul(cls, base);
+                } else if (cls.is_bl1t) {
+                    emit_bl1t(base);
+                } else if (cls.is_bl2t) {
+                    emit_bl2t(base);
+                    inst_terminates = true;
+                } else if (cls.alu != alu_kind::NONE) {
                     ok = emit_alu(cls, base);
                     // Unconditional ALU writing r15 acts as a terminator.
                     if (ok && base->cond == ConditionCode::AL) {
@@ -850,6 +1237,7 @@ namespace eka2l1::arm::dyncom_jit {
                 }
 
                 if (!ok) {
+                    if (base->idx < 224) stat_blocker_hist[base->idx]++;
                     w_.b.resize(snapshot);
                     break;
                 }
@@ -924,7 +1312,7 @@ namespace eka2l1::arm::dyncom_jit {
             {
                 wasm_writer body;
                 body.uleb(2); // two local groups
-                body.uleb(8); body.u8(0x7F); // 8 x i32 (L_N..L_ADDR)
+                body.uleb(9); body.u8(0x7F); // 9 x i32 (L_N..L_T3)
                 body.uleb(1); body.u8(0x7E); // 1 x i64 (L_W64)
                 body.b.insert(body.b.end(), w_.b.begin(), w_.b.end());
                 // Safety net: validator requires the function to end with a

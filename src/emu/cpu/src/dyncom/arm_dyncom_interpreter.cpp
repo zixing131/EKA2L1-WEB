@@ -1839,6 +1839,7 @@ DISPATCH : {
             if (bl_entry.jit_idx > 0) {
                 const int executed = eka2l1::arm::dyncom_jit::call(bl_entry.jit_idx, cpu);
                 if (executed > 0) {
+                    eka2l1::arm::dyncom_jit::stat_jit_instrs += static_cast<std::uint32_t>(executed);
                     num_instrs += static_cast<std::uint32_t>(executed);
                     if (num_instrs >= cpu->NumInstrsToExecute)
                         goto END;

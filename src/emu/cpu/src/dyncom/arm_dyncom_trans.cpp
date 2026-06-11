@@ -2024,13 +2024,21 @@ const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / si
 #include <cpu/dyncom/arm_dyncom_jit.h>
 
 namespace eka2l1::arm::dyncom_jit {
-    static int trans_index_of(transop_fp_t fn) {
+    static int trans_index_of_nth(transop_fp_t fn, int nth) {
+        int seen = 0;
         for (std::size_t i = 0; i < arm_instruction_trans_len; i++) {
             if (arm_instruction_trans[i] == fn) {
-                return static_cast<int>(i);
+                if (seen == nth) {
+                    return static_cast<int>(i);
+                }
+                seen++;
             }
         }
         return -1;
+    }
+
+    static int trans_index_of(transop_fp_t fn) {
+        return trans_index_of_nth(fn, 0);
     }
 
     const trans_indices indices = {
@@ -2050,14 +2058,28 @@ namespace eka2l1::arm::dyncom_jit {
         trans_index_of(INTERPRETER_TRANSLATE(orr)),
         trans_index_of(INTERPRETER_TRANSLATE(mov)),
         trans_index_of(INTERPRETER_TRANSLATE(mvn)),
+        trans_index_of(INTERPRETER_TRANSLATE(cpy)),
+        trans_index_of(INTERPRETER_TRANSLATE(mul)),
+        trans_index_of(INTERPRETER_TRANSLATE(mla)),
         trans_index_of(INTERPRETER_TRANSLATE(ldrb)),
         trans_index_of(INTERPRETER_TRANSLATE(strb)),
         trans_index_of(INTERPRETER_TRANSLATE(ldr)),
         trans_index_of(INTERPRETER_TRANSLATE(ldrcond)),
         trans_index_of(INTERPRETER_TRANSLATE(str)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldrh)),
+        trans_index_of(INTERPRETER_TRANSLATE(strh)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldrsh)),
+        trans_index_of(INTERPRETER_TRANSLATE(ldrsb)),
+        trans_index_of_nth(INTERPRETER_TRANSLATE(ldm), 0),
+        trans_index_of_nth(INTERPRETER_TRANSLATE(ldm), 1),
+        trans_index_of_nth(INTERPRETER_TRANSLATE(ldm), 2),
+        trans_index_of_nth(INTERPRETER_TRANSLATE(stm), 0),
+        trans_index_of_nth(INTERPRETER_TRANSLATE(stm), 1),
         trans_index_of(INTERPRETER_TRANSLATE(bbl)),
         trans_index_of(INTERPRETER_TRANSLATE(bx)),
         trans_index_of(INTERPRETER_TRANSLATE(b_2_thumb)),
         trans_index_of(INTERPRETER_TRANSLATE(b_cond_thumb)),
+        trans_index_of(INTERPRETER_TRANSLATE(bl_1_thumb)),
+        trans_index_of(INTERPRETER_TRANSLATE(bl_2_thumb)),
     };
 }
