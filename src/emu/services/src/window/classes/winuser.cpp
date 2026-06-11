@@ -345,6 +345,11 @@ namespace eka2l1::epoc {
             // Force a visible region update when the next screen redraw comes
             if (is_visible()) {
                 scr->need_update_visible_regions(true);
+
+                // Retained composition: pixels at the old position/extent are
+                // not repainted by anyone unless the screen rebuilds from
+                // scratch (same ghosting as hiding a window, see set_visible).
+                scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
             }
         }
     }
@@ -379,6 +384,13 @@ namespace eka2l1::epoc {
 
         if (should_trigger_redraw) {
             scr->need_update_visible_regions(true);
+
+            // Composition is retained: without a full server redraw the pixels
+            // this window painted stay on the screen texture after it goes
+            // invisible (dismissed dialogs/toasts ghost on whatever is below).
+            // Force a from-scratch rebuild so the windows underneath repaint
+            // the exposed area from their retained segments.
+            scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
 
             // Redraw the screen. NOW!
             client->get_ws().get_anim_scheduler()->schedule(client->get_ws().get_graphics_driver(),
