@@ -19,7 +19,13 @@ android {
     namespace 'com.github.eka2l1'
 
     defaultConfig {
-        applicationId "com.github.eka2l1"
+        // 可通过 -PappIdSuffix=.clone / -PappLabel="EKA2L1 Clone" 覆盖，
+        // 用于构建可与正式版共存的“克隆版”。不传则与原构建完全一致。
+        def cloneIdSuffix = (project.findProperty('appIdSuffix') ?: "").toString()
+        def cloneLabel = (project.findProperty('appLabel') ?: "EKA2L1").toString()
+
+        applicationId "com.github.eka2l1${cloneIdSuffix}"
+        manifestPlaceholders = [appLabel: cloneLabel]
         minSdkVersion 21
         targetSdkVersion 34
         versionCode 12

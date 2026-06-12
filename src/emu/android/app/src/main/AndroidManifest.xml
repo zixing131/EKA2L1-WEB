@@ -18,7 +18,7 @@
         android:allowBackup="false"
         android:hasFragileUserData="true"
         android:icon="@mipmap/ic_ducky"
-        android:label="@string/app_name"
+        android:label="${appLabel}"
         android:preserveLegacyExternalStorage="true"
         android:requestLegacyExternalStorage="true"
         android:roundIcon="@mipmap/ic_ducky_round"

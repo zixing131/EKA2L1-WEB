@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # ============================================================================
-# EKA2L1 Android arm64-v8a 构建脚本
+# EKA2L1 Android “克隆版”构建脚本
 #
-# 输出: build_android/eka2l1-arm64-v8a-release.apk（已签名）
-#       build_android/eka2l1-arm64-v8a-release-unsigned.apk（未签名副本）
+# 与 build_android.sh 相同，但把包名加上 .clone 后缀（applicationId =
+# com.github.eka2l1.clone），并把启动器名称改为 “EKA2L1 Clone”，因此可以与
+# 正式版同时安装、互不覆盖数据，用于双开 / 对比测试。
 #
-# 依赖:
-#   - Android SDK（包含 Gradle 插件所需组件）
-#   - Android NDK 25.1.8937393（或通过 ANDROID_NDK_HOME 指定其他版本）
-#   - JDK 11+（JAVA_HOME 指向对应目录）
-#   - CMake 3.22.1+（NDK 内置版本或系统版本均可）
-#   - Git（用于生成 versionCode 的 git hash）
+# 用法:
+#   ./build_android_clone.sh            # 默认 release
+#   ./build_android_clone.sh release
+#   ./build_android_clone.sh debug
 #
-# 环境变量（可选覆盖）:
-#   ANDROID_SDK_ROOT  —— Android SDK 根目录（优先级高于 ANDROID_HOME）
-#   ANDROID_NDK_HOME  —— 指定 NDK 目录，不设则使用 SDK 内 NDK
-#   JOBS              —— 并行编译线程数（默认 nproc）
-#   KEYSTORE          —— keystore 路径；设置后自动签名
-#   KEY_ALIAS         —— 签名 key alias（与 KEYSTORE 配合使用）
-#   KEY_PASS          —— key 密码
-#   STORE_PASS        —— keystore 密码
+# 输出:
+#   build_android/eka2l1-clone-<abi>-release.apk           （release，已签名/未签名见下）
+#   build_android/eka2l1-clone-<abi>-release-unsigned.apk
+#   build_android/eka2l1-clone-<abi>-debug.apk             （debug，Gradle 自动用 debug key 签名）
+#
+# 环境变量（可选覆盖，与 build_android.sh 一致）:
+#   ANDROID_SDK_ROOT / ANDROID_NDK_HOME / JOBS
+#   KEYSTORE / KEY_ALIAS / KEY_PASS / STORE_PASS   —— 仅 release 用于签名
+#   ABI               —— 覆盖默认 ABI（release 默认 arm64-v8a，debug 默认 x86_64）
+#   APP_ID_SUFFIX     —— 覆盖包名后缀（默认 .clone）
+#   APP_LABEL         —— 覆盖启动器名称（默认 "EKA2L1 Clone"）
 # ============================================================================
 set -euo pipefail
 
@@ -28,11 +30,36 @@ ANDROID_PROJECT="$ROOT/src/emu/android"
 OUT_DIR="$ROOT/build_android"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)}"
 
-# 签名：默认用仓库根目录的 eka2l1.jks，可用环境变量覆盖。
+# 克隆参数
+APP_ID_SUFFIX="${APP_ID_SUFFIX:-.clone}"
+APP_LABEL="${APP_LABEL:-EKA2L1 Clone}"
+
+# 签名：默认用仓库根目录的 eka2l1.jks（与正式版同一证书），可用环境变量覆盖。
 KEYSTORE="${KEYSTORE:-$ROOT/eka2l1.jks}"
 KEY_ALIAS="${KEY_ALIAS:-eka2l1}"
 STORE_PASS="${STORE_PASS:-1311817771}"
 KEY_PASS="${KEY_PASS:-$STORE_PASS}"
+
+# ── 解析 release / debug 参数（默认 release）─────────────────────────────────
+BUILD_TYPE="${1:-release}"
+BUILD_TYPE="$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')"
+
+case "$BUILD_TYPE" in
+    release)
+        GRADLE_TASK="assembleRelease"
+        ABI="${ABI:-arm64-v8a}"
+        ;;
+    debug)
+        GRADLE_TASK="assembleDebug"
+        # build.gradle 的 debug buildType 声明 abiFilters 为 x86_64，
+        # 注入 arm64-v8a 会与之求交集为空导致无 native 库，故默认 x86_64。
+        ABI="${ABI:-x86_64}"
+        ;;
+    *)
+        echo "用法: $0 [release|debug]   (默认 release)" >&2
+        exit 1
+        ;;
+esac
 
 mkdir -p "$OUT_DIR"
 
@@ -51,7 +78,6 @@ if [ -z "${ANDROID_SDK_ROOT:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
 fi
 
 if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
-    # 常见默认位置
     for candidate in \
         "$HOME/Library/Android/sdk" \
         "$HOME/Android/Sdk" \
@@ -82,9 +108,7 @@ if [ -n "${ANDROID_NDK_HOME:-}" ]; then
 else
     NDK_PATH="$ANDROID_SDK_ROOT/ndk/$REQUIRED_NDK_VER"
     if [ ! -d "$NDK_PATH" ]; then
-        warn "NDK $REQUIRED_NDK_VER 未找到（期望路径: $NDK_PATH）"
-        warn "build.gradle 中 ndkVersion='$REQUIRED_NDK_VER'；Gradle 会自动下载，或可手动安装："
-        warn "  \$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \"ndk;$REQUIRED_NDK_VER\""
+        warn "NDK $REQUIRED_NDK_VER 未找到（期望路径: $NDK_PATH），Gradle 会尝试自动下载。"
     else
         info "NDK $REQUIRED_NDK_VER: $NDK_PATH"
     fi
@@ -93,11 +117,6 @@ fi
 # ── 检查 JDK ────────────────────────────────────────────────────────────────
 if ! command -v java >/dev/null 2>&1; then
     error "未找到 java。请安装 JDK 11+ 并将其加入 PATH，或设置 JAVA_HOME。"
-fi
-
-JAVA_VER=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1)
-if [ -n "$JAVA_VER" ] && [ "$JAVA_VER" -lt 11 ] 2>/dev/null; then
-    warn "检测到 JDK $JAVA_VER，建议使用 JDK 11+。"
 fi
 info "Java: $(java -version 2>&1 | head -1)"
 
@@ -109,30 +128,31 @@ fi
 # ── 进入 Android 项目目录 ────────────────────────────────────────────────────
 cd "$ANDROID_PROJECT"
 info "工作目录: $ANDROID_PROJECT"
-
-# ── 确保 gradlew 可执行 ──────────────────────────────────────────────────────
 chmod +x gradlew
 
 # ── 组装 Gradle 参数 ─────────────────────────────────────────────────────────
-# android.injected.build.abi 强制 Gradle 只针对 arm64-v8a 调用 CMake/NDK，
-# 跳过 armeabi-v7a，大幅减少构建时间和产物体积。
 GRADLE_ARGS=(
-    assembleRelease
-    "-Pandroid.injected.build.abi=arm64-v8a"
+    "$GRADLE_TASK"
+    "-PappIdSuffix=$APP_ID_SUFFIX"
+    "-PappLabel=$APP_LABEL"
+    "-Pandroid.injected.build.abi=$ABI"
     "--no-daemon"
     "-Dorg.gradle.workers.max=$JOBS"
 )
 
-info "开始构建 arm64-v8a Release APK (并行线程: $JOBS)..."
+info "构建克隆版：类型=$BUILD_TYPE  ABI=$ABI"
+info "  包名      = com.github.eka2l1$APP_ID_SUFFIX"
+info "  启动器名称 = $APP_LABEL"
 info "命令: ./gradlew ${GRADLE_ARGS[*]}"
 echo ""
 
 ./gradlew "${GRADLE_ARGS[@]}"
 
-# ── 定位产物 ─────────────────────────────────────────────────────────────────
-# Gradle 可能将产物写入 outputs/apk/ 或 intermediates/apk/，两处均搜索
-APK_FILE=$(find "$ANDROID_PROJECT/app/build" -name "*.apk" | grep -v "test" | head -1)
-
+# ── 定位产物（限定到对应 buildType 目录）─────────────────────────────────────
+APK_FILE=$(find "$ANDROID_PROJECT/app/build" -path "*/$BUILD_TYPE/*" -name "*.apk" | grep -v "test" | head -1)
+if [ -z "$APK_FILE" ]; then
+    APK_FILE=$(find "$ANDROID_PROJECT/app/build" -name "*.apk" | grep -v "test" | head -1)
+fi
 if [ -z "$APK_FILE" ]; then
     error "构建完成但未找到 APK（搜索目录: $ANDROID_PROJECT/app/build）"
 fi
@@ -142,18 +162,27 @@ info "构建成功！"
 info "APK 路径: $APK_FILE"
 info "文件大小: $(du -sh "$APK_FILE" | cut -f1)"
 
-# ── 复制未签名 APK 到输出目录 ────────────────────────────────────────────────
-UNSIGNED_OUT="$OUT_DIR/eka2l1-arm64-v8a-release-unsigned.apk"
+# ── debug：Gradle 已用 debug key 签名，直接复制输出 ──────────────────────────
+if [ "$BUILD_TYPE" = "debug" ]; then
+    FINAL_APK="$OUT_DIR/eka2l1-clone-$ABI-debug.apk"
+    cp "$APK_FILE" "$FINAL_APK"
+    echo ""
+    info "全部完成（debug 已自动签名，可直接安装）。"
+    info "  $(du -sh "$FINAL_APK" | cut -f1)  $FINAL_APK"
+    exit 0
+fi
+
+# ── release：复制未签名副本，并按需签名 ──────────────────────────────────────
+UNSIGNED_OUT="$OUT_DIR/eka2l1-clone-$ABI-release-unsigned.apk"
 cp "$APK_FILE" "$UNSIGNED_OUT"
 info "未签名副本 -> $UNSIGNED_OUT"
 
-# ── 签名并输出到 build_android/ ──────────────────────────────────────────────
-FINAL_APK="$OUT_DIR/eka2l1-arm64-v8a-release.apk"
+FINAL_APK="$OUT_DIR/eka2l1-clone-$ABI-release.apk"
 
 APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$(ls "$ANDROID_SDK_ROOT/build-tools" 2>/dev/null | sort -V | tail -1)/apksigner"
 
 if [ ! -f "$APKSIGNER" ]; then
-    warn "未找到 apksigner，输出未签名 APK（安装前需手动签名）。"
+    warn "未找到 apksigner，输出未签名 APK（无法直接安装，会提示证书缺失）。"
     cp "$APK_FILE" "$FINAL_APK"
 elif [ -f "$KEYSTORE" ]; then
     info "用 keystore 签名: $KEYSTORE (alias=$KEY_ALIAS) -> $FINAL_APK"
@@ -166,8 +195,26 @@ elif [ -f "$KEYSTORE" ]; then
         "$APK_FILE"
     info "签名完成: $FINAL_APK"
 else
-    warn "keystore 不存在: $KEYSTORE，输出未签名 APK。安装前需手动签名。"
-    cp "$APK_FILE" "$FINAL_APK"
+    # 默认 keystore 不在（被删/未克隆全），退到 Android debug keystore 自动签名，
+    # 至少保证克隆版能侧载安装（否则未签名会提示“证书缺失/无法解析软件包”）。
+    warn "keystore 不存在: $KEYSTORE，改用 debug keystore 自动签名。"
+    DEBUG_KS="$HOME/.android/debug.keystore"
+    if [ ! -f "$DEBUG_KS" ]; then
+        mkdir -p "$HOME/.android"
+        keytool -genkeypair -v -keystore "$DEBUG_KS" \
+            -storepass android -keypass android -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1 \
+            || warn "生成 debug keystore 失败，将输出未签名 APK。"
+    fi
+    if [ -f "$DEBUG_KS" ]; then
+        "$APKSIGNER" sign --ks "$DEBUG_KS" --ks-key-alias androiddebugkey \
+            --ks-pass pass:android --key-pass pass:android \
+            --out "$FINAL_APK" "$APK_FILE"
+        info "签名完成（debug 证书）: $FINAL_APK"
+    else
+        cp "$APK_FILE" "$FINAL_APK"
+    fi
 fi
 
 echo ""
