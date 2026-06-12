@@ -59,6 +59,17 @@ html, body {
     -webkit-font-smoothing: antialiased;
 }
 
+/* Reserve the scrollbar gutter on the root scroller so the viewport width is
+   the same whether the current tab scrolls (设置, tall) or not (游戏, short).
+   Without this, the classic desktop scrollbar appears only on the long tab,
+   which narrows the viewport and makes the centered .page-layout and the
+   position:fixed bottom-nav jump sideways when you switch tabs ("两边不对齐").
+   On iOS/overlay-scrollbar platforms this is a harmless no-op. (Supported by
+   every browser that can run this WASM-threads/WebGL2 app.) */
+html {
+    scrollbar-gutter: stable;
+}
+
 button { font-family: inherit; }
 
 /* ---------------------------------------------------------------- top bar */
