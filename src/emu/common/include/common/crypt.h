@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -98,8 +99,26 @@ namespace eka2l1::crypt {
 
     /**
      * @brief Check if given IMEI string is correct
-     * 
+     *
      * @returns IMEI_ERROR_NONE on right.
      */
     imei_valid_error is_imei_valid(const std::string &supposed_imei);
+
+    /**
+     * @brief Compute the SHA-256 digest of a buffer.
+     *
+     * Self-contained reference implementation (no external dependency); used by
+     * the WASM web frontend's tamper-detection. Works identically on desktop
+     * and Emscripten.
+     *
+     * @param data Pointer to the input bytes.
+     * @param size Number of input bytes.
+     * @return 32-byte digest.
+     */
+    std::array<std::uint8_t, 32> sha256(const void *data, const std::size_t size);
+
+    /**
+     * @brief Lowercase hex string of sha256(data, size) (64 chars).
+     */
+    std::string sha256_hex(const void *data, const std::size_t size);
 }

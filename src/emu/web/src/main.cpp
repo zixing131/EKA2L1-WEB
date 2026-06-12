@@ -91,6 +91,8 @@
 #include <services/window/classes/wingroup.h>
 #include <services/init.h>
 
+#include "protection.h"
+
 // ============================================================================
 // Global State
 // ============================================================================
@@ -124,6 +126,12 @@ namespace eka2l1::web {
         Uint32 last_fps_time = 0;
         int frame_count = 0;
         int current_fps = 0;
+
+        // Build-info watermark: an RGBA texture rendered once from the C++
+        // bitmap font and blitted semi-transparent in the bottom-right corner.
+        drivers::handle watermark_tex = 0;
+        int watermark_w = 0;
+        int watermark_h = 0;
     };
 
     static wasm_state g_state;
@@ -620,7 +628,66 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
             static_cast<float>(scr->ui_rotation), 0);
     }
 
+    // Build-info watermark (bottom-right, semi-transparent). The texture is
+    // created once on the main thread in init_emulator(); here we only queue
+    // draw commands. Release can't turn it off; the Channel tag distinguishes
+    // Test vs Release builds for leak tracing.
+    if (g_state.watermark_tex && (g_state.watermark_w > 0) && (g_state.watermark_h > 0)) {
+        builder.set_feature(eka2l1::drivers::graphics_feature::blend, true);
+        builder.blend_formula(
+            eka2l1::drivers::blend_equation::add, eka2l1::drivers::blend_equation::add,
+            eka2l1::drivers::blend_factor::frag_out_alpha,
+            eka2l1::drivers::blend_factor::one_minus_frag_out_alpha,
+            eka2l1::drivers::blend_factor::one,
+            eka2l1::drivers::blend_factor::one_minus_frag_out_alpha);
+
+        int wx = static_cast<int>(window_width) - g_state.watermark_w - 4;
+        int wy = static_cast<int>(window_height) - g_state.watermark_h - 4;
+        if (wx < 0) wx = 0;
+        if (wy < 0) wy = 0;
+
+        eka2l1::rect wdst;
+        wdst.top = eka2l1::vec2(wx, wy);
+        wdst.size = eka2l1::vec2(g_state.watermark_w, g_state.watermark_h);
+
+        eka2l1::rect wsrc;
+        wsrc.top = eka2l1::vec2(0, 0);
+        wsrc.size = eka2l1::vec2(g_state.watermark_w, g_state.watermark_h);
+
+        builder.set_texture_filter(g_state.watermark_tex, true, eka2l1::drivers::filter_option::nearest);
+        builder.set_texture_filter(g_state.watermark_tex, false, eka2l1::drivers::filter_option::nearest);
+        builder.draw_bitmap(g_state.watermark_tex, 0, wdst, wsrc, eka2l1::vec2(0, 0), 0.0f, 0);
+
+        builder.set_feature(eka2l1::drivers::graphics_feature::blend, false);
+    }
+
     builder.load_backup_state();
+}
+
+// Create the build-info watermark texture once, on the main thread. Safe to
+// call repeatedly; it returns early once the texture exists.
+static void ensure_watermark_texture() {
+    if (g_state.watermark_tex || !g_state.graphics_driver) {
+        return;
+    }
+
+    std::vector<std::uint8_t> rgba;
+    int w = 0;
+    int h = 0;
+    // scale 2 keeps the 8px font legible when the canvas is scaled up.
+    if (!eka2l1::web::protection::render_text_rgba(
+            eka2l1::web::protection::watermark_text(), 2, rgba, w, h)) {
+        return;
+    }
+
+    g_state.watermark_tex = eka2l1::drivers::create_texture(
+        g_state.graphics_driver.get(), 2, 0,
+        eka2l1::drivers::texture_format::rgba,
+        eka2l1::drivers::texture_format::rgba,
+        eka2l1::drivers::texture_data_type::ubyte,
+        rgba.data(), rgba.size(), eka2l1::vec3(w, h, 0));
+    g_state.watermark_w = w;
+    g_state.watermark_h = h;
 }
 
 // Counterpart of the Android frontend's register_draw_callback(): whenever the
@@ -873,6 +940,11 @@ static bool init_emulator() {
 
     g_state.symsys->set_audio_driver(g_state.audio_driver.get());
 
+    // Build the version watermark texture now, on the main thread (the screen
+    // redraw callback may run on the timer thread and must not create GL
+    // resources).
+    ensure_watermark_texture();
+
     g_state.initialized = true;
     g_state.running = true;
 
@@ -886,6 +958,21 @@ static bool init_emulator() {
 
 static void main_loop() {
     if (!g_state.initialized || !g_state.symsys) {
+        return;
+    }
+
+    // Protection tripwire: if a tamper check fails (e.g. the deferred wasm
+    // self-hash), freeze the guest. The JS side polls wasm_is_blocked() and
+    // raises the copyright/refusal overlay. No-op in debug builds.
+    if (eka2l1::web::protection::is_blocked()) {
+        static bool s_logged_block = false;
+        if (!s_logged_block) {
+            s_logged_block = true;
+            g_state.running = false;
+            LOG_ERROR(FRONTEND_CMDLINE,
+                "Protection check failed; emulator halted. {}",
+                eka2l1::web::protection::copyright_text());
+        }
         return;
     }
 
@@ -1172,6 +1259,13 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
         eka2l1::log::toggle_console();
     }
 
+    // Defense in depth: refuse to touch a device if the protection checks
+    // haven't passed (a tampered JS shell could try to skip the gate).
+    if (eka2l1::web::protection::is_blocked()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "Refusing init: protection check not satisfied");
+        return -9;
+    }
+
     const bool has_rpkg = (rpkg_path && rpkg_path[0] != '\0');
     LOG_INFO(FRONTEND_CMDLINE, "Initializing with ROM: {}  RPKG: {}",
         rom_path, has_rpkg ? rpkg_path : "(none)");
@@ -1337,6 +1431,10 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
 EMSCRIPTEN_KEEPALIVE
 int wasm_install_package(const char *pkg_path) {
     if (!pkg_path) return -1;
+    if (eka2l1::web::protection::is_blocked()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "Refusing install: protection check not satisfied");
+        return -9;
+    }
 
     LOG_INFO(FRONTEND_CMDLINE, "Installing package: {}", pkg_path);
 
@@ -1780,6 +1878,10 @@ const char *wasm_get_app_icon(int uid) {
 EMSCRIPTEN_KEEPALIVE
 int wasm_launch_app(int uid) {
     if (!g_state.symsys) return -1;
+    if (eka2l1::web::protection::is_blocked()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "Refusing launch: protection check not satisfied");
+        return -9;
+    }
 
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (!kern) return -2;
@@ -2307,6 +2409,12 @@ int main(int argc, char **argv) {
     eka2l1::log::toggle_console();
 
     LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 WebAssembly starting...");
+
+    // Display the copyright + build info at startup (baked into the wasm, so
+    // it shows regardless of any HTML/JS tampering).
+    LOG_INFO(FRONTEND_CMDLINE, "\n{}\n{}",
+        eka2l1::web::protection::copyright_text(),
+        eka2l1::web::protection::build_info());
 
     // Initialize SDL
     if (!init_sdl()) {

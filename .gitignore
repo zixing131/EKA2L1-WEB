@@ -22,5 +22,6 @@ cmake-build-*
 /CMakeFiles
 CMakeCache.txt
 /build_wasm_prof
+/build_wasm_release
 /src/emu/web/dev-cert.pem
 /src/emu/web/dev-key.pem

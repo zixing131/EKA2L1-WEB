@@ -25,6 +25,7 @@ const APP_SHELL = [
     './css/app.css',
     './js/boot.js',
     './js/build_id.js',
+    './js/integrity.js',
     './js/index.js',
     './js/run.js',
     './icons/icon.svg',

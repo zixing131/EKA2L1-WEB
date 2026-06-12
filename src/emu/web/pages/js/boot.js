@@ -149,46 +149,55 @@
                 EKA2L1.module = mod;
                 patchIDBFS(mod);
 
-                try { mod.FS.mkdir('/eka2l1'); } catch (e) { /* exists */ }
-                mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
+                // Copyright / integrity / domain gate — must pass before the
+                // emulator core (callMain) or any device data is touched.
+                onProgress(40, '校验程序完整性…');
+                EKA2L1.runProtection(mod).then(function () {
+                    try { mod.FS.mkdir('/eka2l1'); } catch (e) { /* exists */ }
+                    mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
 
-                onProgress(62, '恢复存档数据…');
-                mod.FS.syncfs(true, function (err) {
-                    if (err) console.warn('[EKA2L1] initial restore error (OK on first run):', err);
+                    onProgress(62, '恢复存档数据…');
+                    mod.FS.syncfs(true, function (err) {
+                        if (err) console.warn('[EKA2L1] initial restore error (OK on first run):', err);
 
-                    onProgress(82, '启动模拟器核心…');
-                    // main() registers the RAF loop then throws "unwind" by
-                    // design (simulate_infinite_loop); treat that as success.
-                    try {
-                        mod.callMain([]);
-                    } catch (e) {
-                        if (!(e === 'unwind' || (e && e.name === 'ExitStatus'))) {
-                            reject(e);
-                            return;
+                        onProgress(82, '启动模拟器核心…');
+                        // main() registers the RAF loop then throws "unwind" by
+                        // design (simulate_infinite_loop); treat that as success.
+                        try {
+                            mod.callMain([]);
+                        } catch (e) {
+                            if (!(e === 'unwind' || (e && e.name === 'ExitStatus'))) {
+                                reject(e);
+                                return;
+                            }
                         }
-                    }
 
-                    // Escape hatches: ?jit=0 turns the dyncom wasm JIT off,
-                    // ?jitlimit=N caps how many blocks get compiled (bisect).
-                    try {
-                        var q = new URLSearchParams(location.search);
-                        if (q.get('jit') === '0') {
-                            mod.ccall('wasm_set_jit', null, ['number'], [0]);
-                        }
-                        if (q.get('dsa565')) {
-                            mod.ccall('wasm_set_dsa565', null, ['number'],
-                                [parseInt(q.get('dsa565'), 10) || 0]);
-                        }
-                        if (q.get('jitlimit')) {
-                            mod.ccall('wasm_set_jit_limit', null, ['number'],
-                                [parseInt(q.get('jitlimit'), 10) || 0]);
-                        }
-                    } catch (e) {}
+                        // Escape hatches: ?jit=0 turns the dyncom wasm JIT off,
+                        // ?jitlimit=N caps how many blocks get compiled (bisect).
+                        try {
+                            var q = new URLSearchParams(location.search);
+                            if (q.get('jit') === '0') {
+                                mod.ccall('wasm_set_jit', null, ['number'], [0]);
+                            }
+                            if (q.get('dsa565')) {
+                                mod.ccall('wasm_set_dsa565', null, ['number'],
+                                    [parseInt(q.get('dsa565'), 10) || 0]);
+                            }
+                            if (q.get('jitlimit')) {
+                                mod.ccall('wasm_set_jit_limit', null, ['number'],
+                                    [parseInt(q.get('jitlimit'), 10) || 0]);
+                            }
+                        } catch (e) {}
 
-                    EKA2L1.ready = true;
-                    onProgress(92, '核心已启动');
-                    resolve(mod);
-                });
+                        // Tier 2: verify the wasm itself, deferred off the
+                        // critical path.
+                        EKA2L1.scheduleWasmSelfCheck(mod);
+
+                        EKA2L1.ready = true;
+                        onProgress(92, '核心已启动');
+                        resolve(mod);
+                    });
+                }).catch(reject);
             }).catch(reject);
         });
     };
@@ -652,6 +661,112 @@
         // digits use their ASCII codes
         D0: 0x30, D1: 0x31, D2: 0x32, D3: 0x33, D4: 0x34,
         D5: 0x35, D6: 0x36, D7: 0x37, D8: 0x38, D9: 0x39
+    };
+
+    // ---- copyright protection (decisions made in wasm) ---------------------
+    //
+    // The wasm holds the expected hashes + domain whitelist; JS only fetches
+    // bytes and reads location.hostname. In Test builds every wasm check returns
+    // success, so this sequence passes transparently.
+    //
+    // ORDER MUST MATCH gen_integrity.py ASSETS and the name_id index in
+    // protection.cpp wasm_verify_asset().
+    var PROTECTED_ASSETS = [
+        'eka2l1.js', 'js/boot.js', 'js/index.js', 'js/run.js',
+        'index.html', 'run.html'
+    ];
+
+    function versionQuery() {
+        var v = (typeof window !== 'undefined' && window.EKA2L1_BUILD_ID) || '';
+        return v ? ('?v=' + v) : '';
+    }
+
+    /** Human-readable refusal message (copyright comes from the wasm). */
+    EKA2L1.protectionMessage = function (mod) {
+        var copyright = '';
+        try { copyright = mod.ccall('wasm_get_copyright', 'string', [], []); } catch (e) {}
+        return (copyright ? copyright + '\n\n' : '') +
+            '检测到程序文件或运行环境已被未经授权修改，或当前运行域名未获得授权。\n' +
+            '为保护项目版权与完整性，程序已拒绝启动。\n' +
+            '请使用官方发布版本，并通过授权域名访问。';
+    };
+
+    /**
+     * Run the startup protection gate: domain whitelist + JS/HTML integrity.
+     * Resolves when the wasm reports status 0; rejects with the refusal message
+     * otherwise. Cheap (assets total a few hundred KB, served from cache).
+     */
+    EKA2L1.runProtection = function (mod) {
+        var q = versionQuery();
+
+        // Domain check first (logic + whitelist live in the wasm).
+        try {
+            mod.ccall('wasm_check_domain', 'number', ['string'],
+                [(typeof location !== 'undefined' && location.hostname) || '']);
+        } catch (e) {}
+
+        var chain = Promise.resolve();
+        PROTECTED_ASSETS.forEach(function (path, idx) {
+            chain = chain.then(function () {
+                return fetch(path + q, { cache: 'force-cache' })
+                    .then(function (r) { return r.arrayBuffer(); })
+                    .then(function (ab) {
+                        var u8 = new Uint8Array(ab);
+                        var ptr = mod.ccall('wasm_protect_buffer', 'number', ['number'], [u8.length]);
+                        if (!ptr) throw new Error('protect buffer alloc failed');
+                        mod.HEAPU8.set(u8, ptr);
+                        mod.ccall('wasm_verify_asset', 'number',
+                            ['number', 'number', 'number'], [idx, ptr, u8.length]);
+                    });
+            });
+        });
+
+        return chain.then(function () {
+            try { mod.ccall('wasm_protect_buffer_free', null, [], []); } catch (e) {}
+            var status = mod.ccall('wasm_protection_status', 'number', [], []);
+            if (status !== 0) {
+                throw new Error(EKA2L1.protectionMessage(mod));
+            }
+        });
+    };
+
+    /**
+     * Deferred wasm self-hash (tier 2). Runs off the boot critical path so the
+     * multi-MB hash never delays startup on low-memory phones. On mismatch the
+     * wasm flips to "blocked"; the running emulator freezes (main_loop) and the
+     * page surfaces the refusal overlay on the next poll.
+     */
+    EKA2L1.scheduleWasmSelfCheck = function (mod) {
+        var expected = (typeof window !== 'undefined' && window.EKA2L1_WASM_HASH) || '';
+        if (!expected) return; // Test build / no seal: wasm check is compiled out.
+
+        setTimeout(function () {
+            fetch('eka2l1.wasm' + versionQuery(), { cache: 'force-cache' })
+                .then(function (r) { return r.arrayBuffer(); })
+                .then(function (ab) {
+                    var u8 = new Uint8Array(ab);
+                    var ptr = mod.ccall('wasm_protect_buffer', 'number', ['number'], [u8.length]);
+                    if (!ptr) return;
+                    mod.HEAPU8.set(u8, ptr);
+                    mod.ccall('wasm_verify_wasm', 'number',
+                        ['number', 'number', 'string'], [ptr, u8.length, expected]);
+                    try { mod.ccall('wasm_protect_buffer_free', null, [], []); } catch (e) {}
+                    if (mod.ccall('wasm_is_blocked', 'number', [], [])) {
+                        var overlay = document.getElementById('bootError');
+                        if (overlay) {
+                            overlay.style.display = 'block';
+                            overlay.textContent = EKA2L1.protectionMessage(mod);
+                        }
+                    }
+                })
+                .catch(function () { /* network/cache miss: leave running */ });
+        }, 4000);
+    };
+
+    /** True after the deferred self-check (or any check) has tripped. */
+    EKA2L1.isBlocked = function () {
+        try { return !!EKA2L1.module.ccall('wasm_is_blocked', 'number', [], []); }
+        catch (e) { return false; }
     };
 
     window.EKA2L1 = EKA2L1;

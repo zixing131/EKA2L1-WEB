@@ -2,14 +2,31 @@
 # EKA2L1 WebAssembly Frontend Build
 # ============================================================================
 
+# Test build (build_wasm_test) defines this to skip all copyright/integrity/
+# domain protection. Release (build_wasm_release) leaves it OFF for full
+# protection. See src/protection.cpp and gen_integrity.py.
+option(EKA2L1_DEBUG_BUILD "Skip web copyright/integrity protection (debug web build)" OFF)
+
 # The web frontend executable
 add_executable(eka2l1_wasm
     src/main.cpp
     src/platform_stubs.cpp
     src/web_audio.cpp
+    src/protection.cpp
 )
 
 target_include_directories(eka2l1_wasm PUBLIC include)
+
+# Build timestamp baked into the watermark / build info. Stamped at configure
+# time; protection.cpp falls back to __DATE__/__TIME__ if this is absent.
+string(TIMESTAMP EKA2L1_BUILD_TIMESTAMP "%Y-%m-%d %H:%M:%S")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_stamp.h"
+    "#pragma once\n#define BUILD_TIMESTAMP \"${EKA2L1_BUILD_TIMESTAMP}\"\n")
+target_include_directories(eka2l1_wasm PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
+if (EKA2L1_DEBUG_BUILD)
+    target_compile_definitions(eka2l1_wasm PRIVATE EKA2L1_DEBUG_BUILD)
+endif()
 
 # Link against all core emulator libraries
 target_link_libraries(eka2l1_wasm PRIVATE
@@ -175,4 +192,21 @@ if (EMSCRIPTEN)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/stamp_pages.cmake
         COMMENT "Copying web frontend pages"
     )
+
+    # Release only: seal the file hashes into the wasm + write integrity.js.
+    # Runs AFTER page stamping so it hashes the final (?v=-stamped) HTML.
+    if (NOT EKA2L1_DEBUG_BUILD)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if (Python3_Interpreter_FOUND)
+            set(EKA2L1_PYTHON ${Python3_EXECUTABLE})
+        else()
+            set(EKA2L1_PYTHON python3)
+        endif()
+        add_custom_command(TARGET eka2l1_wasm POST_BUILD
+            COMMAND ${EKA2L1_PYTHON}
+                ${CMAKE_CURRENT_SOURCE_DIR}/gen_integrity.py
+                --stage ${WASM_STAGE_DIR}
+            COMMENT "Sealing integrity hashes into eka2l1.wasm (Release)"
+        )
+    endif()
 endif()
