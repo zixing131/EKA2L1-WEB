@@ -793,9 +793,16 @@ namespace eka2l1 {
 
         const epoc::open_font_info *info = &(font->of_info);
         std::uint32_t metric_identifier = font->of_info.metric_identifier;
-        epoc::glyph_bitmap_type bitmap_type = epoc::glyph_bitmap_type::default_glyph_bitmap;
         std::uint32_t bitmap_data_size = 0;
         epoc::open_font_character_metric char_metric;
+
+        // The guest font was created expecting one glyph bitmap type (the bound
+        // font's declared output) and decodes every glyph it asks for in that
+        // format. Request that exact type so a fallback glyph from a different
+        // font (e.g. the CJK fallback) comes back in the same encoding instead
+        // of whatever the fallback adapter would pick on its own - otherwise the
+        // guest reads e.g. mono RLE as 8bpp and the glyph scrambles.
+        epoc::glyph_bitmap_type bitmap_type = font->of_info.adapter->get_output_bitmap_type();
 
         // Glyph-level fallback: when the bound font has no glyph for this character,
         // freetype would otherwise silently rasterize the .notdef tofu box. Borrow the

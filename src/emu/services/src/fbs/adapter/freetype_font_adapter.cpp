@@ -248,11 +248,29 @@ namespace eka2l1::epoc::adapter {
             return nullptr;
         }
 
-        // Small scalable glyphs: render through the monochrome hinter so they
-        // survive low display-depth blits and stay legible (see threshold note).
-        // Fonts with embedded strikes already return MONO and are unaffected.
+        // The guest configures its font object for ONE glyph bitmap type (the
+        // bound font's get_output_bitmap_type, antialised for this adapter) and
+        // decodes every glyph in that format - including fallback glyphs from a
+        // different font. So the caller passes the expected type in *bmp_type and
+        // we must honour it, or the guest reads mono RLE bytes as an 8bpp image
+        // (or vice versa) and the glyph scrambles into noise (X-plore's CJK).
+        const epoc::glyph_bitmap_type requested_type = bmp_type ? *bmp_type : epoc::glyph_bitmap_type::default_glyph_bitmap;
+
+        // Small scalable glyphs default to the monochrome hinter so they survive
+        // low display-depth blits and stay legible; but an explicit antialised
+        // request always wins (and an explicit mono request always forces mono).
+        bool want_mono;
+        if (requested_type == epoc::glyph_bitmap_type::monochrome_glyph_bitmap) {
+            want_mono = true;
+        } else if (requested_type == epoc::glyph_bitmap_type::antialised_glyph_bitmap) {
+            want_mono = false;
+        } else {
+            want_mono = (face->size->metrics.y_ppem != 0)
+                && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD);
+        }
+
         FT_Int32 load_flags = FT_LOAD_RENDER;
-        if ((face->size->metrics.y_ppem != 0) && (static_cast<std::uint32_t>(face->size->metrics.y_ppem) <= SMALL_GLYPH_MONO_PPEM_THRESHOLD)) {
+        if (want_mono) {
             load_flags |= FT_LOAD_TARGET_MONO;
         }
 
@@ -279,12 +297,41 @@ namespace eka2l1::epoc::adapter {
             *bmp_type = glyph_bitmap_type::antialised_glyph_bitmap;
         }
 
-        // Fonts with embedded bitmap strikes (EBDT/EBLC, e.g. the S60 CJK fallback
-        // S60SC.ttf) make FreeType return a 1bpp packed bitmap when a strike matches
-        // the requested ppem. Re-encode it as Symbian's run-length monochrome glyph
-        // stream (same as the GDR adapter): the guest blitter accepts that at any
-        // display depth, while 8bpp antialiased glyphs are dropped on low-depth
-        // offscreen bitmaps (custom-drawn UIs) and raw mono would be misread.
+        // A mono bitmap with an explicit antialised request comes from a font
+        // with embedded bitmap strikes (FreeType returns 1bpp regardless of the
+        // load target). Expand it to 8bpp so it matches the type the guest font
+        // expects, instead of RLE-encoding it as mono (which the guest would
+        // then misread as an 8bpp image).
+        if (bitmap.buffer && (bitmap.pixel_mode == FT_PIXEL_MODE_MONO)
+            && (requested_type == epoc::glyph_bitmap_type::antialised_glyph_bitmap)) {
+            const int aa_width = static_cast<int>(bitmap.width);
+            const int aa_height = static_cast<int>(bitmap.rows);
+            mono_expand_scratch_.assign(static_cast<std::size_t>(aa_width) * aa_height, 0);
+
+            for (int y = 0; y < aa_height; y++) {
+                for (int x = 0; x < aa_width; x++) {
+                    const std::uint8_t bit = bitmap.buffer[y * bitmap.pitch + (x >> 3)] & (0x80 >> (x & 7));
+                    mono_expand_scratch_[static_cast<std::size_t>(y) * aa_width + x] = bit ? 0xFF : 0x00;
+                }
+            }
+
+            total_size = static_cast<std::uint32_t>(aa_width) * aa_height;
+
+            character_metric.width = static_cast<std::int16_t>(bitmap.width);
+            character_metric.height = static_cast<std::int16_t>(bitmap.rows);
+            character_metric.horizontal_bearing_x = static_cast<std::int16_t>(glyph->bitmap_left);
+            character_metric.horizontal_bearing_y = static_cast<std::int16_t>(glyph->bitmap_top);
+            character_metric.horizontal_advance = ft_convention_to_int_pixel(glyph->metrics.horiAdvance);
+            character_metric.vertical_bearing_x = ft_convention_to_int_pixel(glyph->metrics.vertBearingX);
+            character_metric.vertical_bearing_y = ft_convention_to_int_pixel(glyph->metrics.vertBearingY);
+            character_metric.vertical_advance = ft_convention_to_int_pixel(glyph->metrics.vertAdvance);
+            character_metric.bitmap_type = glyph_bitmap_type::antialised_glyph_bitmap;
+
+            return mono_expand_scratch_.data();
+        }
+
+        // Otherwise a mono bitmap is RLE-encoded as Symbian's run-length
+        // monochrome glyph stream (same as the GDR adapter), reported as mono.
         if (bitmap.buffer && (bitmap.pixel_mode == FT_PIXEL_MODE_MONO)) {
             const int mono_width = static_cast<int>(bitmap.width);
             const int mono_height = static_cast<int>(bitmap.rows);
@@ -355,10 +402,19 @@ namespace eka2l1::epoc::adapter {
                 *bmp_type = glyph_bitmap_type::monochrome_glyph_bitmap;
             }
 
-            character_metric.width = ft_convention_to_int_pixel(glyph->metrics.width);
-            character_metric.height = ft_convention_to_int_pixel(glyph->metrics.height);
-            character_metric.horizontal_bearing_x = ft_convention_to_int_pixel(glyph->metrics.horiBearingX);
-            character_metric.horizontal_bearing_y = ft_convention_to_int_pixel(glyph->metrics.horiBearingY);
+            // width/height MUST be the rasterized bitmap dimensions, not the
+            // design bbox: the guest decodes the glyph bitmap (mono RLE here,
+            // 8bpp below) using metric.width as the row stride and metric.height
+            // as the row count. For outline fonts the FreeType design metrics
+            // differ from the rendered bitmap by ±1px, which shifts every RLE
+            // row and scrambles the glyph (fonts with embedded bitmap strikes —
+            // e.g. S60SC — happen to match, which is why they looked fine while
+            // outline CJK fallbacks like Droid came out as noise). Mirrors the
+            // GDR adapter, which sets metric.width = the bitmap's target_width.
+            character_metric.width = static_cast<std::int16_t>(bitmap.width);
+            character_metric.height = static_cast<std::int16_t>(bitmap.rows);
+            character_metric.horizontal_bearing_x = static_cast<std::int16_t>(glyph->bitmap_left);
+            character_metric.horizontal_bearing_y = static_cast<std::int16_t>(glyph->bitmap_top);
             character_metric.horizontal_advance = ft_convention_to_int_pixel(glyph->metrics.horiAdvance);
             character_metric.vertical_bearing_x = ft_convention_to_int_pixel(glyph->metrics.vertBearingX);
             character_metric.vertical_bearing_y = ft_convention_to_int_pixel(glyph->metrics.vertBearingY);
@@ -368,10 +424,12 @@ namespace eka2l1::epoc::adapter {
             return mono_expand_scratch_.data();
         }
 
-        character_metric.width = ft_convention_to_int_pixel(glyph->metrics.width);
-        character_metric.height = ft_convention_to_int_pixel(glyph->metrics.height);
-        character_metric.horizontal_bearing_x = ft_convention_to_int_pixel(glyph->metrics.horiBearingX);
-        character_metric.horizontal_bearing_y = ft_convention_to_int_pixel(glyph->metrics.horiBearingY);
+        // See the mono branch: bitmap dimensions, not design metrics, or the
+        // 8bpp glyph image is read back with the wrong stride.
+        character_metric.width = static_cast<std::int16_t>(bitmap.width);
+        character_metric.height = static_cast<std::int16_t>(bitmap.rows);
+        character_metric.horizontal_bearing_x = static_cast<std::int16_t>(glyph->bitmap_left);
+        character_metric.horizontal_bearing_y = static_cast<std::int16_t>(glyph->bitmap_top);
         character_metric.horizontal_advance = ft_convention_to_int_pixel(glyph->metrics.horiAdvance);
         character_metric.vertical_bearing_x = ft_convention_to_int_pixel(glyph->metrics.vertBearingX);
         character_metric.vertical_bearing_y = ft_convention_to_int_pixel(glyph->metrics.vertBearingY);
