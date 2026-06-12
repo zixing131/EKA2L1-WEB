@@ -672,50 +672,84 @@
         if (!fsDir) { EKA2L1.toast('目标路径无效'); return; }
 
         var totalBytes = files.reduce(function (acc, f) { return acc + f.size; }, 0);
-        setStatus('yellow', '上传 ' + files.length + ' 个文件…');
+        var totalMB = Math.ceil(totalBytes / 1048576);
 
         var writtenPaths = [];
-        var stageName = '写入模拟器内存';
-        var chain = Promise.resolve();
-        files.forEach(function (f, i) {
-            chain = chain.then(function () {
-                var label = '上传 ' + (i + 1) + '/' + files.length + '：' + f.name;
-                setStatus('yellow', label);
-                // Keep the original filename: Symbian path lookup is
-                // case-insensitive on the emulator side.
-                return EKA2L1.writeFileToVFS(f, fsDir + f.name, function (done, total) {
-                    if (total > 4 * 1048576) {
-                        setStatus('yellow', label + ' ' + Math.floor(done * 100 / total) + '%');
-                    }
-                }).then(function (p) { writtenPaths.push(p); });
-            });
-        });
+        var stageName = '检查存储空间';
+        setStatus('yellow', '检查存储空间…');
 
-        chain.then(function () {
+        // Pre-flight: persisting needs the uploaded bytes free in the IndexedDB
+        // quota, plus a working copy. The device-install path already checks
+        // this; uploads used to skip it and just die mid-write with a cryptic
+        // error. Refuse early with the actual numbers instead.
+        var preflight = (navigator.storage && navigator.storage.estimate)
+            ? navigator.storage.estimate()
+            : Promise.resolve(null);
+
+        preflight.then(function (est) {
+            if (est) {
+                var freeBytes = (est.quota || 0) - (est.usage || 0);
+                // Headroom: the put() transaction transiently holds another copy
+                // of the largest file on top of the persisted bytes.
+                var largest = files.reduce(function (m, f) { return Math.max(m, f.size); }, 0);
+                var needBytes = totalBytes + largest;
+                if (est.quota && freeBytes < needBytes) {
+                    var lowQuota = Math.floor((est.quota || 0) / 1048576) < 300;
+                    var err = new Error('浏览器存储空间不足：需要约 '
+                        + Math.ceil(needBytes / 1048576) + 'MB（含写入余量），仅剩 '
+                        + Math.floor(freeBytes / 1048576) + 'MB / 配额 '
+                        + Math.floor((est.quota || 0) / 1048576) + 'MB。\n'
+                        + '请删除一些已安装的应用或设备后重试'
+                        + (lowQuota ? '；当前配额过小，疑似无痕/隐私浏览模式。' : '。'));
+                    err.name = 'QuotaPreflightError';
+                    throw err;
+                }
+            }
+
+            stageName = '写入模拟器内存';
+            var chain = Promise.resolve();
+            files.forEach(function (f, i) {
+                chain = chain.then(function () {
+                    var label = '上传 ' + (i + 1) + '/' + files.length + '：' + f.name;
+                    setStatus('yellow', label);
+                    // Keep the original filename: Symbian path lookup is
+                    // case-insensitive on the emulator side.
+                    return EKA2L1.writeFileToVFS(f, fsDir + f.name, function (done, total) {
+                        if (total > 4 * 1048576) {
+                            setStatus('yellow', label + ' ' + Math.floor(done * 100 / total) + '%');
+                        }
+                    }).then(function (p) { writtenPaths.push(p); });
+                });
+            });
+            return chain;
+        }).then(function () {
             stageName = '写入浏览器存储';
             setStatus('yellow', '写入浏览器存储…');
-            // Persist just the uploaded files: a full-mount syncfs walks and
-            // reconciles the whole device tree, which is slow and has been
-            // seen OOM-killing the tab on iOS Safari for large uploads.
-            if (EKA2L1.savePaths) {
-                return EKA2L1.savePaths(writtenPaths, function (done, total, bytes) {
-                    setStatus('yellow', '写入浏览器存储… ' + Math.floor(bytes / 1048576) + 'MB');
-                }).catch(function (e) {
-                    console.warn('[EKA2L1] savePaths failed, falling back to full syncfs:', e);
-                    return EKA2L1.save();
-                });
+            // Persist just the uploaded files. A full-mount syncfs reconciles the
+            // whole device tree (300MB+), which is exactly what OOM-kills the tab
+            // for big uploads - so on failure we report it, NOT fall back to that
+            // heavier path (which would only fail harder). The bytes are already
+            // in MEMFS, so a later autosave still has a chance to persist them.
+            if (!EKA2L1.savePaths) {
+                return EKA2L1.save();
             }
-            return EKA2L1.save();
+            return EKA2L1.savePaths(writtenPaths, function (done, total, bytes) {
+                setStatus('yellow', '写入浏览器存储… ' + Math.floor(bytes / 1048576) + 'MB');
+            });
         }).then(function () {
             setStatus('green', '就绪');
             var hint = (guest.toLowerCase().indexOf('n-gage') !== -1)
                 ? '。N-Gage 游戏需重新进入游戏页，在「Games」应用中完成安装'
                 : '';
-            EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + Math.ceil(totalBytes / 1048576) + 'MB）到 ' + guest + hint, 5000);
+            EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + totalMB + 'MB）到 ' + guest + hint, 5000);
         }).catch(function (err) {
             console.error('[EKA2L1] upload failed:', err);
             setStatus('red', '上传失败');
             var detail = (err && err.name ? err.name + ': ' : '') + ((err && err.message) || err);
+            if (err && (err.name === 'QuotaExceededError' || /quota/i.test(detail))) {
+                detail = '浏览器存储空间不足（' + totalMB + 'MB 写入超出配额）。\n'
+                    + '请删除一些已安装的应用或设备后重试。\n原始错误：' + detail;
+            }
             showError('文件上传失败（阶段：' + stageName + '）：\n' + detail);
         });
     });
