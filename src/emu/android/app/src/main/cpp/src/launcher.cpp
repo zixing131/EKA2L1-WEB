@@ -446,27 +446,27 @@ namespace eka2l1::android {
 
         kern->lock();
         alserv->launch_app(*reg, cmdline, nullptr, [&](kernel::process *pr) {
-            // The launched Symbian app's process has exited. This fires on a normal
-            // exit as well as on a guest-side panic (e.g. E32USER-CBase when a game
-            // sends an SMS through the still-stubbed SendAs service).
+            // The launched Symbian app's process has exited. On Android the emulator
+            // runs one app per process lifecycle, so we tear the whole process down
+            // and let MainActivity relaunch into the app list. Skipping this (an
+            // earlier attempt) left the EmulatorActivity up over a dead emulator =
+            // black screen on a normal exit, so the kill must always happen.
             //
-            // Previously we called Emulator.exitInstance() ->
-            // Process.killProcess(myPid()), tearing down the whole Android process.
-            // That is exactly the "闪退" the user sees: one app exiting kills the
-            // entire emulator. The WASM frontend (web/src/main.cpp wasm_launch_app)
-            // simply logs the exit and lets the emulator keep running, which is why
-            // the web build "carries on" instead of crashing. Mirror that here: log
-            // the exit reason and return, leaving the emulated device running so the
-            // user falls back to the shell / app list and can continue.
-            if (!pr) {
+            // The exit info is logged first so a guest-side panic (exit_type=2,
+            // e.g. E32USER-CBase) is visible in logcat instead of a silent close.
+            if (pr) {
+                LOG_WARN(eka2l1::FRONTEND_CMDLINE,
+                    "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
+                    pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
+                    eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
+            } else {
                 LOG_WARN(eka2l1::FRONTEND_CMDLINE, "Launched app exited with null process handle");
-                return;
             }
 
-            LOG_WARN(eka2l1::FRONTEND_CMDLINE,
-                "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
-                pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
-                eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
+            JNIEnv *env = common::jni::environment();
+            jclass clazz = common::jni::find_class("com/github/eka2l1/emu/Emulator");
+            jmethodID exit_method = env->GetStaticMethodID(clazz, "exitInstance", "()V");
+            env->CallStaticVoidMethod(clazz, exit_method);
         });
 
         kern->unlock();
