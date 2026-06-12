@@ -219,7 +219,13 @@ namespace eka2l1 {
                 return;
             }
 
-            if (entry_buf + entry_no_name_size + common::align(common::utf8_to_ucs2(info->name).length() * 2, 4) + 4 > entry_buf_end) {
+            // The name length in the packed stream is the UCS-2 character
+            // count: info->name is UTF-8, where multibyte characters (CJK
+            // file names) made the write stride larger than the descriptor
+            // length the client advances by, desyncing every following entry.
+            const std::size_t name_bytes = common::utf8_to_ucs2(info->name).length() * 2;
+
+            if (entry_buf + entry_no_name_size + common::align(name_bytes, 4) + 4 > entry_buf_end) {
                 break;
             }
 
@@ -229,8 +235,8 @@ namespace eka2l1 {
             memcpy(entry_buf, &entry, entry_write_size);
             entry_buf += entry_write_size;
 
-            memcpy(entry_buf, &entry.name.data[0], info->name.length() * 2);
-            entry_buf += common::align(info->name.length() * 2, 4);
+            memcpy(entry_buf, &entry.name.data[0], name_bytes);
+            entry_buf += common::align(name_bytes, 4);
 
             if (should_support_64bit_size) {
                 // Epoc10 uses two reserved bytes

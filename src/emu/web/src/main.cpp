@@ -86,6 +86,7 @@
 #include <services/window/window.h>
 #include <services/window/screen.h>
 #include <services/window/keys.h>
+#include <services/window/classes/wingroup.h>
 #include <services/init.h>
 
 // ============================================================================
@@ -2122,6 +2123,45 @@ void wasm_debug_dump() {
             pc, pc_module.c_str(), pc_offset, lr, sp,
             thr->wait_obj ? thr->wait_obj->name().c_str() : "");
     }
+
+    // Window-server focus: a "frozen" app with a healthy event loop usually
+    // means key events route to whatever window group really holds focus.
+    if (g_state.winserv) {
+        epoc::screen *scr = g_state.winserv->get_screens();
+        while (scr) {
+            std::string focus_name = "<none>";
+            std::string focus_proc = "?";
+            if (scr->focus) {
+                focus_name = common::ucs2_to_utf8(scr->focus->name);
+                if (scr->focus->client && scr->focus->client->get_client()) {
+                    focus_proc = scr->focus->client->get_client()->name();
+                }
+            }
+            std::printf("[dump] screen %d focus-group='%s' owner-thread='%s'\n", scr->number,
+                focus_name.c_str(), focus_proc.c_str());
+            scr = scr->next;
+        }
+    }
+
+    // In-flight (never completed) IPC: the usual culprit when a guest thread
+    // hangs forever in User::WaitForRequest. Disconnect messages (type 0) of
+    // already-closed sessions linger by design - skip them.
+    kern->for_each_inflight_ipc_message([](eka2l1::ipc_msg *msg) {
+        if (msg->type == eka2l1::ipc_message_type_disconnect) {
+            return;
+        }
+
+        eka2l1::service::server *target = msg->msg_session ? msg->msg_session->get_server() : nullptr;
+        const bool queued = !msg->delivered_msg_link.alone();
+        std::printf("[dump] inflight-ipc server='%s' session='%s' func=0x%X type=%d status=%d queued=%d sender='%s'\n",
+            target ? target->name().c_str() : "?",
+            msg->msg_session ? msg->msg_session->name().c_str() : "?",
+            msg->function,
+            static_cast<int>(msg->type),
+            static_cast<int>(msg->msg_status),
+            queued ? 1 : 0,
+            msg->own_thr ? msg->own_thr->name().c_str() : "?");
+    });
 
     std::printf("[dump] =====================================================\n");
     std::fflush(stdout);

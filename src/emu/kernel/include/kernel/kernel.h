@@ -592,6 +592,27 @@ namespace eka2l1 {
             return codesegs_;
         }
 
+        /**
+         * \brief Walk the IPC message pool and hand every in-flight (delivered or
+         *        accepted, not yet completed) message to the callback.
+         *
+         * Debug aid: a guest thread stuck forever in User::WaitForRequest usually
+         * means a server received a message and never completed it - this names
+         * the server, opcode and sender.
+         */
+        template <typename F>
+        void for_each_inflight_ipc_message(F callback) {
+            for (auto &msg : msgs_) {
+                if (!msg || msg->is_free()) {
+                    continue;
+                }
+
+                if ((msg->msg_status == ipc_message_status::delivered) || (msg->msg_status == ipc_message_status::accepted)) {
+                    callback(msg.get());
+                }
+            }
+        }
+
         /*! \brief Get kernel object by handle
         */
         template <typename T>
