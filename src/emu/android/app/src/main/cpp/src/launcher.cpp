@@ -28,9 +28,13 @@
 
 #include <common/fileutils.h>
 #include <common/android/jniutils.h>
+#include <common/crypt.h>
 #include <common/cvt.h>
 #include <common/language.h>
 #include <common/path.h>
+
+#include <algorithm>
+#include <cstring>
 #include <common/pystr.h>
 #include <common/fileutils.h>
 #include <loader/mif.h>
@@ -156,6 +160,75 @@ namespace eka2l1::android {
         return lunasvg::Document::loadFromData(svg_text);
     }
 
+    // lunasvg 2.3.8 has no <image> element, so SVG icons that are merely a wrapper
+    // around an embedded raster bitmap (a data: URI base64 payload - common for
+    // PyS60 / 7Days style icons) render completely blank. Detect that case and
+    // decode the bitmap ourselves with stb_image, returning premultiplied RGBA
+    // ready to memcpy into an ARGB_8888 Android bitmap. The browser-backed WASM
+    // frontend renders <image> natively, which is why those icons only break here.
+    static bool decode_embedded_svg_image(const std::string &svg_path,
+        std::vector<std::uint8_t> &out_rgba, int &out_w, int &out_h) {
+        eka2l1::common::ro_std_file_stream in(svg_path, true);
+        if (!in.valid() || (in.size() == 0)) {
+            return false;
+        }
+
+        std::string svg(static_cast<std::size_t>(in.size()), '\0');
+        in.read(svg.data(), svg.size());
+
+        const std::size_t img_tag = svg.find("<image");
+        if (img_tag == std::string::npos) {
+            return false;
+        }
+        std::size_t b64 = svg.find("base64,", img_tag);
+        if (b64 == std::string::npos) {
+            return false;
+        }
+        b64 += 7; // strlen("base64,")
+        const std::size_t b64_end = svg.find_first_of("\"'", b64);
+        if (b64_end == std::string::npos) {
+            return false;
+        }
+
+        std::string encoded = svg.substr(b64, b64_end - b64);
+        encoded.erase(std::remove_if(encoded.begin(), encoded.end(),
+                          [](char c) { return (c == '\n') || (c == '\r') || (c == ' ') || (c == '\t'); }),
+            encoded.end());
+        if ((encoded.size() < 4) || (encoded.size() % 4 != 0)) {
+            return false;
+        }
+
+        const std::size_t decoded_size = eka2l1::crypt::base64_decode(
+            reinterpret_cast<const std::uint8_t *>(encoded.data()), encoded.size(), nullptr, 0);
+        if (decoded_size == 0) {
+            return false;
+        }
+
+        std::vector<std::uint8_t> decoded(decoded_size);
+        eka2l1::crypt::base64_decode(reinterpret_cast<const std::uint8_t *>(encoded.data()),
+            encoded.size(), reinterpret_cast<char *>(decoded.data()), decoded.size());
+
+        int comp = 0;
+        stbi_uc *pixels = stbi_load_from_memory(decoded.data(), static_cast<int>(decoded.size()),
+            &out_w, &out_h, &comp, 4);
+        if (!pixels) {
+            return false;
+        }
+
+        const std::size_t pixel_count = static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h);
+        out_rgba.resize(pixel_count * 4);
+        for (std::size_t i = 0; i < pixel_count; i++) {
+            const std::uint32_t a = pixels[i * 4 + 3];
+            out_rgba[i * 4 + 0] = static_cast<std::uint8_t>(pixels[i * 4 + 0] * a / 255);
+            out_rgba[i * 4 + 1] = static_cast<std::uint8_t>(pixels[i * 4 + 1] * a / 255);
+            out_rgba[i * 4 + 2] = static_cast<std::uint8_t>(pixels[i * 4 + 2] * a / 255);
+            out_rgba[i * 4 + 3] = static_cast<std::uint8_t>(a);
+        }
+
+        stbi_image_free(pixels);
+        return true;
+    }
+
     jobjectArray launcher::get_app_icon(JNIEnv *env, std::uint32_t uid) {
         apa_app_registry *reg = alserv->get_registration(uid);
         if (!reg) {
@@ -236,6 +309,25 @@ namespace eka2l1::android {
                     }
                 }
                 
+                // lunasvg can't render embedded raster <image>; if the converted
+                // SVG is just a base64 bitmap wrapper, decode and blit it directly.
+                {
+                    std::vector<std::uint8_t> embedded_rgba;
+                    int embedded_w = 0;
+                    int embedded_h = 0;
+                    if (decode_embedded_svg_image(cached_path, embedded_rgba, embedded_w, embedded_h)) {
+                        jobject source_bitmap = make_new_bitmap(env, embedded_w, embedded_h);
+                        void *data_to_write = nullptr;
+                        if (AndroidBitmap_lockPixels(env, source_bitmap, &data_to_write) >= 0) {
+                            std::memcpy(data_to_write, embedded_rgba.data(), embedded_rgba.size());
+                            AndroidBitmap_unlockPixels(env, source_bitmap);
+                            env->SetObjectArrayElement(jicons, 0, source_bitmap);
+                            return jicons;
+                        }
+                        env->DeleteLocalRef(source_bitmap);
+                    }
+                }
+
                 if (document) {
                     std::uint32_t width = document->width();
                     std::uint32_t height = document->height();
