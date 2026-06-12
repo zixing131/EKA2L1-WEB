@@ -115,6 +115,44 @@ namespace eka2l1::android {
         return newBitmap;
     }
 
+    // Symbian-era SVGs (SVG Tiny / 2000-03 DTD) routinely omit the xmlns
+    // declarations. lunasvg parses strictly enough that a missing default
+    // namespace renders nothing, and a missing xlink prefix (used by embedded
+    // <image> bitmaps, e.g. PyS60 / 7Days app icons) fails outright - the icon
+    // shows up blank. Read the converted SVG back, patch the declarations in, and
+    // load from the fixed string. Mirrors the WASM frontend fix in
+    // web/src/main.cpp (wasm_get_app_icon).
+    static std::unique_ptr<lunasvg::Document> load_svg_doc_with_ns_fix(const std::string &path) {
+        eka2l1::common::ro_std_file_stream svg_in(path, true);
+        if (!svg_in.valid() || (svg_in.size() == 0)) {
+            return nullptr;
+        }
+
+        std::string svg_text(static_cast<std::size_t>(svg_in.size()), '\0');
+        svg_in.read(svg_text.data(), svg_text.size());
+
+        const std::size_t tag_pos = svg_text.find("<svg");
+        if (tag_pos != std::string::npos) {
+            const std::size_t tag_end = svg_text.find('>', tag_pos);
+            const std::string head = svg_text.substr(
+                tag_pos, (tag_end == std::string::npos) ? std::string::npos : (tag_end - tag_pos));
+
+            std::string inject;
+            if (head.find("xmlns=") == std::string::npos) {
+                inject += " xmlns=\"http://www.w3.org/2000/svg\"";
+            }
+            if ((svg_text.find("xlink:") != std::string::npos)
+                && (head.find("xmlns:xlink=") == std::string::npos)) {
+                inject += " xmlns:xlink=\"http://www.w3.org/1999/xlink\"";
+            }
+            if (!inject.empty()) {
+                svg_text.insert(tag_pos + 4, inject);
+            }
+        }
+
+        return lunasvg::Document::loadFromData(svg_text);
+    }
+
     jobjectArray launcher::get_app_icon(JNIEnv *env, std::uint32_t uid) {
         apa_app_registry *reg = alserv->get_registration(uid);
         if (!reg) {
@@ -143,7 +181,7 @@ namespace eka2l1::android {
 
                 if (eka2l1::common::exists(cached_path)) {
                     if (eka2l1::common::get_last_modifiy_since_ad(eka2l1::common::utf8_to_ucs2(cached_path)) >= mif_last_modified) {
-                        document = lunasvg::Document::loadFromFile(cached_path.c_str());
+                        document = load_svg_doc_with_ns_fix(cached_path);
                     }
                 }
                 
@@ -176,14 +214,14 @@ namespace eka2l1::android {
                                 }
 
                                 outfile_stream.reset();
-                                document = lunasvg::Document::loadFromFile(cached_path.c_str());
+                                document = load_svg_doc_with_ns_fix(cached_path);
                             } else {
                                 inside_stream = eka2l1::common::ro_buf_stream(data.data() + sizeof(eka2l1::loader::mif_icon_header),
                                                                               data.size() - sizeof(eka2l1::loader::mif_icon_header));
 
                                 if (eka2l1::loader::convert_nvg_to_svg(inside_stream, *outfile_stream, errors_nvg)) {
                                     outfile_stream.reset();
-                                    document = lunasvg::Document::loadFromFile(cached_path.c_str());
+                                    document = load_svg_doc_with_ns_fix(cached_path);
                                 } else  {
                                     LOG_ERROR(eka2l1::FRONTEND_UI, "Icon for app {} can't be decoded!", header.type, app_name);
                                     outfile_stream.reset();
