@@ -540,3 +540,37 @@ update_bitmap 层）：
 3. **指纹叠加的正确方向是找"合法内容不可能、目标内容必然"的正交特征**：alpha
    字节恒定性正交于 16 位翻倍性，两者 AND 后误判类（恒定 alpha 的品红帧）与命中类
    （杂乱 alpha 的真 565 帧）完全分离。
+
+---
+
+## 第 32 轮（2026-06-12，commit 28672e0eb）：上传文件 guest 不可见（大小写）
+
+### 错误 25：大小写敏感宿主上的小写映射 miss——"上传成功但 X-plore 看不到"
+
+**现象（用户描述精准）** 大文件上传到 IndexedDB 成功、刷新后宿主侧 FS.stat 正常，
+但 X-plore 列目录看不到。
+
+**定位** 新增 `wasm_ls`（经模拟器 io_system 列目录）+ dev-test `?lsdiff` 双侧对比：
+JS `FS.readdir` 能看到 `Symbian-阿凡达-127.32 MB.sisx`（NFC、尺寸正确），模拟器
+迭代器漏掉它。**根因不是 CJK 不是大小，是文件名里的大写字母**：
+[vfs.cpp](src/emu/vfs/src/vfs.cpp) `get_real_physical_path` 在大小写敏感宿主上把
+guest 路径全转小写映射物理路径（设备树约定全小写落盘），而上传前端保留原始文件名
+（含大写 S/MB）写入 MEMFS → 目录迭代器 readdir 拿到名字后按虚拟路径
+`get_entry_info` 重解析 → 小写路径 miss → **条目被静默丢弃**（[vfs.cpp
+physical_directory::get_next_entry](src/emu/vfs/src/vfs.cpp) 的 continue），open 同理。
+全小写名/纯中文名不受影响 → "小文件能看到、大文件看不到"的错觉（大游戏文件命名
+惯带大写）。
+
+**修复** ① vfs：小写映射不存在时在父目录做最终分量大小写不敏感救援（仅非 ROM 盘，
+ROM 全小写免探测）→ 已持久化的旧混合大小写文件立即恢复可见可读；② 前端上传
+`toLowerCase` 文件名。验证：模拟器 [ls] 与 X-plore 均列出该文件且排序正确；
+管家/X-plore 冒烟无回归。
+
+### 教训
+
+1. **"A 侧有、B 侧没有"的失踪文件，先做双侧 listing diff**（宿主 FS vs guest io），
+   一条命令分离问题域——wasm_ls + ?lsdiff 现已入永久装备。
+2. **静默 continue 丢弃迭代条目是隐形错误放大器**：get_entry_info 失败的目录条目
+   直接消失，没有任何日志。同类模式（解析失败→跳过）值得全库审视。
+3. **跨边界写入必须遵守对侧的命名约定**：JS 侧写 MEMFS 绕过了模拟器的"全小写"
+   约定，两个世界各自正确、组合即 bug。
