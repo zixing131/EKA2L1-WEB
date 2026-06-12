@@ -34,6 +34,15 @@ endif()
 # Expose the id to boot.js (locateFile appends it to .wasm/.data requests).
 file(WRITE "${STAGE_DIR}/js/build_id.js" "window.EKA2L1_BUILD_ID='${BUILD_ID}';\n")
 
+# Stamp sw.js: replace BUILD_ID_PLACEHOLDER so the service worker uses a
+# versioned cache name that matches the current build.  Changing any source
+# file automatically rotates the cache and forces a fresh SW install.
+if(EXISTS "${STAGE_DIR}/sw.js")
+    file(READ "${STAGE_DIR}/sw.js" SW_CONTENT)
+    string(REPLACE "BUILD_ID_PLACEHOLDER" "${BUILD_ID}" SW_CONTENT "${SW_CONTENT}")
+    file(WRITE "${STAGE_DIR}/sw.js" "${SW_CONTENT}")
+endif()
+
 # Stamp every page that loads the emulator scripts.
 file(GLOB STAMP_PAGES "${STAGE_DIR}/*.html")
 foreach(page ${STAMP_PAGES})
@@ -44,6 +53,7 @@ foreach(page ${STAMP_PAGES})
     string(REPLACE "src=\"js/run.js\"" "src=\"js/run.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "src=\"js/build_id.js\"" "src=\"js/build_id.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "href=\"css/app.css\"" "href=\"css/app.css?v=${BUILD_ID}\"" content "${content}")
+    string(REPLACE "href=\"manifest.json\"" "href=\"manifest.json?v=${BUILD_ID}\"" content "${content}")
     file(WRITE "${page}" "${content}")
 endforeach()
 

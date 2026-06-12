@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Dark background, no rounded rect — browser clips per icon shape -->
+  <rect width="512" height="512" fill="#0d0d0f"/>
+
+  <!-- Phone body -->
+  <rect x="148" y="60" width="216" height="380" rx="32" fill="none" stroke="#e94560" stroke-width="18"/>
+
+  <!-- Screen bezel -->
+  <rect x="172" y="100" width="168" height="234" rx="8" fill="#e94560" opacity="0.12"/>
+  <rect x="172" y="100" width="168" height="234" rx="8" fill="none" stroke="#e94560" stroke-width="2" opacity="0.6"/>
+
+  <!-- Play triangle on screen -->
+  <polygon points="230,174 230,266 320,220" fill="#e94560" opacity="0.9"/>
+
+  <!-- Home button -->
+  <circle cx="256" cy="384" r="20" fill="none" stroke="#e94560" stroke-width="14"/>
+
+  <!-- Speaker grill dots -->
+  <circle cx="236" cy="78" r="5" fill="#e94560" opacity="0.5"/>
+  <circle cx="256" cy="78" r="5" fill="#e94560" opacity="0.5"/>
+  <circle cx="276" cy="78" r="5" fill="#e94560" opacity="0.5"/>
+</svg>

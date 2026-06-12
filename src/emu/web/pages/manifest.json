@@ -1,0 +1,64 @@
+{
+    "name": "EKA2L1 — Symbian 模拟器",
+    "short_name": "EKA2L1",
+    "description": "在浏览器中运行 Symbian OS 游戏与应用的 WebAssembly 模拟器",
+    "start_url": "./index.html",
+    "scope": "./",
+    "display": "standalone",
+    "orientation": "any",
+    "background_color": "#0d0d0f",
+    "theme_color": "#0d0d0f",
+    "lang": "zh-CN",
+    "categories": ["games", "entertainment", "utilities"],
+    "icons": [
+        {
+            "src": "icons/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        },
+        {
+            "src": "icons/icon-maskable.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "maskable"
+        },
+        {
+            "src": "icons/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "icons/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ],
+    "screenshots": [
+        {
+            "src": "icons/screenshot-wide.png",
+            "sizes": "1280x800",
+            "type": "image/png",
+            "form_factor": "wide",
+            "label": "EKA2L1 游戏库"
+        },
+        {
+            "src": "icons/screenshot-narrow.png",
+            "sizes": "390x844",
+            "type": "image/png",
+            "form_factor": "narrow",
+            "label": "EKA2L1 游戏库（移动端）"
+        }
+    ],
+    "shortcuts": [
+        {
+            "name": "游戏库",
+            "url": "./index.html",
+            "description": "打开游戏库",
+            "icons": [{ "src": "icons/icon.svg", "sizes": "any" }]
+        }
+    ],
+    "prefer_related_applications": false
+}
