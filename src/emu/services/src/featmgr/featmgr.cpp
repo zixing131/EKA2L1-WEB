@@ -54,12 +54,6 @@ namespace eka2l1 {
         feature_id_thai = 1081,
         feature_id_chinese = 1096,
         feature_id_flash_lite_viewer = 1145,
-        // Empirically required by 7Days (and likely other apps): queried while
-        // building the in-game map / Options view. Default-denying it leads to an
-        // E32USER-CBase 21 (array index out of range) panic — same default-deny
-        // failure class as feature_id_app_menu_show_images above. Exact KFeatureId
-        // name unconfirmed; named after its observed Avkon menu-gating role.
-        feature_id_avkon_extended_menu_gate = 1638,
         feature_id_pen_calibration = 1658,
         feature_id_tactile_feedback = 1718
     };
@@ -79,12 +73,6 @@ namespace eka2l1 {
         // built-in Calculator (and apps with the same pattern) panic with
         // EIKCOCTL 8 when opening their Options menu.
         enable_features.push_back(feature_id_app_menu_show_images);
-        // Same failure class: 7Days queries feature 1638 when opening its in-game
-        // map / Options view; default-denying it sends the app down a menu/array
-        // path that indexes out of range and panics E32USER-CBase 21 ("array out
-        // of range"). Empirically confirmed via the feature-query probe (a 1638->0
-        // reply immediately precedes the panic). Blast radius is this one id.
-        enable_features.push_back(feature_id_avkon_extended_menu_gate);
 
         // 2. Are we welcoming SVG? Check for OpenVG, cause it should be there if this feature is available
         if (sys->get_io_system()->exist(u"z:\\sys\\bin\\libopenvg.dll")) {
