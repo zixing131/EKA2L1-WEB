@@ -70,6 +70,16 @@ html {
     scrollbar-gutter: stable;
 }
 
+/* Clip any stray horizontal overflow. On iOS Safari a document that is even a
+   hair wider than the viewport makes position:fixed elements size to the
+   document width instead of the viewport, which pushed the bottom-nav's 设置
+   item off-centre on the (taller, scrollable) 设置 tab while 游戏 stayed
+   centred. Clipping horizontal overflow keeps the document == viewport width so
+   the fixed nav stays symmetric across tabs. */
+html, body {
+    overflow-x: hidden;
+}
+
 button { font-family: inherit; }
 
 /* ---------------------------------------------------------------- top bar */
@@ -481,6 +491,11 @@ button { font-family: inherit; }
     .top-app-bar, .page-layout { margin-left: 88px; }
     .page-layout { max-width: 760px; padding-bottom: 40px; }
     .fab { bottom: 28px; }
+
+    /* Clear the fixed left rail so the boot-error / copyright-refusal banner
+       isn't hidden under it (its left text was being cut off). !important beats
+       the element's inline margin shorthand. */
+    #bootError { margin-left: 88px !important; }
 }
 
 /* ------------------------------------------------------------ action sheet */

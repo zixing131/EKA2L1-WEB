@@ -122,9 +122,11 @@ namespace eka2l1::web {
         int window_width = 360;
         int window_height = 640;
 
-        // FPS tracking
+        // FPS tracking. current_fps is the guest's actual render rate (screen
+        // redraw callbacks per second), sampled against last_redraw_count — not
+        // the host RAF present rate.
         Uint32 last_fps_time = 0;
-        int frame_count = 0;
+        std::uint64_t last_redraw_count = 0;
         int current_fps = 0;
 
         // Build-info watermark: an RGBA texture rendered once from the C++
@@ -674,9 +676,10 @@ static void ensure_watermark_texture() {
     std::vector<std::uint8_t> rgba;
     int w = 0;
     int h = 0;
-    // scale 2 keeps the 8px font legible when the canvas is scaled up.
+    // scale 1 (small): three short lines (Build/Commit/Channel) that fit the
+    // bottom-right corner even on narrow phone screens without clipping.
     if (!eka2l1::web::protection::render_text_rgba(
-            eka2l1::web::protection::watermark_text(), 2, rgba, w, h)) {
+            eka2l1::web::protection::watermark_text(), 1, rgba, w, h)) {
         return;
     }
 
@@ -1071,12 +1074,18 @@ static void main_loop() {
     // Swap buffers
     SDL_GL_SwapWindow(g_window);
 
-    // FPS counting
-    g_state.frame_count++;
+    // FPS counting: report the guest's actual render rate (screen-redraw
+    // callbacks = frames the window server really composed) rather than the
+    // host requestAnimationFrame present rate, which is capped at 60 and
+    // unrelated to how fast the running app/game actually redraws. Normalised
+    // by the real elapsed time so a slightly-over-1000ms window stays accurate.
     Uint32 now = SDL_GetTicks();
-    if (now - g_state.last_fps_time >= 1000) {
-        g_state.current_fps = g_state.frame_count;
-        g_state.frame_count = 0;
+    Uint32 elapsed = now - g_state.last_fps_time;
+    if (elapsed >= 1000) {
+        const std::uint64_t redraws = s_redraw_cb_count.load();
+        g_state.current_fps = static_cast<int>(
+            (redraws - g_state.last_redraw_count) * 1000ull / elapsed);
+        g_state.last_redraw_count = redraws;
         g_state.last_fps_time = now;
 
         // Update window title with FPS

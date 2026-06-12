@@ -77,6 +77,18 @@ def main():
     if wasm.find(MAGIC, off + 1) >= 0:
         sys.exit("gen_integrity: integrity magic found more than once")
 
+    table_size = TABLE_HEADER + MAX_ENTRIES * ENTRY_SIZE  # 472
+    # The whole table must be materialized in the binary as the 0xCC filler
+    # (see protection.cpp). If wasm-ld trimmed/split the zero region, the bytes
+    # past the magic belong to another data segment and patching them would
+    # corrupt the module. Verify the filler is present before touching anything.
+    region = wasm[off:off + table_size]
+    entries_filler = region[TABLE_HEADER:]   # name/sha area, must be all 0xCC
+    if len(entries_filler) != MAX_ENTRIES * ENTRY_SIZE or any(b != 0xCC for b in entries_filler):
+        sys.exit("gen_integrity: integrity table not materialized as 0xCC filler "
+                 "(wasm-ld trimmed the zero region). The patch would corrupt the "
+                 "wasm. Ensure protection.cpp g_integ uses a non-zero initializer.")
+
     count = len(digests)
     if count > MAX_ENTRIES:
         sys.exit("gen_integrity: too many assets (%d > %d)" % (count, MAX_ENTRIES))

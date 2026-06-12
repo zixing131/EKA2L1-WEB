@@ -81,7 +81,12 @@ function injectCrossOriginHeaders(response) {
 /** 将网络响应存入缓存（仅成功响应）*/
 function storeInCache(request, response) {
     if (!response || !response.ok) return;
-    caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+    // Clone SYNCHRONOUSLY: the caller consumes response.body right after this
+    // returns (injectCrossOriginHeaders does `new Response(response.body,…)`),
+    // so cloning inside the async caches.open().then() would fail with
+    // "Response body is already used".
+    const copy = response.clone();
+    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
 }
 
 // ─── 请求拦截 ─────────────────────────────────────────────────────────────────

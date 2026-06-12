@@ -80,13 +80,34 @@ namespace eka2l1::web::protection {
     static_assert(sizeof(integ_entry) == 56, "integ_entry must be padding-free");
     static_assert(sizeof(integ_table) == 24 + 8 * 56, "integ_table layout drift");
 
+    // CRITICAL: every byte of the table must be non-zero in the initializer.
+    // wasm-ld trims a data segment's trailing zeros (and splits large zero
+    // gaps) out of the binary, so a zero-initialized entries area is NOT
+    // materialized — gen_integrity.py would then patch bytes that belong to the
+    // next data segment, producing a module that fails to parse
+    // ("unknown init_expr opcode 0"). The 0xCC filler keeps the whole 472-byte
+    // blob contiguous and patchable; gen_integrity overwrites version/count and
+    // the used entries, unused bytes keep the filler.
+#define EKA2L1_PC8 '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC'
+#define EKA2L1_PC24 EKA2L1_PC8, EKA2L1_PC8, EKA2L1_PC8
+#define EKA2L1_PB8 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC
+#define EKA2L1_PB32 EKA2L1_PB8, EKA2L1_PB8, EKA2L1_PB8, EKA2L1_PB8
+#define EKA2L1_PENTRY { { EKA2L1_PC24 }, { EKA2L1_PB32 } }
+
     __attribute__((used)) volatile integ_table g_integ = {
         // 14 chars + NUL; gen_integrity.py searches for "EKA2L1INTEGTBL\0".
         { 'E', 'K', 'A', '2', 'L', '1', 'I', 'N', 'T', 'E', 'G', 'T', 'B', 'L', 0, 0 },
         1,
-        0,
-        {}
+        0xCCCCCCCCu, // count placeholder (gen_integrity sets the real count)
+        { EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY,
+          EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY }
     };
+
+#undef EKA2L1_PENTRY
+#undef EKA2L1_PB32
+#undef EKA2L1_PB8
+#undef EKA2L1_PC24
+#undef EKA2L1_PC8
 
     // ------------------------------------------------------------------------
     // Runtime protection state (release only).
@@ -140,8 +161,11 @@ namespace eka2l1::web::protection {
     }
 
     std::string watermark_text() {
-        return std::string("Build: ") + BUILD_TIMESTAMP + "  " + GIT_COMMIT_HASH +
-            "  [" + EKA2L1_BUILD_CHANNEL "]";
+        // Three short lines (Build / Commit / Channel) so it fits the corner on
+        // narrow screens instead of overflowing as one clipped line.
+        return std::string("Build: ") + BUILD_TIMESTAMP +
+            "\nCommit: " + GIT_COMMIT_HASH +
+            "\nChannel: " + EKA2L1_BUILD_CHANNEL;
     }
 
     bool is_blocked() {
@@ -266,37 +290,64 @@ namespace eka2l1::web::protection {
             return false;
         }
 
-        width = static_cast<int>(text.size()) * 8 * scale;
-        height = 8 * scale;
+        // Split on '\n' into lines; the texture is sized to the widest line and
+        // the line count so multi-line watermarks render in a tidy block.
+        std::vector<std::string> lines;
+        std::string cur;
+        for (char c : text) {
+            if (c == '\n') {
+                lines.push_back(cur);
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        lines.push_back(cur);
+
+        std::size_t max_len = 0;
+        for (const std::string &l : lines) {
+            max_len = std::max(max_len, l.size());
+        }
+        if (max_len == 0) {
+            return false;
+        }
+
+        width = static_cast<int>(max_len) * 8 * scale;
+        height = static_cast<int>(lines.size()) * 8 * scale;
         out.assign(static_cast<std::size_t>(width) * height * 4, 0);
 
         // Translucent white text; the caller blits this over the screen.
         const std::uint8_t alpha = 170;
 
-        for (std::size_t ci = 0; ci < text.size(); ci++) {
-            unsigned char ch = static_cast<unsigned char>(text[ci]);
-            if (ch < 0x20 || ch > 0x7F) {
-                ch = '?';
-            }
-            const std::uint8_t *glyph = k_font8x8[ch - 0x20];
-            const int char_x = static_cast<int>(ci) * 8 * scale;
+        for (std::size_t li = 0; li < lines.size(); li++) {
+            const std::string &line = lines[li];
+            const int line_y = static_cast<int>(li) * 8 * scale;
 
-            for (int row = 0; row < 8; row++) {
-                for (int col = 0; col < 8; col++) {
-                    if (!((glyph[row] >> col) & 1)) {
-                        continue;
-                    }
-                    // Expand the 1x1 source pixel to scale x scale.
-                    for (int sy = 0; sy < scale; sy++) {
-                        for (int sx = 0; sx < scale; sx++) {
-                            const int px = char_x + col * scale + sx;
-                            const int py = row * scale + sy;
-                            const std::size_t idx =
-                                (static_cast<std::size_t>(py) * width + px) * 4;
-                            out[idx + 0] = 255;
-                            out[idx + 1] = 255;
-                            out[idx + 2] = 255;
-                            out[idx + 3] = alpha;
+            for (std::size_t ci = 0; ci < line.size(); ci++) {
+                unsigned char ch = static_cast<unsigned char>(line[ci]);
+                if (ch < 0x20 || ch > 0x7F) {
+                    ch = '?';
+                }
+                const std::uint8_t *glyph = k_font8x8[ch - 0x20];
+                const int char_x = static_cast<int>(ci) * 8 * scale;
+
+                for (int row = 0; row < 8; row++) {
+                    for (int col = 0; col < 8; col++) {
+                        if (!((glyph[row] >> col) & 1)) {
+                            continue;
+                        }
+                        // Expand the 1x1 source pixel to scale x scale.
+                        for (int sy = 0; sy < scale; sy++) {
+                            for (int sx = 0; sx < scale; sx++) {
+                                const int px = char_x + col * scale + sx;
+                                const int py = line_y + row * scale + sy;
+                                const std::size_t idx =
+                                    (static_cast<std::size_t>(py) * width + px) * 4;
+                                out[idx + 0] = 255;
+                                out[idx + 1] = 255;
+                                out[idx + 2] = 255;
+                                out[idx + 3] = alpha;
+                            }
                         }
                     }
                 }
