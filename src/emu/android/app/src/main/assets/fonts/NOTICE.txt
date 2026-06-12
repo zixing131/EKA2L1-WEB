@@ -1,0 +1,12 @@
+DroidSansFallback.ttf
+
+Droid Sans Fallback (family "Droid Sans Fallback").
+A pure-outline (scalable) pan-CJK font with no embedded bitmap strikes,
+so FreeType always returns clean grayscale glyphs at any pixel size.
+
+Purpose in EKA2L1 web build: glyph-level fallback font so CJK text in
+Symbian apps renders even when the device ROM fonts lack those glyphs
+(e.g. western S60v5 firmware such as the Nokia 5320 ROM).
+
+License: Apache License 2.0 (part of the Android Open Source Project).
+See https://www.apache.org/licenses/LICENSE-2.0

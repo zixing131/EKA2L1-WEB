@@ -187,6 +187,11 @@ public class Emulator {
         boolean shouldUpdate = checkUpdate();
         updateFolder("resources", shouldUpdate);
         updateFolder("patch", shouldUpdate);
+        // Glyph-fallback fonts (CJK). The native fbs loads them from the host-side
+        // "fonts/" folder relative to the working dir (see fbs load_fallback_host_fonts).
+        // Without this, western-firmware ROMs that lack CJK glyphs render Chinese as
+        // empty boxes (e.g. X-plore). Mirrors how the WASM build preloads assets/fonts.
+        updateFolder("fonts", shouldUpdate);
         copyFolder("compat", shouldUpdate);
         copyFolder("scripts", shouldUpdate);
 
