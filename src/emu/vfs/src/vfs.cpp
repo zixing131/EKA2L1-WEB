@@ -706,7 +706,42 @@ namespace eka2l1 {
                 vert_path_no_root = common::lowercase_ucs2_string(vert_path_no_root);
             }
 
-            return eka2l1::add_path(map_path, vert_path_no_root);
+            std::u16string mapped = eka2l1::add_path(map_path, vert_path_no_root);
+
+            // On case-sensitive hosts guest paths map to all-lowercase physical
+            // names, but files written from outside the emulator (web uploads
+            // keep the picked file's original name) may carry upper-case
+            // letters - the lowercase mapping then misses and the file becomes
+            // invisible to the guest despite existing on the host. Rescue: when
+            // the mapped path doesn't exist, match the final component case-
+            // insensitively in its parent directory. ROM drives are staged by
+            // our own installer (always lowercase), so skip them - this also
+            // keeps the existence probe off the hot boot path.
+            if (!common::is_system_case_insensitive() && (drv.media_type != drive_media::rom)) {
+                std::string mapped_utf8 = common::ucs2_to_utf8(mapped);
+
+                if (!common::exists(mapped_utf8)) {
+                    const std::string parent_utf8 = eka2l1::file_directory(mapped_utf8);
+                    const std::string want = common::lowercase_string(eka2l1::filename(mapped_utf8));
+
+                    if (!want.empty() && !parent_utf8.empty() && common::exists(parent_utf8)) {
+                        auto rescue_iterator = common::make_directory_iterator(parent_utf8, "*");
+
+                        if (rescue_iterator && rescue_iterator->is_valid()) {
+                            common::dir_entry rescue_entry;
+
+                            while (rescue_iterator->next_entry(rescue_entry) == 0) {
+                                if (common::lowercase_string(rescue_entry.name) == want) {
+                                    mapped = common::utf8_to_ucs2(eka2l1::add_path(parent_utf8, rescue_entry.name));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return mapped;
         }
 
     public:

@@ -2220,6 +2220,42 @@ void wasm_dump_screen() {
 }
 
 /**
+ * Debug: list a guest directory through the emulator's io_system - the same
+ * iterator the file server serves RDir from. Diffing this against the JS-side
+ * FS listing separates "host filesystem has it" from "the guest can see it".
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_ls(const char *guest_path) {
+    if (!g_state.symsys || !guest_path) {
+        std::printf("[ls] system not created\n");
+        return;
+    }
+
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+    if (!io) {
+        std::printf("[ls] no io\n");
+        return;
+    }
+
+    const std::u16string path_u16 = eka2l1::common::utf8_to_ucs2(std::string(guest_path));
+    auto dir = io->open_dir(path_u16, {}, io_attrib_include_dir | io_attrib_include_file);
+
+    if (!dir) {
+        std::printf("[ls] open_dir failed for %s\n", guest_path);
+        return;
+    }
+
+    std::printf("[ls] %s:\n", guest_path);
+    while (auto entry = dir->get_next_entry()) {
+        std::printf("[ls]   %s %s size=%llu\n",
+            (entry->type == eka2l1::io_component_type::dir) ? "<dir>" : "     ",
+            entry->name.c_str(), static_cast<unsigned long long>(entry->size));
+    }
+    std::printf("[ls] end\n");
+    std::fflush(stdout);
+}
+
+/**
  * Get emulator state as a bitmask.
  * Bit 0: initialized
  * Bit 1: running
