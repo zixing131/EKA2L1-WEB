@@ -383,3 +383,63 @@ X-plore 英文界面+目录浏览 ✓。
    不一致就是本轮第一案。
 4. **cmap 不可信**：字体声称有字形 ≠ 字形是真的。渲染同一性（两字 bit 级相同）是
    廉价且零误报的占位字体判据。
+
+---
+
+## 第 29 轮（2026-06-12，commit 6c4d01dd9）：X-plore CJK 客户端字形乱码
+
+承接第 28 轮：管家（wserv 图集路径）已修，但 X-plore 中文菜单/盘符仍是满屏
+白点乱码。用户在浏览器把 X-plore 设成中文并保存到 IndexedDB 后复现。
+
+### 定位：服务端字形是对的，病在客户端消费
+
+加探针 dump U+6587(文) 的服务端原始字节（`0404C3FF04210B33...`），离线按
+Symbian 单色 RLE 解码 → **画出完美的「文」字**。即字形数据、RLE 编码、Droid
+回退全部正确。屏幕乱码 ⇒ 客户端 rasterize_glyph 路径消费错误。
+
+**两条渲染路径再次分野**：管家 CJK 走 wserv `get_glyph_atlas`（font_atlas，
+类型自洽，第 28 轮已修）；X-plore CJK 走**客户端 rasterize_glyph IPC**（app 自己
+把字形 blit 进离屏位图）。
+
+### 根因 1（决定性）：字形位图类型不匹配
+
+guest 创建 font 时把 `font.glyph_bitmap_type` 锁定为**绑定字体** adapter 的
+`get_output_bitmap_type()`——freetype/STB 都声明 `antialised_glyph_bitmap`(8bpp)。
+之后该 font 的每个字形都按此类型解码，**包括借自别的字体的回退字形**。但
+freetype `get_glyph_bitmap` 对 ppem≤15 小字形强制返回**单色 RLE**（第 24 轮为低
+色深离屏加的）→ guest 把单色 RLE 字节当 8bpp 读 = 白点乱码。
+
+- Latin 正常：绑定字体自渲染，类型自洽；只有 CJK 走回退才暴露不一致。
+- "S60SC 好换 Droid 坏"在客户端路径的解释：S60SC 内嵌点阵 FreeType 直接返回
+  1bpp，恰是 guest 期望的格式之一；纯轮廓 Droid 被强制 mono 后与 AA 期望冲突。
+
+**修**：`rasterize_glyph` 把绑定字体声明的输出类型（`font->of_info.adapter->
+get_output_bitmap_type()`）作为**请求**传入 `get_glyph_bitmap`；freetype 据此决定
+mono/AA——请求 AA 永不强制 mono，内嵌点阵字体遇 AA 请求则把 1bpp 展开成 8bpp。
+保证一个 font 的所有字形（含跨字体回退）类型一致。
+
+### 根因 2：度量宽误用设计值
+
+MONO/AA 两分支都把 `character_metric.width/height` 设为 `glyph->metrics`（设计
+bbox），而 RLE/8bpp 数据按 `bitmap.width/rows` 编码，轮廓字体二者差 ±1px →
+客户端按错误行宽解码再次错位。**修**：width/height 改用实际位图尺寸、bearing
+改用 `bitmap_left/top`，对齐 GDR 适配器（`metric.width = target_width`）的做法。
+（单独修根因 2 不够——视觉无变化，因为客户端实际用 rasterized_width；但保留此修
+是正确性必需，且对其他消费者有益。）
+
+### 验证
+
+X-plore 菜单/盘符中文全清晰（文件/查找/编辑/工具/退出、可用 1.0GB、选择/取消）；
+安全管家全界面、天地道中文对话、snakes 英文菜单均正常（英文更锐利=AA 渲染附带
+收益）。**X-plore 之前的"展开 CJK 文件名盘符卡 requestSema"遗留也未再现**（本轮
+设中文后菜单与盘符浏览均正常）。
+
+### 教训
+
+1. **字形 bug 先分离服务端产物与客户端呈现**：dump 字节离线解码，确认服务端对了
+   就别在服务端绕圈。本轮服务端 100% 正确，纯客户端消费 bug。
+2. **glyph_bitmap_type 是 per-font 契约**：guest 按绑定字体声明的单一类型解码所有
+   字形，回退字形必须服从同一类型——`get_output_bitmap_type()` 与 `get_glyph_bitmap()`
+   实际输出必须永远一致，跨字体回退尤其要强制对齐。
+3. **位图度量 width/height 必须是实际位图尺寸**，不是设计 bbox——任何按行宽解码
+   字形流的消费者都会因 ±1px 错位而碎。GDR 适配器是正确参照。
