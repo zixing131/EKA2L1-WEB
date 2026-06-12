@@ -286,7 +286,7 @@ namespace eka2l1::drivers {
             {
                 const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
                 const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
-                std::uint32_t nonzero = 0, pair_eq = 0;
+                std::uint32_t nonzero = 0, pair_eq = 0, alpha_odd = 0;
                 for (std::size_t i = 0; i < total; i += 5) {
                     const std::uint32_t v = slots[i];
                     if (!v || (v == 0xFFFFFFFFu)) {
@@ -303,15 +303,24 @@ namespace eka2l1::drivers {
                     if ((v >> 16) == (v & 0xFFFF)) {
                         pair_eq++;
                     }
+                    const std::uint32_t top = v >> 24;
+                    if ((top != 0) && (top != 0xFF)) {
+                        alpha_odd++;
+                    }
                 }
 
-                // +1 looks-565, -1 looks-32bpp, 0 inconclusive (blank/flat frame)
-                const int cls = (nonzero <= 1000) ? 0 : ((pair_eq * 20 >= nonzero) ? 1 : -1);
+                // +1 looks-565, -1 looks-32bpp, 0 inconclusive (blank/flat frame).
+                // Both fingerprints must hold: doubled 16-bit halves AND varying
+                // top bytes (a doubled 565 slot's top byte carries colour bits;
+                // legit X/ARGB content keeps it 00/FF - dark magenta 32bpp frames
+                // match the pair test alone and would flap the conversion).
+                const int cls = (nonzero <= 1000) ? 0
+                    : (((pair_eq * 20 >= nonzero) && (alpha_odd * 10 >= nonzero)) ? 1 : -1);
 
                 if (verdict >= 0) {
                     if (cls > 0) {
                         if (++verdict >= 2) {
-                            LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
+                            LOG_WARN(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
                             verdict = -1;
                         }
                     } else if (cls < 0) {
@@ -324,7 +333,7 @@ namespace eka2l1::drivers {
                     if (cls > 0) {
                         verdict = -1;
                     } else if ((cls < 0) && (--verdict <= -3)) {
-                        LOG_INFO(DRIVER_GRAPHICS, "Bitmap {}x{} RGB565 conversion disengaged (content looks 32bpp again)", dim.x, dim.y);
+                        LOG_WARN(DRIVER_GRAPHICS, "Bitmap {}x{} RGB565 conversion disengaged (content looks 32bpp again)", dim.x, dim.y);
                         verdict = 0;
                     }
                 }

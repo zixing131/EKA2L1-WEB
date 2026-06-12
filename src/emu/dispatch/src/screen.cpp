@@ -280,6 +280,7 @@ namespace eka2l1::dispatch {
 
         std::uint32_t nonzero = 0;
         std::uint32_t pair_eq = 0;
+        std::uint32_t alpha_odd = 0;
 
         for (std::size_t i = 0; i < total; i += 5) { // ~20% sample
             const std::uint32_t v = slots[i];
@@ -296,13 +297,27 @@ namespace eka2l1::dispatch {
             if ((v >> 16) == (v & 0xFFFF)) {
                 pair_eq++;
             }
+            const std::uint32_t top = v >> 24;
+            if ((top != 0) && (top != 0xFF)) {
+                alpha_odd++;
+            }
         }
 
         if (nonzero <= 1000) {
             return 0;
         }
 
-        return (pair_eq * 20 >= nonzero) ? 1 : -1; // >5%
+        // Two independent fingerprints must both hold for a 565 verdict:
+        // - pair_eq: doubled 16-bit halves (flat runs in 565 streams);
+        // - alpha_odd: the top byte of a doubled 565 slot carries red/green
+        //   colour bits, so it takes arbitrary values - while legit X/ARGB
+        //   frames keep it constant 00 or FF. Without this check, dark
+        //   magenta-ish 32bpp content (R==B, G=0, X=0 - e.g. Snakes' board
+        //   shadows) intermittently matched pair_eq alone and made the
+        //   conversion flap on and off (visible as transient corrupt frames).
+        const bool looks_565 = (pair_eq * 20 >= nonzero) && (alpha_odd * 10 >= nonzero); // >5% pairs, >10% odd alpha
+
+        return looks_565 ? 1 : -1;
     }
 
     BRIDGE_FUNC_DISPATCHER(void, update_screen, const std::uint32_t screen_number, const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
@@ -370,7 +385,7 @@ namespace eka2l1::dispatch {
                 if (verdict565 >= 0) {
                     if (cls565 > 0) {
                         if (++verdict565 >= 2) {
-                            LOG_INFO(HLE_DISPATCHER, "DSA content detected as RGB565 in a 32bpp chunk, converting on upload");
+                            LOG_WARN(HLE_DISPATCHER, "DSA content detected as RGB565 in a 32bpp chunk, converting on upload");
                             verdict565 = -1;
                         }
                     } else if (cls565 < 0) {
@@ -384,7 +399,7 @@ namespace eka2l1::dispatch {
                     if (cls565 > 0) {
                         verdict565 = -1;
                     } else if ((cls565 < 0) && (--verdict565 <= -3)) {
-                        LOG_INFO(HLE_DISPATCHER, "DSA RGB565 conversion disengaged (content looks 32bpp again)");
+                        LOG_WARN(HLE_DISPATCHER, "DSA RGB565 conversion disengaged (content looks 32bpp again)");
                         verdict565 = 0;
                     }
                 }
