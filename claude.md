@@ -574,3 +574,90 @@ ROM 全小写免探测）→ 已持久化的旧混合大小写文件立即恢复
    直接消失，没有任何日志。同类模式（解析失败→跳过）值得全库审视。
 3. **跨边界写入必须遵守对侧的命名约定**：JS 侧写 MEMFS 绕过了模拟器的"全小写"
    约定，两个世界各自正确、组合即 bug。
+
+---
+
+## 第 33 轮（2026-06-12）：iPhone 13 (4GB) 运行期 OOM —— chunk 保留全段变脏页
+
+**现象（用户实测）** 4GB 的 iPhone 13 能装 ROM 和软件，运行游戏时提示 OOM。
+线上部署即最新构建（hash 与本地一致），即 OOM 发生在已做过流式安装优化的版本上。
+
+### 量化装备（先测后砍）
+
+- `wasm_mem_stats` 导出：wasm 堆大小 / mallinfo 在用 / 空闲（[main.cpp](src/emu/web/src/main.cpp)）。
+- dev-test `memStats(tag)`：各阶段打印 wasmHeap/inUse/free/memfs/jsHeap；
+  `?rmbig=<MB>` 删除盘内超大测试残留并全量 save 回收 IndexedDB。
+- `/tmp/eka2l1-test/rss-sample.sh`：采样 Chrome 渲染进程峰值 RSS。
+- 临时把 chunk 创建日志升 WARN 跑普查：**启动管家共创建 61 个 chunk、保留 337MB**
+  —— local#×23=128MB、FbsLargeChunk=96MB、ROM=67MB、$HEAP×6=42MB。
+
+### 根因：Emscripten 匿名 mmap = memalign + memset(0)
+
+[virtualmem.cpp](src/emu/common/src/virtualmem.cpp) `map_memory` 在 WASM 落入 POSIX
+分支 `mmap(PROT_NONE)`。Emscripten 把匿名 mmap 实现为 **memalign + 全段 memset(0)**：
+"保留地址空间"变成"真实分配 + 每页触脏"。Symbian 内存模型"保留 max、按需提交"的
+设计（真机上保留不花物理内存）在 WASM 上被放大成全额脏页 —— 启动一个应用就背上
+337MB 保留 + ROM/JIT/杂项 ≈ 626MB wasm 堆，渲染进程 RSS 1.4GB，正好顶穿 iOS
+WebKit 单页 ~1.0-1.4GB 的 jetsam 限额。
+
+### 修复：保留不清零 + 首次提交页清零（懒脏页）
+
+1. `map_memory`(WASM) 改 `posix_memalign`（64KB 对齐）**不清零** —— 浏览器对
+   未写入的 wasm 页不分配物理内存；`unmap_memory`(WASM) 配对 `free`。
+2. [multiple/chunk.cpp](src/emu/mem/src/model/multiple/chunk.cpp) commit 循环里
+   **首次提交的页**（`host_addr == nullptr` 分支）memset(0)：malloc 内存是回收的
+   不是新鲜零页，必须还原 Symbian"提交即清零"语义（.bss/堆依赖）；
+   `is_external_host`（ROM 映射缓冲）跳过，否则会抹掉 ROM 内容。
+   decommit 已置空 host_addr → 重提交自动再清零，语义比桌面 mprotect 还原得更准。
+3. [flexible/memobj.cpp](src/emu/mem/src/model/flexible/memobj.cpp)（epoc95+ 设备）：
+   加 `committed_mask_` 位图，同样首提交清零。
+   注意：清零**不能**放进 `common::commit` —— multiple 模型对整段范围（含已提交页）
+   调它，会抹活数据；必须放在逐页判断"此页从未提交"的分支里。
+
+### 实测效果（设备树 275MB，清掉 1.16GB 测试垃圾后）
+
+| 场景 | 修复前 RSS | 修复后 RSS |
+|---|---|---|
+| 管家 60s | **1413MB** | **1091MB**（-322MB ≈ 保留未触碰部分） |
+| snakes 3D 游玩 | — | 967MB |
+
+wasm 堆/mallinfo 数字不变（地址空间还在），脏页省下来 —— 这正是 mallinfo 看不见、
+只有 RSS/jetsam 看得见的那类内存。
+
+### 回归（全过）
+
+管家对话框中文 ✓、snakes 主菜单+3D 棋盘游戏内（彩色渐变棋盘=当年 565 误判场景类，
+零锁定事件）✓、天地道转置+书法中文 ✓、X-plore 中文菜单+盘符 ✓。
+
+### 附带修复与 UX
+
+- **run 页 OOM 人性化**（[run.js](src/emu/web/pages/js/run.js)+[boot.js](src/emu/web/pages/js/boot.js)）：
+  `isOOMError` 识别 OOM/grow 失败；boot 失败与**游玩中**（RAF 循环里 abort 之前只会
+  冻屏）都切到 overlay 显示指引：当前设备数据 MB 数（`EKA2L1.dataBytes()`）+ 关后台
+  + 删安装包 + 设备建议。overlay-text 加 `white-space: pre-line`。
+- **stamp_pages 缓存盲区**：BUILD_ID 原来只哈希 wasm+data —— 纯 JS/CSS 改动不换
+  版本号，回头访客拿旧缓存；且 css link 根本没盖戳。现在哈希含 pages/ 全部文件，
+  app.css 也加 ?v=。
+
+### 最低配置要求（基于实测）
+
+页面总占用 ≈ wasm 脏页(~300-450MB) + 设备树全量驻留(MEMFS，随安装内容线性增长)
++ JSC/GL 开销(~200-300MB)：
+
+- **桌面 / 安卓 Chrome（6GB+ RAM）**：无压力（实测峰值 ~1.1GB）。
+- **iPhone 6GB+**（13 Pro 及以后 Pro 系、15/16 全系）：推荐配置。
+- **iPhone 4GB**（12/13/14 标准版）：修复后小中型应用可运行；**设备数据必须精简**
+  （装完游戏删 E: 盘安装包，127MB 的 sisx 常驻就是 127MB 内存）；大型 3D 游戏仍可能
+  被系统杀。
+- **3GB 及以下**：不支持。
+
+### 教训
+
+1. **"保留地址空间"在 WASM 上不是免费的**：Emscripten 匿名 mmap 全段 memset 触脏。
+   任何"reserve big, commit small"模式移植到 WASM 都要重新实现懒脏页。
+2. **mallinfo/堆大小对"脏页"型内存问题是盲的**：malloc 账面不变、RSS 砍 322MB。
+   测内存要测到 OS 级（RSS/jetsam 视角），不能只看分配器。
+3. **清零语义的插入点要看调用方契约**：同名"commit"在 common 层是范围语义（可含
+   已提交页）、在模型层是逐页语义 —— 放错层就是数据损毁。
+4. **内容寻址的缓存破除必须覆盖全部会变的资产**：哈希漏了 pages/ = JS 修复部署了
+   等于没部署。

@@ -22,6 +22,8 @@
 #include <common/platform.h>
 #include <common/virtualmem.h>
 
+#include <cstdlib>
+
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
 #elif EKA2L1_PLATFORM(POSIX)
@@ -37,6 +39,21 @@ namespace eka2l1::common {
 #if EKA2L1_PLATFORM(WIN32)
         return VirtualAlloc(nullptr, size,
             MEM_RESERVE, PAGE_NOACCESS);
+#elif EKA2L1_PLATFORM(WASM)
+        // Emscripten implements anonymous mmap as memalign + memset(0): the
+        // memset dirties every page of the reservation up front, so a Symbian
+        // "reserve max, commit a little" chunk costs its full max_size in
+        // physical memory (~340MB of mostly-idle reservations after one app
+        // launch). Plain memalign leaves the pages untouched - the browser
+        // only backs wasm pages with physical memory once they are first
+        // written - and the mem models zero pages at commit time instead
+        // (malloc memory is recycled, not fresh; Symbian guarantees
+        // zero-filled commits).
+        void *ptr = nullptr;
+        if (posix_memalign(&ptr, 65536, size) != 0) {
+            return nullptr;
+        }
+        return ptr;
 #else
         return mmap(nullptr, size, PROT_NONE,
             MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
@@ -44,6 +61,12 @@ namespace eka2l1::common {
     }
 
     bool unmap_memory(void *ptr, const std::size_t size) {
+#if EKA2L1_PLATFORM(WASM)
+        // Paired with posix_memalign in map_memory.
+        free(ptr);
+        (void)size;
+        return true;
+#else
 #if EKA2L1_PLATFORM(WIN32)
         const auto result = VirtualFree(ptr, 0, MEM_RELEASE);
 
@@ -57,6 +80,7 @@ namespace eka2l1::common {
         }
 
         return true;
+#endif
     }
 
     bool commit(void *ptr, const std::size_t size, const prot commit_prot) {

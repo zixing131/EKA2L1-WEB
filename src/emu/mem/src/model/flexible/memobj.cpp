@@ -24,7 +24,10 @@
 
 #include <common/algorithm.h>
 #include <common/log.h>
+#include <common/platform.h>
 #include <common/virtualmem.h>
+
+#include <cstring>
 
 namespace eka2l1::mem::flexible {
     memory_object::memory_object(control_base *ctrl, const std::size_t page_count, void *external_host)
@@ -32,7 +35,8 @@ namespace eka2l1::mem::flexible {
         , page_occupied_(page_count)
         , control_(ctrl)
         , external_(false)
-        , page_arr_(page_count) {
+        , page_arr_(page_count)
+        , committed_mask_(page_count, false) {
         if (data_) {
             external_ = true;
         } else {
@@ -68,6 +72,22 @@ namespace eka2l1::mem::flexible {
             if (!alloc_result) {
                 return false;
             }
+
+#if EKA2L1_PLATFORM(WASM)
+            // Recycled malloc backing (see common::map_memory): zero pages on
+            // their first commit so the guest sees Symbian's guaranteed
+            // zero-fill. Already-committed pages keep their live contents.
+            for (std::size_t pg = page_offset; pg < page_offset + total_pages; pg++) {
+                if (!committed_mask_[pg]) {
+                    std::memset(reinterpret_cast<std::uint8_t *>(data_) + (pg << control_->page_size_bits_),
+                        0, control_->page_size());
+                }
+            }
+#endif
+        }
+
+        for (std::size_t pg = page_offset; pg < page_offset + total_pages; pg++) {
+            committed_mask_[pg] = true;
         }
 
         control_flexible *ctrl_fx = reinterpret_cast<control_flexible *>(control_);
@@ -124,6 +144,10 @@ namespace eka2l1::mem::flexible {
                     break;
                 }
             }
+        }
+
+        for (std::size_t pg = page_offset; pg < page_offset + total_pages; pg++) {
+            committed_mask_[pg] = false;
         }
 
         page_arr_.alter(page_offset, static_cast<std::uint32_t>(total_pages), prot_none, true);

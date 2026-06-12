@@ -714,7 +714,8 @@ button { font-family: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .overlay-title { font-size: 17px; font-weight: 700; }
-.overlay-text { font-size: 13px; color: var(--text-2); line-height: 1.6; }
+/* pre-line: error guidance (OOM advice) uses \n bullet lists */
+.overlay-text { font-size: 13px; color: var(--text-2); line-height: 1.6; white-space: pre-line; }
 
 .overlay-progress {
     width: 220px;

@@ -46,6 +46,12 @@ namespace eka2l1::mem::flexible {
         std::vector<mapping *> mappings_;
         page_array page_arr_;
 
+        // Tracks which pages have ever been committed: on WASM the backing
+        // memory is recycled malloc memory (see common::map_memory), so pages
+        // must be zeroed on their first commit to honour Symbian's
+        // zero-filled-commit guarantee.
+        std::vector<bool> committed_mask_;
+
     public:
         explicit memory_object(control_base *ctrl, const std::size_t page_count, void *external_host);
         ~memory_object();

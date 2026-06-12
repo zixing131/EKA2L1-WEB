@@ -37,7 +37,9 @@
 
 // Emscripten-specific headers
 #include <emscripten.h>
+#include <emscripten/heap.h>
 #include <emscripten/html5.h>
+#include <malloc.h>
 #include <set>
 #include <unistd.h>
 
@@ -2253,6 +2255,26 @@ void wasm_ls(const char *guest_path) {
     }
     std::printf("[ls] end\n");
     std::fflush(stdout);
+}
+
+/**
+ * Memory telemetry for low-RAM triage. Returns JSON:
+ *   heap      - current wasm linear memory size (grows, never shrinks)
+ *   malloc    - bytes live inside dlmalloc (in-use blocks)
+ *   free      - bytes free inside the heap (fragmentation = heap - malloc - free
+ *               is bookkeeping/stack/static, roughly constant)
+ * MEMFS file bytes live in the JS heap, not here - the JS side sums those.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_mem_stats() {
+    static char buf[192];
+    struct mallinfo mi = mallinfo();
+    std::snprintf(buf, sizeof(buf),
+        "{\"heap\":%zu,\"malloc\":%zu,\"free\":%zu}",
+        emscripten_get_heap_size(),
+        static_cast<std::size_t>(mi.uordblks),
+        static_cast<std::size_t>(mi.fordblks));
+    return buf;
 }
 
 /**

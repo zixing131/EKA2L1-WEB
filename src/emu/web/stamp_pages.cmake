@@ -1,8 +1,9 @@
 # Post-build page stamping: copy pages/ into the stage dir, then rewrite
 # script/asset references with a content-derived version (?v=<hash>) so static
 # hosting + browser caches pick up new builds without a manual hard refresh.
-# The version is the truncated SHA256 of eka2l1.wasm + eka2l1.data, i.e. it
-# only changes when the binaries actually change.
+# The version is the truncated SHA256 of eka2l1.wasm + eka2l1.data + every
+# file in pages/, so JS/CSS-only changes also get a fresh tag (binaries-only
+# hashing once shipped a JS fix that returning visitors never received).
 #
 # Usage: cmake -DPAGES_DIR=... -DSTAGE_DIR=... -P stamp_pages.cmake
 
@@ -19,7 +20,14 @@ if(EXISTS "${STAGE_DIR}/eka2l1.wasm")
     if(EXISTS "${STAGE_DIR}/eka2l1.data")
         file(SHA256 "${STAGE_DIR}/eka2l1.data" DATA_HASH)
     endif()
-    string(SHA256 COMBINED_HASH "${WASM_HASH}${DATA_HASH}")
+    set(PAGES_HASH "")
+    file(GLOB_RECURSE PAGE_FILES LIST_DIRECTORIES false "${PAGES_DIR}/*")
+    list(SORT PAGE_FILES)
+    foreach(pf ${PAGE_FILES})
+        file(SHA256 "${pf}" PF_HASH)
+        string(APPEND PAGES_HASH "${PF_HASH}")
+    endforeach()
+    string(SHA256 COMBINED_HASH "${WASM_HASH}${DATA_HASH}${PAGES_HASH}")
     string(SUBSTRING "${COMBINED_HASH}" 0 12 BUILD_ID)
 endif()
 
@@ -35,6 +43,7 @@ foreach(page ${STAMP_PAGES})
     string(REPLACE "src=\"js/index.js\"" "src=\"js/index.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "src=\"js/run.js\"" "src=\"js/run.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "src=\"js/build_id.js\"" "src=\"js/build_id.js?v=${BUILD_ID}\"" content "${content}")
+    string(REPLACE "href=\"css/app.css\"" "href=\"css/app.css?v=${BUILD_ID}\"" content "${content}")
     file(WRITE "${page}" "${content}")
 endforeach()
 

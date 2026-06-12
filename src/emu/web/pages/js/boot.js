@@ -490,6 +490,37 @@
     };
 
     /**
+     * Total bytes of files under /eka2l1. The whole tree sits in browser
+     * memory while the emulator runs (MEMFS), so this is the resident cost of
+     * the installed device + games — the number to quote in OOM guidance.
+     */
+    EKA2L1.dataBytes = function () {
+        var FS = EKA2L1.module && EKA2L1.module.FS;
+        if (!FS) return 0;
+        var total = 0;
+        (function walk(dir) {
+            var names;
+            try { names = FS.readdir(dir); } catch (e) { return; }
+            names.forEach(function (n) {
+                if (n === '.' || n === '..') return;
+                var p = dir + '/' + n;
+                try {
+                    var st = FS.lstat(p);
+                    if (FS.isDir(st.mode)) walk(p);
+                    else if (FS.isFile(st.mode)) total += (st.size || 0);
+                } catch (e) {}
+            });
+        })('/eka2l1');
+        return total;
+    };
+
+    /** Heuristic: does this error look like the tab ran out of memory? */
+    EKA2L1.isOOMError = function (err) {
+        var s = String((err && (err.message || err.name)) || err || '');
+        return /OOM|out of memory|cannot enlarge|memory\.grow|could not allocat/i.test(s);
+    };
+
+    /**
      * Write a File/Blob into the wasm VFS in 8MB slices. Streaming matters on
      * iOS Safari: loading a 100MB+ ROM as one ArrayBuffer (on top of the MEMFS
      * copy) pushed the tab over the memory limit and got it killed mid-install.

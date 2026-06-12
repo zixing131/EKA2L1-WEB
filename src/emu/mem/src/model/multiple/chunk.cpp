@@ -22,10 +22,13 @@
 #include <mem/model/multiple/process.h>
 
 #include <common/algorithm.h>
+#include <common/platform.h>
 #include <common/virtualmem.h>
 
 #include <common/log.h>
 #include <cpu/arm_interface.h>
+
+#include <cstring>
 
 namespace eka2l1::mem {
     std::size_t multiple_mem_model_chunk::commit(const vm_address offset, const std::size_t size, bool ignore_committed) {
@@ -80,6 +83,16 @@ namespace eka2l1::mem {
                 if (pt->pages_[poff].host_addr == nullptr) {
                     pt->pages_[poff].host_addr = reinterpret_cast<std::uint8_t *>(host_base_) + (poff << control_->page_size_bits_) + pt_base;
                     pt->pages_[poff].perm = permission_;
+
+#if EKA2L1_PLATFORM(WASM)
+                    // map_memory hands out recycled malloc memory on WASM (see
+                    // virtualmem.cpp): scrub each page on its first commit so the
+                    // guest sees the zero-fill Symbian guarantees (.bss, heaps).
+                    // External hosts carry preloaded content (ROM image) - keep.
+                    if (!is_external_host) {
+                        std::memset(pt->pages_[poff].host_addr, 0, psize);
+                    }
+#endif
 
                     // Increase committed size.
                     committed_ += psize;
