@@ -10,3 +10,13 @@
 .cxx
 *.dll
 *.map
+
+# Android assets 构建产物（由 CMake 从源目录复制，不提交）
+/app/src/main/assets/compat/
+/app/src/main/assets/patch/
+/app/src/main/assets/scripts/
+/app/src/main/assets/resources/*.frag
+/app/src/main/assets/resources/*.vert
+/app/src/main/assets/resources/*.hsb
+/app/src/main/assets/resources/*.sf2
+/app/src/main/assets/resources/upscale/

@@ -22,9 +22,8 @@
 
 #if !EKA2L1_PLATFORM(WASM)
 #include <drivers/audio/backend/cubeb/audio_cubeb.h>
-#else
-#include <drivers/audio/backend/null/audio_null.h>
 #endif
+#include <drivers/audio/backend/null/audio_null.h>
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <drivers/audio/backend/wmf/wmf_loader.h>
