@@ -30,7 +30,13 @@
         document.getElementById('topBarLargeTitle').textContent = tabTitles[name];
         document.getElementById('topBarSmallTitle').textContent = tabTitles[name];
         document.getElementById('fab').classList.toggle('hidden', name !== 'games');
+        // Reset scroll position AND large-title state synchronously so the
+        // top bar never shows the wrong (scrolled) appearance after switching.
         window.scrollTo({ top: 0 });
+        if (scrolled) {
+            scrolled = false;
+            document.getElementById('topAppBar').classList.remove('scrolled');
+        }
     };
 
     var scrolled = false;

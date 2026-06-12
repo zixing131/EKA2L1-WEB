@@ -26,6 +26,7 @@
     --key-press: #d9d9de;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 6px 22px rgba(0, 0, 0, 0.05);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-top: env(safe-area-inset-top, 0px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -65,7 +66,10 @@ button { font-family: inherit; }
     position: sticky;
     top: 0;
     z-index: 30;
-    padding: 0 16px;
+    /* In PWA standalone mode the status bar / Dynamic Island overlaps the
+       page top; padding-top pushes our content below it so buttons are
+       tappable.  env() evaluates to 0 in a regular browser tab. */
+    padding: var(--safe-top) 16px 0;
     background: var(--bar-bg);
     -webkit-backdrop-filter: var(--bar-blur);
     backdrop-filter: var(--bar-blur);
@@ -607,7 +611,9 @@ button { font-family: inherit; }
 /* ------------------------------------------------------------ progress bar */
 .boot-progress {
     position: fixed;
-    top: 0;
+    /* Sit just below the status bar so the thin bar is visible, not hidden
+       behind the notch/Dynamic Island in standalone PWA mode. */
+    top: var(--safe-top);
     left: 0;
     right: 0;
     height: 2.5px;
@@ -639,7 +645,8 @@ button { font-family: inherit; }
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
+    /* Safe-area padding: buttons must sit below status bar / Dynamic Island. */
+    padding: calc(var(--safe-top) + 7px) 10px 7px;
     background: var(--bar-bg);
     -webkit-backdrop-filter: var(--bar-blur);
     backdrop-filter: var(--bar-blur);
