@@ -419,6 +419,11 @@ namespace eka2l1 {
                             continue;
                         }
 
+                        // central_repo has no constructor, and the CRE loader does not
+                        // necessarily fill the uid, so a CRE-loaded repo was left with
+                        // an uninitialised uid (observed as garbage 0xCCCCCC00). Set it
+                        // from the requested key, matching the INI path below.
+                        repo->uid = key;
                         repo->reside_place = avail_drives[0];
                         repo->access_count = 1;
 
