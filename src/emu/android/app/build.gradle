@@ -34,6 +34,13 @@ android {
         buildConfigField "String", "GIT_HASH", "\"${getGitHash()}\""
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
+            // 可选 -PtargetAbi=armeabi-v7a 限定单一 ABI（用于 32 位老设备构建）。
+            // 走 abiFilters 而非 android.injected.build.abi —— 后者会让 AGP 给 APK
+            // 打 android:testOnly="true"，导致普通 adb install 报 INSTALL_FAILED_TEST_ONLY。
+            if (project.hasProperty('targetAbi')) {
+                abiFilters.clear()
+                project.property('targetAbi').toString().split(',').each { abiFilters.add(it.trim()) }
+            }
         }
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
