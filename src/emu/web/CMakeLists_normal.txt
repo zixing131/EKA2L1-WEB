@@ -91,26 +91,26 @@ if (EMSCRIPTEN)
         # scan, so Chinese text renders even on firmware without CJK glyphs.
         # Wipe first so swapping the fallback font doesn't leave a stale copy in
         # the packaged data (copy_directory merges, it doesn't mirror).
-        # COMMAND ${CMAKE_COMMAND} -E rm -rf "${WASM_STAGE_DIR}/fonts"
-        # COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/fonts"
-        # COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts" "${WASM_STAGE_DIR}/fonts/"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${WASM_STAGE_DIR}/fonts"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_STAGE_DIR}/fonts"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts" "${WASM_STAGE_DIR}/fonts/"
         COMMENT "Staging resources for Emscripten file packaging"
     )
 
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
-        "SHELL:-s ALLOW_MEMORY_GROWTH=0"
+        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         # 160MB start, grow on demand (in-place for shared memory, no copy).
         # iOS Safari kills the tab well under ~1.2GB commit, and a ROM install
         # peaks at baseline + RPKG in MEMFS + extracted Z drive + IndexedDB
         # sync copies. 256MB was sized for the old 131MB dyncom translation
         # arena; with that trimmed to 32MB on WASM the same headroom fits in
         # 160MB, leaving ~100MB more for the install spike.
-        "SHELL:-s INITIAL_MEMORY=469762048"
+        "SHELL:-s INITIAL_MEMORY=268435456"
         # 1GB cap: heavy runs peak well under 400MB, and a smaller reservation
         # is friendlier to iOS Safari's shared-memory accounting.
-        #"SHELL:-s MAXIMUM_MEMORY=1073741824"
-        "SHELL:-s STACK_SIZE=1048576"
+        "SHELL:-s MAXIMUM_MEMORY=1073741824"
+        "SHELL:-s STACK_SIZE=4194304"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=0"
         "SHELL:-s USE_FREETYPE=1"
@@ -145,7 +145,7 @@ if (EMSCRIPTEN)
         "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
         "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
-        # "SHELL:--preload-file ${WASM_STAGE_DIR}/fonts@fonts"
+        "SHELL:--preload-file ${WASM_STAGE_DIR}/fonts@fonts"
         # Performance build: max link-time optimization.
         -O3
         "--closure=0"
