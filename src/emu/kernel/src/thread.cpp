@@ -574,6 +574,37 @@ namespace eka2l1 {
                 return fmt::format(" code[0x{:08X}..]={}", start, hex);
             };
 
+            // Dump GP registers + identify live objects: for any register pointing
+            // to a heap object whose first word is a vtable in a known codeseg,
+            // print "DLL+off". Names the C++ class involved in a guest panic, which
+            // pure return-address backtraces can't (e.g. which control owns a bad
+            // array). Cross-reference the vtable offset against the ROM disassembly.
+            {
+                arm::core *c = ((kern->crr_thread() == this) && core) ? core : nullptr;
+                auto reg = [&](int i) -> std::uint32_t { return c ? c->get_reg(i) : ctx.cpu_registers[i]; };
+                std::string regs;
+                for (int i = 0; i <= 12; i++) {
+                    regs += fmt::format("r{}=0x{:08X} ", i, reg(i));
+                }
+                LOG_WARN(KERNEL, "Panic regs: {}", regs);
+
+                if (pr) {
+                    auto vtable_of = [&](std::uint32_t obj) -> std::string {
+                        if (obj < 0x400000) return "";
+                        std::uint32_t *vp = reinterpret_cast<std::uint32_t *>(pr->get_ptr_on_addr_space(obj));
+                        if (!vp) return "";
+                        const std::string w = resolve(*vp);
+                        return (w == "?") ? "" : fmt::format("vtable={} (vt@0x{:08X})", w, *vp);
+                    };
+                    for (int i = 0; i <= 12; i++) {
+                        const std::string v = vtable_of(reg(i));
+                        if (!v.empty()) {
+                            LOG_WARN(KERNEL, "  obj r{}=0x{:08X} {}", i, reg(i), v);
+                        }
+                    }
+                }
+            }
+
             // Heuristic backtrace: scan the stack for words that land inside a
             // codeseg's text section — noisy but enough to see the call chain.
             if (pr) {
@@ -590,6 +621,33 @@ namespace eka2l1 {
                             (printed < 8) ? code_hex(*word) : "");
                         printed++;
                     }
+                }
+
+                // Scan the stack for heap object pointers whose first word is a
+                // vtable in a known codeseg (callee-saved 'this' pointers spilled by
+                // prologues). Reports each object's class (vtable DLL+off) - surfaces
+                // the objects involved in a panic that a return-address backtrace
+                // alone can't name. Cross-reference the vtable offset with the ROM.
+                int objs = 0;
+                std::uint32_t last_obj = 0;
+                for (std::uint32_t off = 0; (off < 512) && (objs < 20); off += 4) {
+                    std::uint32_t *word = reinterpret_cast<std::uint32_t *>(
+                        pr->get_ptr_on_addr_space(sp + off));
+                    if (!word || (*word < 0x400000) || (*word == last_obj)) {
+                        continue;
+                    }
+                    std::uint32_t *vp = reinterpret_cast<std::uint32_t *>(pr->get_ptr_on_addr_space(*word));
+                    if (!vp) {
+                        continue;
+                    }
+                    const std::string vw = resolve(*vp);
+                    if (vw == "?") {
+                        continue;
+                    }
+                    last_obj = *word;
+                    LOG_WARN(KERNEL, "  obj@stack[sp+0x{:03X}] this=0x{:08X} vtable={} (vt@0x{:08X})",
+                        off, *word, vw, *vp);
+                    objs++;
                 }
             }
         }
