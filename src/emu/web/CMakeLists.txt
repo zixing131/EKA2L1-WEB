@@ -109,17 +109,17 @@ if (EMSCRIPTEN)
         "SHELL:-s INITIAL_MEMORY=167772160"
         # 1GB cap: heavy runs peak well under 400MB, and a smaller reservation
         # is friendlier to iOS Safari's shared-memory accounting.
-        "SHELL:-s MAXIMUM_MEMORY=1073741824"
+        "SHELL:-s MAXIMUM_MEMORY=805306368"
         "SHELL:-s STACK_SIZE=8388608"
         "SHELL:-s USE_SDL=2"
-        "SHELL:-s FULL_ES3=1"
+        "SHELL:-s FULL_ES3=0"
         "SHELL:-s USE_FREETYPE=1"
         "SHELL:-s USE_PTHREADS=1"
         # Pooled workers cost real memory on iOS (JS worker + wasm stack each).
         # Census after pruning the idle applist pool: ntimer + applist loader +
         # spdlog + slack = well under 8, and runtime creation still works for
         # stragglers since nothing blocks on spawn.
-        "SHELL:-s PTHREAD_POOL_SIZE=8"
+        "SHELL:-s PTHREAD_POOL_SIZE=2"
         # 1MB per worker stack (allocated from the wasm heap). The old 64KB
         # default overflowed; 1MB keeps 16x headroom over that crash without
         # 32MB+ of standing stacks.
@@ -142,10 +142,10 @@ if (EMSCRIPTEN)
         "SHELL:-s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\"$autoResumeAudioContext\"]"
         "SHELL:-s MIN_WEBGL_VERSION=2"
         "SHELL:-s MAX_WEBGL_VERSION=2"
-        "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
-        "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
-        "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
-        "SHELL:--preload-file ${WASM_STAGE_DIR}/fonts@fonts"
+        # "SHELL:--preload-file ${WASM_STAGE_DIR}/resources@resources"
+        # "SHELL:--preload-file ${WASM_STAGE_DIR}/miscs@miscs"
+        # "SHELL:--preload-file ${WASM_STAGE_DIR}/patch@patch"
+        # "SHELL:--preload-file ${WASM_STAGE_DIR}/fonts@fonts"
         # Performance build: max link-time optimization.
         -O3
         "--closure=0"
