@@ -45,6 +45,8 @@
 
 #ifdef EKA2L1_DEBUG_BUILD
 #define EKA2L1_BUILD_CHANNEL "Test"
+#elif defined(EKA2L1_HOS_BUILD)
+#define EKA2L1_BUILD_CHANNEL "HOS"
 #else
 #define EKA2L1_BUILD_CHANNEL "Release"
 #endif
@@ -133,6 +135,14 @@ namespace eka2l1::web::protection {
 
     static bool host_in_whitelist(const std::string &host_in) {
         const std::string host = to_lower(host_in);
+#ifdef EKA2L1_HOS_BUILD
+        // HarmonyOS WebView loads from local origins (file://, resource://,
+        // or an empty host under a custom scheme). Allow any empty/local host
+        // in addition to the regular domain whitelist.
+        if (host.empty() || host == "localhost" || host == "127.0.0.1") {
+            return true;
+        }
+#endif
         static const char *roots[] = { "zixing.fun", "iniche.cn" };
         for (const char *root : roots) {
             const std::string r(root);

@@ -27,3 +27,4 @@ CMakeCache.txt
 /src/emu/web/dev-key.pem
 /build_android
 /build_android_old
+/build_wasm_hos

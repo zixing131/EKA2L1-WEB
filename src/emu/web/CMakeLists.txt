@@ -6,6 +6,9 @@
 # domain protection. Release (build_wasm_release) leaves it OFF for full
 # protection. See src/protection.cpp and gen_integrity.py.
 option(EKA2L1_DEBUG_BUILD "Skip web copyright/integrity protection (debug web build)" OFF)
+# HOS build: full copyright/integrity/watermark active, but domain check allows
+# local origins (file://, resource://, etc.) for HarmonyOS WebView embedding.
+option(EKA2L1_HOS_BUILD "Allow local-origin access for HarmonyOS WebView" OFF)
 
 # The web frontend executable
 add_executable(eka2l1_wasm
@@ -26,6 +29,9 @@ target_include_directories(eka2l1_wasm PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 if (EKA2L1_DEBUG_BUILD)
     target_compile_definitions(eka2l1_wasm PRIVATE EKA2L1_DEBUG_BUILD)
+endif()
+if (EKA2L1_HOS_BUILD)
+    target_compile_definitions(eka2l1_wasm PRIVATE EKA2L1_HOS_BUILD)
 endif()
 
 # Link against all core emulator libraries
