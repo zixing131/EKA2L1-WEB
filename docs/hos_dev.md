@@ -430,6 +430,34 @@ W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 h
    compat)是 IDE 构建流程之外的,直接 IDE 跑会漏掉运行期资源。资源类缺失要先确认 HAP 里到底
    有没有,别只在代码里找 bug。
 
+## 6.8 第六轮 — 点开游戏黑屏(有 FPS):着色器仍没进 HAP(§6.7 的后半)
+
+§6.7 修了「缺着色器不崩」,但治标:用 DevEco 直接打的 HAP 里**根本没有着色器**,所以不崩
+之后变成**黑屏(但 FPS 正常显示)**。
+
+### 判定:不是卡顿,是渲染没出来(着色器空程序)
+
+`unzip -l entry-default-signed.hap` 确认包内**无 `rawfile/`、无任何 `.vert`/`.frag`、无
+`defaultbank`**(只有 ArkUI 工程自己的 `resources/base/media/*` 图标)。运行时 `do_init`
+8 个 `ogl_shader_module` 全部打开失败(§6.7 修复后优雅跳过,`shader` 句柄留 0)→
+`sprite_program->create(...)` 等用空模块 link → 所有 program 无效 → 画位图用无效 program
+→ **全黑**。FPS 正常是因为主循环/命令队列照跑,纯粹着色器没编译成功。
+
+「有 FPS + 黑屏」的指纹:**渲染管线在转,但着色器/纹理/program 没就位**。先确认资源是否
+真在包里(`unzip -l`),再看 shader 编译日志,别当成性能卡顿去查。
+
+### 解法:让着色器进 HAP(打包问题,非代码 bug)
+
+`build_hos_native.sh` 的 `stage_assets()` 从 `src/emu/drivers/resources/gles/*` 拷到
+`entry/src/main/resources/rawfile/assets/resources/`(扁平化 gles→resources,匹配代码相对
+路径 `resources//sprite_norm.vert`)。本轮已手动跑过 staging,`rawfile/assets/resources/`
+现含 `do_init` 需要的全部 8 个着色器 + `defaultbank.{hsb,sf2}` + `upscale/` + `compat/`。
+**用 `build_hos_native.sh` 打包(或打包前先跑 `stage_assets`),不要用 DevEco「运行」按钮。**
+
+> 着色器进包只是第一步:`glCompileShader/glLinkProgram` 还得在真机 GLES 上成功。着色器是
+> 标准 `#version 300 es` + `precision highp float`,鸿蒙 GLES 应认;若带上后仍黑屏,日志里
+> 会有 `shader_ogl.cpp` 的 `glGetShaderInfoLog` 编译错误(那才是另一类问题)。
+
 ## 7. 已知遗留 / 待办
 
 - [ ] **无声音**：null 音频现在是「自走时静音流」（不崩不卡，但没声）。后续接 Audio Kit
