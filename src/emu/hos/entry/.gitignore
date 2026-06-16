@@ -1,0 +1,13 @@
+/node_modules
+/oh_modules
+/.preview
+/build
+/.cxx
+/.test
+
+# Native build dir created by build_hos_native.sh --native / --configure
+/src/main/cpp/.cxx-native
+
+# Runtime assets staged by build_hos_native.sh (stage_assets): regenerated from
+# src/emu/drivers/resources, miscs/compat and the built Symbian patch DLLs.
+/src/main/resources/rawfile/assets

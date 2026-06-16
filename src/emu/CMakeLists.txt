@@ -48,6 +48,10 @@ if (ANDROID)
     add_subdirectory(android/app/src/main/cpp)
 elseif(EMSCRIPTEN)
     add_subdirectory(web)
+elseif(EKA2L1_OHOS)
+    # HarmonyOS native frontend (static lib). The NAPI entry module in
+    # hos/entry/src/main/cpp links it and DevEco/hvigor packages the result.
+    add_subdirectory(hos/native)
 else()
     add_subdirectory(qt)
 endif()

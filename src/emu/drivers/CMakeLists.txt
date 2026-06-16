@@ -79,7 +79,7 @@ add_library(drivers
         src/video/video.cpp
         ${DRIVERS_VULKAN_SRC})
 
-if (NOT EMSCRIPTEN)
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_sources(drivers PRIVATE
         src/audio/backend/cubeb/audio_cubeb.cpp
         src/audio/backend/cubeb/stream_cubeb.cpp
@@ -88,11 +88,18 @@ if (NOT EMSCRIPTEN)
         src/video/backend/ffmpeg/video_player_ffmpeg.cpp
     )
 else()
+    # WASM and OHOS have no prebuilt FFmpeg/cubeb: use the null audio driver.
     target_sources(drivers PRIVATE
         src/audio/backend/null/audio_null.cpp
     )
 endif()
-if (NOT ANDROID)
+if (EKA2L1_OHOS)
+    # OHOS has no SDL2 (so no SDL controller/vibration/scoping) and no Android
+    # JNI camera/sensor. The frontend owns the window; camera/sensor/vibration
+    # fall back to the null backends already compiled into the base sources.
+    target_sources(drivers PRIVATE
+        src/graphics/emu_window.cpp)
+elseif (NOT ANDROID)
     target_sources(drivers PRIVATE
         include/drivers/input/backend/emu_controller_sdl2.h
         include/drivers/hwrm/backend/vibration_sdl2.h
@@ -149,6 +156,14 @@ elseif(ANDROID)
         src/graphics/backend/context_egl_android.cpp
         src/graphics/backend/context_egl_android.h
     )
+elseif(EKA2L1_OHOS)
+    target_sources(drivers PRIVATE
+        src/graphics/backend/context_egl.cpp
+        src/graphics/backend/context_egl.h
+        src/graphics/backend/context_egl_ohos.cpp
+        src/graphics/backend/context_egl_ohos.h
+    )
+    target_link_libraries(drivers PUBLIC EGL GLESv3)
 else()
     find_package(X11 REQUIRED)
     find_package(OpenGL REQUIRED)
@@ -173,7 +188,9 @@ add_library(miniBAE_EMU STATIC ${MINIBAE_SHARED_SOURCES})
 target_include_directories(miniBAE_EMU
     PRIVATE include/drivers/audio/backend/minibae ${MINIBAE_INTERNAL_INCLUDE_DIRS})
 target_link_libraries(miniBAE_EMU PRIVATE common)
-if (EMSCRIPTEN)
+if (EMSCRIPTEN OR EKA2L1_OHOS)
+    # miniBAE's legacy C casts long<->void* freely; the Emscripten and OHOS
+    # (BiSheng) clangs promote -Wint-conversion to an error, so silence it here.
     target_compile_options(miniBAE_EMU PRIVATE -Wno-int-conversion -Wno-incompatible-pointer-types)
 endif()
 
@@ -181,6 +198,9 @@ if (EMSCRIPTEN)
     target_compile_options(drivers PRIVATE "SHELL:-sUSE_SDL=2")
     target_link_libraries(drivers PRIVATE common glad glm miniBAE_EMU)
     # SDL2 is provided by Emscripten via -s USE_SDL=2, linked automatically
+elseif (EKA2L1_OHOS)
+    # No cubeb/ffmpeg/SDL2 on OHOS. EGL/GLESv3 already linked above.
+    target_link_libraries(drivers PRIVATE common glad glm miniBAE_EMU)
 else()
     target_link_libraries(drivers PRIVATE common cubeb ffmpeg glad glm miniBAE_EMU)
     if (NOT ANDROID)

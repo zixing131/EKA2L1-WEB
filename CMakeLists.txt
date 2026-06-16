@@ -79,6 +79,32 @@ if (EMSCRIPTEN)
     add_link_options(-flto)
 endif()
 
+# HarmonyOS / OpenHarmony (DevEco BiSheng toolchain sets CMAKE_SYSTEM_NAME=OHOS).
+# Surfaced as EKA2L1_OHOS so the rest of the tree can branch the same way it does
+# for ANDROID/EMSCRIPTEN. The frontend lives in src/emu/hos and is built by the
+# DevEco hvigor pipeline, so we don't add it as a subdirectory here.
+if (CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR DEFINED OHOS OR DEFINED OHOS_STL)
+    set (EKA2L1_OHOS TRUE)
+endif()
+
+if (EKA2L1_OHOS)
+    message(STATUS "Configuring EKA2L1 core for HarmonyOS / OpenHarmony (OHOS)")
+    # Make sure common/platform.h takes the OHOS branch even if the toolchain
+    # doesn't predefine __OHOS__ for our preprocessor checks.
+    add_compile_definitions(__OHOS__=1)
+
+    # OHOS is aarch64; force the ARM target so dynarmic (x86-host only) is skipped
+    # and the dyncom interpreter is used, mirroring the Android/WASM CPU choice.
+    set (ARCHITECTURE_AARCH64 TRUE)
+
+    # No prebuilt LuaJIT for OHOS in src/external, so scripting must be off.
+    if (EKA2L1_ENABLE_SCRIPTING_ABILITY)
+        message(STATUS "Disabling scripting on OHOS build (no OHOS LuaJIT prebuilt)")
+        set (EKA2L1_ENABLE_SCRIPTING_ABILITY OFF CACHE BOOL "" FORCE)
+        unset (ENABLE_SCRIPTING)
+    endif()
+endif()
+
 add_subdirectory(src/patch)
 add_subdirectory(src/external)
 add_subdirectory(src/emu)

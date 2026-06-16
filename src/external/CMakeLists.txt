@@ -168,8 +168,11 @@ add_library(Vulkan INTERFACE)
 target_include_directories(Vulkan INTERFACE ${Vulkan_INCLUDE_DIRS})
 target_link_libraries(Vulkan INTERFACE ${Vulkan_LIBRARIES})
 
-# Cubeb - Not available on Emscripten (uses native audio APIs)
-if (NOT EMSCRIPTEN)
+# Cubeb - Not available on Emscripten (uses native audio APIs).
+# Also skipped on OHOS/HarmonyOS: cubeb has no OpenHarmony backend (only
+# AAudio/OpenSL for Android) and the OHOS sysroot ships no ALSA/PulseAudio dev
+# libs, so the HOS frontend uses the null audio driver for now.
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     option (BUILD_TOOLS "Build tools" OFF)
     option (BUILD_TESTS "Build cubeb tests" OFF)
 
@@ -179,8 +182,9 @@ if (NOT EMSCRIPTEN)
     add_subdirectory(cubeb)
 endif()
 
-# FFMPEG - Not available on Emscripten
-if (NOT EMSCRIPTEN)
+# FFMPEG - Not available on Emscripten; no prebuilt OHOS arm64 libs are shipped
+# here either, so it is skipped for OHOS (frontend has no video/compressed audio).
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     add_subdirectory(ffmpeg)
     if (APPLE)
         target_link_libraries(ffmpeg INTERFACE "-framework CoreVideo" "iconv")
@@ -235,8 +239,9 @@ set(MINIBAE_SHARED_SOURCES ${MINIBAE_SHARED_SOURCES} CACHE INTERNAL "MiniBAE sou
 # TinySoundFont
 set (TSF_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "TSF include path")
 
-# SDL2 - Emscripten provides its own SDL2 port via -s USE_SDL=2
-if (NOT ANDROID AND NOT EMSCRIPTEN)
+# SDL2 - Emscripten provides its own SDL2 port via -s USE_SDL=2.
+# Android and OHOS frontends are native (XComponent on OHOS) and don't use SDL2.
+if (NOT ANDROID AND NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/sdl2-cmake-scripts")
 
     if(APPLE)
@@ -253,8 +258,10 @@ if (NOT ANDROID AND NOT EMSCRIPTEN)
     target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
 endif()
 
-# libuv - Not available on Emscripten
-if (NOT EMSCRIPTEN)
+# libuv - Not available on Emscripten. Also skipped on OHOS: libuv's unix
+# backend uses cpu_set_t/sched_setaffinity which the OHOS musl libc doesn't
+# expose, so it fails to build. The HOS frontend takes the null networking path.
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     option(LIBUV_BUILD_TESTS "Build test for libuv" OFF)
     option(LIBUV_BUILD_BENCH "Build bench for libuv" OFF)
     option(BUILD_UVW_LIBS "Build UVW libraries" ON)
@@ -265,8 +272,8 @@ if (NOT EMSCRIPTEN)
     add_subdirectory(uvlooper)
 endif()
 
-# UPNP - Not available on Emscripten
-if (NOT EMSCRIPTEN)
+# UPNP - Not available on Emscripten or OHOS (null networking path on both).
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     option (UPNPC_BUILD_SHARED "Build shared library" FALSE)
     option (UPNPC_BUILD_TESTS "Build test executables" FALSE)
     option (UPNPC_BUILD_SAMPLE "Build sample executables" FALSE)

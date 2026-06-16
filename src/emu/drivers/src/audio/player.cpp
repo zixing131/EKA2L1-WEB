@@ -21,7 +21,7 @@
 #include <drivers/audio/backend/minibae/player_minibae.h>
 #include <drivers/audio/backend/tinysoundfont/player_tsf.h>
 #include <drivers/audio/player.h>
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
 #include <drivers/audio/backend/ffmpeg/player_ffmpeg.h>
 #if EKA2L1_PLATFORM(WIN32)
 #include <drivers/audio/backend/wmf/player_wmf.h>
@@ -64,7 +64,7 @@ namespace eka2l1::drivers {
         case player_type_tsf:
             return std::make_unique<player_tsf>(aud);
 
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
         case player_type_ffmpeg:
             return std::make_unique<player_ffmpeg>(aud);
 #endif

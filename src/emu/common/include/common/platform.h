@@ -82,7 +82,11 @@
 #endif
 #endif
 
-#if defined(__unix__) && !defined(__EMSCRIPTEN__)
+// OHOS (HarmonyOS) and Android both define __unix__ but are not desktop Unix;
+// they get their own platform macros below and route through POSIX, so exclude
+// them here to avoid pulling in X11/GLX/desktop-only Unix code paths.
+#if defined(__unix__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) \
+    && !defined(__OHOS__) && !defined(OHOS_PLATFORM) && !defined(__HOS__)
 #define EKA2L1_PLATFORM_UNIX 1
 #endif
 
@@ -104,6 +108,13 @@
 #define EKA2L1_PLATFORM_ANDROID 1
 #endif
 
+// HarmonyOS / OpenHarmony. The BiSheng/clang toolchain defines __OHOS__ (and
+// also defines __linux__/__unix__). Keep OHOS as its own platform so frontends
+// can branch on it, while still inheriting the POSIX path below.
+#if defined(__OHOS__) || defined(OHOS_PLATFORM) || defined(__HOS__)
+#define EKA2L1_PLATFORM_OHOS 1
+#endif
+
 #ifdef __EMSCRIPTEN__
 #define EKA2L1_PLATFORM_WASM 1
 #endif
@@ -118,6 +129,17 @@
 #endif
 #endif
 
-#if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(MACOS) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(WASM)
+#if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(MACOS) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(WASM) || EKA2L1_PLATFORM(OHOS)
 #define EKA2L1_PLATFORM_POSIX 1
 #endif
+
+// Platforms with no prebuilt FFmpeg/cubeb available (WASM uses native browser
+// APIs; OHOS has no prebuilt arm64 FFmpeg here and cubeb has no OHOS backend).
+// These take the audio/video fallback paths (null audio, PCM-only DSP, no
+// ffmpeg video player). Use EKA2L1_HAS_NATIVE_AV() to gate AV backend code.
+#if EKA2L1_PLATFORM(WASM) || EKA2L1_PLATFORM(OHOS)
+#define EKA2L1_HAS_NATIVE_AV_VAL 0
+#else
+#define EKA2L1_HAS_NATIVE_AV_VAL 1
+#endif
+#define EKA2L1_HAS_NATIVE_AV() EKA2L1_HAS_NATIVE_AV_VAL

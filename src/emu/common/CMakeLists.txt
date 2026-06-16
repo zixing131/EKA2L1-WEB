@@ -106,7 +106,8 @@ add_library(common
         ${CUSTOM_COMMON_SOURCE}
         )
 
-if (NOT EMSCRIPTEN)
+# OHOS, like WASM, has no miniupnpc here; use the null UPnP implementation.
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_sources(common PRIVATE src/upnp.cpp)
 else()
     target_sources(common PRIVATE src/upnp_null.cpp)
@@ -127,7 +128,7 @@ endif()
 
 target_include_directories(common PUBLIC include)
 target_link_libraries(common PUBLIC fmt miniz spdlog)
-if (NOT EMSCRIPTEN)
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
 else()
     target_link_libraries(common PRIVATE pugixml re2::re2)

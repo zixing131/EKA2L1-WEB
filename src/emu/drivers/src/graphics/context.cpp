@@ -26,6 +26,8 @@
 #include "backend/context_agl.h"
 #elif EKA2L1_PLATFORM(ANDROID)
 #include "backend/context_egl_android.h"
+#elif EKA2L1_PLATFORM(OHOS)
+#include "backend/context_egl_ohos.h"
 #elif EKA2L1_PLATFORM(WASM)
 #include "backend/context_emscripten.h"
 #elif EKA2L1_PLATFORM(UNIX)
@@ -44,6 +46,8 @@ namespace eka2l1::drivers::graphics {
         return std::make_unique<gl_context_agl>(system_info, stereo, core);
 #elif EKA2L1_PLATFORM(ANDROID)
         return std::make_unique<gl_context_egl_android>(system_info, stereo, core);
+#elif EKA2L1_PLATFORM(OHOS)
+        return std::make_unique<gl_context_egl_ohos>(system_info, stereo, core);
 #elif EKA2L1_PLATFORM(WASM)
         return std::make_unique<gl_context_emscripten>(system_info, stereo, core);
 #elif EKA2L1_PLATFORM(UNIX)

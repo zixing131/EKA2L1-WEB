@@ -39,6 +39,9 @@
 #define X_PLATFORM X_MACINTOSH
 #elif EKA2L1_PLATFORM(WASM)
 #define X_PLATFORM X_LINUX
+#elif EKA2L1_PLATFORM(OHOS)
+// HarmonyOS / OpenHarmony is Linux-like for miniBAE's purposes.
+#define X_PLATFORM X_LINUX
 #elif EKA2L1_PLATFORM(UNIX)
 #if EKA2L1_PLATFORM(ANDROID)
 #define X_PLATFORM X_ANDROID

@@ -20,7 +20,7 @@
 #include <drivers/audio/audio.h>
 #include <common/platform.h>
 
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
 #include <drivers/audio/backend/cubeb/audio_cubeb.h>
 #endif
 #include <drivers/audio/backend/null/audio_null.h>
@@ -66,7 +66,7 @@ namespace eka2l1::drivers {
             res.push_back(player_type_wmf);
         } else
 #endif
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
         {
             res.push_back(player_type_ffmpeg);
         }
@@ -143,7 +143,7 @@ namespace eka2l1::drivers {
     audio_driver_instance make_audio_driver(const audio_driver_backend backend, const std::uint32_t initial_master_vol,
         const player_type preferred_midi_backend) {
         switch (backend) {
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
         case audio_driver_backend::cubeb: {
             return std::make_unique<cubeb_audio_driver>(initial_master_vol, preferred_midi_backend);
         }

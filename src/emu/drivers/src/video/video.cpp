@@ -19,13 +19,13 @@
 
 #include <common/platform.h>
 #include <drivers/video/video.h>
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
 #include <drivers/video/backend/ffmpeg/video_player_ffmpeg.h>
 #endif
 
 namespace eka2l1::drivers {
     video_player_instance new_best_video_player(audio_driver *drv) {
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
         return std::make_unique<video_player_ffmpeg>(drv);
 #else
         return nullptr;

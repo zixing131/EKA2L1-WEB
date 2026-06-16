@@ -30,7 +30,7 @@
 #include <drivers/graphics/backend/ogl/fb_ogl.h>
 #include <glad/glad.h>
 
-#if EKA2L1_PLATFORM(ANDROID)
+#if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(OHOS)
 #include <EGL/egl.h>
 #elif EKA2L1_PLATFORM(WASM)
 #include <SDL2/SDL.h>
@@ -65,7 +65,7 @@ namespace eka2l1::drivers {
             }
 
             case graphics::gl_context::mode::opengl_es: {
-#if EKA2L1_PLATFORM(ANDROID)
+#if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(OHOS)
                 if (!gladLoadGLES2Loader((GLADloadproc) eglGetProcAddress)) {
                     LOG_CRITICAL(DRIVER_GRAPHICS, "gladLoadGLES2Loader() failed");
                     return;

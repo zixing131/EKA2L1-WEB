@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "EKA2L1 Symbian emulator"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "EKA2L1 Symbian emulator"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "EKA2L1"
+    },
+    {
+      "name": "app_name",
+      "value": "EKA2L1"
+    },
+    {
+      "name": "settings_title",
+      "value": "Settings"
+    }
+  ]
+}

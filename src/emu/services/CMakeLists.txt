@@ -300,7 +300,9 @@ add_library(epocservs
         src/window/util.cpp
         src/window/window.cpp)
 
-if (NOT EMSCRIPTEN)
+# OHOS, like WASM, has no libuv/uvw here, so it takes the null bluetooth/internet
+# protocol path (no host-backed networking for now).
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_sources(epocservs PRIVATE
         src/bluetooth/btmidman.cpp
         src/bluetooth/protocols/btlink/resolver_inet.cpp
@@ -339,7 +341,7 @@ target_link_libraries(epocservs PUBLIC
         epocutils
         thread-pool)
 
-if (NOT EMSCRIPTEN)
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_link_libraries(epocservs PUBLIC
         uv_a
         uvw

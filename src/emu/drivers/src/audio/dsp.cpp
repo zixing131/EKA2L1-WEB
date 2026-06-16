@@ -19,7 +19,7 @@
 
 #include <common/platform.h>
 #include <drivers/audio/dsp.h>
-#if !EKA2L1_PLATFORM(WASM)
+#if EKA2L1_HAS_NATIVE_AV()
 #include <drivers/audio/backend/ffmpeg/dsp_ffmpeg.h>
 #else
 #include <drivers/audio/backend/dsp_shared.h>
@@ -94,7 +94,7 @@ namespace eka2l1::drivers {
     }
 
 
-#if EKA2L1_PLATFORM(WASM)
+#if !EKA2L1_HAS_NATIVE_AV()
     // WASM has no audio backend (ffmpeg is compiled out), so the factories used
     // to return nullptr. The MMF device server dereferences the returned stream
     // unconditionally, which traps. These no-op streams accept all data and
@@ -306,7 +306,7 @@ namespace eka2l1::drivers {
     std::unique_ptr<dsp_stream> new_dsp_out_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
         case dsp_stream_backend_ffmpeg:
-#if EKA2L1_PLATFORM(WASM)
+#if !EKA2L1_HAS_NATIVE_AV()
             // With a real audio driver (Web Audio) PCM can actually play; the
             // paced no-op stream remains the fallback so MMF never stalls.
             if (aud) {
@@ -326,7 +326,7 @@ namespace eka2l1::drivers {
     std::unique_ptr<dsp_stream> new_dsp_in_stream(drivers::audio_driver *aud, const dsp_stream_backend dsp_backend) {
         switch (dsp_backend) {
         case dsp_stream_backend_ffmpeg:
-#if EKA2L1_PLATFORM(WASM)
+#if !EKA2L1_HAS_NATIVE_AV()
             (void)aud;
             return std::make_unique<dsp_input_stream_null>();
 #else
