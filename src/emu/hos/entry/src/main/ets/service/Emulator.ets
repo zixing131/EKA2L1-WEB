@@ -23,8 +23,18 @@ const TAG = 'EKA2L1';
 
 // Runtime asset folders bundled under entry/src/main/resources/rawfile/assets
 // that the emulator expects to find next to its working directory (the same set
-// the Android frontend copies into app assets). Copied once into the sandbox.
+// the Android frontend copies into app assets). Copied into the sandbox when the
+// stamp below changes.
 const ASSET_DIRS: string[] = ['resources', 'patch', 'compat', 'scripts'];
+
+// Bump this whenever the bundled assets change so the sandbox copy is redone.
+// A plain "does the dir exist?" gate is not enough: an earlier HAP that shipped
+// without shaders still created an empty resources/ dir, after which the gate
+// skipped the copy forever and the real shaders (added in a later HAP) never
+// landed -> black screen. The stamp file records which asset version was copied;
+// if it is missing or stale we re-copy.
+const ASSET_VERSION = '2';
+const ASSET_STAMP = '.assets_version';
 
 /**
  * ArkTS facade over the native EKA2L1 core (libentry.so). Mirrors the static
@@ -76,19 +86,40 @@ export class Emulator {
     this.started = true;
   }
 
-  // Copy rawfile/assets/<dir> trees into filesDir/<dir> the first time only.
+  // Copy rawfile/assets/<dir> trees into filesDir/<dir>. Gated by a version stamp
+  // rather than directory existence, so a HAP that adds/changes assets re-copies
+  // even if an earlier run already created (possibly empty) dirs.
   private async copyAssets(context: common.UIAbilityContext): Promise<void> {
+    const stampPath = `${this.emulatorDir}/${ASSET_STAMP}`;
+    let copied = '';
+    try {
+      if (fs.accessSync(stampPath)) {
+        copied = fs.readTextSync(stampPath).trim();
+      }
+    } catch (err) {
+      copied = '';
+    }
+    if (copied === ASSET_VERSION) {
+      return; // sandbox already holds this asset version
+    }
+
     const mgr = context.resourceManager;
     for (const dir of ASSET_DIRS) {
       const dest = `${this.emulatorDir}/${dir}`;
-      if (fs.accessSync(dest)) {
-        continue; // already copied
-      }
       try {
+        // Re-copy unconditionally (overwrites stale/empty files from older HAPs).
         await this.copyRawfileDir(mgr, `assets/${dir}`, dest);
       } catch (err) {
         hilog.warn(DOMAIN, TAG, 'Asset copy skipped for %{public}s: %{public}s', dir, JSON.stringify(err));
       }
+    }
+
+    try {
+      const file = fs.openSync(stampPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, ASSET_VERSION);
+      fs.closeSync(file);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to write asset stamp: %{public}s', JSON.stringify(err));
     }
   }
 
@@ -115,7 +146,9 @@ export class Emulator {
       } else {
         try {
           const content: Uint8Array = mgr.getRawFileContentSync(childRaw);
-          const file = fs.openSync(childDest, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE);
+          // TRUNC so re-copying over a stale/empty file from an older HAP fully
+          // overwrites it rather than leaving leftover bytes.
+          const file = fs.openSync(childDest, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
           fs.writeSync(file.fd, content.buffer as ArrayBuffer);
           fs.closeSync(file);
         } catch (err) {

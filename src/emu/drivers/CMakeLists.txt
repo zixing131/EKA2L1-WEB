@@ -163,7 +163,9 @@ elseif(EKA2L1_OHOS)
         src/graphics/backend/context_egl_ohos.cpp
         src/graphics/backend/context_egl_ohos.h
     )
-    target_link_libraries(drivers PUBLIC EGL GLESv3)
+    # native_window: OH_NativeWindow_NativeWindowHandleOpt (SET_FORMAT) used in
+    # context_egl_ohos.cpp to match the native window's format to the EGLConfig.
+    target_link_libraries(drivers PUBLIC EGL GLESv3 native_window)
 else()
     find_package(X11 REQUIRED)
     find_package(OpenGL REQUIRED)

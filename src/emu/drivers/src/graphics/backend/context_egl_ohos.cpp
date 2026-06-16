@@ -20,6 +20,8 @@
 #include "context_egl_ohos.h"
 #include <common/log.h>
 
+#include <native_window/external_window.h>
+
 namespace eka2l1::drivers::graphics {
     gl_context_egl_ohos::gl_context_egl_ohos(const window_system_info& wsi, bool stereo, bool core)
         : gl_context_egl(wsi, stereo, core, true) {
@@ -30,10 +32,27 @@ namespace eka2l1::drivers::graphics {
             return;
         }
 
-        // The XComponent already owns the OHNativeWindow and has configured its
-        // buffer geometry/format. Unlike Android we do not call
-        // ANativeWindow_setBuffersGeometry here; eglCreateWindowSurface in the
-        // base class accepts the OHNativeWindow* directly.
+        // The XComponent's OHNativeWindow defaults to an RGBA8888 buffer, but the
+        // EGLConfig we picked may be RGB(X)888 (no alpha). eglCreateWindowSurface
+        // then fails with EGL_BAD_MATCH (pixel format) and every later draw hits
+        // "EGLSurface is invalid" (EGL_BAD_SURFACE 0x300D) -> the screen stays
+        // black even though the render loop and FPS keep running.
+        //
+        // Force the native window's buffer format to match the chosen config's
+        // native visual id before creating the surface - the OHOS equivalent of
+        // Android's ANativeWindow_setBuffersGeometry(format) in
+        // context_egl_android.cpp.
+        EGLint format = 0;
+        if (eglGetConfigAttrib(egl_display, egl_config, EGL_NATIVE_VISUAL_ID, &format) == EGL_TRUE && format != 0) {
+            OHNativeWindow *window = reinterpret_cast<OHNativeWindow *>(render_window);
+            const int32_t ret = OH_NativeWindow_NativeWindowHandleOpt(window, SET_FORMAT, format);
+            if (ret != 0) {
+                LOG_WARN(DRIVER_GRAPHICS, "OHOS native window SET_FORMAT {} failed: {}", format, ret);
+            }
+        } else {
+            LOG_WARN(DRIVER_GRAPHICS, "Could not read EGL_NATIVE_VISUAL_ID; native window format left as-is");
+        }
+
         gl_context_egl::create_surface();
     }
 }
