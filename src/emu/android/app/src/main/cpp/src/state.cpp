@@ -87,6 +87,25 @@ namespace eka2l1::android {
 
                     drivers::command_list retrieved = builder.retrieve_command_list();
                     state_ptr->graphics_driver->submit_command_list(retrieved);
+
+                    // Measure the real present FPS over a ~500ms sliding window.
+                    const std::uint64_t now_us = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+                    if (state_ptr->fps_window_start_us == 0) {
+                        state_ptr->fps_window_start_us = now_us;
+                        state_ptr->fps_frame_count = 0;
+                    }
+
+                    state_ptr->fps_frame_count++;
+
+                    const std::uint64_t elapsed_us = now_us - state_ptr->fps_window_start_us;
+                    if (elapsed_us >= 500000) {
+                        state_ptr->present_fps.store(state_ptr->fps_frame_count * 1000000.0f / elapsed_us);
+                        state_ptr->fps_window_start_us = now_us;
+                        state_ptr->fps_frame_count = 0;
+                    }
                 });
 
                 screen_change_handles.push_back(change_handle);

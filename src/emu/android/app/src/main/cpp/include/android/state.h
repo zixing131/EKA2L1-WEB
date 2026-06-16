@@ -20,6 +20,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -85,6 +86,11 @@ namespace eka2l1::android {
         config::state conf;
         window_server *winserv;
         int present_status;
+
+        // Real present FPS measurement (updated from the draw callback, read via JNI).
+        std::atomic<float> present_fps{ 0.0f };
+        std::uint64_t fps_window_start_us{ 0 };
+        std::uint32_t fps_frame_count{ 0 };
 
         std::mutex input_mutex;
 

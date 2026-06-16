@@ -758,6 +758,10 @@ public class Emulator {
 
     public static native void loadConfig();
 
+    public static native float getFps();
+
+    public static native boolean isFpsCounterEnabled();
+
     public static native void setLanguage(int languageId);
 
     public static native void setRtosLevel(int level);

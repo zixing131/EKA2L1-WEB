@@ -122,6 +122,7 @@ namespace eka2l1::config {
         bool hide_mouse_in_screen_space{ false };
         bool nearest_neighbor_filtering{ true };
         bool integer_scaling{ true };
+        bool show_fps{ true };
         bool cpu_load_save{ true };
         bool mime_detection{ true };
 

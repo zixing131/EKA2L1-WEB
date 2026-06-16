@@ -261,6 +261,22 @@ Java_com_github_eka2l1_emu_Emulator_loadConfig(JNIEnv *env, jclass clazz) {
     state->launcher->load_config();
 }
 
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_github_eka2l1_emu_Emulator_getFps(JNIEnv *env, jclass clazz) {
+    if (!state) {
+        return 0.0f;
+    }
+    return state->present_fps.load();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_github_eka2l1_emu_Emulator_isFpsCounterEnabled(JNIEnv *env, jclass clazz) {
+    if (!state) {
+        return JNI_FALSE;
+    }
+    return state->conf.show_fps ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_github_eka2l1_emu_Emulator_setLanguage(JNIEnv *env, jclass clazz, jint language_id) {
     state->launcher->set_language(language_id);

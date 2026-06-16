@@ -5,6 +5,10 @@
         android:key="enable-nearest-neighbor-filter"
         android:title="@string/pref_general_utilities_nearest_neighbor_filtering_msg" />
     <SwitchPreferenceCompat
+        android:defaultValue="true"
+        android:key="show-fps"
+        android:title="@string/pref_general_show_fps" />
+    <SwitchPreferenceCompat
         android:id="@+id/switchPreferenceCompat"
         android:defaultValue="true"
         android:key="hide-system-apps"

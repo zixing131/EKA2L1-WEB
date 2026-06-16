@@ -33,6 +33,8 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.SparseIntArray;
 import android.view.Display;
 import android.view.KeyEvent;
@@ -46,6 +48,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -112,6 +115,24 @@ public class EmulatorActivity extends AppCompatActivity {
     private ProfileModel params;
     private MenuItem actionScreenshot;
 
+    private TextView fpsCounter;
+    private final Handler fpsHandler = new Handler(Looper.getMainLooper());
+    private static final long FPS_UPDATE_INTERVAL_MS = 500;
+    private final Runnable fpsUpdater = new Runnable() {
+        @Override
+        public void run() {
+            if (fpsCounter != null && launched) {
+                if (Emulator.isFpsCounterEnabled()) {
+                    fpsCounter.setVisibility(View.VISIBLE);
+                    fpsCounter.setText(String.format(java.util.Locale.US, "%.0f FPS", Emulator.getFps()));
+                } else {
+                    fpsCounter.setVisibility(View.GONE);
+                }
+            }
+            fpsHandler.postDelayed(this, FPS_UPDATE_INTERVAL_MS);
+        }
+    };
+
     @SuppressLint("ClickableViewAccessibility")
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -130,6 +151,7 @@ public class EmulatorActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_emulator);
         overlayView = findViewById(R.id.overlay);
+        fpsCounter = findViewById(R.id.fps_counter);
 
         String name;
         String deviceCode;
@@ -258,6 +280,19 @@ public class EmulatorActivity extends AppCompatActivity {
         if (hasFocus) {
             hideSystemUI();
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        fpsHandler.removeCallbacks(fpsUpdater);
+        fpsHandler.post(fpsUpdater);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        fpsHandler.removeCallbacks(fpsUpdater);
     }
 
     @SuppressLint("SourceLockedOrientationActivity")
