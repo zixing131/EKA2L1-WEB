@@ -10,7 +10,6 @@ src/emu/lazarus/drives/*
 src/emu/lazarus/*.dll
 src/emu/common/include/common/configure.h
 src/emu/common/include/common/version.h
-docs
 CMakeSettings.json
 .vscode
 out
