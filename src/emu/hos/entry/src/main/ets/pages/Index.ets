@@ -96,6 +96,12 @@ struct Index {
     }
     this.refresh();
     this.loading = false;
+    // A device restored from storage boots its OS thread asynchronously, so the
+    // applist may still be empty right after init. If there is a device but no
+    // apps yet, keep polling until they show up (mirrors the post-install path).
+    if (this.devices.length > 0 && this.apps.length === 0) {
+      await this.refreshAppsWhenReady();
+    }
   }
 
   private refresh(): void {
@@ -103,6 +109,24 @@ struct Index {
     this.currentDevice = this.emu.getCurrentDevice();
     this.apps = this.emu.getApps();
     this.loadIcons();
+  }
+
+  // After a device is first installed, bootFirstDevice() only *starts* the OS
+  // thread; the applist server boots and scans its registries asynchronously a
+  // little later, so getApps() right away returns empty (the "list doesn't
+  // refresh after installing a device" bug). We can't block the ArkUI thread
+  // waiting for the OS thread (that deadlocks - see the WASM/HOS Atomics.wait
+  // history), so poll: re-scan + refresh a few times until apps show up or we
+  // hit the timeout. Devices appear immediately; only apps need the wait.
+  private async refreshAppsWhenReady(maxWaitMs: number = 8000, stepMs: number = 300): Promise<void> {
+    this.refresh();
+    let waited = 0;
+    while (this.apps.length === 0 && waited < maxWaitMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, stepMs));
+      waited += stepMs;
+      this.emu.rescanApps();
+      this.refresh();
+    }
   }
 
   private async loadIcons(): Promise<void> {
@@ -197,8 +221,13 @@ struct Index {
         // otherwise the system is already running and a refresh suffices.
         if (this.devices.length === 0) {
           this.emu.bootFirstDevice();
+          // The OS thread boots the applist server asynchronously - poll until
+          // its apps appear instead of reading an empty list immediately.
+          this.busyText = '正在启动设备 / Starting device...';
+          await this.refreshAppsWhenReady();
+        } else {
+          this.refresh();
         }
-        this.refresh();
       } else {
         this.toast(`安装失败 / Install failed (code ${result})`);
       }

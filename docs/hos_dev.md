@@ -458,6 +458,46 @@ W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 h
 > 标准 `#version 300 es` + `precision highp float`,鸿蒙 GLES 应认;若带上后仍黑屏,日志里
 > 会有 `shader_ogl.cpp` 的 `glGetShaderInfoLog` 编译错误(那才是另一类问题)。
 
+## 6.9 第七轮 — 装完设备(ROM)后 app 列表不刷新(OS 线程异步起,列表读太早)
+
+§6.1 修的是装 **SIS** 后列表不刷新(`rescanApps`);这次是装完 **设备/ROM** 后列表空。
+是不同场景、不同根因。
+
+### 根因:`bootFirstDevice()` 只「启动」OS 线程,applist 还没扫完就 `getApps()`
+
+装第一个设备的流程([Index.ets](src/emu/hos/entry/src/main/ets/pages/Index.ets) `onInstallRom`):
+`installDevice()` → `bootFirstDevice()` → `refresh()`。而 native 的
+[boot_first_installed_device](src/emu/hos/native/src/thread.cpp) 做的是
+`bring_up_after_install()` + `stage_two()` + **`std::thread(os_thread)`** —— 起完线程立刻返回。
+applist 服务端是 Symbian OS 在 `symsys->loop()` 里**异步**启动并扫注册表的,等 `os_thread`
+真正跑起来要好些 wall-clock 迭代。所以 `bootFirstDevice()` 一返回就 `getApps()`,服务端还没
+扫,`alserv->get_registerations()` 是空 → 列表空。
+
+对照桌面 [main_window::on_new_device_added](src/emu/qt/src/mainwindow.cpp):它在
+`startup()+set_device()` 后 `init_event.set(); init_event.wait();` **阻塞等 OS 线程重初始化
+完成**再 `setup_app_list()`。但 HOS/WASM 的整个崩溃史(错误 14-16)就是「ArkUI/主线程不能
+阻塞等 OS 线程」(`Atomics.wait`/`join`/`event.wait` 会死锁/ANR),所以不能照抄那个 wait。
+
+### 修复(ArkUI 侧轮询,不阻塞):`refreshAppsWhenReady()`
+
+新增 `refreshAppsWhenReady(maxWaitMs=8000, stepMs=300)`:`refresh()` 后若 `apps` 仍空,
+就每 300ms `rescanApps()`+`refresh()` 重试,直到 app 出现或超时。设备是同步就绪的(立刻显示),
+只有 app 需要等。两处接入:
+- `onInstallRom`:装完第一个设备 `bootFirstDevice()` 后调它(显示「正在启动设备」),不再用
+  会读到空列表的同步 `refresh()`;设备已在跑(非首装)时仍用同步 `refresh()`。
+- `boot()`:从存储恢复的设备开机时 OS 线程也是异步起的,若「有设备但 app 空」同样轮询。
+
+`rescanApps()`/`getApps()` 对 `alserv` 仍为 null 时是安全的(launcher 里 `rescan_apps` 会
+`retrieve_servers()` 重解析、`get_apps` 判空返回空),所以轮询早期服务端没起来也不会崩。
+
+### 教训
+
+1. **「启动 OS 线程」≠「OS 已就绪」**:Symbian 服务端(applist)是在 guest 的 `loop()` 里
+   异步 boot 的,起线程的调用一返回就读服务端状态必然过早。要么等就绪信号(桌面的 `init_event`),
+   要么 UI 侧轮询——W^X/无阻塞平台只能选后者。
+2. **同一症状两个根因**:装 SIS 不刷新(§6.1,服务端缓存→`rescanApps`)和装设备不刷新(本轮,
+   服务端尚未起→轮询)看着一样,修法不同。先分清「服务端在不在 + 扫没扫」。
+
 ## 7. 已知遗留 / 待办
 
 - [ ] **无声音**：null 音频现在是「自走时静音流」（不崩不卡，但没声）。后续接 Audio Kit
@@ -522,6 +562,11 @@ W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 h
 | `src/emu/common/include/common/buffer.h` | `ro_std_file_stream` 的 `tell/size/read/seek` 加 null `FILE*` 防护（musl `ftell(null)` 会 abort） |
 | `src/emu/drivers/src/graphics/backend/ogl/shader_ogl.cpp` | `ogl_shader_module` 构造遇无效流 `LOG_ERROR` 后直接 return |
 | （非代码）`build_hos_native.sh` `stage_assets` | 提醒：必须经此打包才会带着色器，别直接用 DevEco「运行」 |
+
+**第七轮真机修复（§6.9，装完设备后 app 列表不刷新）**
+| 文件 | 改动 |
+|---|---|
+| `src/emu/hos/entry/src/main/ets/pages/Index.ets` | 新增 `refreshAppsWhenReady()` 轮询（OS 线程异步起 applist）；`onInstallRom` 首装后、`boot()` 恢复设备后接入 |
 
 **鸿蒙工程**：`build_hos_native.sh` + `src/emu/hos/`（整目录）
 
