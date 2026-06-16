@@ -377,6 +377,59 @@ W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 h
 
 ---
 
+## 6.7 第五轮真机崩溃 — 点开游戏 SIGABRT:`ftell(null)`(缺着色器 + musl 严格)
+
+承接 §6.6:装 ROM/起 app 都过了(进程活 12s、进了 RunPage),点开游戏后图形线程 abort。
+
+### 错误:图形线程 `do_init` 加载着色器,文件没打开就 `ftell(null)` → musl abort
+
+**现象** `SIGABRT`,`LastFatalMessage:__ftello: parameter is null`,图形线程。栈:
+
+```
+#02 ftello (musl)                              ← abort 源
+#03 common::ro_std_file_stream::tell()
+#04 common::ro_std_file_stream::size()
+#05 drivers::ogl_shader_module::ogl_shader_module(path,...)
+#07 ogl_graphics_driver::do_init()             ← 首次 draw_bitmap 时延迟初始化
+#08 ogl_graphics_driver::draw_bitmap(...)
+```
+
+**两个叠加的根因**
+1. **着色器文件没进 HAP**(功能性根因):着色器源在 `src/emu/drivers/resources/gles/*`,
+   `build_hos_native.sh` 的 `stage_assets()` 会把它们拷进 `entry/src/main/resources/rawfile/
+   assets/resources/`(扁平化 gles→resources,匹配代码里的相对路径 `resources//sprite_norm.vert`),
+   再由 `Emulator.ets` 首次运行拷进沙箱。但**直接用 DevEco「运行」打的 HAP 不会跑这个 shell
+   脚本的 staging 步骤**→`rawfile/assets/` 是空的→HAP 里没有着色器→`do_init` 第一个着色器
+   就打不开。(本轮排查时 `rawfile/assets/` 目录根本不存在,坐实了这点。)
+2. **`ro_std_file_stream` 对 null `FILE*` 不设防**(健壮性根因):`open_c_file` 失败后 `fi_`
+   为 null,而 `tell()/size()/read()/seek()` 直接拿 `fi_` 调 `ftell/fread/...`。glibc 的
+   `ftell(null)` 返回错误,**musl 的 `ftell(null)` 直接 abort 整个进程**——又一例 musl 比
+   glibc 严。`ogl_shader_module` 构造里虽然 `if (!stream.valid()) LOG_ERROR(...)`,但只打日志
+   **没 return**,径直走到 `stream.size()` → 触发 abort。
+
+**修复(健壮性,代码层)**
+- [buffer.h](src/emu/common/include/common/buffer.h) `ro_std_file_stream`:`tell/size/read/seek`
+  全部加 `if (!fi_)` 防护(tell/size 返 0、read 返 0、seek 直接 return)。任何打开失败的只读
+  文件流不再崩,优雅退化。
+- [shader_ogl.cpp](src/emu/drivers/src/graphics/backend/ogl/shader_ogl.cpp)
+  `ogl_shader_module` 构造:`!stream.valid()` 时 `LOG_ERROR` 后**直接 return**,不再拿空流
+  去 `size()`/编译空着色器。
+
+> 注意:代码层修复只是**让缺着色器不崩**;要真正出画面,HAP 必须带着色器——用
+> `build_hos_native.sh`(它会 `stage_assets`)打包,或在 DevEco 打包前手动跑一次
+> `stage_assets`,别直接用 DevEco「运行」按钮(它不跑 shell 脚本的 staging)。
+
+### 教训
+
+1. **musl 的 stdio 对 null 句柄是 abort,不是返错**:`ftell/fseek/fread(null)` 在 glibc 上
+   宽容、在 musl(安卓/OHOS)上直接杀进程。所有「打开可能失败的文件」封装,方法体内必须判空,
+   不能只提供一个 `valid()` 让调用方自觉。
+2. **`valid()` 检查后要真的 `return`**:只 `LOG_ERROR` 不 return = 没检查。本案就差这一个
+   return,把「缺文件」变成「崩溃」。
+3. **DevEco「运行」≠ `build_hos_native.sh`**:shell 脚本里的 `stage_assets`(拷着色器/补丁/
+   compat)是 IDE 构建流程之外的,直接 IDE 跑会漏掉运行期资源。资源类缺失要先确认 HAP 里到底
+   有没有,别只在代码里找 bug。
+
 ## 7. 已知遗留 / 待办
 
 - [ ] **无声音**：null 音频现在是「自走时静音流」（不崩不卡，但没声）。后续接 Audio Kit
@@ -434,6 +487,13 @@ W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 h
 |---|---|
 | `src/emu/common/src/types.cpp` | `translate_protection`：W^X 平台把 `prot_read_write_exec` 降级为 RW（去掉 host EXEC）；include `common/virtualmem.h` |
 | `src/emu/common/src/virtualmem.cpp` | `map_memory` 非 WASM 分支 `mmap` fd `0→-1`，`MAP_FAILED` 归一化为 nullptr |
+
+**第五轮真机修复（§6.7，点开游戏 `ftell(null)` abort）**
+| 文件 | 改动 |
+|---|---|
+| `src/emu/common/include/common/buffer.h` | `ro_std_file_stream` 的 `tell/size/read/seek` 加 null `FILE*` 防护（musl `ftell(null)` 会 abort） |
+| `src/emu/drivers/src/graphics/backend/ogl/shader_ogl.cpp` | `ogl_shader_module` 构造遇无效流 `LOG_ERROR` 后直接 return |
+| （非代码）`build_hos_native.sh` `stage_assets` | 提醒：必须经此打包才会带着色器，别直接用 DevEco「运行」 |
 
 **鸿蒙工程**：`build_hos_native.sh` + `src/emu/hos/`（整目录）
 
