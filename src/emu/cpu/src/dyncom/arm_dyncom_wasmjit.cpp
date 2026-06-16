@@ -358,7 +358,9 @@ namespace eka2l1::arm::dyncom_jit {
             // callee together (a stale chain can never be reached).
             void emit_chain_or_exit(std::uint32_t target, std::uint32_t executed_extra) {
                 std::int32_t callee = 0;
-                const auto ite = cpu_->jit_block_map.find(target);
+                // jit_block_map is asid-tagged; a within-block branch target is
+                // always in the same address space, so key with the current asid.
+                const auto ite = cpu_->jit_block_map.find(cpu_->make_instruction_cache_key(target));
                 if ((ite != cpu_->jit_block_map.end()) && (ite->second > 0) && (target != pc_start_)) {
                     callee = ite->second;
                 }

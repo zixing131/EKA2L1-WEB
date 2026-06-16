@@ -1010,7 +1010,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
         ret = inst_base->br;
     };
 
-    cpu->instruction_cache[pc_start] = bb_start;
+    cpu->instruction_cache[cpu->make_instruction_cache_key(pc_start)] = bb_start;
     cpu->mark_code_page(pc_start);
 #ifdef __EMSCRIPTEN__
     eka2l1_wasm_guest_blocks_translated++;
@@ -1033,7 +1033,7 @@ static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, s
         inst_base->br = TransExtData::SINGLE_STEP;
     }
 
-    cpu->instruction_cache[pc_start] = bb_start;
+    cpu->instruction_cache[cpu->make_instruction_cache_key(pc_start)] = bb_start;
     cpu->mark_code_page(pc_start);
 
     return KEEP_GOING;
@@ -1803,12 +1803,15 @@ DISPATCH : {
     // Find the cached instruction cream, otherwise translate it...
     {
         const std::uint32_t dispatch_pc = cpu->Reg[15];
+        const std::uint32_t dispatch_asid = cpu->instruction_cache_asid;
         ARMul_State::block_lookup_entry &bl_entry = cpu->block_lookup_ref(dispatch_pc);
 
-        if ((bl_entry.pc == dispatch_pc) && (bl_entry.generation == cpu->block_lookup_generation)) {
+        if ((bl_entry.pc == dispatch_pc) && (bl_entry.asid == dispatch_asid)
+            && (bl_entry.generation == cpu->block_lookup_generation)) {
             ptr = bl_entry.ptr;
         } else {
-            auto itr = cpu->instruction_cache.find(dispatch_pc);
+            const std::uint64_t cache_key = cpu->make_instruction_cache_key(dispatch_pc);
+            auto itr = cpu->instruction_cache.find(cache_key);
             if (itr != cpu->instruction_cache.end()) {
                 ptr = itr->second;
             } else if (cpu->NumInstrsToExecute != 1) {
@@ -1820,13 +1823,14 @@ DISPATCH : {
             }
 
             bl_entry.pc = dispatch_pc;
+            bl_entry.asid = dispatch_asid;
             bl_entry.generation = cpu->block_lookup_generation;
             bl_entry.ptr = ptr;
             bl_entry.jit_count = 0;
             bl_entry.jit_idx = 0;
 #ifdef __EMSCRIPTEN__
             if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
-                auto jit_it = cpu->jit_block_map.find(dispatch_pc);
+                auto jit_it = cpu->jit_block_map.find(cache_key);
                 if (jit_it != cpu->jit_block_map.end()) {
                     bl_entry.jit_idx = jit_it->second;
                 }
@@ -1862,7 +1866,7 @@ DISPATCH : {
                 if (++bl_entry.jit_count >= 128) {
                     const std::int32_t verdict = eka2l1::arm::dyncom_jit::try_compile(cpu, dispatch_pc, ptr);
                     bl_entry.jit_idx = verdict;
-                    cpu->jit_block_map[dispatch_pc] = verdict;
+                    cpu->jit_block_map[cpu->make_instruction_cache_key(dispatch_pc)] = verdict;
                 }
             }
         }

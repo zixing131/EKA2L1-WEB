@@ -116,8 +116,11 @@ namespace eka2l1::kernel {
 
                 run_core->flush_tlb();
 
-                // NOTE: This is not needed now
-                //run_core->set_asid(mm_process->address_space_id());
+                // Push the new address space so the core's ASID-tagged
+                // instruction cache keeps per-process translations apart and
+                // survives this switch (dyncom; no-op on other backends). Paired
+                // with flush_tlb above, which only drops the data TLB now.
+                run_core->set_asid(static_cast<std::uint32_t>(mm_process->address_space_id()));
             }
 
             run_core->load_context(crr_thread->ctx);

@@ -321,15 +321,27 @@ public:
     char trans_cache_buf[TRANS_CACHE_SIZE];
     size_t trans_cache_buf_top = 0;
 
-    // TODO(bunnei): Move this cache to a better place - it should be per codeset (likely per
-    // process for our purposes), not per ARMul_State (which tracks CPU core state).
-    std::unordered_map<std::uint32_t, std::size_t> instruction_cache;
+    // ASID-tagged translation cache. Translations from different address spaces
+    // coexist (key = (asid << 32) | virtual_pc) so the cache survives process
+    // switches instead of being wiped on every IPC round-trip. The scheduler
+    // pushes the running process's asid via dyncom_core::set_asid -> set_asid()
+    // below. asid 0 is used by the embedded-fallback interpreter (no asid ever
+    // pushed), which is also fine: it just keeps one un-tagged keyspace.
+    std::unordered_map<std::uint64_t, std::size_t> instruction_cache;
+    std::uint32_t instruction_cache_asid = 0;
+
+    std::uint64_t make_instruction_cache_key(const std::uint32_t vaddr) const {
+        return (static_cast<std::uint64_t>(instruction_cache_asid) << 32) | vaddr;
+    }
 
     // Direct-mapped lookaside in front of instruction_cache: DISPATCH runs on
     // every taken branch and unordered_map::find dominated interpreter
-    // profiles. Invalidation is O(1) via the generation counter.
+    // profiles. Invalidation is O(1) via the generation counter. The entry
+    // carries the asid so two same-PC blocks from different address spaces
+    // don't alias in the same direct-mapped slot.
     struct block_lookup_entry {
         std::uint32_t pc;
+        std::uint32_t asid;
         std::uint32_t generation;
         std::size_t ptr;
         // wasm JIT bookkeeping (zero on (re)fill): execution counter towards
@@ -367,9 +379,12 @@ public:
         return (code_page_bitmap[(addr >> 12) >> 6] & (1ull << ((addr >> 12) & 63))) != 0;
     }
 
-    // wasm JIT: compiled-block verdicts by guest pc (0 never stored; -2 =
-    // uncompilable, > 0 = table index). The lookaside entries cache these.
-    std::unordered_map<std::uint32_t, std::int32_t> jit_block_map;
+    // wasm JIT: compiled-block verdicts keyed by (asid << 32) | guest pc, same
+    // as instruction_cache (0 never stored; -2 = uncompilable, > 0 = table
+    // index). asid-tagged so a compiled block isn't reused for a different
+    // process that happens to share the guest PC. The lookaside entries cache
+    // these.
+    std::unordered_map<std::uint64_t, std::int32_t> jit_block_map;
     bool jit_enabled = false;
 
     // Cross-block chaining recursion depth: compiled blocks call each other

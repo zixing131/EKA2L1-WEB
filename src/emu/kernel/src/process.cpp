@@ -234,6 +234,16 @@ namespace eka2l1::kernel {
             process_handles.reset();
         }
 
+        // This process's address-space id (asid) can be recycled for a future
+        // process. The dyncom instruction cache is ASID-tagged and now survives
+        // process switches, so drop every translation here to ensure a recycled
+        // asid never executes this dead process's stale code. Process teardown
+        // is rare (never in a hot loop), so a full clear is cheap; it's the
+        // correctness backstop for asid reuse.
+        if (arm::core *cpu = kern->get_cpu()) {
+            cpu->clear_instruction_cache();
+        }
+
         return 0;
     }
 

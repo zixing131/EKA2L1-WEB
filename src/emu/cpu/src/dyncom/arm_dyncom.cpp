@@ -180,12 +180,17 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::flush_tlb() {
+        // Flush only the data TLB. It is keyed by virtual address with no asid,
+        // so the same vaddr maps different host memory in the new process and
+        // must be dropped on an address-space switch.
+        //
+        // The *instruction* cache is NOT dropped here: it is ASID-tagged (see
+        // ARMul_State::make_instruction_cache_key), so translations from
+        // different processes coexist and survive IPC round-trips. Before this
+        // change, wiping it on every process switch made IPC-heavy apps
+        // re-decode their whole working set after each round-trip. The scheduler
+        // pushes the new asid via set_asid() right after this call.
         mem_cache_.flush();
-
-        // Called by the scheduler on address-space switches: the same virtual
-        // address may map different code in the new process, so cached
-        // translations (keyed by PC only) must go.
-        state_->invalidate_translation_cache();
     }
 
     void dyncom_core::clear_instruction_cache() {
@@ -194,6 +199,10 @@ namespace eka2l1::arm {
 
     void dyncom_core::imb_range(address addr, std::size_t size) {
         clear_instruction_cache();
+    }
+
+    void dyncom_core::set_asid(const std::uint32_t asid) {
+        state_->instruction_cache_asid = asid;
     }
 
     std::uint32_t dyncom_core::get_num_instruction_executed() {

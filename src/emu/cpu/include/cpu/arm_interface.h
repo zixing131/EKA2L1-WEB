@@ -196,6 +196,14 @@ namespace eka2l1::arm {
         virtual void clear_instruction_cache() = 0;
         virtual void imb_range(address addr, std::size_t size) = 0;
 
+        // Tell the core which address space (process) is now running, so an
+        // ASID-tagged translation cache keeps per-process translations apart and
+        // survives process switches. Default no-op: backends that don't tag their
+        // cache by address space (dynarmic, 12l1r) ignore it; dyncom overrides.
+        virtual void set_asid(const std::uint32_t asid) {
+            (void)asid;
+        }
+
         virtual bool should_clear_old_memory_map() const {
             return true;
         }
