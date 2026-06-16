@@ -319,6 +319,64 @@ glDrawBuffers）**漏了 OHOS** → 走桌面分支。
 
 ---
 
+## 6.6 第四轮真机崩溃 — dispatcher trampoline chunk 用了 RWX（W^X 拒绝）
+
+承接 §6.5：dynarmic 那关过了之后（新构建 hash `052e12be`，build-id 与崩溃日志一致），
+装 ROM 仍闪退，但崩点完全变了。
+
+### 错误：`set_device → reset → setup_outsider → dispatcher 构造` 里 chunk 清零写崩
+
+**现象** `SIGSEGV(SEGV_ACCERR)@0x5cfe7ce000`，进程 3s。完整栈（符号化后）：
+
+```
+#13 hos::emulator::stage_one()
+#11 system_impl::set_device()
+#10 system_impl::reset()
+#09 system_impl::setup_outsider()
+#07 dispatch::dispatcher::dispatcher(kernel_system*, ntimer*)
+#06 kernel_system::create<kernel::chunk>(...)
+#05 make_unique<kernel::chunk>(...)            dispatcher.cpp
+#04 kernel::chunk::chunk(...)
+#03 std::fill<unsigned char*>(...)             ← chunk.cpp:151 清零写
+#00 std::__fill_n<unsigned char*>
+```
+
+寄存器决定性：`x0=x9=0x5cfe7ce000`（写目标=fault 地址）、`x1=0x4000`（写 16KB）、
+`esr=0x92000047`（数据写权限错）。`0x4000` = `MAX_TRAMPOLINE_CHUNK_SIZE`。
+
+**根因（又是 W^X，换了个地方）**
+[dispatcher.cpp](src/emu/dispatch/src/dispatcher.cpp) 构造时建 trampoline chunk 用了
+**`prot_read_write_exec`（RWX）**。chunk 创建后 [chunk.cpp:151](src/emu/kernel/src/chunk.cpp)
+`std::fill(base..., clear_byte)` 清零。OHOS（同 iOS）W^X：`commit` 的
+`mprotect(PROT_READ|PROT_WRITE|PROT_EXEC)` 被内核拒绝 → 页留在不可写 → 清零写第一字节就
+`SEGV_ACCERR`。这就是 §6.5 修完 dynarmic 后「往后多走了几步又崩」的下一颗雷。
+
+**关键观察**：trampoline chunk 的内容是**宿主写入、guest CPU 执行**——host 侧
+`start_base[0]=0xEFC10001…` 写的是 guest ARM 指令，由模拟 CPU（dyncom 解释 / dynarmic
+重编译进自己独立的可执行缓冲）当数据读取,host **从不直接执行**这块内存。所以这里的
+PROT_EXEC 对 host 是多余的,RW 足矣。
+
+**修复**（[types.cpp](src/emu/common/src/types.cpp) `translate_protection`，单一收口处）：
+W^X 平台把 `prot_read_write_exec` 降级成 `PROT_READ|PROT_WRITE`（去掉 host 的 EXEC），
+非 W^X 平台仍给真 RWX。所有 RWX chunk 统一受益,不只 trampoline。guest 仍通过模拟 CPU
+「执行」这块内存,语义不变。
+- 附带:[virtualmem.cpp](src/emu/common/src/virtualmem.cpp) `map_memory` 非 WASM 路径
+  `mmap` 的 `fd` 从误写的 `0` 改 `-1`（musl/OHOS 比 glibc 严），失败时把 `MAP_FAILED`
+  归一化成 `nullptr`,否则调用方只判 null 会漏检、继续往 `(char*)-1+off` 写。
+
+### 教训
+
+1. **W^X 不止卡 JIT,也卡任何 RWX 映射**:模拟器里「可执行」的 guest chunk 在 host 看来
+   只是数据(解释器读字节、JIT 编进别的缓冲),host 侧根本不需要 PROT_EXEC。给 guest 内存
+   申请 host RWX 在 W^X 平台一律失败。把 RWX 降级 RW 收口在 `translate_protection` 最干净。
+2. **`mprotect` 失败要顺着传到清零写之前**:本案 commit 失败没拦住后面的 `std::fill`,才
+   让一个 mprotect 的 -1 变成 SIGSEGV。映射类失败要么不往下走、要么 fail 得更早更明确。
+3. **截断日志会把人带偏**:前一版 28 行日志缺寄存器/完整栈,addr2line 又因
+   `.debug_ranges` 缺失把行号标到邻近 TU,差点定位成 mem-model chunk;拿到完整栈 + 寄存器
+   (`x1=0x4000` 直接指向 trampoline)才一锤定音。要完整 crashlog 再下结论。
+
+---
+
 ## 7. 已知遗留 / 待办
 
 - [ ] **无声音**：null 音频现在是「自走时静音流」（不崩不卡，但没声）。后续接 Audio Kit
@@ -370,6 +428,12 @@ glDrawBuffers）**漏了 OHOS** → 走桌面分支。
 |---|---|
 | `src/emu/common/include/common/virtualmem.h`、`src/.../virtualmem.cpp` | 新增 `is_executable_memory_available()`（mmap+mprotect+执行探测，结果缓存）；`is_memory_wx_exclusive()` 把 OHOS 加入返回 true |
 | `src/emu/system/src/epoc.cpp` | OHOS 单独分支：`is_executable_memory_available() ? dynarmic : dyncom`；include `common/virtualmem.h` |
+
+**第四轮真机修复（§6.6，dispatcher trampoline RWX 被 W^X 拒绝）**
+| 文件 | 改动 |
+|---|---|
+| `src/emu/common/src/types.cpp` | `translate_protection`：W^X 平台把 `prot_read_write_exec` 降级为 RW（去掉 host EXEC）；include `common/virtualmem.h` |
+| `src/emu/common/src/virtualmem.cpp` | `map_memory` 非 WASM 分支 `mmap` fd `0→-1`，`MAP_FAILED` 归一化为 nullptr |
 
 **鸿蒙工程**：`build_hos_native.sh` + `src/emu/hos/`（整目录）
 

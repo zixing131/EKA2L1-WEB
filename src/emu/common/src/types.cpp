@@ -19,6 +19,7 @@
  */
 #include <common/platform.h>
 #include <common/types.h>
+#include <common/virtualmem.h>
 
 #if EKA2L1_PLATFORM(POSIX)
 #include <sys/mman.h>
@@ -66,7 +67,16 @@ int translate_protection(prot cprot) {
 #endif
     } else if (cprot == prot_read_write_exec) {
 #if EKA2L1_PLATFORM(POSIX)
-        tprot = PROT_READ | PROT_WRITE | PROT_EXEC;
+        // W^X platforms (iOS/HarmonyOS store builds, etc.) reject a single mapping
+        // that is writable AND executable - mprotect fails and the page is left
+        // unwritable, so the chunk's clear-fill then faults (SEGV_ACCERR). EKA2L1's
+        // guest chunks are never executed as host code anyway: the interpreter reads
+        // them as data and the JIT recompiles into its own separate executable
+        // buffer. So drop host PROT_EXEC here - the guest still "executes" the chunk
+        // through the emulated CPU. Keep real RWX on permissive hosts.
+        tprot = eka2l1::common::is_memory_wx_exclusive()
+            ? (PROT_READ | PROT_WRITE)
+            : (PROT_READ | PROT_WRITE | PROT_EXEC);
 #else
         tprot = PAGE_EXECUTE_READWRITE;
 #endif

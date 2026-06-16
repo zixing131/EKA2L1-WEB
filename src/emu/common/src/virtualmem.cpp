@@ -57,8 +57,16 @@ namespace eka2l1::common {
         }
         return ptr;
 #else
-        return mmap(nullptr, size, PROT_NONE,
-            MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+        // fd must be -1 for MAP_ANONYMOUS (musl/OHOS is stricter than glibc, which
+        // tolerates 0). On failure mmap returns MAP_FAILED ((void*)-1), not null -
+        // normalize to nullptr so every `if (!ptr)` call site catches it instead of
+        // marching on to write at (char*)-1 + offset (a page-aligned SEGV_ACCERR).
+        void *ptr = mmap(nullptr, size, PROT_NONE,
+            MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (ptr == MAP_FAILED) {
+            return nullptr;
+        }
+        return ptr;
 #endif
     }
 
