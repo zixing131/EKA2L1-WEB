@@ -62,7 +62,9 @@ namespace eka2l1::drivers {
         if (stream_)
             stream_->set_volume(static_cast<float>(volume_) / 10.0f);
 
-        if (!was_already_stopped) {
+        // stream_ may be null with a backend-less audio driver (null driver on
+        // OHOS). Skip the restart in that case; the stream stays virtual/silent.
+        if (!was_already_stopped && stream_) {
             stream_->start();
         }
 
@@ -94,6 +96,14 @@ namespace eka2l1::drivers {
         }
 
         avg_frame_count_ = 0;
+
+        // The audio driver may have no real backend (e.g. the null driver used on
+        // OHOS): new_output_stream returns null. Treat that as a silent/virtual
+        // stream so the guest's MMF pipeline keeps running instead of crashing.
+        if (!stream_) {
+            virtual_stop = false;
+            return true;
+        }
 
         if (virtual_stop) {
             if (!stream_->start()) {
@@ -204,6 +214,11 @@ namespace eka2l1::drivers {
     }
 
     std::uint64_t dsp_output_stream_shared::real_time_position() {
+        // No real backend (null driver): fall back to the computed position.
+        if (!stream_) {
+            return position();
+        }
+
         std::uint64_t frame_streamed = 0;
         if (!stream_->current_frame_position(&frame_streamed)) {
             LOG_ERROR(DRIVER_AUD, "Fail to retrieve streamed sample count!");

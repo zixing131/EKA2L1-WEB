@@ -96,6 +96,13 @@ static napi_value GetApps(napi_env env, napi_callback_info info) {
     return make_string_array(env, launcher()->get_apps());
 }
 
+static napi_value RescanApps(napi_env env, napi_callback_info info) {
+    if (launcher()) {
+        launcher()->rescan_apps();
+    }
+    return make_undefined(env);
+}
+
 // Returns { width, height, data: ArrayBuffer(rgba8888) } or undefined.
 static napi_value icon_to_js(napi_env env, const eka2l1::hos::icon_bitmap &icon) {
     if (!icon.valid()) {
@@ -493,6 +500,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "startNative", nullptr, StartNative, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "isInitialized", nullptr, IsInitialized, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "getApps", nullptr, GetApps, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "rescanApps", nullptr, RescanApps, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "getAppIcon", nullptr, GetAppIcon, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "launchApp", nullptr, LaunchApp, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "getDevices", nullptr, GetDevices, nullptr, nullptr, nullptr, napi_default, nullptr },

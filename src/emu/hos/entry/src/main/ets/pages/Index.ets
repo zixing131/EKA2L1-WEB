@@ -24,6 +24,46 @@ import { DeviceItem } from '../model/DeviceItem';
 const DOMAIN = 0x1311;
 const TAG = 'EKA2L1';
 
+// One app icon + label cell. A separate @Component with @ObjectLink so that when
+// the async icon load sets app.icon (AppItem is @Observed), THIS cell re-renders.
+// A plain @Builder would not, because the keyed ForEach above never recreates an
+// item whose key (uid) is unchanged.
+@Reusable
+@Component
+struct AppCell {
+  @ObjectLink app: AppItem;
+  onTap: (app: AppItem) => void = () => {};
+
+  build() {
+    Column() {
+      if (this.app.icon) {
+        Image(this.app.icon)
+          .width(56).height(56)
+          .objectFit(ImageFit.Contain)
+          .borderRadius(12)
+      } else {
+        Column() {
+          SymbolGlyph($r('sys.symbol.square_grid_2x2')).fontSize(32).fontColor([Color.Gray])
+        }
+        .width(56).height(56)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#1F000000')
+        .borderRadius(12)
+      }
+      Text(this.app.title)
+        .fontSize(12)
+        .margin({ top: 6 })
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
+        .width('100%')
+    }
+    .width('100%')
+    .padding(8)
+    .onClick(() => this.onTap(this.app))
+  }
+}
+
 @Entry
 @Component
 struct Index {
@@ -66,13 +106,14 @@ struct Index {
   }
 
   private async loadIcons(): Promise<void> {
+    // Each AppItem is @Observed and rendered by the AppCell @Component via
+    // @ObjectLink, so assigning app.icon re-renders just that cell. No need to
+    // reassign the whole array (which would actually detach @ObjectLink).
     for (const app of this.apps) {
       if (!app.icon) {
         const pm = await this.emu.getAppIcon(app.uid);
         if (pm) {
           app.icon = pm;
-          // Reassign array element to trigger re-render of the observed item.
-          this.apps = this.apps.slice();
         }
       }
     }
@@ -180,6 +221,9 @@ struct Index {
       const result = this.emu.installApp(path);
       if (result === 0) {
         this.toast('应用安装成功 / App installed');
+        // The applist server caches registrations; re-scan from disk so the
+        // newly installed app shows up without restarting.
+        this.emu.rescanApps();
         this.refresh();
       } else {
         this.toast(`安装失败 / Install failed (code ${result})`);
@@ -271,36 +315,6 @@ struct Index {
   }
 
   @Builder
-  AppCell(app: AppItem) {
-    Column() {
-      if (app.icon) {
-        Image(app.icon)
-          .width(56).height(56)
-          .objectFit(ImageFit.Contain)
-          .borderRadius(12)
-      } else {
-        Column() {
-          SymbolGlyph($r('sys.symbol.square_grid_2x2')).fontSize(32).fontColor([Color.Gray])
-        }
-        .width(56).height(56)
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor('#1F000000')
-        .borderRadius(12)
-      }
-      Text(app.title)
-        .fontSize(12)
-        .margin({ top: 6 })
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .textAlign(TextAlign.Center)
-        .width('100%')
-    }
-    .width('100%')
-    .padding(8)
-    .onClick(() => this.onRunApp(app))
-  }
-
-  @Builder
   EmptyState() {
     Column({ space: 16 }) {
       SymbolGlyph($r('sys.symbol.exclamationmark_circle')).fontSize(64).fontColor([Color.Gray])
@@ -343,7 +357,7 @@ struct Index {
           Grid() {
             ForEach(this.apps, (app: AppItem) => {
               GridItem() {
-                this.AppCell(app)
+                AppCell({ app: app, onTap: (a: AppItem) => this.onRunApp(a) })
               }
             }, (app: AppItem) => app.uid.toString())
           }

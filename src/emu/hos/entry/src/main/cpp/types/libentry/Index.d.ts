@@ -18,6 +18,7 @@ export const isInitialized: () => boolean;
 
 // App list / icons
 export const getApps: () => string[];
+export const rescanApps: () => void;
 export const getAppIcon: (uid: number) => AppIcon | undefined;
 export const launchApp: (uid: number) => void;
 

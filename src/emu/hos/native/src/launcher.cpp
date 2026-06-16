@@ -64,12 +64,24 @@ namespace eka2l1::hos {
         , conf(sys->get_config())
         , kern(sys->get_kernel_system())
         , alserv(nullptr)
+        , scale_ratio_(100.0f)
+        , scale_type_(1)        // fit width (Android default screenScaleType)
+        , gravity_(1)           // top (Android default screenGravity)
         , input_complete_callback_(nullptr)
         , yes_no_complete_callback_(nullptr)
         , is_s80(false)
         , background_img_(0)
         , background_img_opacity_(0.0f)
+        , background_width(0)
+        , background_height(0)
         , keep_bg_aspect_(true) {
+        // Default to the same screen params the Android profile ships with, so
+        // draw() never reads uninitialised scale/gravity/colour (the draw
+        // callback runs on the OS thread the moment an app renders -> would
+        // otherwise crash before setScreenParams is ever called).
+        background_color_[0] = 0xD0;
+        background_color_[1] = 0xD0;
+        background_color_[2] = 0xD0;
         retrieve_servers();
     }
 
@@ -110,6 +122,19 @@ namespace eka2l1::hos {
             }
         }
         return info;
+    }
+
+    void launcher::rescan_apps() {
+        // Mirrors the desktop force_refresh_applist: re-read registries from disk
+        // so a just-installed/uninstalled app appears/disappears without a restart.
+        if (!alserv) {
+            // alserv may be stale if it was null at construction (no device yet);
+            // try to (re)resolve it now that a device/kernel may exist.
+            retrieve_servers();
+        }
+        if (alserv) {
+            alserv->rescan_registries(sys->get_io_system());
+        }
     }
 
     // Symbian-era SVGs (SVG Tiny / 2000-03 DTD) routinely omit the xmlns
@@ -409,7 +434,10 @@ namespace eka2l1::hos {
         cmdline.launch_cmd_ = epoc::apa::command_create;
 
         kern->lock();
-        alserv->launch_app(*reg, cmdline, nullptr, [&](kernel::process *pr) {
+        // Capture by value (nothing local is needed): this callback fires later,
+        // from the OS thread when the app process exits, long after launch_app
+        // has returned - a by-reference capture of the stack frame would dangle.
+        alserv->launch_app(*reg, cmdline, nullptr, [](kernel::process *pr) {
             // The launched Symbian app's process has exited. Like Android, the
             // emulator runs one app per session, so we notify the ArkUI side to
             // tear down the run page and return to the app list. Logging the exit

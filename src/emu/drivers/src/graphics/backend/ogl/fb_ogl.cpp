@@ -97,7 +97,7 @@ namespace eka2l1::drivers {
 
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClearStencil(0);
-#if defined(EKA2L1_PLATFORM_ANDROID) || defined(__EMSCRIPTEN__)
+#if defined(EKA2L1_PLATFORM_ANDROID) || defined(__EMSCRIPTEN__) || defined(EKA2L1_PLATFORM_OHOS)
         // GLES/WebGL2 only ship glClearDepthf; glClearDepth is a null pointer.
         glClearDepthf(0);
 #else
@@ -262,7 +262,7 @@ namespace eka2l1::drivers {
             return false;
         }
 
-#if defined(EKA2L1_PLATFORM_ANDROID) || defined(__EMSCRIPTEN__)
+#if defined(EKA2L1_PLATFORM_ANDROID) || defined(__EMSCRIPTEN__) || defined(EKA2L1_PLATFORM_OHOS)
         // GLES/WebGL2 only ship glDrawBuffers (plural).
         GLenum draw_buffers[2] = { GL_NONE, GL_NONE };
         draw_buffers[attachment_id] = GL_COLOR_ATTACHMENT0 + attachment_id;

@@ -185,7 +185,18 @@ export class Emulator {
     return out;
   }
 
-  // Decode the native RGBA icon into a PixelMap, or undefined if none.
+  // Re-scan installed app registries from disk. Call after a SIS/SISX install
+  // or an uninstall so the next getApps() reflects the change.
+  rescanApps(): void {
+    emuNative.rescanApps();
+  }
+
+  // Decode the native icon into a PixelMap, or undefined if none.
+  //
+  // The native buffer is straight RGBA8888 (R,G,B,A byte order). HarmonyOS
+  // image.createPixelMap from a raw ArrayBuffer interprets the bytes as
+  // BGRA8888, so passing srcPixelFormat=RGBA_8888 makes it swap R/B for us and
+  // the icon shows in correct colours. (Without this, R and B come out swapped.)
   async getAppIcon(uid: number): Promise<image.PixelMap | undefined> {
     const icon = emuNative.getAppIcon(uid);
     if (!icon || !icon.data || icon.width <= 0 || icon.height <= 0) {
@@ -193,6 +204,7 @@ export class Emulator {
     }
     const opts: image.InitializationOptions = {
       editable: false,
+      srcPixelFormat: image.PixelMapFormat.RGBA_8888,
       pixelFormat: image.PixelMapFormat.RGBA_8888,
       size: { width: icon.width, height: icon.height }
     };

@@ -225,8 +225,13 @@ namespace eka2l1::hos {
             symsys->mount(drive_z, drive_media::rom,
                 eka2l1::add_path(conf.storage, "/drives/z/"), io_attrib_internal | io_attrib_write_protected);
 
-            // No cubeb on OHOS yet - run with the null audio driver so MMF never
-            // stalls. Sound can be wired to Audio Kit (AudioRenderer) later.
+            // No real audio backend on OHOS yet, but we still need a non-null
+            // driver: the dispatch player path (eaudio_player_open_url) calls
+            // driver->get_suitable_player_types() unguarded. The null driver now
+            // hands out self-pacing silent streams (see audio_null.h) so the guest
+            // MMF pipeline keeps progressing - apps that start sound run silently
+            // instead of stalling on a never-completing buffer (black screen).
+            // Sound can later be wired to Audio Kit (AudioRenderer).
             audio_driver = drivers::make_audio_driver(drivers::audio_driver_backend::null, conf.audio_master_volume,
                 drivers::player_type_tsf);
 

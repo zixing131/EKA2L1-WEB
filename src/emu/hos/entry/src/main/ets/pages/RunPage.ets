@@ -86,8 +86,17 @@ struct RunPage {
       return;
     }
     this.launched = true;
+
+    // Mirror Android's updateScreenSize(): push screen params BEFORE launch so
+    // the draw callback (which runs on the OS thread the instant the app paints)
+    // never reads uninitialised scale/gravity/colour. Values match the Android
+    // default profile: bg 0xD0D0D0, scaleType 1 (fit width), gravity 1 (top),
+    // ratio 100, no background image.
+    this.emu.setScreenParams(0xD0D0D0, 100, 1, 1, '', 0.5, true);
+
     // Give the graphics thread a moment to finish EGL setup before launching.
     setTimeout(() => {
+      hilog.info(DOMAIN, TAG, 'launchApp uid=%{public}d', this.uid);
       this.emu.launchApp(this.uid);
     }, 200);
   }

@@ -89,6 +89,9 @@ namespace eka2l1::hos {
         explicit launcher(eka2l1::system *sys);
 
         std::vector<std::string> get_apps();
+        // Re-scan installed app registries from disk (call after a SIS/SISX
+        // install or an uninstall so get_apps() reflects the change).
+        void rescan_apps();
         icon_bitmap get_app_icon(std::uint32_t uid);
         void launch_app(std::uint32_t uid);
         package::installation_result install_app(std::string &path);
