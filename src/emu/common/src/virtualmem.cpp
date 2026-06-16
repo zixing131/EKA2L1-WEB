@@ -22,7 +22,9 @@
 #include <common/platform.h>
 #include <common/virtualmem.h>
 
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
@@ -148,8 +150,70 @@ namespace eka2l1::common {
     }
 
     bool is_memory_wx_exclusive() {
-#if EKA2L1_PLATFORM(UWP) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(WASM)
+#if EKA2L1_PLATFORM(UWP) || EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(WASM) || EKA2L1_PLATFORM(OHOS)
         return true;
+#else
+        return false;
+#endif
+    }
+
+    bool is_executable_memory_available() {
+#if EKA2L1_PLATFORM(WASM)
+        // The WASM sandbox can never execute host-generated machine code.
+        return false;
+#elif EKA2L1_PLATFORM(WIN32)
+        // Desktop Windows always permits executable allocations.
+        return true;
+#elif EKA2L1_PLATFORM(POSIX)
+        // Probe once and cache: some sandboxes (store-signed HarmonyOS apps, iOS
+        // without the JIT entitlement) deny PROT_EXEC to a signed app while the
+        // same build JITs fine in a developer context. Map a page executable,
+        // write a trivial function into it, and run it - this catches both
+        // "PROT_EXEC denied" and "granted but not actually executable".
+        static int cached = -1;
+        if (cached != -1) {
+            return cached != 0;
+        }
+
+        const std::size_t page = static_cast<std::size_t>(get_host_page_size());
+
+        // Map RW, write the instruction, then flip to RX. This is the W^X-safe
+        // pattern every sandbox accepts when executable memory is allowed at all,
+        // and it mirrors how the JIT itself allocates code - so the probe result
+        // faithfully predicts whether the JIT will work.
+        void *mem = mmap(nullptr, page, PROT_READ | PROT_WRITE,
+            MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (mem == MAP_FAILED) {
+            cached = 0;
+            return false;
+        }
+
+#if EKA2L1_ARCH(ARM64)
+        // AArch64 "ret": 0xD65F03C0 (little-endian bytes C0 03 5F D6).
+        const std::uint32_t ret_insn = 0xD65F03C0u;
+        std::memcpy(mem, &ret_insn, sizeof(ret_insn));
+#else
+        // x86/x86_64 "ret": 0xC3.
+        *reinterpret_cast<std::uint8_t *>(mem) = 0xC3u;
+#endif
+
+        bool ok = (mprotect(mem, page, PROT_READ | PROT_EXEC) == 0);
+        if (ok) {
+#if EKA2L1_ARCH(ARM64)
+            // The just-written instruction sits in the data cache and has never
+            // been in the instruction cache; sync them before executing it.
+            __builtin___clear_cache(reinterpret_cast<char *>(mem),
+                reinterpret_cast<char *>(mem) + sizeof(ret_insn));
+#endif
+            using probe_fn = void (*)();
+            probe_fn fn = reinterpret_cast<probe_fn>(mem);
+            fn();
+        }
+
+        munmap(mem, page);
+
+        cached = ok ? 1 : 0;
+        return ok;
 #else
         return false;
 #endif

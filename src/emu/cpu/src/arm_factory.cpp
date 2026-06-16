@@ -25,6 +25,9 @@
 #if EKA2L1_ARCH(ARM)
 #include <cpu/12l1r/arm_12l1r.h>
 #elif !EKA2L1_PLATFORM(WASM)
+// Dynarmic is built on every non-WASM, non-32-bit-ARM host, including OHOS
+// (HarmonyOS) arm64. Whether it is actually *used* there is decided at runtime
+// by probing for executable memory - see system_impl's CPU type selection.
 #include <cpu/arm_dynarmic.h>
 #endif
 

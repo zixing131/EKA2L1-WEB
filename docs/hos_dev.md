@@ -244,6 +244,81 @@ glDrawBuffers）**漏了 OHOS** → 走桌面分支。
 
 ---
 
+## 6.5 第三轮真机崩溃 — 装 ROM 即闪退（错误地选了 Dynarmic JIT）
+
+### 错误：装 ROM 后 `startup()` 起 CPU 核时 SIGSEGV in oaknut/Dynarmic
+
+**现象** 真机（nova 12 Ultra，arm64，ADL-AL00U 6.1.0）装完 ROM 立刻闪退，进程仅存活 3s。
+`Reason:Signal:SIGSEGV(SEGV_MAPERR)@0xffffffffffffffff`。崩溃栈：
+
+```
+#16 hos::emulator::stage_one()
+#14 system_impl::startup()
+#13 arm::create_core(..., arm_emulator_type)
+#11 arm::dynarmic_core::dynarmic_core(...)         ← 居然创建了 Dynarmic 核
+#10 arm::make_jit(...)
+#06 Dynarmic::A32::Jit::Impl::Impl(...)
+#04 Dynarmic::Backend::Arm64::A32AddressSpace::EmitPrelude()   ← 往 JIT 缓冲写机器码
+#02 oaknut::BasicCodeGenerator::LDR(...)            ← oaknut（Dynarmic 的 arm64 汇编器）
+#00 oaknut::PointerCodeGeneratorPolicy::append(uint)  ← 写代码缓冲越界
+```
+
+**根因（两层对「ARM」的定义不一致，aarch64 在两边都漏判）**
+本意是「OHOS arm64 用 dyncom 解释器、不用 dynarmic」（§7 待办里也这么写），但该意图**从未生效**：
+
+1. **C++ 选核**（[epoc.cpp](src/emu/system/src/epoc.cpp) `system_impl` 构造）用
+   `#if EKA2L1_ARCH(ARM)`，而 `EKA2L1_ARCH_ARM` 在 [platform.h](src/emu/common/include/common/platform.h)
+   **只对 32 位 `__arm__` 定义**，aarch64 走的是 `EKA2L1_ARCH_ARM64`。于是 OHOS arm64 上
+   `EKA2L1_ARCH(ARM)` 为假 → 跳过 r12l1 → 跳过 WASM → 落到 `#else` → `cpu_type = dynarmic`。
+
+2. **CMake 选库**（[src/emu/cpu/CMakeLists.txt](src/emu/cpu/CMakeLists.txt)）只判
+   `EMSCRIPTEN` / `ARCHITECTURE_ARM32` / `else`，OHOS 落 `else` → 链接 Dynarmic。根 CMake
+   设的 `ARCHITECTURE_AARCH64 TRUE`（注释自称"force ARM target so dynarmic is skipped"）
+   **根本没人消费**——[src/external/CMakeLists.txt](src/external/CMakeLists.txt) 还用
+   `check_symbol_exists(__aarch64__)` 把它覆盖回去，dynarmic 照样进编译。
+
+两层一致地选错：编译 Dynarmic + 运行时也请求 Dynarmic。而 Dynarmic 是 host JIT，需要
+可执行内存。
+
+**关键政策细节：鸿蒙的 JIT「开发可用、上架不可用」**
+鸿蒙同 iOS：**开发/调试签名的 app 能拿到可执行内存（JIT 可跑），但上架商店的签名 app
+被沙箱拒绝 `PROT_EXEC`**。所以不能简单「OHOS 一律 dyncom」（那样开发机白白丢掉 JIT 性能），
+也不能「OHOS 一律 dynarmic」（上架即崩）。正解是**运行期探测 + 自动降级**。
+
+**修复（运行期探测可执行内存，能 JIT 就 JIT，不能就降级 dyncom）**
+- [virtualmem.cpp](src/emu/common/src/virtualmem.cpp) 新增
+  `is_executable_memory_available()`：`mmap` 一页 → 写入一条 `ret`（aarch64 `0xD65F03C0`）
+  → `mprotect` 到 `PROT_READ|PROT_EXEC` → `__builtin___clear_cache` 同步 i-cache → 真正
+  调用一次。成功才返回 true（既测「PROT_EXEC 被拒」也测「给了但不可执行」）。结果缓存。
+  这条 RW→RX 路径与 Dynarmic 内部 W^X 分配方式一致，故探测结果能代表 Dynarmic 能否工作。
+- [epoc.cpp](src/emu/system/src/epoc.cpp)：OHOS 单独一个 `#elif` 分支，
+  `cpu_type = is_executable_memory_available() ? dynarmic : dyncom`。WASM 仍恒 dyncom。
+- [virtualmem.cpp](src/emu/common/src/virtualmem.cpp) `is_memory_wx_exclusive()` 把 OHOS
+  加入返回 true 的列表（同 iOS/Android）：JIT 真被启用时走 W^X 安全的 RW↔RX 翻转，不申请 RWX。
+- **CMake 不动**：OHOS 是真 aarch64，`ARCHITECTURE_ARM32` 为假 → 本来就会
+  `add_subdirectory(dynarmic)` 并链接 Dynarmic 的 arm64 后端（崩溃栈里的
+  `Dynarmic::Backend::Arm64` 证明它已为 arm64 编出来了）。dynarmic 留在构建里给开发机用。
+- `arm_factory.cpp` 的 dynarmic include / case 守卫维持 `!EKA2L1_PLATFORM(WASM)`（OHOS 要
+  编 dynarmic case）。
+
+> 上架的 store 构建探测失败 → dyncom（纯解释器，arm64 偏慢但不崩）；开发机/侧载探测成功
+> → dynarmic JIT（快）。同一个 HAP 二进制两种环境自适应，无需两套产物。
+
+### 教训
+
+1. **CMake 变量 ≠ C++ 预处理宏**：根 CMake 里 `set(ARCHITECTURE_AARCH64 TRUE)` 不会定义
+   `EKA2L1_ARCH_ARM` 宏，也不会被 `src/external` 的 `check_symbol_exists` 之后的逻辑当真
+   （它紧接着就被覆盖）。想影响选核必须落到真正被消费的那个开关上。
+2. **`EKA2L1_ARCH(ARM)` 只表示 32 位 ARM**，aarch64 是 `EKA2L1_ARCH(ARM64)`。任何
+   `#if EKA2L1_ARCH(ARM)` 的分支在 arm64 host 上都为假，写跨平台分支时要把 aarch64 显式
+   考虑进去（W^X JIT 选择尤甚）。
+3. **「能不能 JIT」是运行期问题、不是编译期问题**：鸿蒙/iOS 同一个二进制，开发签名能 JIT、
+   商店签名不能。编译期 `#if PLATFORM(OHOS)` 无法区分这两种运行环境，硬编码任一边都错。
+   正确做法是运行期探测一次（mmap+mprotect+执行一条指令）再选后端——探测路径要和真正的
+   JIT 分配方式一致才有代表性。
+
+---
+
 ## 7. 已知遗留 / 待办
 
 - [ ] **无声音**：null 音频现在是「自走时静音流」（不崩不卡，但没声）。后续接 Audio Kit
@@ -252,7 +327,8 @@ glDrawBuffers）**漏了 OHOS** → 走桌面分支。
 - [ ] **无摄像头/传感器/振动**：都走 null 后端。可接 Camera Kit / Sensor / Vibrator Kit。
 - [ ] `launch_browser` no-op → 接 `startAbilityByType('browser', { uri })`。
 - [ ] 设置页设备改名是占位（需要自定义输入对话框）。
-- [ ] dyncom 解释器（arm64 guest 跑在 arm64 host 上没用 dynarmic），性能待观察。
+- [ ] CPU 后端（§6.5 改为运行期探测：商店签名走 dyncom 解释器、开发签名走 dynarmic JIT）。
+  store 构建用 dyncom 性能待观察；需在真机分别用商店签名与开发签名验证探测的两条分支。
 - [ ] **app 退出未自动返回列表**：native `on_app_exit` 回调还没接到 ArkUI（需 napi
   线程安全回调），app 正常退出/崩溃后 RunPage 会停在黑屏。
 - [ ] 图标偏色修法基于「裸 buffer 按 BGRA 解读」的推断，若实机反而变蓝则改回。
@@ -288,6 +364,12 @@ glDrawBuffers）**漏了 OHOS** → 走桌面分支。
 | `src/emu/hos/native/src/{launcher,state}.cpp`、`include/hos/launcher.h` | `rescan_apps`；启动崩溃/空设备/装机流程修复（§5+§6） |
 | `src/emu/hos/entry/src/main/cpp/napi_init.cpp`、`types/libentry/Index.d.ts` | `rescanApps`/`bootFirstDevice` napi 接口 |
 | `src/emu/hos/entry/src/main/ets/pages/Index.ets`、`service/Emulator.ets`、`pages/RunPage.ets` | `@Component AppCell`+图标响应式、装后 rescan、icon srcPixelFormat、启动前 setScreenParams |
+
+**第三轮真机修复（§6.5，装 ROM 即崩 = 误选 Dynarmic JIT；改为运行期探测自动降级）**
+| 文件 | 改动 |
+|---|---|
+| `src/emu/common/include/common/virtualmem.h`、`src/.../virtualmem.cpp` | 新增 `is_executable_memory_available()`（mmap+mprotect+执行探测，结果缓存）；`is_memory_wx_exclusive()` 把 OHOS 加入返回 true |
+| `src/emu/system/src/epoc.cpp` | OHOS 单独分支：`is_executable_memory_available() ? dynarmic : dyncom`；include `common/virtualmem.h` |
 
 **鸿蒙工程**：`build_hos_native.sh` + `src/emu/hos/`（整目录）
 

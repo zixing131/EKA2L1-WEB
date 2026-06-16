@@ -30,6 +30,7 @@
 #include <common/platform.h>
 #include <common/random.h>
 #include <common/time.h>
+#include <common/virtualmem.h>
 
 #include <disasm/disasm.h>
 
@@ -626,6 +627,17 @@ namespace eka2l1 {
         cpu_type = arm_emulator_type::r12l1;
 #elif EKA2L1_PLATFORM(WASM)
         cpu_type = arm_emulator_type::dyncom;
+#elif EKA2L1_PLATFORM(OHOS)
+        // HarmonyOS allows JIT in a developer/debug build but a store-distributed
+        // (signed) app is denied executable memory - dynarmic's oaknut emitter then
+        // crashes writing the first JIT prelude. Probe at runtime: use the dynarmic
+        // JIT when the host actually grants executable pages, otherwise fall back to
+        // the dyncom interpreter so store builds still run (slower, but no crash).
+        // Note: aarch64 evaluates EKA2L1_ARCH(ARM) as false (that macro is 32-bit
+        // __arm__ only), so OHOS arm64 lands here rather than the r12l1 branch.
+        cpu_type = common::is_executable_memory_available()
+            ? arm_emulator_type::dynarmic
+            : arm_emulator_type::dyncom;
 #else
         cpu_type = /*arm::string_to_arm_emulator_type(conf_->cpu_backend);*/ arm_emulator_type::dynarmic;
 #endif

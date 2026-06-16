@@ -112,4 +112,22 @@ namespace eka2l1::common {
      * \brief Returns true if the platform doesn't allow write and executable memory at the same time.
     */
     bool is_memory_wx_exclusive();
+
+    /**
+     * \brief Probe whether the host actually lets this process allocate executable memory.
+     *
+     * Some sandboxes (notably store-distributed HarmonyOS apps, like iOS without the
+     * dynamic-codesigning entitlement) deny PROT_EXEC mappings to a signed app even
+     * though the same code runs fine in a developer/debug build. A host JIT
+     * (dynarmic / 12l1r) cannot work without an executable mapping, so callers use
+     * this to decide between a JIT core and the dyncom interpreter at runtime.
+     *
+     * The result is cached after the first call. The probe maps a page as
+     * executable, and where possible writes a trivial function into it and runs it,
+     * so it catches both "PROT_EXEC mapping denied" and "mapping granted but not
+     * truly executable" cases.
+     *
+     * \returns True if executable memory could be allocated (and executed).
+     */
+    bool is_executable_memory_available();
 }
