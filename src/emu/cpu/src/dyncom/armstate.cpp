@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <cstring>
 #include <common/bytes.h>
 #include <common/log.h>
 #include <cpu/dyncom/arm_dyncom.h>
@@ -269,6 +270,18 @@ std::uint32_t ARMul_State::ReadMemory32Slow(std::uint32_t address) const {
 }
 
 std::uint32_t ARMul_State::ReadCode(std::uint32_t address) const {
+    // Fast path: a warm, executable code page in the dyncom TLB lets the fetch
+    // skip the page-directory walk that core->read_code performs. The data
+    // accessors (ReadMemory*) already use this TLB; ReadCode was the one hot
+    // accessor still always page-walking. Exec-only match; miss falls through.
+    if (eka2l1::arm::r12l1::tlb *cache = core->mem_cache()) {
+        if (const std::uint8_t *ptr = cache->lookup_exec(address)) {
+            std::uint32_t value;
+            std::memcpy(&value, ptr, sizeof(value));
+            return value;
+        }
+    }
+
     std::uint32_t value = 0;
     bool result = core->read_code(address, &value);
 

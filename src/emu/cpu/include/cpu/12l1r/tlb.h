@@ -123,5 +123,22 @@ namespace eka2l1::arm::r12l1 {
             // TLB miss
             return nullptr;
         }
+
+        // Instruction-fetch fast path: hit only on a page mapped executable.
+        // ReadCode otherwise always page-walks via core->read_code; this lets a
+        // warm code page skip the walk. On a miss the caller falls back, so the
+        // stricter (exec-only) match here can never be a correctness hazard.
+        std::uint8_t *lookup_exec(const vaddress addr) {
+            const std::size_t page_index = addr >> page_bits;
+            const std::size_t tlb_index = page_index & (TLB_ENTRY_COUNT - 1);
+            const vaddress addr_normed = addr & ~page_mask;
+
+            tlb_entry &entry = entries[tlb_index];
+
+            if (entry.host_base && (entry.execute_addr == addr_normed)) {
+                return entry.host_base + (addr & page_mask);
+            }
+            return nullptr;
+        }
     };
 }
