@@ -104,6 +104,13 @@ namespace eka2l1::hos {
         void stage_one();
         bool stage_two();
 
+        // First-boot bring-up for a device installed while the emulator was
+        // already running with no device. Mirrors the device-setup block of
+        // stage_one() (startup + set_device + mount C/D/E). Returns false when
+        // there is still no installed device. After this succeeds the caller
+        // must run stage_two() and start the OS thread.
+        bool bring_up_after_install();
+
         void on_system_reset(system *the_sys);
         void register_draw_callback();
     };

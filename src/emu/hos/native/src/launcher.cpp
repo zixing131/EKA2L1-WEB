@@ -91,6 +91,12 @@ namespace eka2l1::hos {
     }
 
     std::vector<std::string> launcher::get_apps() {
+        // Before any device is installed/selected there is no app-list server.
+        // The ArkUI side calls getApps() on boot regardless, so return empty
+        // rather than dereferencing a null server pointer (SIGSEGV).
+        if (!alserv) {
+            return {};
+        }
         std::vector<apa_app_registry> &registerations = alserv->get_registerations();
         std::vector<std::string> info;
         for (auto &reg : registerations) {
@@ -212,6 +218,10 @@ namespace eka2l1::hos {
 
     icon_bitmap launcher::get_app_icon(std::uint32_t uid) {
         icon_bitmap result;
+
+        if (!alserv) {
+            return result;
+        }
 
         apa_app_registry *reg = alserv->get_registration(uid);
         if (!reg) {
@@ -386,7 +396,14 @@ namespace eka2l1::hos {
     }
 
     void launcher::launch_app(std::uint32_t uid) {
+        if (!alserv) {
+            return;
+        }
+
         apa_app_registry *reg = alserv->get_registration(uid);
+        if (!reg) {
+            return;
+        }
 
         epoc::apa::command_line cmdline;
         cmdline.launch_cmd_ = epoc::apa::command_create;

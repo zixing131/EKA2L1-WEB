@@ -219,7 +219,17 @@ namespace eka2l1 {
             color_dist_sink = std::make_shared<spdlog::sinks::dist_sink_mt>();
 
             sinks.push_back(color_dist_sink);
-            sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file_name));
+
+            // Opening the log file throws spdlog_ex when the working directory is
+            // not writable (e.g. a sandboxed app whose CWD was not set to a
+            // writable folder). That exception is otherwise uncaught and aborts
+            // the whole process, so degrade gracefully to console-only logging.
+            try {
+                sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file_name));
+            } catch (const spdlog::spdlog_ex &ex) {
+                std::cerr << "Failed to open log file '" << log_file_name << "': " << ex.what()
+                          << "; continuing without a file log." << std::endl;
+            }
 
 #ifdef _MSC_VER
             sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_st>());

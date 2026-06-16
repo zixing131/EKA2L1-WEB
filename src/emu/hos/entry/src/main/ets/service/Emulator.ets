@@ -157,6 +157,12 @@ export class Emulator {
     emuNative.rescanDevices();
   }
 
+  // Brings up the kernel + OS thread for the first device installed after the
+  // app started without one. Returns true once the system is running.
+  bootFirstDevice(): boolean {
+    return emuNative.bootFirstDevice();
+  }
+
   doesRomNeedRpkg(romPath: string): boolean {
     return emuNative.doesRomNeedRPKG(romPath);
   }

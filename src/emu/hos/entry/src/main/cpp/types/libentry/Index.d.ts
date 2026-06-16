@@ -28,6 +28,7 @@ export const setCurrentDevice: (id: number, temporary: boolean) => void;
 export const setDeviceName: (id: number, newName: string) => void;
 export const rescanDevices: () => void;
 export const getCurrentDevice: () => number;
+export const bootFirstDevice: () => boolean;
 export const installDevice: (rpkgPath: string, romPath: string, installRpkg: boolean) => number;
 export const doesRomNeedRPKG: (romPath: string) => boolean;
 

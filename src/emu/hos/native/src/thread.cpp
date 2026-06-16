@@ -136,6 +136,24 @@ namespace eka2l1::hos {
         return result;
     }
 
+    bool boot_first_installed_device(emulator &state) {
+        // Already running an OS thread? Nothing to do.
+        if (os_thread_obj_hos) {
+            return true;
+        }
+
+        if (!state.bring_up_after_install()) {
+            return false;
+        }
+
+        if (!state.stage_two()) {
+            return false;
+        }
+
+        os_thread_obj_hos = std::make_unique<std::thread>(os_thread, std::ref(state));
+        return true;
+    }
+
     void init_threads(emulator &state) {
         // Continue graphics initialization
         state.graphics_sema.notify();

@@ -176,6 +176,38 @@ namespace eka2l1::hos {
         stage_two_inited = false;
     }
 
+    bool emulator::bring_up_after_install() {
+        device_manager *dvcmngr = symsys->get_device_manager();
+        if (!dvcmngr || (dvcmngr->total() == 0)) {
+            LOG_ERROR(FRONTEND_CMDLINE, "No device installed; cannot bring up the system");
+            return false;
+        }
+
+        // The first device just got installed while we were idle (stage_one ran
+        // with an empty device manager and skipped startup). Bring the kernel
+        // up now, exactly like the device-setup block of stage_one and the
+        // desktop frontend's on_new_device_added.
+        symsys->startup();
+
+        conf.device = 0;
+        conf.serialize(false);
+
+        if (!symsys->set_device(0)) {
+            LOG_ERROR(FRONTEND_CMDLINE, "Failed to set the freshly installed device");
+            return false;
+        }
+
+        symsys->mount(drive_c, drive_media::physical, eka2l1::add_path(conf.storage, "/drives/c/"), io_attrib_internal);
+        symsys->mount(drive_d, drive_media::physical, eka2l1::add_path(conf.storage, "/drives/d/"), io_attrib_internal);
+        symsys->mount(drive_e, drive_media::physical, eka2l1::add_path(conf.storage, "/drives/e/"), io_attrib_removeable);
+
+        on_system_reset(symsys.get());
+
+        // Force stage_two to actually run (it early-returns when already inited).
+        stage_two_inited = false;
+        return true;
+    }
+
     bool emulator::stage_two() {
         if (!stage_two_inited) {
             device_manager *dvcmngr = symsys->get_device_manager();

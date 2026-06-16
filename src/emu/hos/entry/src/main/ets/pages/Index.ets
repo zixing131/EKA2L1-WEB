@@ -118,18 +118,45 @@ struct Index {
   }
 
   private async onInstallRom(): Promise<void> {
-    const uri = await this.pickFile(['ROM file|.rom', 'VPL file|.vpl', 'All|.*']);
-    if (!uri) {
+    // Step 1: pick the ROM file.
+    const romUri = await this.pickFile(['ROM file|.rom', 'All|.*']);
+    if (!romUri) {
       return;
     }
+
     this.busyText = '正在安装设备 / Installing device...';
     try {
-      const path = await this.copyPickedToCache(uri, this.nameFromUri(uri));
-      // VPL/firmware install path (installRpkg = false handles a full firmware).
-      const result = this.emu.installDevice('', path, false);
+      const romPath = await this.copyPickedToCache(romUri, this.nameFromUri(romUri));
+
+      // Step 2: most Symbian ROMs ship without their writable ROFS/drive-C
+      // content, so an accompanying RPKG is required to complete the device.
+      // Ask the core; if needed, prompt for the RPKG file too (mirrors the
+      // desktop/Android two-file install flow).
+      let rpkgPath = '';
+      if (this.emu.doesRomNeedRpkg(romPath)) {
+        // Stop blocking the UI while the picker is up.
+        this.busyText = '';
+        this.toast('该 ROM 需要配套 RPKG，请选择 / Select the matching RPKG');
+        const rpkgUri = await this.pickFile(['RPKG file|.rpkg', 'All|.*']);
+        if (!rpkgUri) {
+          this.toast('已取消：缺少 RPKG / Cancelled: RPKG required');
+          return;
+        }
+        this.busyText = '正在安装设备 / Installing device...';
+        rpkgPath = await this.copyPickedToCache(rpkgUri, this.nameFromUri(rpkgUri));
+      }
+
+      // installRpkg = true takes the ROM (+ optional RPKG) path; the core picks
+      // install_rpkg vs install_rom internally based on the ROM contents.
+      const result = this.emu.installDevice(rpkgPath, romPath, true);
       if (result === 0) {
         this.toast('设备安装成功 / Device installed');
-        this.emu.rescanDevices();
+        // If the app started with no device, the kernel/OS thread were never
+        // brought up. Boot the freshly installed device now so its apps appear;
+        // otherwise the system is already running and a refresh suffices.
+        if (this.devices.length === 0) {
+          this.emu.bootFirstDevice();
+        }
         this.refresh();
       } else {
         this.toast(`安装失败 / Install failed (code ${result})`);

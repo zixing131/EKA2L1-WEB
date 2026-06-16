@@ -28,3 +28,4 @@ CMakeCache.txt
 /build_android
 /build_android_old
 /build_wasm_hos
+/logs

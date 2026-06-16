@@ -30,6 +30,11 @@ namespace eka2l1::hos {
 
     bool emulator_entry(emulator &state);
 
+    // Bring up and start the OS thread for a device installed after the
+    // emulator already booted without one. Returns false if no device is
+    // installed or bring-up failed.
+    bool boot_first_installed_device(emulator &state);
+
     void init_threads(emulator &state);
 
     void start_threads(emulator &state);

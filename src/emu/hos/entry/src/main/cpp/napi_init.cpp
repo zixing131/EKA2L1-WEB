@@ -60,9 +60,16 @@ static napi_value SetDirectory(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     const std::string path = get_string(env, args[0]);
-    // The HAP sandbox path is a directory; cd into it so the emulator's relative
-    // paths (config, drives, cache, patch) resolve under the app sandbox.
-    eka2l1::common::set_current_directory(path);
+    // The ArkTS side hands us a *file* path inside the app sandbox working dir
+    // (e.g. ".../files/eka2l1.cfg"). chdir() needs a directory, so cd into the
+    // containing folder; chdir() on a file path fails with ENOTDIR, leaving the
+    // CWD at the read-only process default ("/") and making every relative path
+    // the emulator writes (EKA2L1.log, config, drives) fail with EACCES.
+    std::string dir = eka2l1::file_directory(path);
+    if (dir.empty()) {
+        dir = path;
+    }
+    eka2l1::common::set_current_directory(dir);
     return make_undefined(env);
 }
 
@@ -187,6 +194,15 @@ static napi_value RescanDevices(napi_env env, napi_callback_info info) {
 
 static napi_value GetCurrentDevice(napi_env env, napi_callback_info info) {
     return make_int(env, launcher() ? static_cast<int>(launcher()->get_current_device()) : 0);
+}
+
+// Brings up the kernel + OS thread for the first device installed after the
+// emulator booted with no device. Returns true once the system is running.
+static napi_value BootFirstDevice(napi_env env, napi_callback_info info) {
+    if (!g_state) {
+        return make_bool(env, false);
+    }
+    return make_bool(env, eka2l1::hos::boot_first_installed_device(*g_state));
 }
 
 static napi_value InstallDevice(napi_env env, napi_callback_info info) {
@@ -485,6 +501,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "setDeviceName", nullptr, SetDeviceName, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "rescanDevices", nullptr, RescanDevices, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "getCurrentDevice", nullptr, GetCurrentDevice, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "bootFirstDevice", nullptr, BootFirstDevice, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "installDevice", nullptr, InstallDevice, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "doesRomNeedRPKG", nullptr, DoesRomNeedRPKG, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "installApp", nullptr, InstallApp, nullptr, nullptr, nullptr, napi_default, nullptr },
