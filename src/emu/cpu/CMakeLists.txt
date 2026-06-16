@@ -92,9 +92,18 @@ add_library(cpu
         ${SOURCE_12L1R_PUBLIC}
         ${SOURCE_DYNCOM})
 
-if (EMSCRIPTEN)
-    # WASM sandbox cannot execute JIT-generated machine code; use dyncom interpreter only
-    # dyncom sources are already included in the base add_library() call above
+# Build the CPU module with the dyncom interpreter only (no dynarmic). Lets the
+# differential test harness link host-side without dragging in dynarmic. OFF by
+# default -> normal builds are unchanged.
+option(EKA2L1_CPU_DYNCOM_ONLY "Build the CPU module with the dyncom interpreter only (no dynarmic)" OFF)
+
+if (EMSCRIPTEN OR EKA2L1_CPU_DYNCOM_ONLY)
+    # WASM sandbox cannot execute JIT-generated machine code; the dyncom-only
+    # build skips dynarmic on purpose. dyncom sources are already in the base
+    # add_library() call above.
+    if (EKA2L1_CPU_DYNCOM_ONLY)
+        target_compile_definitions(cpu PRIVATE EKA2L1_CPU_DYNCOM_ONLY_BUILD=1)
+    endif()
 elseif (ARCHITECTURE_ARM32)
     target_sources(cpu PRIVATE ${SOURCE_12L1R})
     target_link_libraries(cpu PRIVATE Catch2)
@@ -114,3 +123,13 @@ target_link_libraries(cpu PUBLIC common)
 target_link_libraries(cpu
         PRIVATE
         capstone-static)
+
+# Differential test harness for the dyncom interpreter (self-A/B + golden ALU
+# oracle over randomized instruction streams). Standalone host tool, default OFF.
+# See scripts/cpu_difftest.sh. Used to gate the ASID instruction-cache change and
+# other shared-CPU optimizations.
+option(EKA2L1_BUILD_DYNCOM_DIFFTEST "Build the dyncom interpreter differential test harness" OFF)
+if (EKA2L1_BUILD_DYNCOM_DIFFTEST)
+    add_executable(dyncom_difftest src/dyncom/tests/dyncom_difftest.cpp)
+    target_link_libraries(dyncom_difftest PRIVATE cpu common)
+endif()
