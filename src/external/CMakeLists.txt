@@ -48,6 +48,18 @@ else()
     check_symbol_exists("__aarch64__" "" ARCHITECTURE_AARCH64)
 endif()
 
+# fmt 10.2.x's compile-time format strings (FMT_STRING) feed a consteval
+# constructor that recent Clang (Emscripten, Apple Clang 17+) rejects on the
+# runtime throw/format paths in os.cc / format-inl.cc. Disabling FMT_USE_CONSTEVAL
+# falls back to the runtime-checked format string path and compiles cleanly.
+# Must be set on the fmt target itself (PUBLIC so consumers see the same ABI):
+# the directory-scoped add_compile_definitions() above does not retroactively
+# apply to the fmt target added earlier in this file.
+# (EMSCRIPTEN is handled above; this covers the host AppleClang toolchain.)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_definitions(fmt PUBLIC FMT_USE_CONSTEVAL=0)
+endif()
+
 unset(CMAKE_REQUIRED_QUIET)
 
 if (EKA2L1_ENABLE_SCRIPTING_ABILITY)

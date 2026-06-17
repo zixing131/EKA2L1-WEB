@@ -51,8 +51,9 @@
 #include <common/pystr.h>
 #include <common/wildcard.h>
 
-#if EKA2L1_PLATFORM(WASM)
-// Emscripten doesn't have stat64; use stat instead
+#if EKA2L1_PLATFORM(WASM) || EKA2L1_PLATFORM(DARWIN)
+// Emscripten and Apple (macOS/iOS) don't have stat64; their plain stat is
+// already 64-bit, so use stat instead.
 #define stat64 stat
 #endif
 
