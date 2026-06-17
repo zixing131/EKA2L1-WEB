@@ -43,6 +43,11 @@ add_subdirectory(system)
 add_subdirectory(utils)
 add_subdirectory(vfs)
 
+# The desktop frontend needs Qt. A host build that only wants the core libraries
+# (e.g. the dyncom differential test harness) has no Qt and no use for a UI, so
+# allow skipping the frontend. Default ON -> normal builds are unchanged.
+option(EKA2L1_BUILD_FRONTEND "Build the platform frontend (Qt desktop UI on host)" ON)
+
 if (ANDROID)
     include_directories(android/app/src/main)
     add_subdirectory(android/app/src/main/cpp)
@@ -52,7 +57,7 @@ elseif(EKA2L1_OHOS)
     # HarmonyOS native frontend (static lib). The NAPI entry module in
     # hos/entry/src/main/cpp links it and DevEco/hvigor packages the result.
     add_subdirectory(hos/native)
-else()
+elseif(EKA2L1_BUILD_FRONTEND)
     add_subdirectory(qt)
 endif()
 
