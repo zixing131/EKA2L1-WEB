@@ -559,6 +559,13 @@ static void on_web_window_key_release(void *userdata, const int key) {
 // keys off whether the first frame has been presented yet (see boot_phase).
 static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
 
+// perf probe accumulators (reset each 1s window in the FPS block)
+static double s_probe_cpu_ms_acc = 0.0;
+static int s_probe_raf_frames = 0;
+static int s_probe_budget_frames = 0;
+static int s_probe_early_frames = 0;
+static long long s_probe_slices_acc = 0;
+
 // Simplified port of the Android launcher::draw(): clear the backbuffer and
 // blit the emulated screen texture scaled to fit the window, centered.
 static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &builder, epoc::screen *scr,
@@ -1046,6 +1053,7 @@ static void main_loop() {
 
     const double frame_start = emscripten_get_now();
     int slices = 0;
+    bool hit_budget = false;
     while (slices < MAX_SLICES_PER_FRAME) {
         const int loop_result = g_state.symsys->loop();
         ++slices;
@@ -1055,7 +1063,28 @@ static void main_loop() {
         }
 
         if ((emscripten_get_now() - frame_start) >= FRAME_CPU_BUDGET_MS) {
+            hit_budget = true;
             break;
+        }
+    }
+
+    // --- perf probe: is the frame CPU-bound (budget) or present/RAF-bound? ---
+    // Accumulate per-RAF-frame stats and dump once a second next to the FPS
+    // counter. cpu_ms = guest execution time this frame; budget_frames = frames
+    // that exhausted FRAME_CPU_BUDGET_MS (CPU-bound); early_frames = frames that
+    // finished all guest work (loop()==0) with budget to spare (present/RAF
+    // -bound). If FPS is below target AND budget_frames is high -> CPU is the
+    // limiter; if early_frames dominate -> the limiter is elsewhere (vsync /
+    // RAF / guest-side pacing), so CPU opts can't raise FPS.
+    {
+        const double cpu_ms = emscripten_get_now() - frame_start;
+        s_probe_cpu_ms_acc += cpu_ms;
+        s_probe_raf_frames += 1;
+        s_probe_slices_acc += slices;
+        if (hit_budget) {
+            s_probe_budget_frames += 1;
+        } else {
+            s_probe_early_frames += 1;
         }
     }
 
@@ -1092,6 +1121,22 @@ static void main_loop() {
         char title[128];
         std::snprintf(title, sizeof(title), "EKA2L1 Web - %d FPS", g_state.current_fps);
         SDL_SetWindowTitle(g_window, title);
+
+        // perf probe dump: tells us whether FPS is CPU-bound or present-bound.
+        if (s_probe_raf_frames > 0) {
+            const double avg_cpu_ms = s_probe_cpu_ms_acc / s_probe_raf_frames;
+            LOG_INFO(FRONTEND_CMDLINE,
+                "[perf] fps={} raf_frames={} avg_guest_cpu={:.1f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.0f}ms",
+                g_state.current_fps, s_probe_raf_frames, avg_cpu_ms,
+                s_probe_budget_frames, s_probe_early_frames,
+                (s_probe_raf_frames ? (s_probe_slices_acc / s_probe_raf_frames) : 0),
+                (boot_phase ? 16.0 : 11.0));
+        }
+        s_probe_cpu_ms_acc = 0.0;
+        s_probe_raf_frames = 0;
+        s_probe_budget_frames = 0;
+        s_probe_early_frames = 0;
+        s_probe_slices_acc = 0;
     }
 }
 
