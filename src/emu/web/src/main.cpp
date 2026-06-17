@@ -1123,9 +1123,11 @@ static void main_loop() {
         SDL_SetWindowTitle(g_window, title);
 
         // perf probe dump: tells us whether FPS is CPU-bound or present-bound.
+        // LOG_WARN (not INFO): the WASM build filters logs below warn level (see
+        // common/log.cpp), so an INFO probe would never reach the console.
         if (s_probe_raf_frames > 0) {
             const double avg_cpu_ms = s_probe_cpu_ms_acc / s_probe_raf_frames;
-            LOG_INFO(FRONTEND_CMDLINE,
+            LOG_WARN(FRONTEND_CMDLINE,
                 "[perf] fps={} raf_frames={} avg_guest_cpu={:.1f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.0f}ms",
                 g_state.current_fps, s_probe_raf_frames, avg_cpu_ms,
                 s_probe_budget_frames, s_probe_early_frames,
