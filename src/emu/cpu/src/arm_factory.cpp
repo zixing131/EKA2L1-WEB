@@ -22,9 +22,19 @@
 
 #include <cpu/dyncom/arm_dyncom.h>
 
-#if EKA2L1_ARCH(ARM)
+// The dyncom-only build (difftest harness, see scripts/cpu_difftest.sh) compiles
+// neither dynarmic nor 12l1r, so its headers/cases must be excluded exactly like
+// the WASM path - on an arm64 host EKA2L1_ARCH(ARM) is false (that macro is
+// 32-bit-only), so without this guard the dynarmic header would still be pulled in.
+#if defined(EKA2L1_CPU_DYNCOM_ONLY_BUILD)
+#define EKA2L1_CPU_DYNCOM_ONLY_FACTORY 1
+#else
+#define EKA2L1_CPU_DYNCOM_ONLY_FACTORY 0
+#endif
+
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
 #include <cpu/12l1r/arm_12l1r.h>
-#elif !EKA2L1_PLATFORM(WASM)
+#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
 // Dynarmic is built on every non-WASM, non-32-bit-ARM host, including OHOS
 // (HarmonyOS) arm64. Whether it is actually *used* there is decided at runtime
 // by probing for executable memory - see system_impl's CPU type selection.
@@ -39,10 +49,10 @@ namespace eka2l1::arm {
         case arm_emulator_type::unicorn:
             return nullptr;
 
-#if EKA2L1_ARCH(ARM)
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
         case arm_emulator_type::r12l1:
             return std::make_unique<r12l1_core>(monitor, 12);
-#elif !EKA2L1_PLATFORM(WASM)
+#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
         case arm_emulator_type::dynarmic:
             return std::make_unique<dynarmic_core>(monitor);
 #endif
@@ -65,10 +75,10 @@ namespace eka2l1::arm {
         case arm_emulator_type::dyncom:
             return std::make_unique<r12l1::exclusive_monitor>(core_count);
 
-#if EKA2L1_ARCH(ARM)
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
         case arm_emulator_type::r12l1:
             return std::make_unique<r12l1::exclusive_monitor>(core_count);
-#elif !EKA2L1_PLATFORM(WASM)
+#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
         case arm_emulator_type::dynarmic:
             return std::make_unique<dynarmic_exclusive_monitor>(core_count);
 #endif
