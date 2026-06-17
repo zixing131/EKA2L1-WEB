@@ -559,6 +559,13 @@ static void on_web_window_key_release(void *userdata, const int key) {
 // keys off whether the first frame has been presented yet (see boot_phase).
 static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
 
+// Post-boot per-frame guest-CPU budget (ms). Default raised from 11 to 14 after
+// the frame-pacing probe showed Snakes is CPU-bound and wants ~14-15ms/frame.
+// Runtime-tunable via wasm_set_cpu_budget() so it can be swept live; clamped to
+// a sane range there. Must stay under the ~16.6ms RAF interval so present/audio
+// still run each frame.
+static double g_frame_cpu_budget_ms = 14.0;
+
 // perf probe accumulators (reset each 1s window in the FPS block)
 static double s_probe_cpu_ms_acc = 0.0;
 static int s_probe_raf_frames = 0;
@@ -1045,9 +1052,19 @@ static void main_loop() {
     // (A feedback controller keyed on RAF intervals was tried and reverted:
     // on slow/loaded machines long intervals made it starve the guest — the
     // opposite of the intent.)
+    // The probe showed Snakes is CPU-bound: ~every frame exhausted the old 11ms
+    // budget (budget_hit == raf_frames, early_exit ~0) and the guest wanted
+    // ~14-15ms, so FPS was pinned well below the game's 40 target. Raise the
+    // post-boot budget toward the observed demand. It's a *time* cap, not a work
+    // cap, and the loop still breaks the instant the guest is caught up
+    // (loop()==0), so this only lengthens genuinely CPU-hungry frames and never
+    // wastes time when idle. Kept below the full 16.6ms RAF interval so present /
+    // GL submit / audio still get a slice each frame (over-budget would starve
+    // present and stutter). Runtime-tunable via wasm_set_cpu_budget for live
+    // sweeping without recompiling.
     const bool boot_phase = (s_redraw_cb_count.load() == 0);
-    const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : 11.0;
-    const int MAX_SLICES_PER_FRAME = boot_phase ? 96 : 32;
+    const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : g_frame_cpu_budget_ms;
+    const int MAX_SLICES_PER_FRAME = boot_phase ? 96 : 64;
 
     (void)raf_interval_ms;
 
@@ -1132,7 +1149,7 @@ static void main_loop() {
                 g_state.current_fps, s_probe_raf_frames, avg_cpu_ms,
                 s_probe_budget_frames, s_probe_early_frames,
                 (s_probe_raf_frames ? (s_probe_slices_acc / s_probe_raf_frames) : 0),
-                (boot_phase ? 16.0 : 11.0));
+                (boot_phase ? 16.0 : g_frame_cpu_budget_ms));
         }
         s_probe_cpu_ms_acc = 0.0;
         s_probe_raf_frames = 0;
@@ -2333,6 +2350,24 @@ void wasm_debug_dump() {
 EMSCRIPTEN_KEEPALIVE
 int wasm_get_fps() {
     return g_state.current_fps;
+}
+
+/**
+ * Set the post-boot per-frame guest-CPU budget in milliseconds. Lets the page
+ * sweep the budget live (e.g. Module.ccall('wasm_set_cpu_budget','number',
+ * ['number'],[14.0])) to find the FPS sweet spot for a given device without
+ * recompiling. Clamped to [4, 16]: below 4 starves CPU-hungry games, at/above
+ * the ~16.6ms RAF interval the guest eats the whole frame and starves present.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_cpu_budget(double ms) {
+    if (ms < 4.0) {
+        ms = 4.0;
+    } else if (ms > 16.0) {
+        ms = 16.0;
+    }
+    g_frame_cpu_budget_ms = ms;
+    LOG_WARN(FRONTEND_CMDLINE, "[perf] post-boot CPU budget set to {:.1f}ms", ms);
 }
 
 /**
