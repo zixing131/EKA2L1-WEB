@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# EKA2L1-WEB Release build.
+# EKA2L1-WEB HarmonyOS (HOS) build.
 #
-# Output: build_wasm_release/  (full protection)
-# EKA2L1_DEBUG_BUILD is OFF: copyright notice, file-integrity checks, domain
-# whitelist and the version watermark are all active. The POST_BUILD step
-# (gen_integrity.py) seals the asset hashes into eka2l1.wasm and writes
-# js/integrity.js.
+# Output: build_wasm_hos/  (full protection, local-origin allowed)
+# Like the Release build but with EKA2L1_HOS_BUILD=ON:
+#   - Copyright notice, file-integrity checks and version watermark are active.
+#   - Domain whitelist is relaxed to allow empty / local hosts so the wasm can
+#     run inside a HarmonyOS WebView (file://, resource://, custom scheme).
+#   - Channel watermark shows "HOS" instead of "Release".
+# The POST_BUILD step (gen_integrity.py) still seals the asset hashes.
 # ============================================================================
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$ROOT/build_wasm_release"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT/build_wasm_hos"
 JOBS="${JOBS:-4}"
 
 if ! command -v emcmake >/dev/null 2>&1; then
@@ -31,6 +33,7 @@ emcmake cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DEKA2L1_DEBUG_BUILD=OFF \
+    -DEKA2L1_HOS_BUILD=ON \
     -DEKA2L1_BUILD_TESTS=OFF \
     -DEKA2L1_BUILD_TOOLS=OFF \
     -DEKA2L1_BUILD_PATCH=OFF \
@@ -39,6 +42,5 @@ emcmake cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
 cmake --build "$BUILD_DIR" --target eka2l1_wasm -j"$JOBS"
 
 echo
-echo "Release build complete -> $BUILD_DIR/bin"
-echo "Integrity sealed (gen_integrity.py); serve from an authorized domain"
-echo "(*.zixing.fun / *.iniche.cn) — localhost is rejected in Release."
+echo "HOS build complete -> $BUILD_DIR/bin"
+echo "Integrity sealed (gen_integrity.py); local origins (file://, resource://) are allowed."

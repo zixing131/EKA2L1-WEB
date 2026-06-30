@@ -31,7 +31,7 @@
 # ============================================================================
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOS_PROJECT="$ROOT/src/emu/hos"
 ENTRY_CPP="$HOS_PROJECT/entry/src/main/cpp"
 ABI="${ABI:-arm64-v8a}"
