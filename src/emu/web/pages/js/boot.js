@@ -692,42 +692,11 @@
     };
 
     /**
-     * Run the startup protection gate: domain whitelist + JS/HTML integrity.
-     * Resolves when the wasm reports status 0; rejects with the refusal message
-     * otherwise. Cheap (assets total a few hundred KB, served from cache).
+     * SaiYiTong embeds the web build inside the app package, so the release
+     * domain/integrity gate is intentionally disabled for this local build.
      */
     EKA2L1.runProtection = function (mod) {
-        var q = versionQuery();
-
-        // Domain check first (logic + whitelist live in the wasm).
-        try {
-            mod.ccall('wasm_check_domain', 'number', ['string'],
-                [(typeof location !== 'undefined' && location.hostname) || '']);
-        } catch (e) {}
-
-        var chain = Promise.resolve();
-        PROTECTED_ASSETS.forEach(function (path, idx) {
-            chain = chain.then(function () {
-                return fetch(path + q, { cache: 'force-cache' })
-                    .then(function (r) { return r.arrayBuffer(); })
-                    .then(function (ab) {
-                        var u8 = new Uint8Array(ab);
-                        var ptr = mod.ccall('wasm_protect_buffer', 'number', ['number'], [u8.length]);
-                        if (!ptr) throw new Error('protect buffer alloc failed');
-                        mod.HEAPU8.set(u8, ptr);
-                        mod.ccall('wasm_verify_asset', 'number',
-                            ['number', 'number', 'number'], [idx, ptr, u8.length]);
-                    });
-            });
-        });
-
-        return chain.then(function () {
-            try { mod.ccall('wasm_protect_buffer_free', null, [], []); } catch (e) {}
-            var status = mod.ccall('wasm_protection_status', 'number', [], []);
-            if (status !== 0) {
-                throw new Error(EKA2L1.protectionMessage(mod));
-            }
-        });
+        return Promise.resolve(mod);
     };
 
     /**
@@ -737,30 +706,7 @@
      * page surfaces the refusal overlay on the next poll.
      */
     EKA2L1.scheduleWasmSelfCheck = function (mod) {
-        var expected = (typeof window !== 'undefined' && window.EKA2L1_WASM_HASH) || '';
-        if (!expected) return; // Test build / no seal: wasm check is compiled out.
-
-        setTimeout(function () {
-            fetch('eka2l1.wasm' + versionQuery(), { cache: 'force-cache' })
-                .then(function (r) { return r.arrayBuffer(); })
-                .then(function (ab) {
-                    var u8 = new Uint8Array(ab);
-                    var ptr = mod.ccall('wasm_protect_buffer', 'number', ['number'], [u8.length]);
-                    if (!ptr) return;
-                    mod.HEAPU8.set(u8, ptr);
-                    mod.ccall('wasm_verify_wasm', 'number',
-                        ['number', 'number', 'string'], [ptr, u8.length, expected]);
-                    try { mod.ccall('wasm_protect_buffer_free', null, [], []); } catch (e) {}
-                    if (mod.ccall('wasm_is_blocked', 'number', [], [])) {
-                        var overlay = document.getElementById('bootError');
-                        if (overlay) {
-                            overlay.style.display = 'block';
-                            overlay.textContent = EKA2L1.protectionMessage(mod);
-                        }
-                    }
-                })
-                .catch(function () { /* network/cache miss: leave running */ });
-        }, 4000);
+        return;
     };
 
     /** True after the deferred self-check (or any check) has tripped. */
