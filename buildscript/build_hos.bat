@@ -19,8 +19,7 @@ REM set EMSDK to the emsdk root (this script will call emsdk_env.bat for you).
 REM ============================================================================
 setlocal enableextensions
 
-set "ROOT=%~dp0"
-if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 set "BUILD_DIR=%ROOT%\build_wasm_hos"
 if not defined JOBS set "JOBS=4"
 
