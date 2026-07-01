@@ -19,7 +19,7 @@
 
     // ---- tabs --------------------------------------------------------------
 
-    var tabTitles = { games: '游戏', settings: '设置' };
+    var tabTitles = { games: '程序', settings: '设置' };
 
     window.switchTab = function (name) {
         document.querySelectorAll('.tab-view').forEach(function (t) { t.classList.remove('active'); });
@@ -187,9 +187,9 @@
             var empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.innerHTML = apps.length === 0
-                ? '<span class="big">🎮</span>暂无已安装的游戏。<br>点击右下角 + 安装 SIS 游戏包。'
+                ? '<span class="big">🎮</span>暂无已安装的程序。<br>点击右下角 + 安装 SIS 程序包。'
                 : (filter
-                    ? ('没有匹配「' + filter + '」的游戏')
+                    ? ('没有匹配「' + filter + '」的程序')
                     : '没有用户安装的应用。<br>系统应用已隐藏，可在「设置 → 系统应用」切换显示。');
             listEl.appendChild(empty);
             return;
@@ -748,7 +748,7 @@
         }).then(function () {
             setStatus('green', '就绪');
             var hint = (guest.toLowerCase().indexOf('n-gage') !== -1)
-                ? '。N-Gage 游戏需重新进入游戏页，在「Games」应用中完成安装'
+                ? '。N-Gage 程序需重新进入程序页，在「Games」应用中完成安装'
                 : '';
             EKA2L1.toast('已上传 ' + files.length + ' 个文件（' + totalMB + 'MB）到 ' + guest + hint, 5000);
         }).catch(function (err) {
@@ -785,7 +785,7 @@
     };
 
     window.wipeAll = function () {
-        if (!confirm('确定要清除全部数据吗？\n设备固件、已装游戏和所有存档都会被删除，且无法恢复。')) return;
+        if (!confirm('确定要清除全部数据吗？\n设备固件、已装程序和所有存档都会被删除，且无法恢复。')) return;
         try {
             localStorage.removeItem(APPS_CACHE_KEY);
             localStorage.removeItem(ICONS_CACHE_KEY);

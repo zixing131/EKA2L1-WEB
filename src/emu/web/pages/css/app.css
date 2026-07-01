@@ -60,7 +60,7 @@ html, body {
 }
 
 /* Reserve the scrollbar gutter on the root scroller so the viewport width is
-   the same whether the current tab scrolls (设置, tall) or not (游戏, short).
+   the same whether the current tab scrolls (设置, tall) or not (程序, short).
    Without this, the classic desktop scrollbar appears only on the long tab,
    which narrows the viewport and makes the centered .page-layout and the
    position:fixed bottom-nav jump sideways when you switch tabs ("两边不对齐").
@@ -73,7 +73,7 @@ html {
 /* Clip any stray horizontal overflow. On iOS Safari a document that is even a
    hair wider than the viewport makes position:fixed elements size to the
    document width instead of the viewport, which pushed the bottom-nav's 设置
-   item off-centre on the (taller, scrollable) 设置 tab while 游戏 stayed
+   item off-centre on the (taller, scrollable) 设置 tab while 程序 stayed
    centred. Clipping horizontal overflow keeps the document == viewport width so
    the fixed nav stays symmetric across tabs. */
 html, body {

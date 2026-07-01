@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="EKA2L1">
     <meta name="mobile-web-app-capable" content="yes">
-    <title>EKA2L1 — 游戏库</title>
+    <title>EKA2L1 — 程序库</title>
     <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -34,7 +34,7 @@
             <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
             <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span>游戏</span>
+        <span>程序</span>
     </button>
     <button class="rail-item" data-tab="settings" onclick="switchTab('settings')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -58,23 +58,23 @@
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
             </svg>
         </button>
-        <div class="top-bar-small-title" id="topBarSmallTitle">游戏</div>
+        <div class="top-bar-small-title" id="topBarSmallTitle">程序</div>
         <div class="top-bar-status" id="coreStatus">
             <span class="status-dot" id="coreStatusDot"></span>
             <span id="coreStatusText">正在启动…</span>
         </div>
     </div>
-    <div class="top-bar-large-title" id="topBarLargeTitle">游戏</div>
+    <div class="top-bar-large-title" id="topBarLargeTitle">程序</div>
 </header>
 
 <main class="page-layout">
-    <!-- Tab: 游戏 -->
+    <!-- Tab: 程序 -->
     <section class="tab-view active" id="tab-games">
         <div class="search-bar">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-            <input type="text" id="gameSearch" placeholder="搜索游戏" oninput="renderGameList()">
+            <input type="text" id="gameSearch" placeholder="搜索程序" oninput="renderGameList()">
         </div>
 
         <!-- shown when no device is installed yet -->
@@ -92,7 +92,7 @@
             <div class="game-list" id="gameList">
                 <div class="empty-state" id="gameListEmpty">
                     <span class="big">🎮</span>
-                    暂无已安装的游戏。<br>点击右下角 + 安装 SIS 游戏包。
+                    暂无已安装的程序。<br>点击右下角 + 安装 SIS 程序包。
                 </div>
             </div>
         </div>
@@ -112,7 +112,7 @@
             <div id="deviceList"></div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">安装 SIS 游戏包</div>
+                    <div class="pref-label">安装 SIS 程序包</div>
                     <div class="pref-sub">.sis / .sisx，安装到 E 盘</div>
                 </div>
                 <button class="btn" onclick="pickSis()">选择文件</button>
@@ -131,7 +131,7 @@
             <div class="pref-item">
                 <span class="pref-label">上传到</span>
                 <select id="fileUpTarget" onchange="onFileTargetChange()">
-                    <option value="e:\n-gage\">E:\n-gage\（N-Gage 游戏）</option>
+                    <option value="e:\n-gage\">E:\n-gage\（N-Gage 程序）</option>
                     <option value="e:\">E:\（存储卡根目录）</option>
                     <option value="c:\data\">C:\Data\</option>
                     <option value="e:\sounds\digital\">E:\Sounds\Digital\（铃声）</option>
@@ -145,7 +145,7 @@
             <div class="pref-item">
                 <div style="flex:1">
                     <div class="pref-label">上传文件到虚拟磁盘</div>
-                    <div class="pref-sub">可多选。N-Gage 游戏（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
+                    <div class="pref-sub">可多选。N-Gage 程序（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
                 </div>
                 <button class="btn" onclick="pickUpload()">选择文件</button>
             </div>
@@ -192,7 +192,7 @@
             <div class="pref-item">
                 <div style="flex:1">
                     <div class="pref-label" style="color:var(--red)">清除全部数据</div>
-                    <div class="pref-sub">删除设备固件、游戏与存档，不可恢复</div>
+                    <div class="pref-sub">删除设备固件、程序与存档，不可恢复</div>
                 </div>
                 <button class="btn btn-danger" onclick="wipeAll()">清除</button>
             </div>
@@ -224,7 +224,7 @@
             <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
             <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span>游戏</span>
+        <span>程序</span>
     </button>
     <button class="bottom-nav-item" data-tab="settings" onclick="switchTab('settings')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -244,7 +244,7 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
-            安装 SIS 游戏包（.sis / .sisx）
+            安装 SIS 程序包（.sis / .sisx）
         </button>
         <button class="sheet-item" onclick="closeSheets();openDeviceSheet()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
