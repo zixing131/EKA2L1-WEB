@@ -25,7 +25,7 @@
     <string name="opengl_required">此应用需要OpenGL ES 3.0及更高版本。</string>
     <string name="warning">警告</string>
     <string name="scoped_storage_warning">您的用户数据存储路径在卸载应用时<b>将被删除</b>\n</string>
-    <string name="install_ng_game">安装 N-Gage 游戏</string>
+    <string name="install_ng_game">安装 N-Gage 程序</string>
     <string name="notify_dialog_title">Notification</string>
     <string name="grid_app_list_mode">Grid mode</string>
     <string name="list_app_list_mode">List mode</string>
@@ -199,8 +199,8 @@
     <string name="about_translator">Translators</string>
     <string name="version">版本： </string>
     <string name="recommended_devices_note"><b>注：</b> 建议安装S60v3及以上版本的设备固件。</string>
-    <string name="install_ng_game_cant_find_data_folder">无法找到游戏数据文件夹！</string>
+    <string name="install_ng_game_cant_find_data_folder">无法找到程序数据文件夹！</string>
     <string name="install_ng_game_more_than_one_game">There is more than one game in the given card game folder!</string>
     <string name="install_ng_game_no_game_info_file">The game information file does not exist in the card game folder!</string>
-    <string name="install_ng_game_corrupted_game_info">游戏信息文件已损坏。请检查您的数据是否有效！</string>
+    <string name="install_ng_game_corrupted_game_info">程序信息文件已损坏。请检查您的数据是否有效！</string>
 </resources>

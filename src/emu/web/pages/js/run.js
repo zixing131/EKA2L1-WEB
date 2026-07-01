@@ -214,12 +214,12 @@
         var dataMB = 0;
         try { dataMB = Math.round(EKA2L1.dataBytes() / 1048576); } catch (e) {}
         return '浏览器内存不足，模拟器被终止。\n' +
-            '设备数据（ROM + 已装游戏）共 ' + (dataMB || '?') + ' MB，运行期间会全部驻留内存，' +
+            '设备数据（ROM + 已装程序）共 ' + (dataMB || '?') + ' MB，运行期间会全部驻留内存，' +
             '加上模拟器本身约 300-600 MB。\n建议：\n' +
             '· 关闭其它标签页和后台 App 后重试\n' +
-            '· 在文件管理器（如 X-plore）里删除不再需要的游戏安装包（E: 盘的 .sis/.sisx）\n' +
+            '· 在文件管理器（如 X-plore）里删除不再需要的程序安装包（E: 盘的 .sis/.sisx）\n' +
             '· 4GB 内存的 iPhone（13/14/15 标准版）只适合小型应用，' +
-            '大型游戏建议 6GB+ 内存设备（Pro 系列）或电脑浏览器';
+            '大型程序建议 6GB+ 内存设备（Pro 系列）或电脑浏览器';
     }
 
     // After the overlay is hidden a wasm abort (e.g. OOM during gameplay)
@@ -237,7 +237,7 @@
     // ---- boot & launch ---------------------------------------------------------
 
     if (!appUid || isNaN(appUid)) {
-        overlayError('缺少应用参数', '请从游戏库选择一个游戏启动。');
+        overlayError('缺少应用参数', '请从程序库选择一个程序启动。');
         return;
     }
 
@@ -252,7 +252,7 @@
 
         var result = EKA2L1.initDevice('', '');
         if (result !== 0) {
-            overlayError('未找到设备固件', '请先回到游戏库安装 ROM（错误：' +
+            overlayError('未找到设备固件', '请先回到程序库安装 ROM（错误：' +
                 EKA2L1.decodeInstallError(result) + '）');
             return;
         }

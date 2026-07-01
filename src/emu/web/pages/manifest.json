@@ -1,7 +1,7 @@
 {
     "name": "EKA2L1 — Symbian 模拟器",
     "short_name": "EKA2L1",
-    "description": "在浏览器中运行 Symbian OS 游戏与应用的 WebAssembly 模拟器",
+    "description": "在浏览器中运行 Symbian OS 程序与应用的 WebAssembly 模拟器",
     "start_url": "./index.html",
     "scope": "./",
     "display": "standalone",
@@ -42,21 +42,21 @@
             "sizes": "1280x800",
             "type": "image/png",
             "form_factor": "wide",
-            "label": "EKA2L1 游戏库"
+            "label": "EKA2L1 程序库"
         },
         {
             "src": "icons/screenshot-narrow.png",
             "sizes": "390x844",
             "type": "image/png",
             "form_factor": "narrow",
-            "label": "EKA2L1 游戏库（移动端）"
+            "label": "EKA2L1 程序库（移动端）"
         }
     ],
     "shortcuts": [
         {
-            "name": "游戏库",
+            "name": "程序库",
             "url": "./index.html",
-            "description": "打开游戏库",
+            "description": "打开程序库",
             "icons": [{ "src": "icons/icon.svg", "sizes": "any" }]
         }
     ],
