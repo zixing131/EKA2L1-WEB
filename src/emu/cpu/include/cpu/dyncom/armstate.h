@@ -238,6 +238,53 @@ public:
         WriteMemory64Slow(address, data);
     }
 
+    // LDM/STM block cursor: a register-list transfer walks a contiguous,
+    // ascending run of words that almost always stays inside one guest page,
+    // but the plain per-word loop pays a full TLB lookup per word. The cursor
+    // resolves the host page once and serves subsequent words from it,
+    // re-resolving only on a page crossing. Misses fall back to the plain
+    // accessors, so semantics are identical to ReadMemory32/WriteMemory32.
+    // The cursor is stack-local to one LDM/STM execution and never outlives
+    // it, so TLB flushes can't leave a stale mapping behind.
+    struct mem_block_cursor {
+        std::uint32_t page{ 1 }; // 1 is never page-aligned, so it never matches
+        std::uint8_t *host{ nullptr };
+    };
+
+    std::uint32_t ReadMemory32Block(mem_block_cursor &cur, std::uint32_t address) const {
+        const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
+        const std::uint32_t page = address - off;
+        if (cur.host && (cur.page == page)) {
+            return *reinterpret_cast<std::uint32_t *>(cur.host + off);
+        }
+        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+            cur.page = page;
+            cur.host = ptr - off;
+            return *reinterpret_cast<std::uint32_t *>(ptr);
+        }
+        cur.host = nullptr;
+        return ReadMemory32Slow(address);
+    }
+
+    void WriteMemory32Block(mem_block_cursor &cur, std::uint32_t address, std::uint32_t data) {
+        if (!InBigEndianMode()) {
+            const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
+            const std::uint32_t page = address - off;
+            if (cur.host && (cur.page == page)) {
+                *reinterpret_cast<std::uint32_t *>(cur.host + off) = data;
+                return;
+            }
+            if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+                cur.page = page;
+                cur.host = ptr - off;
+                *reinterpret_cast<std::uint32_t *>(ptr) = data;
+                return;
+            }
+            cur.host = nullptr;
+        }
+        WriteMemory32Slow(address, data);
+    }
+
     std::uint8_t ReadMemory8Slow(std::uint32_t address) const;
     std::uint16_t ReadMemory16Slow(std::uint32_t address) const;
     std::uint32_t ReadMemory32Slow(std::uint32_t address) const;
