@@ -608,16 +608,37 @@
                         delBtn.textContent = '删除';
                         return;
                     }
-                    // Full-mount sync so the removed firmware files are also
-                    // deleted from IndexedDB (a delete-heavy reconcile is
-                    // cheap — no file contents get cloned).
-                    EKA2L1.save().catch(function () {}).then(function () {
+                    // devices.yml/config.yml are rewritten (in MEMFS) by the
+                    // C++ side above; persist that edit with the same
+                    // small-write path used for uploads, then directly
+                    // delete the firmware payload's IndexedDB records —
+                    // NOT a full-mount EKA2L1.save(). A full syncfs reconcile
+                    // is oriented around discovering new/changed files and
+                    // isn't guaranteed to also propagate a whole subtree's
+                    // removal, which left ghost "device already exists"
+                    // registrations behind after delete + reinstall.
+                    var firmcodeLow = (d.firmware || '').toLowerCase();
+                    var persist = (EKA2L1.savePaths
+                        ? EKA2L1.savePaths(['/eka2l1/devices.yml', '/eka2l1/config.yml'])
+                        : EKA2L1.save())
+                        .then(function () {
+                            if (!EKA2L1.deletePathPrefixes || !firmcodeLow) return;
+                            return EKA2L1.deletePathPrefixes([
+                                '/eka2l1/roms/' + firmcodeLow,
+                                '/eka2l1/drives/z/' + firmcodeLow
+                            ]);
+                        });
+                    persist.catch(function (e) { console.warn('[EKA2L1] device delete persist failed:', e); }).then(function () {
                         if (d.current) {
                             // The deleted device may still be mapped by the
                             // kernel; only a fresh boot is safe.
                             try {
                                 var devsLeft = JSON.parse(EKA2L1.module.ccall('wasm_get_devices', 'string', [], [])) || [];
-                                if (!devsLeft.length) localStorage.removeItem(HAS_DEVICE_KEY);
+                                if (!devsLeft.length) {
+                                    localStorage.removeItem(HAS_DEVICE_KEY);
+                                    localStorage.removeItem(APPS_CACHE_KEY);
+                                    localStorage.removeItem(ICONS_CACHE_KEY);
+                                }
                             } catch (e) {}
                             location.reload();
                             return;

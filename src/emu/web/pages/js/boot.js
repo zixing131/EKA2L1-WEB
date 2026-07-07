@@ -410,6 +410,65 @@
         });
     };
 
+    /**
+     * Directly delete every IndexedDB record whose path falls under one of
+     * the given directory prefixes (e.g. '/eka2l1/roms/rm-159'), plus the
+     * directory entry itself. Unlike FS.syncfs(false, ...), whose reconcile
+     * is oriented around discovering *new/changed* local files, this doesn't
+     * depend on it also detecting and propagating removals for a whole
+     * subtree that MEMFS no longer has — a full-mount syncfs left stale
+     * firmware records behind often enough (see the "device already exists"
+     * ghost-entry bug) that a targeted, guaranteed cursor-delete is used
+     * instead for uninstall/device-delete flows.
+     */
+    EKA2L1.deletePathPrefixes = function (prefixes) {
+        var MOUNT = '/eka2l1';
+        var STORE = 'FILE_DATA';
+        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
+
+        prefixes = (prefixes || []).filter(function (p) { return p && p.indexOf(MOUNT) === 0; });
+        if (!prefixes.length) return Promise.resolve();
+
+        return new Promise(function (resolve, reject) {
+            var req;
+            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
+            req.onupgradeneeded = function (e) {
+                var db = e.target.result;
+                var st = db.objectStoreNames.contains(STORE)
+                    ? e.target.transaction.objectStore(STORE)
+                    : db.createObjectStore(STORE);
+                if (!st.indexNames.contains('timestamp')) {
+                    st.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
+            req.onsuccess = function () { resolve(req.result); };
+        }).then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction([STORE], 'readwrite');
+                tx.onerror = tx.onabort = function (e) {
+                    reject((e.target && e.target.error) || new Error('IndexedDB 删除失败'));
+                    if (e.preventDefault) e.preventDefault();
+                };
+                tx.oncomplete = function () { db.close(); resolve(); };
+
+                var store = tx.objectStore(STORE);
+                prefixes.forEach(function (prefix) {
+                    store.delete(prefix); // the directory entry itself (if any)
+                    var range = IDBKeyRange.bound(prefix + '/', prefix + '/\uffff');
+                    var cursorReq = store.openCursor(range);
+                    cursorReq.onsuccess = function (e) {
+                        var cursor = e.target.result;
+                        if (cursor) {
+                            cursor.delete();
+                            cursor.continue();
+                        }
+                    };
+                });
+            });
+        });
+    };
+
     // ---- C API wrappers ----------------------------------------------------
 
     function ccall(name, ret, argTypes, args) {

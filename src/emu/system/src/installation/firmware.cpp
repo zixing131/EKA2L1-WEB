@@ -466,7 +466,7 @@ namespace eka2l1 {
 
         const std::string current_temp_rom = eka2l1::add_path(rom_resident_path, "SYM.ROM");
 
-        if (dvcmngr->get(firmcode)) {
+        if (dvcmngr->heal_ghost_registration(firmcode, drives_z_path)) {
             LOG_ERROR(SYSTEM, "The device already exists, revert all changes");
             eka2l1::common::delete_folder(drives_z_temp_path);
             eka2l1::common::remove(current_temp_rom);

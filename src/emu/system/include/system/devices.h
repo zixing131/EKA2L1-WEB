@@ -119,6 +119,29 @@ namespace eka2l1 {
 
         bool delete_device(const std::string &firmcode);
 
+        /*! \brief Detect and clean up a stale ("ghost") device registration.
+         *
+         * A registration can outlive its firmware payload if a previous
+         * delete/reinstall was interrupted before both sides (devices.yml
+         * and the drives/z/<firmcode>/ payload) were removed together (e.g.
+         * a browser tab killed mid-uninstall, or a persistence layer that
+         * updates the registry and the file tree in separate steps). Without
+         * this check, installers rejecting on "device already exists" would
+         * permanently wedge that firmware code even though nothing usable is
+         * left of it.
+         *
+         * \param firmcode        The firmware code found duplicated.
+         * \param drives_z_root   The drives/z resident root path (the
+         *                        directory that contains firmcode-named
+         *                        subfolders for each installed device).
+         *
+         * \returns true if \p firmcode is a genuine, still-installed
+         *          duplicate (caller should still reject); false if there
+         *          was no registration, or a ghost one was found and removed
+         *          (caller may proceed with the install).
+        */
+        bool heal_ghost_registration(const std::string &firmcode, const std::string &drives_z_root);
+
         /*! \brief Get the device with the given firmware code.
          *
          * You should avoid method that involves comparing firmware code, since
