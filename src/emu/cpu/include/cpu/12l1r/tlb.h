@@ -104,6 +104,13 @@ namespace eka2l1::arm::r12l1 {
             }
         }
 
+        // NOTE on page 0: the *_addr fields use 0 as the "no permission"
+        // sentinel, which collides with the page-aligned address of guest page
+        // 0. A resident entry whose page index folds to slot 0 but lacks a
+        // permission would otherwise false-hit accesses to page 0 (e.g. a wild
+        // jump/null dereference would read bytes from an unrelated page
+        // instead of faulting). Both lookups therefore reject addr_normed == 0
+        // and let page-0 accesses take the slow, fully-checked walk.
         std::uint8_t *lookup(const vaddress addr) {
             const std::size_t page_index = addr >> page_bits;
             const std::size_t tlb_index = page_index & (TLB_ENTRY_COUNT - 1);
@@ -111,7 +118,7 @@ namespace eka2l1::arm::r12l1 {
 
             tlb_entry &entry = entries[tlb_index];
 
-            if (!entry.host_base) {
+            if (!entry.host_base || !addr_normed) {
                 return nullptr;
             }
 
@@ -126,8 +133,8 @@ namespace eka2l1::arm::r12l1 {
 
         // Instruction-fetch fast path: hit only on a page mapped executable.
         // ReadCode otherwise always page-walks via core->read_code; this lets a
-        // warm code page skip the walk. On a miss the caller falls back, so the
-        // stricter (exec-only) match here can never be a correctness hazard.
+        // warm code page skip the walk. On a miss the caller falls back to the
+        // fully-checked walk (see the page-0 note above).
         std::uint8_t *lookup_exec(const vaddress addr) {
             const std::size_t page_index = addr >> page_bits;
             const std::size_t tlb_index = page_index & (TLB_ENTRY_COUNT - 1);
@@ -135,7 +142,7 @@ namespace eka2l1::arm::r12l1 {
 
             tlb_entry &entry = entries[tlb_index];
 
-            if (entry.host_base && (entry.execute_addr == addr_normed)) {
+            if (entry.host_base && addr_normed && (entry.execute_addr == addr_normed)) {
                 return entry.host_base + (addr & page_mask);
             }
             return nullptr;

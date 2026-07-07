@@ -137,12 +137,14 @@ namespace eka2l1::mem::flexible {
                 LOG_WARN(MEMORY, "Unable to unmap decommitted memory from a mapping!");
             }
 
+            // Notify every CPU even when the owning address space is not
+            // current: the instruction cache is ASID-tagged and survives
+            // process switches, so a code-page decommit in a non-current
+            // address space must still raise the CPU's icache-invalidate
+            // flag. The vaddr-keyed data-TLB eviction this also does on a
+            // non-owner core is only a harmless false eviction.
             for (auto &mm : ctrl_fx->mmus_) {
-                if (mapping->owner_->id() == mm->current_addr_space()) {
-                    // Unmap from to CPU right away
-                    mm->unmap_from_cpu(mapping->base_ + start_offset, size_to_decommit);
-                    break;
-                }
+                mm->unmap_from_cpu(mapping->base_ + start_offset, size_to_decommit);
             }
         }
 
