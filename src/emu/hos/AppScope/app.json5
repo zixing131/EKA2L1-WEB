@@ -1,7 +1,7 @@
 {
   "app": {
     "bundleName": "com.zixing.eka2l1",
-    "vendor": "example",
+    "vendor": "zixing",
     "versionCode": 1000000,
     "versionName": "1.0.0",
     "icon": "$media:layered_image",
