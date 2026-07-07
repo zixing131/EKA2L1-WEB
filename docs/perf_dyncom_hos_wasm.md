@@ -1,4 +1,9 @@
-# dyncom 性能优化（HOS + WASM）— 2026-06-16
+# dyncom 性能优化（HOS + WASM）— 2026-06-16（2026-07-07 更新）
+
+> **2026-07-07 更新**：①第 1、2 项（ASID 缓存 + ReadCode-TLB）已在 macOS host 上通过
+> `scripts/cpu_difftest.sh` 差分验证（多 seed 共 180 万随机指令用例，golden +
+> 自对照 A/B + 阴性对照全部 PASS），不再视为「未验证」；②新落地第 3 项
+> LDM/STM block cursor（见下）。
 
 参考 iOS fork（[docs/ios/](./ios/)）的优化结论,把对 **dyncom 解释器**（HOS 原生版、
 WASM 版共用的 CPU 后端,两者都不能 JIT）有效、且跨平台安全的优化落到本仓库。每项独立
@@ -40,6 +45,21 @@ iOS fork 的采样显示:解释器线程几乎 100% 在 `InterpreterMainLoop`,�
 `ReadCode`(取指)是唯一还总是 page-walk 的热访问器(`ReadMemory*` 早已走 dyncom 512 项
 TLB 快路径)。新增 `tlb::lookup_exec()`(只命中标记为可执行的页),`ReadCode` 先试它、miss
 回退原 `read_code` 走查 → 零正确性风险(更严格的 exec-only 匹配)。对标 iOS Stage-1a。
+
+### 3. LDM/STM block cursor（2026-07-07 落地）
+
+**问题** 寄存器列表传输（LDM/STM）访问的是几乎总在同一 guest 页内的连续字串，
+但原来的逐字循环每个字都付一次完整的 512 项 dyncom-TLB 查找。iOS fork 已落地并
+保留此优化（`ios_snakes_perf.md §2026-06 follow-up`），profile 里 `LdnStM*` /
+`LnSWoUB*` 是最热的两组函数。
+
+**修复** `armstate.h` 新增 `mem_block_cursor` + `ReadMemory32Block` /
+`WriteMemory32Block`：首字解析一次 host 页并缓存，后续字直接从该页读写，跨页时
+重新解析；miss 回退原 `ReadMemory32/WriteMemory32`，语义完全一致。cursor 是
+LDM/STM 单次执行的栈上局部变量，不会跨 TLB flush 存活 → 无失效隐患。
+
+**验证** `dyncom_difftest` 4 seeds（1/7/12345/999）共 100 万用例 PASS（用例流
+含 ldm/stm）。
 
 ### 已确认本仓库已有、无需再做
 
