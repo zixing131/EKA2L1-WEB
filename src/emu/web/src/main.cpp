@@ -1069,6 +1069,12 @@ static void main_loop() {
             break;
         }
     }
+    // Exiting on the slice cap is also a work-capped (CPU-bound) frame; without
+    // this it would be counted as "early exit" and skew the probe toward
+    // present-bound.
+    if (slices >= MAX_SLICES_PER_FRAME) {
+        hit_budget = true;
+    }
 
     // --- perf probe: is the frame CPU-bound (budget) or present/RAF-bound? ---
     // Accumulate per-RAF-frame stats and dump once a second next to the FPS
@@ -2331,7 +2337,9 @@ int wasm_get_fps() {
  */
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_cpu_budget(double ms) {
-    if (ms < 4.0) {
+    // !(ms >= 4.0) instead of (ms < 4.0): also catches NaN, which would sail
+    // through both comparisons and disable the budget check entirely.
+    if (!(ms >= 4.0)) {
         ms = 4.0;
     } else if (ms > 16.0) {
         ms = 16.0;
