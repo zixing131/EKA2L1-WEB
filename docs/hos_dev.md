@@ -655,3 +655,502 @@ surface。`drivers` 库补链 `native_window`(`libnative_window.so`,之前只 en
    `@Builder` 不行。
 9. **裸 buffer 转 PixelMap 的字节序**：HarmonyOS `createPixelMap` 从 ArrayBuffer 默认按
    BGRA 解读，RGBA 源要显式 `srcPixelFormat: RGBA_8888`，否则 R/B 互换。
+
+---
+
+## 10. 仅获批 `ALLOW_WRITABLE_CODE_MEMORY` 时的性能提升估算
+
+> 背景：权限申请文档（`permission_request.md`）列了 5 个权限，实际只能申请到
+> `ohos.permission.ALLOW_WRITABLE_CODE_MEMORY` 一个。结合 `perf_dyncom_hos_wasm.md` 中
+> dyncom 解释器的实测数据和优化记录，估算这一权限对实际性能的影响。
+
+### 10.1 关键问题：只有这一个权限，JIT 能跑起来吗？
+
+| 权限 | 作用 | 仅有 ALLOW_WRITABLE_CODE_MEMORY 时 |
+|---|---|---|
+| `ALLOW_WRITABLE_CODE_MEMORY` | 允许分配可写可执行匿名内存 | ✅ 已获批，`mmap` RWX 可用 |
+| `DISABLE_CODE_MEMORY_PROTECTION` | 禁用代码运行时完整性保护 | ❌ 未获批 |
+| `ALLOW_EXECUTABLE_FORT_MEMORY` | JITFort 安全内存 | ❌ 未获批 |
+| `ALLOW_USE_JITFORT_INTERFACE` | JITFort 接口调用 | ❌ 未获批 |
+
+核心矛盾：`ALLOW_WRITABLE_CODE_MEMORY` 让 Dynarmic 能分配 RWX 内存页，但没有
+`DISABLE_CODE_MEMORY_PROTECTION`，W^X 翻转（RW→RX）时仍可能触发代码完整性校验。
+
+三种可能场景：
+
+**场景 A（最乐观，概率 ~60%）：JIT 完全可用**
+`ALLOW_WRITABLE_CODE_MEMORY` 的权限说明是"允许应用申请**可写可执行**匿名内存"——这暗示
+它本身就允许 W+X 共存，不需要翻转。Dynarmic 直接分配 RWX 页，无需 `mprotect` 翻转，
+也无需 `DISABLE_CODE_MEMORY_PROTECTION`。JIT 全速运行。
+
+**场景 B（较可能，概率 ~30%）：JIT 可用但有翻转开销**
+没有 `DISABLE_CODE_MEMORY_PROTECTION`，每次 `mprotect` 翻转仍有完整性校验开销。Dynarmic
+需要更频繁地做 RW↔RX 切换（每个 code block 写完后切 RX 执行，修改缓存时再切回 RW），
+每次翻转有系统调用 + 可能的校验延迟（~1-5μs/次，典型 ~1000-5000 次/秒 → 约 1-25ms/秒
+→ **~1-2.5% 线程时间**）。性能损失约 5-10%，仍然非常可用。
+
+**场景 C（最悲观，概率 ~10%）：完整性校验直接拒绝执行**
+`ALLOW_WRITABLE_CODE_MEMORY` 只允许分配，但运行时执行被修改过的代码页仍被拦截 → JIT
+仍然崩溃，回退 dyncom → 无性能提升。只能靠 ASID-tag 缓存优化（消掉 ~17% 重翻译开销）
+给解释器小幅改善。
+
+### 10.2 各场景性能对比（麒麟 8000 / nova 12 Ultra 真机）
+
+**场景 A：JIT 完全可用**
+
+| 游戏类型 | dyncom 解释器（当前） | JIT 全速 | 提升倍数 |
+|---|---|---|---|
+| 系统菜单/文件浏览 | 8-15 FPS | ~60 FPS | **4-7.5x** |
+| 2D 游戏（贪吃蛇、益智类） | < 10 FPS | ~60 FPS | **6x+** |
+| 3D N-Gage 游戏 | 3-8 FPS | 30-60 FPS | **5-20x** |
+
+**场景 B：JIT 可用 + 翻转开销**
+
+| 游戏类型 | dyncom 解释器（当前） | JIT + 翻转开销 | 提升倍数 |
+|---|---|---|---|
+| 系统菜单/文件浏览 | 8-15 FPS | ~55-60 FPS | **3.7-7.5x** |
+| 2D 游戏 | < 10 FPS | ~55-60 FPS | **5.5x+** |
+| 3D N-Gage 游戏 | 3-8 FPS | 28-55 FPS | **4.5-18x** |
+
+**场景 C：JIT 不可用（回退 dyncom + ASID 优化）**
+
+| 游戏类型 | dyncom 当前 | dyncom + ASID 优化 | 提升 |
+|---|---|---|---|
+| 所有类型 | 基准 | +10-17%（消重翻译） | 微幅，仍不可玩 |
+
+### 10.3 综合结论
+
+| | 概率 | 2D 游戏 FPS | 3D 游戏 FPS | 可用性 |
+|---|---|---|---|---|
+| 仅 `ALLOW_WRITABLE_CODE_MEMORY` | — | **55-60** | **28-55** | ✅ 完全可玩 |
+| 对比：无任何权限（当前） | — | < 10 | 3-8 | ❌ 不可玩 |
+| **综合预期提升** | — | **~6x** | **~7-10x** | — |
+
+**最可能的结果**：仅凭 `ALLOW_WRITABLE_CODE_MEMORY` 一个权限，Dynarmic JIT 就能以
+**接近全速**运行（比完整权限集慢不超过 5-10%），因为：
+
+1. 这个权限的核心能力是"允许 W+X 内存"，这正是 JIT 的本质需求
+2. 如果它允许直接分配 RWX 页（不翻转），则根本不需要 `DISABLE_CODE_MEMORY_PROTECTION`
+3. 即使需要翻转，开销也很小（~5-10% 性能损失）
+
+### 10.4 验证建议
+
+在真机上先测试 `ALLOW_WRITABLE_CODE_MEMORY` 单独生效时
+`is_executable_memory_available()` 的探测结果——如果返回 `true`，就说明这一个权限
+就够了，其他权限可以不申请。如果返回 `false`，则需要考虑：
+- 是否可以用 JITFort 路径替代（但 JITFort 权限也没拿到）
+- 是否可以改为一次性分配 RWX 页、不做翻转（需要改 Dynarmic 的码缓存策略）
+- 或者追加申请 `DISABLE_CODE_MEMORY_PROTECTION`
+
+### 10.5 代码级深入分析：oaknut CodeBlock 的实际内存分配策略
+
+> 仅靠权限文档的权限说明做推断不够可靠，需要看 Dynarmic 在 OHOS 上**实际怎么分配内存**。
+
+**关键发现 1：oaknut::CodeBlock 在 OHOS 上直接 `mmap(RWX)`，不做 W^X 翻转**
+
+Dynarmic ARM64 后端使用 `oaknut::CodeBlock`（见
+`src/external/dynarmic/src/dynarmic/backend/arm64/address_space.h` 第 71 行：
+`oaknut::CodeBlock mem;`）。而 oaknut 的 CodeBlock 在 Linux/OHOS 分支
+（`src/external/dynarmic/externals/oaknut/include/oaknut/code_block.hpp` 第 44 行）：
+
+```cpp
+// #else 分支（Linux/Android/OHOS 都走这里）
+m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+    MAP_ANON | MAP_PRIVATE, -1, 0);
+```
+
+一次性请求 RWX，之后**不再做任何 mprotect 翻转**。
+
+**关键发现 2：`ProtectCodeMemory()`/`UnprotectCodeMemory()` 在 OHOS 上是空操作**
+
+`address_space.h` 第 50-60 行：
+
+```cpp
+void ProtectCodeMemory() {
+#if defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) || defined(__APPLE__) || defined(__OpenBSD__)
+    mem.protect();   // 切到 RX
+#endif
+}
+void UnprotectCodeMemory() {
+#if defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT) || defined(__APPLE__) || defined(__OpenBSD__)
+    mem.unprotect(); // 切到 RW
+#endif
+}
+```
+
+OHOS 不定义 `__APPLE__`、`__OpenBSD__`，也没定义 `DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT`
+→ 两个函数**编译为空**→ Dynarmic 在 OHOS 上**从不**做 RW↔RX 翻转。
+
+**关键发现 3：探测函数和 oaknut 的分配策略不一致**
+
+| | 探测函数 `is_executable_memory_available()` | oaknut CodeBlock |
+|---|---|---|
+| 分配方式 | `mmap(RW)` → `mprotect(RX)` → 执行 | `mmap(RWX)` 一次性 |
+| W^X 合规 | ✅ 安全（从不 W+X 共存） | ❌ 不安全（W+X 同时存在） |
+| 需要权限 | `ALLOW_WRITABLE_CODE_MEMORY`（RW→RX 翻转） | `ALLOW_WRITABLE_CODE_MEMORY`（RWX 直接分配） |
+
+**这意味着探测可能返回 `true`（RW→RX 被允许），但 oaknut 的 `mmap(RWX)` 仍被拒绝**——
+两者测试的是不同的内核策略。
+
+### 10.6 修正后的场景概率与应对方案
+
+基于代码级发现，修正 §10.1 的场景分析：
+
+**场景 A（概率 ~50%）：`ALLOW_WRITABLE_CODE_MEMORY` 允许 `mmap(RWX)`**
+- oaknut 直接 RWX 分配成功，JIT 全速运行
+- 无 W^X 翻转 → 无 `DISABLE_CODE_MEMORY_PROTECTION` 需求
+- 性能：与完整权限集一致（2D ~60 FPS、3D 30-60 FPS）
+
+**场景 B（概率 ~30%）：`mmap(RWX)` 被拒，但 `mmap(RW)` + `mprotect(RX)` 可用**
+- 探测函数返回 `true`，但 oaknut 的 CodeBlock 构造抛 `std::bad_alloc` → JIT 初始化崩溃
+- **需要代码修改**才能利用此权限：
+  - **方案 B1**：定义 `DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT`，让 `ProtectCodeMemory()`/
+    `UnprotectCodeMemory()` 生效，同时改 oaknut CodeBlock 在 OHOS 上分配 RW 而非 RWX
+  - **方案 B2**：让 oaknut 在 OHOS 上使用 `DualCodeBlock`（`memfd_create` + `MAP_SHARED`
+    双映射：RW 视图写 + RX 视图执行），但需确认 OHOS musl 有 `memfd_create`
+  - **方案 B3**：自定义 oaknut CodeBlock 的 OHOS 分支，仿 iOS 的 `mmap(RX)` +
+    `pthread_jit_write_protect_np` 等价物（如果 OHOS 提供类似 API）
+- 性能：B1 有 mprotect 翻转开销（~5-10% 损失）；B2/B3 接近全速
+
+**场景 C（概率 ~20%）：两者都被拒**
+- 探测返回 `false`，自动降级 dyncom → 无性能提升
+- ASID 缓存优化仍可带来 ~10-17% 解释器改善，但远不够可玩
+
+### 10.7 建议的行动项
+
+1. **最优先**：在真机上用商店签名 + `ALLOW_WRITABLE_CODE_MEMORY` 测试
+   `is_executable_memory_available()` 返回值。**但同时**要单独测试 `mmap(RWX)` 是否成功
+   （当前探测只测 RW→RX，不测直接 RWX）：
+   ```cpp
+   // 补充探测：直接测 mmap(RWX)
+   void* rwx = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC,
+       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+   bool rwx_ok = (rwx != MAP_FAILED);
+   ```
+   如果 `rwx_ok == true` → 场景 A，直接可用；如果 `rwx_ok == false` 但探测 `true` → 场景 B。
+
+2. **如果确认是场景 B**：最小改动是给 oaknut 的 `code_block.hpp` 加 OHOS 分支：
+   ```cpp
+   #elif defined(__OHOS__)
+       // OHOS W^X: allocate RW, will flip to RX via mprotect
+       m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE,
+           MAP_ANON | MAP_PRIVATE, -1, 0);
+   ```
+   并在 `protect()`/`unprotect()` 加 OHOS 分支做 `mprotect` 翻转，同时定义
+   `DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT` 让 Dynarmic 调用这两个函数。
+
+3. **如果确认是场景 C**：只能靠 dyncom + ASID 优化，考虑追加申请
+   `DISABLE_CODE_MEMORY_PROTECTION` 或走 JITFort 通道。
+
+### 10.8 两条独立的内存分配路径（重要）
+
+OHOS 上实际存在**两条完全独立的内存分配路径**，对权限的需求不同：
+
+| 路径 | 用途 | 分配方式 | 经过 `translate_protection`？ |
+|---|---|---|---|
+| **Guest 内存**（trampoline chunk、dispatcher 等） | 存放 guest Symbian 的代码/数据 | EKA2L1 的 `map_memory()` → `mmap` + `translate_protection()` | ✅ 是 |
+| **Dynarmic JIT 码缓存** | 存放 host AArch64 重编译机器码 | oaknut `CodeBlock` → 直接 `mmap(RWX)` | ❌ 否 |
+
+§6.6 的修复（`translate_protection` 把 `prot_read_write_exec` 降级为 RW）只影响 **Guest 内存**
+路径。即使 JIT 权限获批、oaknut 成功分配了 RWX 码缓存，Guest 内存仍然走降级路径（RW）。
+这**不影响正确性**——§6.6 已论证 Guest chunk 对 host 只是数据（解释器读字节、JIT 编进
+别的缓冲），host 侧不需要 PROT_EXEC。
+
+但如果 `ALLOW_WRITABLE_CODE_MEMORY` 只允许 RW→RX 翻转（场景 B），则：
+- Guest 内存：`translate_protection` 降级为 RW → ✅ 正常工作（§6.6 已修）
+- Dynarmic 码缓存：oaknut `mmap(RWX)` → ❌ 失败（需要改 oaknut）
+
+两条路径要**分别处理**，不能假设修了一条另一条也通了。
+
+### 10.9 探测函数的「假阳性」风险与修复建议
+
+当前 `is_executable_memory_available()` 用 RW→RX 模式探测，但 oaknut 用 RWX 模式分配。
+如果 OHOS 内核的策略是「允许 RW→RX 翻转但禁止直接 RWX mmap」，探测会**假阳性**：
+
+```
+探测：mmap(RW) ✅ → mprotect(RX) ✅ → 执行 ✅ → 返回 true
+oaknut：mmap(RWX) ❌ → bad_alloc → 崩溃
+```
+
+**建议**：在探测函数中增加一个前置测试——先尝试 `mmap(RWX)`，如果成功说明是场景 A
+（oaknut 直接可用）；如果失败再回退到 RW→RX 探测（场景 B，需要改 oaknut）：
+
+```cpp
+bool is_executable_memory_available() {
+    // ... 现有缓存逻辑 ...
+
+    // 先测 mmap(RWX) —— 和 oaknut CodeBlock 实际使用的方式一致
+    void* rwx_mem = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC,
+        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (rwx_mem != MAP_FAILED) {
+        // 场景 A：直接 RWX 可用，oaknut 无需修改
+        // 写入 ret 指令并执行验证
+        // ...
+        munmap(rwx_mem, page);
+        cached = 1;
+        return true;
+    }
+
+    // mmap(RWX) 失败，再测 RW→RX 翻转
+    void* rw_mem = mmap(nullptr, page, PROT_READ | PROT_WRITE, ...);
+    // ... 现有 RW→RX 探测逻辑 ...
+    // 如果 RW→RX 成功但 RWX 失败，记录一个标记供 oaknut 适配层使用
+}
+```
+
+同时可暴露一个 `is_direct_rwx_available()` 接口，让 oaknut 适配层决定用哪种分配策略。
+
+### 10.10 综合结论（更新版）
+
+| 场景 | 概率 | JIT 状态 | 2D FPS | 3D FPS | 是否需要代码修改 |
+|---|---|---|---|---|---|
+| A：`mmap(RWX)` 直接可用 | ~50% | ✅ 全速 | ~60 | 30-60 | 否 |
+| B：仅 RW→RX 可用 | ~30% | ✅ 可用（需改 oaknut） | ~55-60 | 28-55 | 是（oaknut OHOS 分支） |
+| C：都不可用 | ~20% | ❌ 降级 dyncom | < 10 | 3-8 | 否（已自适应） |
+
+**核心结论**：
+
+1. **仅 `ALLOW_WRITABLE_CODE_MEMORY` 一个权限，有 ~80% 概率能让 JIT 工作**（场景 A+B），
+   其中场景 A（~50%）无需任何代码修改，场景 B（~30%）需要给 oaknut 加 OHOS 分支。
+2. **当前探测函数有假阳性风险**：它测的是 RW→RX，但 oaknut 用的是 RWX。建议在真机测试时
+   同时测两种方式，以确定是场景 A 还是 B。
+3. **即使 JIT 不可用**，`perf_dyncom_hos_wasm.md` 中的 ASID-tag 缓存优化仍可为解释器
+   带来 ~10-17% 的改善（消除 IPC 重户场景下的重复翻译开销），但远不够达到可玩标准。
+4. **性能上限**：JIT 获批后，综合预期 2D 游戏 ~60 FPS、3D 游戏 30-60 FPS，与完整权限集
+   差距不超过 5-10%（场景 B 的 mprotect 翻转开销）。产品可用性从「形同虚设」提升到
+  「完全可玩」。
+
+### 10.11 ASID 缓存优化与 JIT 的交互
+
+`perf_dyncom_hos_wasm.md` 中落地的 ASID-tag 指令翻译缓存（最大单项优化，iOS 上消掉 ~17%
+重翻译开销）和 JIT 权限是**完全独立的两条优化路径**，互不影响：
+
+| | dyncom 解释器（无 JIT） | Dynarmic JIT |
+|---|---|---|
+| 翻译缓存 | `instruction_cache`（ASID-tagged，`make_instruction_cache_key`） | Dynarmic 自己的码缓存（`oaknut::CodeBlock`） |
+| ASID 优化 | ✅ 有效：跨进程切换缓存存活，消掉重复翻译 | ❌ 无关：Dynarmic 不用 EKA2L1 的 `instruction_cache` |
+| `set_asid()` | dyncom override 设 `instruction_cache_asid` | 默认 no-op（`arm_interface` 基类空实现） |
+| `flush_tlb` | 只清数据 TLB，不清指令缓存（ASID 保护） | 不影响 Dynarmic 码缓存 |
+
+**结论**：
+- JIT 获批 → Dynarmic 接管 CPU 模拟，ASID 优化不生效（但也不碍事），性能由 JIT 决定
+- JIT 不可用 → dyncom 解释器自动接管，ASID 优化生效，解释器性能提升 ~10-17%
+- 两条路径互斥、互不干扰，代码中已通过 `is_executable_memory_available()` 自动选择
+
+ASID 优化已落地（见 `arm_dyncom.cpp` 的 `set_asid`、`armstate.h` 的 `make_instruction_cache_key`
+和 `block_lookup` 的 asid 校验），无论 JIT 是否获批都已生效。
+
+### 10.12 场景 B 的代码修改工作量估算
+
+如果真机测试确认是场景 B（`mmap(RWX)` 被拒但 RW→RX 可用），需要修改的文件：
+
+| 文件 | 修改内容 | 工作量 |
+|---|---|---|
+| `oaknut/code_block.hpp` | 加 `__OHOS__` 分支：`mmap(RW)` 替代 `mmap(RWX)`；`protect()`/`unprotect()` 加 OHOS `mprotect` 翻转 | 小（~20 行） |
+| `dynarmic/backend/arm64/address_space.h` | `ProtectCodeMemory()`/`UnprotectCodeMemory()` 的 `#if` 条件加 `__OHOS__` | 极小（2 行） |
+| CMake 或 `platform.h` | 定义 `DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT`（或在 OHOS 分支自动开启） | 极小（1 行） |
+| `virtualmem.cpp` | 可选：增加 `is_direct_rwx_available()` 探测，让 oaknut 适配层自动选择策略 | 小（~15 行） |
+
+**总工作量**：~40 行代码修改，涉及 3-4 个文件。核心改动集中在 oaknut 的 `code_block.hpp`。
+修改后需重跑差分测试 harness（`scripts/cpu_difftest.sh`）验证 ASID 改动未受影响。
+
+**风险点**：
+- oaknut 的 `protect()`/`unprotect()` 在 Apple 平台用的是 `pthread_jit_write_protect_np`（
+  线程级切换），而 OHOS 只能用 `mprotect`（页级切换）——粒度更粗，但 Dynarmic 只在
+  `EmitPrelude` 和码缓存写入时调 `Unprotect`，其余时间 `Protect`，翻转频率不高
+- 需确认 OHOS musl 的 `mprotect` 对同一页的反复 RW↔RX 翻转没有额外限制
+
+### 10.13 与 iOS 的对比
+
+iOS 面临完全相同的 W^X 限制，但 Apple 提供了专用的 JIT 安全通道：
+
+| | iOS | OHOS（本申请） |
+|---|---|---|
+| JIT 内存分配 | `MAP_JIT` flag + `mmap` | `ALLOW_WRITABLE_CODE_MEMORY` + `mmap` |
+| W^X 切换 | `pthread_jit_write_protect_np()`（线程级，无系统调用） | `mprotect()`（页级，有系统调用） |
+| 权限获取 | 开发签名自动可用；商店签名需 JIT entitlement（App Store 审核） | 商店签名需申请受限权限 |
+| oaknut 支持 | ✅ 原生（`TARGET_OS_IPHONE` 分支） | ❌ 需新增 OHOS 分支（场景 B 时） |
+
+iOS fork 已经走过了这条路。OHOS 的 `ALLOW_WRITABLE_CODE_MEMORY` 如果对应 iOS 的
+`MAP_JIT` 语义（允许可执行内存但强制 W^X），则场景 B 是确定的，oaknut 的 OHOS 分支
+应该仿 iOS 分支的模式实现。
+
+### 10.14 权限申请策略建议
+
+基于以上分析，建议分两步走：
+
+**第一步（立即）**：用 `ALLOW_WRITABLE_CODE_MEMORY` 单独打包真机测试
+- 同时探测 `mmap(RWX)` 和 `mmap(RW)→mprotect(RX)` 两种方式
+- 根据结果确认场景 A/B/C
+- 如果是场景 A：直接发布，无需任何代码修改
+- 如果是场景 B：按 §10.12 修改 oaknut，再打包测试
+
+**第二步（仅在场景 C 时）**：追加申请 `DISABLE_CODE_MEMORY_PROTECTION`
+- 附上场景 A/B 的测试日志作为证据
+- 说明已尝试 `ALLOW_WRITABLE_CODE_MEMORY` 但不足以满足 JIT 需求
+
+### 10.15 完整决策树
+
+```
+真机测试（商店签名 + ALLOW_WRITABLE_CODE_MEMORY）
+│
+├─ mmap(RWX) 成功 + 执行成功
+│   └─ 场景 A：直接发布
+│       • 无需代码修改
+│       • 预期性能：2D ~60 FPS / 3D 30-60 FPS
+│       • 工作量：0
+│
+├─ mmap(RWX) 失败，但 mmap(RW)→mprotect(RX)→执行 成功
+│   └─ 场景 B：修改 oaknut 后发布
+│       • 修改 oaknut code_block.hpp + address_space.h（~40 行）
+│       • 预期性能：2D ~55-60 FPS / 3D 28-55 FPS（比 A 慢 ~5-10%）
+│       • 工作量：1-2 天（含测试）
+│       • 需跑 difftest harness 验证
+│
+└─ 两者都失败
+    └─ 场景 C：降级 dyncom
+        • 无需代码修改（已自适应）
+        • 性能：< 10 FPS（不可玩）
+        • ASID 优化已生效，解释器提升 ~10-17%（仍不够）
+        • 行动：追加申请 DISABLE_CODE_MEMORY_PROTECTION
+        • 或考虑 JITFort 通道（需同时申请 ALLOW_EXECUTABLE_FORT_MEMORY
+          + ALLOW_USE_JITFORT_INTERFACE）
+```
+
+### 10.16 风险矩阵
+
+| 风险 | 概率 | 影响 | 缓解措施 |
+|---|---|---|---|
+| 探测假阳性（§10.9）：探测返回 true 但 oaknut RWX 失败 | 中 | 高（运行时崩溃） | 补充 `mmap(RWX)` 探测；或场景 B 代码修改 |
+| oaknut W^X 翻转性能不如预期 | 低 | 中（性能下降 >10%） | 考虑 DualCodeBlock 或 JITFort |
+| OHOS musl 缺少 `memfd_create`（场景 B 的 DualCodeBlock 方案） | 中 | 低（有替代方案） | 回退到 mprotect 翻转方案 |
+| `ALLOW_WRITABLE_CODE_MEMORY` 仅对平板生效，手机不可用 | 确定 | 低（已计划仅平板上架） | 手机端用 WASM 版 |
+| 商店审核仍拒绝 JIT（即使有权限） | 低 | 高 | 提前与华为审核团队沟通，附上权限批准文件 |
+| Dynarmic 码缓存与 W^X 不兼容的其他位置 | 低 | 中 | 完整回归测试（多游戏 / 长时间运行） |
+
+### 10.17 最终总结
+
+**核心结论**：仅 `ALLOW_WRITABLE_CODE_MEMORY` 一个权限，**有 ~80% 概率能让商店版 EKA2L1
+获得可玩性能**（场景 A 50% + 场景 B 30%）。最坏情况（场景 C 20%）下产品仍不可用，但有
+明确的追加申请路径。
+
+**性能预期**：
+
+| | 无权限（当前） | 仅 ALLOW_WRITABLE_CODE_MEMORY | 完整权限集 |
+|---|---|---|---|
+| CPU 后端 | dyncom 解释器 | Dynarmic JIT（场景 A/B） | Dynarmic JIT |
+| 2D 游戏 | < 10 FPS | ~55-60 FPS | ~60 FPS |
+| 3D 游戏 | 3-8 FPS | 28-55 FPS | 30-60 FPS |
+| 系统菜单 | 8-15 FPS | ~55-60 FPS | ~60 FPS |
+| 可用性 | ❌ 不可玩 | ✅ 完全可玩 | ✅ 完全可玩 |
+| 与完整权限差距 | — | **-5~10%** | 基准 |
+
+**关键行动**：真机测试同时探测 `mmap(RWX)` 和 `mmap(RW)→mprotect(RX)` 两种方式，
+以确定具体场景并决定后续步骤。
+
+### 10.18 最小化真机探测方案
+
+不需要构建完整模拟器，只需一个独立的 NAPI C++ 测试模块即可确定场景。以下是一个
+~50 行的探测函数，可嵌入 `napi_init.cpp` 或通过 hvigorw 打包进测试 HAP：
+
+```cpp
+#include <sys/mman.h>
+#include <cstring>
+#include <cstdint>
+
+struct jit_probe_result {
+    bool rwx_mmap_ok;      // mmap(RWX) 分配成功
+    bool rwx_exec_ok;      // mmap(RWX) 分配 + 执行成功
+    bool wx_flip_ok;       // mmap(RW) → mprotect(RX) → 执行成功
+    int scenario;          // 0=C(都不可用), 1=B(仅翻转), 2=A(直接RWX)
+};
+
+jit_probe_result probe_jit_capability() {
+    jit_probe_result r{};
+    const size_t page = sysconf(_SC_PAGESIZE);
+
+    // 测试 1：直接 mmap(RWX) —— oaknut CodeBlock 实际使用的方式
+    void* rwx = mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC,
+        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (rwx != MAP_FAILED) {
+        r.rwx_mmap_ok = true;
+        // 写入 AArch64 RET 指令并执行
+        const uint32_t ret = 0xD65F03C0u;
+        std::memcpy(rwx, &ret, sizeof(ret));
+        __builtin___clear_cache((char*)rwx, (char*)rwx + sizeof(ret));
+        ((void(*)())rwx)();
+        r.rwx_exec_ok = true;
+        munmap(rwx, page);
+    }
+
+    // 测试 2：mmap(RW) → mprotect(RX) —— 当前探测函数使用的方式
+    void* rw = mmap(nullptr, page, PROT_READ | PROT_WRITE,
+        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (rw != MAP_FAILED) {
+        const uint32_t ret = 0xD65F03C0u;
+        std::memcpy(rw, &ret, sizeof(ret));
+        if (mprotect(rw, page, PROT_READ | PROT_EXEC) == 0) {
+            __builtin___clear_cache((char*)rw, (char*)rw + sizeof(ret));
+            ((void(*)())rw)();
+            r.wx_flip_ok = true;
+        }
+        munmap(rw, page);
+    }
+
+    // 判定场景
+    if (r.rwx_exec_ok) r.scenario = 2;       // A：直接 RWX
+    else if (r.wx_flip_ok) r.scenario = 1;   // B：仅翻转
+    else r.scenario = 0;                       // C：都不可用
+    return r;
+}
+```
+
+通过 NAPI 导出后，ArkTS 侧调用一次即可拿到 `scenario` 值，**无需启动模拟器、无需装 ROM、
+无需跑任何游戏**。这个探测可以在 HAP 打包后 10 秒内完成，是确定场景的最快路径。
+
+**建议的测试流程**：
+1. 用 DevEco 创建一个最小 HAP 工程，只包含一个按钮 + 文本显示
+2. 嵌入上述探测函数，点击按钮显示 `scenario` 结果
+3. 用**商店签名**（不是开发签名）打包，安装到 nova 12 Ultra
+4. 点击按钮，记录结果：
+   - `scenario=2` → 场景 A，直接可用
+   - `scenario=1` → 场景 B，需修改 oaknut
+   - `scenario=0` → 场景 C，需追加权限申请
+
+这个最小测试可以在 **1 天内**完成，远快于构建完整模拟器并跑游戏。
+
+### 10.19 实施时间线估算
+
+| 阶段 | 内容 | 预计耗时 | 前置条件 |
+|---|---|---|---|
+| ① 最小探测 HAP | 编写 §10.18 的探测模块 + ArkUI 页面 | 0.5 天 | 无 |
+| ② 商店签名测试 | DevEco 商店签名打包 + 真机安装 + 记录结果 | 0.5 天 | ①完成 |
+| ③-A 场景 A 发布 | 无需代码修改，直接集成到模拟器 HAP | 0 天 | ②结果=2 |
+| ③-B 场景 B 适配 | 修改 oaknut + 编译 + difftest + 真机回归 | 1-2 天 | ②结果=1 |
+| ③-C 场景 C 追加申请 | 撰写补充材料 + 提交审核 | 1 天 + 审核周期 | ②结果=0 |
+| ④ 集成测试 | 多游戏实测 + 长时间稳定性测试 | 2-3 天 | ③完成 |
+| ⑤ 上架 | AppGallery 提交 + 审核 | 审核周期 | ④完成 |
+
+**乐观路径（场景 A）**：①→②→④→⑤ ≈ **4-5 天 + 审核周期**
+
+**中等路径（场景 B）**：①→②→③-B→④→⑤ ≈ **6-7 天 + 审核周期**
+
+**悲观路径（场景 C）**：①→②→③-C→等待审核→可能需补充材料 → **数周**
+
+### 10.20 JITFort 备选方案分析
+
+如果场景 C 发生且 `DISABLE_CODE_MEMORY_PROTECTION` 也被拒，鸿蒙还提供了 **JITFort**
+安全通道（`permission_request.md` 第二梯队的两个权限）。JITFort 的设计思路：
+
+- 应用通过 `MAP_FORT` 标志分配匿名内存，系统保证这块内存可以 RW↔RX 翻转
+- 翻转通过专用的 JITFort 接口而非裸 `mprotect`，系统可审计每次翻转
+- 相当于系统给 JIT 应用开了一个「受控的安全通道」
+
+**JITFort 适配工作量**：
+- 需要重写 oaknut 的内存分配逻辑，用 `MAP_FORT` + JITFort 接口替代 `mmap` + `mprotect`
+- 工作量比场景 B 大（~100-150 行），因为 JITFort 的 API 和标准 mmap 不同
+- 需要确认 OHOS SDK 中 JITFort 接口的具体 API（头文件、函数签名）
+
+**建议**：JITFort 作为场景 C 的备选，仅在 `ALLOW_WRITABLE_CODE_MEMORY` +
+`DISABLE_CODE_MEMORY_PROTECTION` 都被拒时再考虑。优先走 JITFort 而非裸 RWX 是鸿蒙的
+设计意图，但适配成本更高。
