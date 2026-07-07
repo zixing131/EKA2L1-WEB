@@ -11,21 +11,25 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="EKA2L1">
     <meta name="mobile-web-app-capable" content="yes">
-    <title>EKA2L1 — 运行</title>
+    <title data-i18n="page.run.title">EKA2L1 — 运行</title>
     <link rel="stylesheet" href="css/app.css">
+    <!-- i18n dictionaries + engine must load before any UI script -->
+    <script src="js/i18n/zh-CN.js"></script>
+    <script src="js/i18n/en-US.js"></script>
+    <script src="js/i18n.js"></script>
 </head>
 <body class="player-body">
 
 <!-- Top bar -->
 <header class="player-bar">
-    <button class="icon-btn" onclick="goBack()" title="返回程序库">
+    <button class="icon-btn" onclick="goBack()" title="返回程序库" data-i18n-title="player.title">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
         </svg>
     </button>
     <div class="player-title" id="playerTitle">EKA2L1</div>
     <div class="player-fps" id="fpsLabel">-- FPS</div>
-    <button class="icon-btn" id="btnPause" onclick="togglePause()" title="暂停 / 继续">
+    <button class="icon-btn" id="btnPause" onclick="togglePause()" title="暂停 / 继续" data-i18n-title="player.togglePause">
         <svg id="iconPause" width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
             <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
         </svg>
@@ -33,30 +37,30 @@
             <polygon points="6 3 21 12 6 21"/>
         </svg>
     </button>
-    <button class="icon-btn" onclick="manualSave()" title="保存存档到浏览器">
+    <button class="icon-btn" onclick="manualSave()" title="保存存档到浏览器" data-i18n-title="player.save">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
             <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
         </svg>
     </button>
-    <button class="icon-btn" onclick="rotateScreen(-90)" title="向左旋转屏幕">
+    <button class="icon-btn" onclick="rotateScreen(-90)" title="向左旋转屏幕" data-i18n-title="player.rotateLeft">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2.5 2v6h6"/><path d="M2.66 15.57a10 10 0 1 0 .57-8.38"/>
         </svg>
     </button>
-    <button class="icon-btn" onclick="rotateScreen(90)" title="向右旋转屏幕">
+    <button class="icon-btn" onclick="rotateScreen(90)" title="向右旋转屏幕" data-i18n-title="player.rotateRight">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38"/>
         </svg>
     </button>
-    <button class="icon-btn" onclick="toggleKeypad()" title="虚拟按键">
+    <button class="icon-btn" onclick="toggleKeypad()" title="虚拟按键" data-i18n-title="player.keypad">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="2" y="6" width="20" height="12" rx="2"/>
             <line x1="6" y1="10" x2="6" y2="10.01"/><line x1="10" y1="10" x2="10" y2="10.01"/><line x1="14" y1="10" x2="14" y2="10.01"/><line x1="18" y1="10" x2="18" y2="10.01"/>
             <line x1="8" y1="14" x2="16" y2="14"/>
         </svg>
     </button>
-    <button class="icon-btn" onclick="toggleFullscreen()" title="全屏">
+    <button class="icon-btn" onclick="toggleFullscreen()" title="全屏" data-i18n-title="player.fullscreen">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
         </svg>
@@ -69,12 +73,12 @@
 
     <div class="stage-overlay" id="bootOverlay">
         <div class="spinner" id="overlaySpinner"></div>
-        <div class="overlay-title" id="overlayTitle">正在加载模拟器…</div>
+        <div class="overlay-title" id="overlayTitle" data-i18n="player.loading">正在加载模拟器…</div>
         <div class="overlay-text" id="overlayText"></div>
         <div class="overlay-progress"><div class="bar" id="overlayBar"></div></div>
         <div class="player-error-actions" id="overlayActions" style="display:none">
-            <button class="btn btn-primary" onclick="goBack()">回到程序库</button>
-            <button class="btn" onclick="location.reload()">重试</button>
+            <button class="btn btn-primary" onclick="goBack()" data-i18n="player.backToLibrary">回到程序库</button>
+            <button class="btn" onclick="location.reload()" data-i18n="player.retry">重试</button>
         </div>
     </div>
 </main>
@@ -82,15 +86,15 @@
 <!-- Virtual keypad: joypad + numpad, classic S60 layout -->
 <footer class="keypad hidden" id="keypad">
     <div class="keypad-grid">
-        <button class="key key-soft" data-key="LSK">左软键</button>
+        <button class="key key-soft" data-key="LSK" data-i18n="player.keySoftLeft">左软键</button>
         <button class="key" data-key="UP">▲</button>
-        <button class="key key-soft" data-key="RSK">右软键</button>
+        <button class="key key-soft" data-key="RSK" data-i18n="player.keySoftRight">右软键</button>
         <button class="key" data-key="LEFT">◀</button>
         <button class="key key-accent" data-key="OK">OK</button>
         <button class="key" data-key="RIGHT">▶</button>
         <button class="key key-soft" data-key="CLEAR">C</button>
         <button class="key" data-key="DOWN">▼</button>
-        <button class="key key-soft key-red" data-key="END">挂断</button>
+        <button class="key key-soft key-red" data-key="END" data-i18n="player.keyEnd">挂断</button>
     </div>
     <div class="keypad-grid">
         <button class="key" data-key="D1">1</button>

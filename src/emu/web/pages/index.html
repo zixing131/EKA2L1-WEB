@@ -12,8 +12,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="EKA2L1">
     <meta name="mobile-web-app-capable" content="yes">
-    <title>EKA2L1 — 程序库</title>
+    <title data-i18n="page.library.title">EKA2L1 — 程序库</title>
     <link rel="stylesheet" href="css/app.css">
+    <!-- i18n dictionaries + engine must load before any UI script -->
+    <script src="js/i18n/zh-CN.js"></script>
+    <script src="js/i18n/en-US.js"></script>
+    <script src="js/i18n.js"></script>
 </head>
 <body>
 
@@ -34,21 +38,21 @@
             <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
             <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span>程序</span>
+        <span data-i18n="nav.games">程序</span>
     </button>
     <button class="rail-item" data-tab="settings" onclick="switchTab('settings')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
-        <span>设置</span>
+        <span data-i18n="nav.settings">设置</span>
     </button>
 </nav>
 
 <!-- Top app bar -->
 <header class="top-app-bar" id="topAppBar">
     <div class="top-bar-small">
-        <button class="icon-btn" id="viewToggle" onclick="toggleView()" title="切换列表 / 平铺视图">
+        <button class="icon-btn" id="viewToggle" onclick="toggleView()" title="切换列表 / 平铺视图" data-i18n-title="action.toggleView">
             <svg id="viewIconGrid" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
                 <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
@@ -58,13 +62,13 @@
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
             </svg>
         </button>
-        <div class="top-bar-small-title" id="topBarSmallTitle">程序</div>
+        <div class="top-bar-small-title" id="topBarSmallTitle" data-i18n="nav.games">程序</div>
         <div class="top-bar-status" id="coreStatus">
             <span class="status-dot" id="coreStatusDot"></span>
-            <span id="coreStatusText">正在启动…</span>
+            <span id="coreStatusText" data-i18n="status.booting">正在启动…</span>
         </div>
     </div>
-    <div class="top-bar-large-title" id="topBarLargeTitle">程序</div>
+    <div class="top-bar-large-title" id="topBarLargeTitle" data-i18n="nav.games">程序</div>
 </header>
 
 <main class="page-layout">
@@ -74,23 +78,25 @@
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-            <input type="text" id="gameSearch" placeholder="搜索程序" oninput="onGameSearchInput()">
+            <input type="text" id="gameSearch" placeholder="搜索程序" data-i18n-placeholder="search.placeholder" oninput="onGameSearchInput()">
         </div>
 
         <!-- shown when no device is installed yet -->
         <div class="section-card" id="onboardCard" style="display:none">
             <div class="empty-state">
-                <span class="big">📦</span>
-                还没有安装设备固件。<br>
-                需要一个 Symbian ROM（S60v3/S^3 机型还需要 RPKG）。
+                <span data-i18n-html="games.onboard.text">
+                    <span class="big">📦</span>
+                    还没有安装设备固件。<br>
+                    需要一个 Symbian ROM（S60v3/S^3 机型还需要 RPKG）。
+                </span>
                 <br><br>
-                <button class="btn btn-primary" onclick="openDeviceSheet()">安装设备 ROM</button>
+                <button class="btn btn-primary" onclick="openDeviceSheet()" data-i18n="action.installRom">安装设备 ROM</button>
             </div>
         </div>
 
         <div class="section-card section-card-games">
             <div class="game-list" id="gameList">
-                <div class="empty-state" id="gameListEmpty">
+                <div class="empty-state" id="gameListEmpty" data-i18n-html="games.empty.none">
                     <span class="big">🎮</span>
                     暂无已安装的程序。<br>点击右下角 + 安装 SIS 程序包。
                 </div>
@@ -101,88 +107,88 @@
     <!-- Tab: 设置 -->
     <section class="tab-view" id="tab-settings">
         <div class="section-card">
-            <div class="section-title">设备</div>
+            <div class="section-title" data-i18n="settings.device.title">设备</div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">固件状态</div>
-                    <div class="pref-sub" id="deviceStatusText">检测中…</div>
+                    <div class="pref-label" data-i18n="settings.device.status.label">固件状态</div>
+                    <div class="pref-sub" id="deviceStatusText" data-i18n="status.detecting">检测中…</div>
                 </div>
-                <button class="btn" onclick="openDeviceSheet()">安装新 ROM</button>
+                <button class="btn" onclick="openDeviceSheet()" data-i18n="action.installNewRom">安装新 ROM</button>
             </div>
             <div id="deviceList"></div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">安装 SIS 程序包</div>
-                    <div class="pref-sub">.sis / .sisx，安装到 E 盘</div>
+                    <div class="pref-label" data-i18n="settings.device.installSis.label">安装 SIS 程序包</div>
+                    <div class="pref-sub" data-i18n="settings.device.installSis.sub">.sis / .sisx，安装到 E 盘</div>
                 </div>
-                <button class="btn" onclick="pickSis()">选择文件</button>
+                <button class="btn" onclick="pickSis()" data-i18n="action.chooseFile">选择文件</button>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">应用管理</div>
+            <div class="section-title" data-i18n="settings.appManage.title">应用管理</div>
             <div id="pkgList">
-                <div class="pref-item"><div class="pref-sub">启动核心后可查看已安装的应用包</div></div>
+                <div class="pref-item"><div class="pref-sub" data-i18n="settings.appManage.hint">启动核心后可查看已安装的应用包</div></div>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">文件管理</div>
+            <div class="section-title" data-i18n="settings.fileManage.title">文件管理</div>
             <div class="pref-item">
-                <span class="pref-label">上传到</span>
+                <span class="pref-label" data-i18n="settings.fileManage.uploadTo">上传到</span>
                 <select id="fileUpTarget" onchange="onFileTargetChange()">
-                    <option value="e:\n-gage\">E:\n-gage\（N-Gage 程序）</option>
-                    <option value="e:\">E:\（存储卡根目录）</option>
-                    <option value="c:\data\">C:\Data\</option>
-                    <option value="e:\sounds\digital\">E:\Sounds\Digital\（铃声）</option>
-                    <option value="custom">自定义路径…</option>
+                    <option value="e:\n-gage\" data-i18n="settings.fileManage.opt.ngage">E:\n-gage\（N-Gage 程序）</option>
+                    <option value="e:\" data-i18n="settings.fileManage.opt.eroot">E:\（存储卡根目录）</option>
+                    <option value="c:\data\" data-i18n="settings.fileManage.opt.cdata">C:\Data\</option>
+                    <option value="e:\sounds\digital\" data-i18n="settings.fileManage.opt.ringtone">E:\Sounds\Digital\（铃声）</option>
+                    <option value="custom" data-i18n="settings.fileManage.opt.custom">自定义路径…</option>
                 </select>
             </div>
             <div class="pref-item" id="fileUpCustomRow" style="display:none">
-                <span class="pref-label">路径</span>
-                <input type="text" id="fileUpCustom" placeholder="例如 e:\games\" style="flex:1;min-width:0;padding:8px 14px;border-radius:999px;border:none;background:var(--bg-elev2);color:inherit;outline:none">
+                <span class="pref-label" data-i18n="settings.fileManage.pathLabel">路径</span>
+                <input type="text" id="fileUpCustom" placeholder="例如 e:\games\" data-i18n-placeholder="settings.fileManage.pathPlaceholder" style="flex:1;min-width:0;padding:8px 14px;border-radius:999px;border:none;background:var(--bg-elev2);color:inherit;outline:none">
             </div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">上传文件到虚拟磁盘</div>
-                    <div class="pref-sub">可多选。N-Gage 程序（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
+                    <div class="pref-label" data-i18n="settings.fileManage.uploadLabel">上传文件到虚拟磁盘</div>
+                    <div class="pref-sub" data-i18n="settings.fileManage.uploadSub">可多选。N-Gage 程序（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
                 </div>
-                <button class="btn" onclick="pickUpload()">选择文件</button>
+                <button class="btn" onclick="pickUpload()" data-i18n="action.chooseFile">选择文件</button>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">性能</div>
+            <div class="section-title" data-i18n="settings.perf.title">性能</div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">运行模式</div>
-                    <div class="pref-sub">省电模式将帧率限制到 30 FPS，适合低性能设备</div>
+                    <div class="pref-label" data-i18n="settings.perf.mode.label">运行模式</div>
+                    <div class="pref-sub" data-i18n="settings.perf.mode.sub">省电模式将帧率限制到 30 FPS，适合低性能设备</div>
                 </div>
                 <select id="prefPerf">
-                    <option value="auto">自动</option>
-                    <option value="high">高性能（60 FPS）</option>
-                    <option value="low">省电（30 FPS）</option>
+                    <option value="auto" data-i18n="settings.perf.mode.opt.auto">自动</option>
+                    <option value="high" data-i18n="settings.perf.mode.opt.high">高性能（60 FPS）</option>
+                    <option value="low" data-i18n="settings.perf.mode.opt.low">省电（30 FPS）</option>
                 </select>
             </div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">画面滤镜</div>
-                    <div class="pref-sub">锐利（像素风）在低端设备上渲染更快</div>
+                    <div class="pref-label" data-i18n="settings.perf.filter.label">画面滤镜</div>
+                    <div class="pref-sub" data-i18n="settings.perf.filter.sub">锐利（像素风）在低端设备上渲染更快</div>
                 </div>
                 <select id="prefFilter">
-                    <option value="auto">自动</option>
-                    <option value="smooth">平滑</option>
-                    <option value="sharp">锐利（像素风）</option>
+                    <option value="auto" data-i18n="settings.perf.filter.opt.auto">自动</option>
+                    <option value="smooth" data-i18n="settings.perf.filter.opt.smooth">平滑</option>
+                    <option value="sharp" data-i18n="settings.perf.filter.opt.sharp">锐利（像素风）</option>
                 </select>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">显示</div>
+            <div class="section-title" data-i18n="settings.display.title">显示</div>
             <div class="pref-item">
-                <span class="pref-label">画面缩放</span>
+                <span class="pref-label" data-i18n="settings.display.scale.label">画面缩放</span>
                 <select id="prefScale">
-                    <option value="fit">适应窗口</option>
+                    <option value="fit" data-i18n="settings.display.scale.opt.fit">适应窗口</option>
                     <option value="1">1×</option>
                     <option value="1.5">1.5×</option>
                     <option value="2">2×</option>
@@ -190,46 +196,61 @@
                 </select>
             </div>
             <div class="pref-item">
-                <span class="pref-label">虚拟按键</span>
+                <span class="pref-label" data-i18n="settings.display.keypad.label">虚拟按键</span>
                 <select id="prefKeypad">
-                    <option value="auto">触屏设备显示</option>
-                    <option value="on">总是显示</option>
-                    <option value="off">隐藏</option>
+                    <option value="auto" data-i18n="settings.display.keypad.opt.auto">触屏设备显示</option>
+                    <option value="on" data-i18n="settings.display.keypad.opt.on">总是显示</option>
+                    <option value="off" data-i18n="settings.display.keypad.opt.off">隐藏</option>
                 </select>
             </div>
             <div class="pref-item">
-                <span class="pref-label">系统应用</span>
+                <span class="pref-label" data-i18n="settings.display.showSys.label">系统应用</span>
                 <select id="prefShowSys">
-                    <option value="0">隐藏（只显示安装的应用）</option>
-                    <option value="1">显示全部</option>
+                    <option value="0" data-i18n="settings.display.showSys.opt.hide">隐藏（只显示安装的应用）</option>
+                    <option value="1" data-i18n="settings.display.showSys.opt.show">显示全部</option>
                 </select>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">数据</div>
+            <div class="section-title" data-i18n="settings.lang.title">语言</div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">立即保存到浏览器</div>
-                    <div class="pref-sub">把虚拟磁盘写入 IndexedDB</div>
+                    <div class="pref-label" data-i18n="settings.lang.label">界面语言</div>
+                    <div class="pref-sub" data-i18n="settings.lang.sub">自动跟随浏览器语言，或手动选择</div>
                 </div>
-                <button class="btn" onclick="manualSave()">保存</button>
-            </div>
-            <div class="pref-item">
-                <div style="flex:1">
-                    <div class="pref-label" style="color:var(--red)">清除全部数据</div>
-                    <div class="pref-sub">删除设备固件、程序与存档，不可恢复</div>
-                </div>
-                <button class="btn btn-danger" onclick="wipeAll()">清除</button>
+                <select id="prefLang">
+                    <option value="auto" data-i18n="settings.lang.opt.auto">自动</option>
+                    <option value="zh-CN" data-i18n="settings.lang.opt.zhCN">简体中文</option>
+                    <option value="en-US" data-i18n="settings.lang.opt.enUS">English</option>
+                </select>
             </div>
         </div>
 
         <div class="section-card">
-            <div class="section-title">关于</div>
+            <div class="section-title" data-i18n="settings.data.title">数据</div>
             <div class="pref-item">
                 <div style="flex:1">
-                    <div class="pref-label">EKA2L1 Web</div>
-                    <div class="pref-sub">Symbian OS 模拟器 · WebAssembly 移植版</div>
+                    <div class="pref-label" data-i18n="settings.data.save.label">立即保存到浏览器</div>
+                    <div class="pref-sub" data-i18n="settings.data.save.sub">把虚拟磁盘写入 IndexedDB</div>
+                </div>
+                <button class="btn" onclick="manualSave()" data-i18n="action.save">保存</button>
+            </div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label" style="color:var(--red)" data-i18n="settings.data.wipe.label">清除全部数据</div>
+                    <div class="pref-sub" data-i18n="settings.data.wipe.sub">删除设备固件、程序与存档，不可恢复</div>
+                </div>
+                <button class="btn btn-danger" onclick="wipeAll()" data-i18n="action.clear">清除</button>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title" data-i18n="settings.about.title">关于</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label" data-i18n="settings.about.name">EKA2L1 Web</div>
+                    <div class="pref-sub" data-i18n="settings.about.sub">Symbian OS 模拟器 · WebAssembly 移植版</div>
                 </div>
             </div>
         </div>
@@ -237,7 +258,7 @@
 </main>
 
 <!-- FAB -->
-<button class="fab" id="fab" onclick="openInstallSheet()" title="安装">
+<button class="fab" id="fab" onclick="openInstallSheet()" title="安装" data-i18n-title="action.install">
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
         <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
     </svg>
@@ -250,14 +271,14 @@
             <rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
             <circle cx="15" cy="10.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r="0.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span>程序</span>
+        <span data-i18n="nav.games">程序</span>
     </button>
     <button class="bottom-nav-item" data-tab="settings" onclick="switchTab('settings')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
-        <span>设置</span>
+        <span data-i18n="nav.settings">设置</span>
     </button>
 </nav>
 
@@ -265,20 +286,20 @@
 <div class="sheet-overlay" id="installSheetOverlay" onclick="if(event.target===this)closeSheets()">
     <div class="sheet">
         <div class="sheet-handle"></div>
-        <div class="sheet-title">安装</div>
+        <div class="sheet-title" data-i18n="action.install">安装</div>
         <button class="sheet-item" onclick="closeSheets();pickSis()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
-            安装 SIS 程序包（.sis / .sisx）
+            <span data-i18n="sheet.installSis">安装 SIS 程序包（.sis / .sisx）</span>
         </button>
         <button class="sheet-item" onclick="closeSheets();openDeviceSheet()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/>
             </svg>
-            安装设备固件（ROM + RPKG）
+            <span data-i18n="sheet.installDevice">安装设备固件（ROM + RPKG）</span>
         </button>
-        <button class="sheet-cancel" onclick="closeSheets()">取消</button>
+        <button class="sheet-cancel" onclick="closeSheets()" data-i18n="action.cancel">取消</button>
     </div>
 </div>
 
@@ -286,15 +307,15 @@
 <div class="sheet-overlay" id="deviceSheetOverlay" onclick="if(event.target===this)closeSheets()">
     <div class="sheet">
         <div class="sheet-handle"></div>
-        <div class="sheet-title">安装设备固件</div>
-        <div class="sheet-desc">
+        <div class="sheet-title" data-i18n="sheet.installDevice.title">安装设备固件</div>
+        <div class="sheet-desc" data-i18n="sheet.installDevice.desc">
             选择 ROM 文件（.rom）。S60 第三版 / Symbian^3 机型（N73、N95、5800、N8 等）
             还需要对应的 RPKG 文件；老机型（EKA1）只需 ROM。
         </div>
-        <div class="drop-zone" id="romZone" onclick="document.getElementById('romInput').click()">📁 点击选择 ROM 文件</div>
-        <div class="drop-zone" id="rpkgZone" onclick="document.getElementById('rpkgInput').click()">📦 点击选择 RPKG 文件（可选）</div>
-        <button class="btn btn-primary btn-block" id="deviceInstallBtn" onclick="installDevice()" disabled>开始安装</button>
-        <button class="sheet-cancel" onclick="closeSheets()">取消</button>
+        <div class="drop-zone" id="romZone" onclick="document.getElementById('romInput').click()" data-i18n="dropzone.rom">📁 点击选择 ROM 文件</div>
+        <div class="drop-zone" id="rpkgZone" onclick="document.getElementById('rpkgInput').click()" data-i18n="dropzone.rpkg">📦 点击选择 RPKG 文件（可选）</div>
+        <button class="btn btn-primary btn-block" id="deviceInstallBtn" onclick="installDevice()" disabled data-i18n="action.startInstall">开始安装</button>
+        <button class="sheet-cancel" onclick="closeSheets()" data-i18n="action.cancel">取消</button>
     </div>
 </div>
 

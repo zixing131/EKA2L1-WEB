@@ -60,14 +60,14 @@
         EKA2L1.setPaused(paused);
         document.getElementById('iconPause').style.display = paused ? 'none' : '';
         document.getElementById('iconPlay').style.display = paused ? '' : 'none';
-        EKA2L1.toast(paused ? '已暂停' : '继续运行');
+        EKA2L1.toast(paused ? EKA2L1.t('toast.paused') : EKA2L1.t('toast.resumed'));
         if (!paused) focusCanvas();
     };
 
     window.manualSave = function () {
         if (!EKA2L1.ready) return;
-        EKA2L1.save().then(function () { EKA2L1.toast('已保存'); },
-            function () { EKA2L1.toast('保存失败，详见控制台', 3500); });
+        EKA2L1.save().then(function () { EKA2L1.toast(EKA2L1.t('toast.saved')); },
+            function () { EKA2L1.toast(EKA2L1.t('toast.saveFailedSeeConsole'), 3500); });
     };
 
     window.toggleFullscreen = function () {
@@ -181,7 +181,7 @@
         rotation = ((rotation + delta) % 360 + 360) % 360;
         localStorage.setItem(rotKey, String(rotation));
         applyRotation();
-        EKA2L1.toast(rotation ? ('屏幕已旋转 ' + rotation + '°') : '屏幕已回正');
+        EKA2L1.toast(rotation ? EKA2L1.t('toast.screenRotated', { deg: rotation }) : EKA2L1.t('toast.screenReset'));
     };
 
     // ---- FPS ---------------------------------------------------------------
@@ -213,13 +213,7 @@
     function oomMessage() {
         var dataMB = 0;
         try { dataMB = Math.round(EKA2L1.dataBytes() / 1048576); } catch (e) {}
-        return '浏览器内存不足，模拟器被终止。\n' +
-            '设备数据（ROM + 已装程序）共 ' + (dataMB || '?') + ' MB，运行期间会全部驻留内存，' +
-            '加上模拟器本身约 300-600 MB。\n建议：\n' +
-            '· 关闭其它标签页和后台 App 后重试\n' +
-            '· 在文件管理器（如 X-plore）里删除不再需要的程序安装包（E: 盘的 .sis/.sisx）\n' +
-            '· 4GB 内存的 iPhone（13/14/15 标准版）只适合小型应用，' +
-            '大型程序建议 6GB+ 内存设备（Pro 系列）或电脑浏览器';
+        return EKA2L1.t('error.oom', { mb: dataMB || '?' });
     }
 
     // After the overlay is hidden a wasm abort (e.g. OOM during gameplay)
@@ -230,43 +224,44 @@
         var err = ev.error || ev.message;
         if (EKA2L1.isOOMError(err)) {
             document.getElementById('bootOverlay').classList.remove('hidden');
-            overlayError('内存不足', oomMessage());
+            overlayError(EKA2L1.t('overlay.oomTitle'), oomMessage());
         }
     });
 
     // ---- boot & launch ---------------------------------------------------------
 
     if (!appUid || isNaN(appUid)) {
-        overlayError('缺少应用参数', '请从程序库选择一个程序启动。');
+        overlayError(EKA2L1.t('overlay.missingAppTitle'), EKA2L1.t('overlay.missingAppText'));
         return;
     }
 
-    overlay('正在加载模拟器…', appName, 5);
+    overlay(EKA2L1.t('player.loading'), appName, 5);
     fitCanvas();
 
     EKA2L1.boot({
         canvas: canvas,
-        onProgress: function (pct, text) { overlay('正在加载模拟器…', text, pct); }
+        onProgress: function (pct, text) { overlay(EKA2L1.t('player.loading'), text, pct); }
     }).then(function () {
-        overlay('正在启动设备…', '', 94);
+        overlay(EKA2L1.t('overlay.startingDevice'), '', 94);
 
-        // Frame-rate cap / CPU budget / upscale filter from the 设置 page.
+        // Frame-rate cap / CPU budget / upscale filter from the Settings page.
         // Applied before launch so a low-end device never burns full-rate CPU.
         var lowPower = EKA2L1.applyPerfPrefs();
         if (lowPower) console.log('[EKA2L1] low-power mode active (30fps cap)');
 
         var result = EKA2L1.initDevice('', '');
         if (result !== 0) {
-            overlayError('未找到设备固件', '请先回到程序库安装 ROM（错误：' +
-                EKA2L1.decodeInstallError(result) + '）');
+            overlayError(EKA2L1.t('overlay.noFirmwareTitle'), EKA2L1.t('overlay.noFirmwareText', {
+                reason: EKA2L1.decodeInstallError(result)
+            }));
             return;
         }
 
-        overlay('正在启动 ' + (appName || '应用') + '…', 'Symbian 系统引导中，首次启动较慢', 97);
+        overlay(EKA2L1.t('overlay.launchingApp', { name: appName || EKA2L1.t('overlay.defaultAppName') }), EKA2L1.t('overlay.launchingHint'), 97);
 
         var launch = EKA2L1.launchApp(appUid);
         if (launch !== 0) {
-            overlayError('启动失败', '应用未能启动（代码 ' + launch + '），可能已被卸载。');
+            overlayError(EKA2L1.t('overlay.launchFailedTitle'), EKA2L1.t('overlay.launchFailedText', { code: launch }));
             return;
         }
 
@@ -285,21 +280,21 @@
                 startAutosave();
             } else if (performance.now() - t0 > 120000) {
                 clearInterval(poll);
-                overlayError('启动超时', '应用 2 分钟内没有输出画面，详见控制台日志。');
+                overlayError(EKA2L1.t('overlay.launchTimeoutTitle'), EKA2L1.t('overlay.launchTimeoutText'));
             } else {
                 var secs = ((performance.now() - t0) / 1000) | 0;
                 if (secs >= 3) {
-                    overlay('正在启动 ' + (appName || '应用') + '…',
-                        'Symbian 系统引导中（' + secs + 's），首次启动较慢', 99);
+                    overlay(EKA2L1.t('overlay.launchingApp', { name: appName || EKA2L1.t('overlay.defaultAppName') }),
+                        EKA2L1.t('overlay.launchingHintSecs', { secs: secs }), 99);
                 }
             }
         }, 250);
     }).catch(function (err) {
         console.error('[EKA2L1] boot failed:', err);
         if (EKA2L1.isOOMError(err)) {
-            overlayError('内存不足', oomMessage());
+            overlayError(EKA2L1.t('overlay.oomTitle'), oomMessage());
         } else {
-            overlayError('模拟器加载失败', String(err && err.message || err));
+            overlayError(EKA2L1.t('overlay.bootFailedTitle'), String(err && err.message || err));
         }
     });
 })();
