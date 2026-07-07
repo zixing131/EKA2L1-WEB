@@ -978,21 +978,6 @@ static void main_loop() {
         return;
     }
 
-    // Protection tripwire: if a tamper check fails (e.g. the deferred wasm
-    // self-hash), freeze the guest. The JS side polls wasm_is_blocked() and
-    // raises the copyright/refusal overlay. No-op in debug builds.
-    if (eka2l1::web::protection::is_blocked()) {
-        static bool s_logged_block = false;
-        if (!s_logged_block) {
-            s_logged_block = true;
-            g_state.running = false;
-            LOG_ERROR(FRONTEND_CMDLINE,
-                "Protection check failed; emulator halted. {}",
-                eka2l1::web::protection::copyright_text());
-        }
-        return;
-    }
-
     // Poll SDL events through the emu window so the input hooks fire and
     // mouse/touch/key events reach the window server. Poll even while paused
     // so the canvas stays responsive.
@@ -1332,13 +1317,6 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
         eka2l1::log::toggle_console();
     }
 
-    // Defense in depth: refuse to touch a device if the protection checks
-    // haven't passed (a tampered JS shell could try to skip the gate).
-    if (eka2l1::web::protection::is_blocked()) {
-        LOG_ERROR(FRONTEND_CMDLINE, "Refusing init: protection check not satisfied");
-        return -9;
-    }
-
     const bool has_rpkg = (rpkg_path && rpkg_path[0] != '\0');
     LOG_INFO(FRONTEND_CMDLINE, "Initializing with ROM: {}  RPKG: {}",
         rom_path, has_rpkg ? rpkg_path : "(none)");
@@ -1504,10 +1482,6 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
 EMSCRIPTEN_KEEPALIVE
 int wasm_install_package(const char *pkg_path) {
     if (!pkg_path) return -1;
-    if (eka2l1::web::protection::is_blocked()) {
-        LOG_ERROR(FRONTEND_CMDLINE, "Refusing install: protection check not satisfied");
-        return -9;
-    }
 
     LOG_INFO(FRONTEND_CMDLINE, "Installing package: {}", pkg_path);
 
@@ -1951,10 +1925,6 @@ const char *wasm_get_app_icon(int uid) {
 EMSCRIPTEN_KEEPALIVE
 int wasm_launch_app(int uid) {
     if (!g_state.symsys) return -1;
-    if (eka2l1::web::protection::is_blocked()) {
-        LOG_ERROR(FRONTEND_CMDLINE, "Refusing launch: protection check not satisfied");
-        return -9;
-    }
 
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (!kern) return -2;
@@ -2501,8 +2471,7 @@ int main(int argc, char **argv) {
 
     LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 WebAssembly starting...");
 
-    // Display the copyright + build info at startup (baked into the wasm, so
-    // it shows regardless of any HTML/JS tampering).
+    // Display the copyright + build info at startup.
     LOG_INFO(FRONTEND_CMDLINE, "\n{}\n{}",
         eka2l1::web::protection::copyright_text(),
         eka2l1::web::protection::build_info());

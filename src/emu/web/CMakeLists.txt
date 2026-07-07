@@ -2,13 +2,11 @@
 # EKA2L1 WebAssembly Frontend Build
 # ============================================================================
 
-# Test build (build_wasm_test) defines this to skip all copyright/integrity/
-# domain protection. Release (build_wasm_release) leaves it OFF for full
-# protection. See src/protection.cpp and gen_integrity.py.
-option(EKA2L1_DEBUG_BUILD "Skip web copyright/integrity protection (debug web build)" OFF)
-# HOS build: full copyright/integrity/watermark active, but domain check allows
-# local origins (file://, resource://, etc.) for HarmonyOS WebView embedding.
-option(EKA2L1_HOS_BUILD "Allow local-origin access for HarmonyOS WebView" OFF)
+# Test build (build_wasm_test) defines this; it selects the "Test" build
+# channel shown in the watermark. See src/protection.cpp.
+option(EKA2L1_DEBUG_BUILD "Mark the web build as a Test-channel build" OFF)
+# HOS build: selects the "HOS" build channel shown in the watermark.
+option(EKA2L1_HOS_BUILD "Mark the web build as a HarmonyOS build" OFF)
 
 # The web frontend executable
 add_executable(eka2l1_wasm
@@ -198,21 +196,4 @@ if (EMSCRIPTEN)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/stamp_pages.cmake
         COMMENT "Copying web frontend pages"
     )
-
-    # Release only: seal the file hashes into the wasm + write integrity.js.
-    # Runs AFTER page stamping so it hashes the final (?v=-stamped) HTML.
-    if (NOT EKA2L1_DEBUG_BUILD)
-        find_package(Python3 COMPONENTS Interpreter QUIET)
-        if (Python3_Interpreter_FOUND)
-            set(EKA2L1_PYTHON ${Python3_EXECUTABLE})
-        else()
-            set(EKA2L1_PYTHON python3)
-        endif()
-        add_custom_command(TARGET eka2l1_wasm POST_BUILD
-            COMMAND ${EKA2L1_PYTHON}
-                ${CMAKE_CURRENT_SOURCE_DIR}/gen_integrity.py
-                --stage ${WASM_STAGE_DIR}
-            COMMENT "Sealing integrity hashes into eka2l1.wasm (Release)"
-        )
-    endif()
 endif()

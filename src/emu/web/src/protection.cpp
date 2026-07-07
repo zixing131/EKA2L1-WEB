@@ -3,26 +3,24 @@
  *
  * This file is part of EKA2L1 project - WebAssembly port.
  *
- * EKA2L1-WEB copyright / version-tracking / tamper-detection. The whole point
- * of this file is that the decision logic is compiled into the wasm binary, so
- * editing the HTML/JS shell cannot disable the copyright notice, the domain
- * whitelist, or the file-integrity checks.
+ * Copyright notice / build watermark for the web build. The project is
+ * licensed under the GNU Affero General Public License v3; there is no
+ * domain whitelist or integrity gating — this file only provides the
+ * attribution text and the on-screen build watermark.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
 
 #include "protection.h"
 
-#include <common/crypt.h>
 #include <common/version.h>
 
 #include <algorithm>
-#include <array>
-#include <cctype>
-#include <cstring>
+#include <string>
+#include <vector>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -57,111 +55,14 @@ namespace eka2l1::web::protection {
     // ------------------------------------------------------------------------
     __attribute__((used)) const char g_eka2l1_copyright[] =
         "EKA2L1-WEB powered by zixing (QQ:1311817771)\n"
+        "Licensed under the GNU Affero General Public License v3.\n"
         "Symbian \xE6\x98\xAF\xE8\xAF\xBA\xE5\x9F\xBA\xE4\xBA\x9A\xE5\xA1\x9E"
         "\xE7\x8F\xAD\xE7\xB3\xBB\xE7\xBB\x9F\xE7\x9A\x84\xE6\xB3\xA8\xE5\x86\x8C"
         "\xE5\x95\x86\xE6\xA0\x87\xEF\xBC\x8C\xE5\x85\xB6\xE7\x9B\xB8\xE5\x85\xB3"
         "\xE5\x95\x86\xE6\xA0\x87\xE6\x9D\x83\xE5\xBD\x92 Nokia \xE6\x89\x80\xE6\x9C\x89\xE3\x80\x82";
 
-    // ------------------------------------------------------------------------
-    // Embedded integrity table. Filled in post-build by gen_integrity.py, which
-    // scans the .wasm for the magic and overwrites the bytes that follow. The
-    // layout is all byte-arrays + 4-byte ints at 4-aligned offsets, so it is
-    // padding-free and the Python side can mirror it exactly.
-    // ------------------------------------------------------------------------
-    struct integ_entry {
-        char name[24];
-        std::uint8_t sha256[32];
-    };
-    struct integ_table {
-        char magic[16];
-        std::uint32_t version;
-        std::uint32_t count;
-        integ_entry entries[8];
-    };
-
-    static_assert(sizeof(integ_entry) == 56, "integ_entry must be padding-free");
-    static_assert(sizeof(integ_table) == 24 + 8 * 56, "integ_table layout drift");
-
-    // CRITICAL: every byte of the table must be non-zero in the initializer.
-    // wasm-ld trims a data segment's trailing zeros (and splits large zero
-    // gaps) out of the binary, so a zero-initialized entries area is NOT
-    // materialized — gen_integrity.py would then patch bytes that belong to the
-    // next data segment, producing a module that fails to parse
-    // ("unknown init_expr opcode 0"). The 0xCC filler keeps the whole 472-byte
-    // blob contiguous and patchable; gen_integrity overwrites version/count and
-    // the used entries, unused bytes keep the filler.
-#define EKA2L1_PC8 '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC', '\xCC'
-#define EKA2L1_PC24 EKA2L1_PC8, EKA2L1_PC8, EKA2L1_PC8
-#define EKA2L1_PB8 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC
-#define EKA2L1_PB32 EKA2L1_PB8, EKA2L1_PB8, EKA2L1_PB8, EKA2L1_PB8
-#define EKA2L1_PENTRY { { EKA2L1_PC24 }, { EKA2L1_PB32 } }
-
-    __attribute__((used)) volatile integ_table g_integ = {
-        // 14 chars + NUL; gen_integrity.py searches for "EKA2L1INTEGTBL\0".
-        { 'E', 'K', 'A', '2', 'L', '1', 'I', 'N', 'T', 'E', 'G', 'T', 'B', 'L', 0, 0 },
-        1,
-        0xCCCCCCCCu, // count placeholder (gen_integrity sets the real count)
-        { EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY,
-          EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY, EKA2L1_PENTRY }
-    };
-
-#undef EKA2L1_PENTRY
-#undef EKA2L1_PB32
-#undef EKA2L1_PB8
-#undef EKA2L1_PC24
-#undef EKA2L1_PC8
-
-    // ------------------------------------------------------------------------
-    // Runtime protection state (release only).
-    // ------------------------------------------------------------------------
-    enum status_bits {
-        prot_ok = 0,
-        prot_domain = 1,
-        prot_asset = 2,
-        prot_wasm = 4,
-        prot_incomplete = 8
-    };
-
-    static bool g_domain_ok = false;
-    static bool g_asset_failed = false;
-    static bool g_wasm_failed = false;
-    static std::uint32_t g_asset_pass_mask = 0;
-
-    static std::string to_lower(std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return s;
-    }
-
-    static bool host_in_whitelist(const std::string &host_in) {
-        const std::string host = to_lower(host_in);
-#ifdef EKA2L1_HOS_BUILD
-        // HarmonyOS WebView loads from local origins (file://, resource://,
-        // or an empty host under a custom scheme). Allow any empty/local host
-        // in addition to the regular domain whitelist.
-        if (host.empty() || host == "localhost" || host == "127.0.0.1") {
-            return true;
-        }
-#endif
-        static const char *roots[] = { "zixing.fun", "iniche.cn" };
-        for (const char *root : roots) {
-            const std::string r(root);
-            if (host == r) {
-                return true;
-            }
-            // "*.root": any subdomain, e.g. test.zixing.fun, www.zixing.fun.
-            if (host.size() > r.size() + 1) {
-                const std::string suffix = "." + r;
-                if (host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     std::string copyright_text() {
-        return std::string(const_cast<const char *>(g_eka2l1_copyright));
+        return std::string(g_eka2l1_copyright);
     }
 
     std::string build_info() {
@@ -176,19 +77,6 @@ namespace eka2l1::web::protection {
         return std::string("Build: ") + BUILD_TIMESTAMP +
             "\nCommit: " + GIT_COMMIT_HASH +
             "\nChannel: " + EKA2L1_BUILD_CHANNEL;
-    }
-
-    bool is_blocked() {
-#ifdef EKA2L1_DEBUG_BUILD
-        return false;
-#else
-        if (!g_domain_ok || g_asset_failed || g_wasm_failed) {
-            return true;
-        }
-        const std::uint32_t count = g_integ.count;
-        const std::uint32_t required = (count >= 32) ? 0xFFFFFFFFu : ((1u << count) - 1u);
-        return (g_asset_pass_mask & required) != required;
-#endif
     }
 
     // ------------------------------------------------------------------------
@@ -368,32 +256,9 @@ namespace eka2l1::web::protection {
 }
 
 // ============================================================================
-// C API exported to JavaScript. JS only fetches bytes / reads location.hostname;
-// every comparison happens here in the wasm.
+// C API exported to JavaScript.
 // ============================================================================
 extern "C" {
-
-// Reusable scratch buffer the JS side fills (HEAPU8.set) before calling
-// wasm_verify_asset / wasm_verify_wasm, so no malloc export is needed and big
-// files never round-trip through ccall's stack-allocated 'array' marshalling.
-static std::vector<std::uint8_t> g_verify_buf;
-
-EMSCRIPTEN_KEEPALIVE
-std::uint8_t *wasm_protect_buffer(int size) {
-    if (size <= 0) {
-        return nullptr;
-    }
-    if (g_verify_buf.size() < static_cast<std::size_t>(size)) {
-        g_verify_buf.resize(static_cast<std::size_t>(size));
-    }
-    return g_verify_buf.data();
-}
-
-EMSCRIPTEN_KEEPALIVE
-void wasm_protect_buffer_free() {
-    g_verify_buf.clear();
-    g_verify_buf.shrink_to_fit();
-}
 
 EMSCRIPTEN_KEEPALIVE
 const char *wasm_get_copyright() {
@@ -411,110 +276,6 @@ EMSCRIPTEN_KEEPALIVE
 const char *wasm_watermark_text() {
     static std::string s = eka2l1::web::protection::watermark_text();
     return s.c_str();
-}
-
-EMSCRIPTEN_KEEPALIVE
-int wasm_check_domain(const char *host) {
-#ifdef EKA2L1_DEBUG_BUILD
-    (void)host;
-    return 0;
-#else
-    using namespace eka2l1::web::protection;
-    if (host && host_in_whitelist(host)) {
-        g_domain_ok = true;
-        return 0;
-    }
-    g_domain_ok = false;
-    return -1;
-#endif
-}
-
-EMSCRIPTEN_KEEPALIVE
-int wasm_verify_asset(int name_id, const std::uint8_t *ptr, int len) {
-#ifdef EKA2L1_DEBUG_BUILD
-    (void)name_id;
-    (void)ptr;
-    (void)len;
-    return 0;
-#else
-    using namespace eka2l1::web::protection;
-    if (!ptr || len < 0 || name_id < 0 ||
-        name_id >= static_cast<int>(g_integ.count) || name_id >= 8) {
-        g_asset_failed = true;
-        return -1;
-    }
-
-    const std::array<std::uint8_t, 32> digest =
-        eka2l1::crypt::sha256(ptr, static_cast<std::size_t>(len));
-
-    // g_integ is volatile (post-build patched); copy the expected bytes out.
-    std::array<std::uint8_t, 32> expected{};
-    for (int i = 0; i < 32; i++) {
-        expected[i] = g_integ.entries[name_id].sha256[i];
-    }
-
-    if (digest == expected) {
-        g_asset_pass_mask |= (1u << name_id);
-        return 0;
-    }
-    g_asset_failed = true;
-    return -1;
-#endif
-}
-
-EMSCRIPTEN_KEEPALIVE
-int wasm_verify_wasm(const std::uint8_t *ptr, int len, const char *expected_hex) {
-#ifdef EKA2L1_DEBUG_BUILD
-    (void)ptr;
-    (void)len;
-    (void)expected_hex;
-    return 0;
-#else
-    using namespace eka2l1::web::protection;
-    if (!ptr || len < 0 || !expected_hex) {
-        g_wasm_failed = true;
-        return -1;
-    }
-    const std::string got = eka2l1::crypt::sha256_hex(ptr, static_cast<std::size_t>(len));
-    std::string want = expected_hex;
-    std::transform(want.begin(), want.end(), want.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (got == want && !want.empty()) {
-        return 0;
-    }
-    g_wasm_failed = true;
-    return -1;
-#endif
-}
-
-EMSCRIPTEN_KEEPALIVE
-int wasm_protection_status() {
-#ifdef EKA2L1_DEBUG_BUILD
-    return 0;
-#else
-    using namespace eka2l1::web::protection;
-    int s = prot_ok;
-    if (!g_domain_ok) {
-        s |= prot_domain;
-    }
-    if (g_asset_failed) {
-        s |= prot_asset;
-    }
-    if (g_wasm_failed) {
-        s |= prot_wasm;
-    }
-    const std::uint32_t count = g_integ.count;
-    const std::uint32_t required = (count >= 32) ? 0xFFFFFFFFu : ((1u << count) - 1u);
-    if ((g_asset_pass_mask & required) != required) {
-        s |= prot_incomplete;
-    }
-    return s;
-#endif
-}
-
-EMSCRIPTEN_KEEPALIVE
-int wasm_is_blocked() {
-    return eka2l1::web::protection::is_blocked() ? 1 : 0;
 }
 
 } // extern "C"
