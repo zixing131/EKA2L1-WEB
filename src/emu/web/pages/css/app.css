@@ -1,51 +1,57 @@
 /* ============================================================================
    EKA2L1 Web — shared design system (library page + player page)
-   Modeled after an iOS-like card/list language: large-title app bar,
-   bottom tab bar on mobile, left rail on desktop, cards, FAB, action sheets.
+   Styled after the miuix (Xiaomi HyperOS) design language: HyperOS blue
+   accent, pure-black dark mode, large smooth-rounded cards, pill buttons,
+   MiSans type. Layout: large-title app bar, bottom tab bar on mobile, left
+   rail on desktop, cards, FAB, action sheets.
    ============================================================================ */
 
 :root {
-    --bg: #f2f2f7;
+    /* miuix light palette */
+    --bg: #f7f7f7;
     --bg-elev: #ffffff;
-    --bg-elev2: #f7f7fa;
-    --text: #1c1c1e;
-    --text-2: #6e6e73;
-    --text-3: #a0a0a8;
-    --separator: rgba(60, 60, 67, 0.12);
-    --accent: #e94560;
-    --accent-press: #c73a55;
-    --blue: #007aff;
-    --green: #34c759;
-    --red: #ff3b30;
-    --yellow: #ffcc00;
-    --card-radius: 14px;
-    --bar-blur: saturate(180%) blur(20px);
-    --bar-bg: rgba(242, 242, 247, 0.82);
-    --keypad-bg: rgba(28, 28, 30, 0.04);
+    --bg-elev2: #f0f0f0;
+    --text: #000000;
+    --text-2: #666666;
+    --text-3: #999999;
+    --separator: rgba(0, 0, 0, 0.075);
+    --accent: #3482ff;         /* HyperOS / miuix primary blue */
+    --accent-press: #2b6fe0;
+    --blue: #3482ff;
+    --green: #36d167;
+    --red: #f23030;
+    --yellow: #f5c400;
+    --card-radius: 19px;       /* miuix smooth-rounded card */
+    --bar-blur: saturate(180%) blur(22px);
+    --bar-bg: rgba(247, 247, 247, 0.86);
+    --keypad-bg: rgba(0, 0, 0, 0.035);
     --key-bg: #ffffff;
     --key-press: #d9d9de;
-    --shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 6px 22px rgba(0, 0, 0, 0.05);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.045);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-top: env(safe-area-inset-top, 0px);
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #0d0d0f;
-        --bg-elev: #1c1c1e;
-        --bg-elev2: #26262a;
-        --text: #f2f2f7;
-        --text-2: #98989f;
-        --text-3: #636368;
-        --separator: rgba(84, 84, 88, 0.5);
-        --accent: #ff5c77;
-        --accent-press: #e94560;
-        --blue: #0a84ff;
-        --bar-bg: rgba(13, 13, 15, 0.8);
+        /* miuix dark palette: pure-black background, #212121 surfaces */
+        --bg: #000000;
+        --bg-elev: #1c1c1c;
+        --bg-elev2: #2b2b2b;
+        --text: #e6e6e6;
+        --text-2: #929292;
+        --text-3: #666666;
+        --separator: rgba(255, 255, 255, 0.09);
+        --accent: #3482ff;
+        --accent-press: #2b6fe0;
+        --blue: #3482ff;
+        --green: #36d167;
+        --red: #ff5545;
+        --bar-bg: rgba(0, 0, 0, 0.84);
         --keypad-bg: rgba(255, 255, 255, 0.04);
-        --key-bg: #2c2c2e;
-        --key-press: #4a4a4e;
-        --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 6px 22px rgba(0, 0, 0, 0.35);
+        --key-bg: #262626;
+        --key-press: #454545;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.4);
     }
 }
 
@@ -54,8 +60,9 @@
 html, body {
     background: var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-family: "MiSans", "MiSans VF", "Mi Lanting", -apple-system,
+        BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+        "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
 }
 
@@ -119,10 +126,11 @@ button { font-family: inherit; }
 .top-app-bar.scrolled .top-bar-small-title { opacity: 1; }
 
 .top-bar-large-title {
-    font-size: 32px;
-    font-weight: 800;
-    letter-spacing: 0.2px;
-    padding: 0 0 10px 2px;
+    /* miuix large-title app bar: lighter weight, roomier leading */
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 2px 0 12px 4px;
 }
 
 .top-bar-status {
@@ -179,27 +187,28 @@ button { font-family: inherit; }
     background: var(--bg-elev);
     border-radius: var(--card-radius);
     box-shadow: var(--shadow);
-    padding: 6px 16px;
-    margin-bottom: 16px;
+    padding: 8px 18px;
+    margin-bottom: 14px;
 }
 
 .section-title {
+    /* miuix group header: small, sentence-case, quiet */
     font-size: 13px;
-    font-weight: 600;
-    color: var(--text-2);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
+    font-weight: 500;
+    color: var(--text-3);
+    letter-spacing: 0.3px;
     padding: 14px 2px 6px;
 }
 
 /* --------------------------------------------------------------- search */
 .search-bar {
+    /* miuix search field: full pill, flat tinted fill */
     display: flex;
     align-items: center;
     gap: 8px;
     background: var(--bg-elev);
-    border-radius: 12px;
-    padding: 9px 12px;
+    border-radius: 999px;
+    padding: 10px 16px;
     margin-bottom: 14px;
     color: var(--text-3);
     box-shadow: var(--shadow);
@@ -233,7 +242,7 @@ button { font-family: inherit; }
 .game-avatar {
     width: 46px;
     height: 46px;
-    border-radius: 11px;
+    border-radius: 14px; /* miuix icon squircle */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -292,7 +301,7 @@ button { font-family: inherit; }
 .game-grid .game-avatar {
     width: 56px;
     height: 56px;
-    border-radius: 13px;
+    border-radius: 16px;
     font-size: 24px;
 }
 
@@ -349,62 +358,65 @@ button { font-family: inherit; }
 
 .pref-item select,
 .pref-item input[type="range"] {
+    /* miuix dropdown: flat tinted pill, no border */
     background: var(--bg-elev2);
     color: var(--text);
-    border: 0.5px solid var(--separator);
-    border-radius: 9px;
-    padding: 7px 10px;
+    border: none;
+    border-radius: 999px;
+    padding: 8px 14px;
     font-size: 14px;
     outline: none;
 }
 
-.pref-item input[type="range"] { width: 140px; padding: 0; accent-color: var(--accent); }
+.pref-item input[type="range"] { width: 140px; padding: 0; border-radius: 4px; accent-color: var(--accent); }
 
 /* ----------------------------------------------------------------- buttons */
 .btn {
+    /* miuix button: full pill, flat fill, no border */
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 7px;
     border: none;
-    border-radius: 11px;
+    border-radius: 999px;
     background: var(--bg-elev2);
     color: var(--text);
     font-size: 14px;
-    font-weight: 600;
-    padding: 10px 16px;
+    font-weight: 500;
+    padding: 10px 20px;
     cursor: pointer;
-    border: 0.5px solid var(--separator);
+    transition: filter 0.12s, background 0.12s, transform 0.12s;
 }
 
-.btn:active { filter: brightness(0.92); }
+.btn:active { filter: brightness(0.9); transform: scale(0.97); }
 
 .btn-primary {
     background: var(--accent);
-    border-color: transparent;
     color: #fff;
+    font-weight: 600;
 }
 
 .btn-primary:active { background: var(--accent-press); }
 
 .btn-danger { color: var(--red); }
 
-.btn-block { width: 100%; margin: 8px 0; }
+.btn-block { width: 100%; margin: 8px 0; border-radius: 16px; padding: 13px 20px; }
 
 .btn[disabled] { opacity: 0.45; pointer-events: none; }
 
 /* --------------------------------------------------------------------- FAB */
 .fab {
+    /* miuix FAB: round, HyperOS blue */
     position: fixed;
     right: 20px;
     bottom: calc(84px + var(--safe-bottom));
     width: 56px;
     height: 56px;
-    border-radius: 18px;
+    border-radius: 50%;
     border: none;
     background: var(--accent);
     color: #fff;
-    box-shadow: 0 6px 20px rgba(233, 69, 96, 0.45);
+    box-shadow: 0 6px 20px rgba(52, 130, 255, 0.45);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -515,11 +527,12 @@ button { font-family: inherit; }
 .sheet-overlay.visible { opacity: 1; pointer-events: auto; }
 
 .sheet {
+    /* miuix bottom sheet: extra-round top corners */
     width: 100%;
     max-width: 520px;
     background: var(--bg-elev);
-    border-radius: 18px 18px 0 0;
-    padding: 8px 16px calc(16px + var(--safe-bottom));
+    border-radius: 28px 28px 0 0;
+    padding: 8px 18px calc(16px + var(--safe-bottom));
     transform: translateY(100%);
     transition: transform 0.26s cubic-bezier(0.3, 0.9, 0.4, 1);
     max-height: 86vh;
@@ -530,7 +543,7 @@ button { font-family: inherit; }
 
 @media (min-width: 1024px) {
     .sheet-overlay { align-items: center; }
-    .sheet { border-radius: 18px; transform: translateY(24px) scale(0.98); }
+    .sheet { border-radius: 28px; transform: translateY(24px) scale(0.98); }
     .sheet-overlay.visible .sheet { transform: none; }
 }
 
@@ -580,18 +593,18 @@ button { font-family: inherit; }
     margin-top: 10px;
     padding: 13px;
     border: none;
-    border-radius: 13px;
+    border-radius: 16px;
     background: var(--bg-elev2);
     color: var(--text);
     font-size: 16px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
 }
 
 /* --------------------------------------------------------------- dropzone */
 .drop-zone {
-    border: 1.6px dashed var(--separator);
-    border-radius: 13px;
+    border: 1.6px dashed rgba(127, 127, 127, 0.4);
+    border-radius: 16px;
     padding: 18px 14px;
     text-align: center;
     color: var(--text-2);
@@ -604,7 +617,7 @@ button { font-family: inherit; }
 
 .drop-zone:hover, .drop-zone.dragover {
     border-color: var(--accent);
-    background: rgba(233, 69, 96, 0.06);
+    background: rgba(52, 130, 255, 0.07);
 }
 
 .drop-zone.picked {
@@ -792,12 +805,12 @@ button { font-family: inherit; }
 .key {
     height: 44px;
     border: none;
-    border-radius: 10px;
+    border-radius: 14px; /* miuix key: softer squircle */
     background: var(--key-bg);
     color: var(--text);
     font-size: 16px;
-    font-weight: 600;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+    font-weight: 500;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
     cursor: pointer;
     display: flex;
     align-items: center;

@@ -250,6 +250,11 @@
     }).then(function () {
         overlay('正在启动设备…', '', 94);
 
+        // Frame-rate cap / CPU budget / upscale filter from the 设置 page.
+        // Applied before launch so a low-end device never burns full-rate CPU.
+        var lowPower = EKA2L1.applyPerfPrefs();
+        if (lowPower) console.log('[EKA2L1] low-power mode active (30fps cap)');
+
         var result = EKA2L1.initDevice('', '');
         if (result !== 0) {
             overlayError('未找到设备固件', '请先回到程序库安装 ROM（错误：' +

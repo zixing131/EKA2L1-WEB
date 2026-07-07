@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#0d0d0f" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f7f7f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
     <!-- PWA -->
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -23,8 +23,8 @@
 <!-- Visible diagnostics. iOS Safari has no devtools console on-device, so any
      boot/install failure (missing SharedArrayBuffer, OOM, install error code)
      is surfaced here instead of being lost to console.error. -->
-<div id="bootError" style="display:none;margin:12px;padding:14px 16px;border-radius:14px;
-     background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.4);color:var(--red,#e94560);
+<div id="bootError" style="display:none;margin:12px;padding:14px 16px;border-radius:19px;
+     background:rgba(242,48,48,.1);border:1px solid rgba(242,48,48,.35);color:var(--red,#f23030);
      font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word"></div>
 
 <!-- Desktop left rail -->
@@ -74,7 +74,7 @@
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-            <input type="text" id="gameSearch" placeholder="搜索程序" oninput="renderGameList()">
+            <input type="text" id="gameSearch" placeholder="搜索程序" oninput="onGameSearchInput()">
         </div>
 
         <!-- shown when no device is installed yet -->
@@ -140,7 +140,7 @@
             </div>
             <div class="pref-item" id="fileUpCustomRow" style="display:none">
                 <span class="pref-label">路径</span>
-                <input type="text" id="fileUpCustom" placeholder="例如 e:\games\" style="flex:1;min-width:0;padding:8px 10px;border-radius:10px;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit">
+                <input type="text" id="fileUpCustom" placeholder="例如 e:\games\" style="flex:1;min-width:0;padding:8px 14px;border-radius:999px;border:none;background:var(--bg-elev2);color:inherit;outline:none">
             </div>
             <div class="pref-item">
                 <div style="flex:1">
@@ -148,6 +148,32 @@
                     <div class="pref-sub">可多选。N-Gage 程序（.n-gage）上传到 E:\n-gage\ 后，在「Games」应用中安装运行</div>
                 </div>
                 <button class="btn" onclick="pickUpload()">选择文件</button>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-title">性能</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">运行模式</div>
+                    <div class="pref-sub">省电模式将帧率限制到 30 FPS，适合低性能设备</div>
+                </div>
+                <select id="prefPerf">
+                    <option value="auto">自动</option>
+                    <option value="high">高性能（60 FPS）</option>
+                    <option value="low">省电（30 FPS）</option>
+                </select>
+            </div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <div class="pref-label">画面滤镜</div>
+                    <div class="pref-sub">锐利（像素风）在低端设备上渲染更快</div>
+                </div>
+                <select id="prefFilter">
+                    <option value="auto">自动</option>
+                    <option value="smooth">平滑</option>
+                    <option value="sharp">锐利（像素风）</option>
+                </select>
             </div>
         </div>
 

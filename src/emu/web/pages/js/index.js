@@ -161,14 +161,26 @@
         renderGameList();
     };
 
-    var avatarPalette = ['#e94560', '#0a84ff', '#34c759', '#ff9f0a', '#bf5af2',
-        '#5e5ce6', '#ff375f', '#64d2ff', '#30d158', '#ffd60a'];
+    // miuix/HyperOS-ish avatar palette (blue-led, saturated but soft)
+    var avatarPalette = ['#3482ff', '#36d167', '#ff9f0a', '#bf5af2', '#f23030',
+        '#5e5ce6', '#00b8c9', '#64d2ff', '#f5c400', '#ff6d3f'];
 
     function avatarColor(name) {
         var h = 0;
         for (var i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
         return avatarPalette[Math.abs(h) % avatarPalette.length];
     }
+
+    // Debounced search: rebuilding the whole list DOM on every keystroke
+    // janks low-end phones once the library grows; 120ms coalesces bursts.
+    var searchDebounce = null;
+    window.onGameSearchInput = function () {
+        if (searchDebounce) clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(function () {
+            searchDebounce = null;
+            renderGameList();
+        }, 120);
+    };
 
     window.renderGameList = function () {
         var listEl = document.getElementById('gameList');
@@ -194,6 +206,10 @@
             listEl.appendChild(empty);
             return;
         }
+
+        // Batch into a fragment: one DOM insertion = one reflow instead of
+        // one per app (matters on weak devices with large libraries).
+        var frag = document.createDocumentFragment();
 
         shown.forEach(function (app) {
             var name = app.name || ('App 0x' + (app.uid >>> 0).toString(16));
@@ -229,9 +245,10 @@
             item.appendChild(info);
             item.appendChild(go);
             item.addEventListener('click', function () { playApp(app); });
-            listEl.appendChild(item);
+            frag.appendChild(item);
         });
 
+        listEl.appendChild(frag);
         pumpIcons();
     };
 
@@ -555,6 +572,7 @@
             row.className = 'pref-item';
             var info = document.createElement('div');
             info.style.flex = '1';
+            info.style.minWidth = '0';
             info.innerHTML = '<div class="pref-label">' + (d.name || '设备 ' + d.index) + '</div>'
                 + '<div class="pref-sub">' + (d.firmware || '') + (d.current ? ' · 当前设备' : '') + '</div>';
             row.appendChild(info);
@@ -570,6 +588,46 @@
                 });
                 row.appendChild(btn);
             }
+            var delBtn = document.createElement('button');
+            delBtn.className = 'btn btn-danger';
+            delBtn.textContent = '删除';
+            delBtn.addEventListener('click', function () {
+                var warn = '删除设备「' + (d.name || d.index) + '」？\n'
+                    + '其固件 ROM 与系统文件将被移除，不可恢复。';
+                if (d.current) {
+                    warn += '\n\n这是当前正在使用的设备，删除后页面将重新加载。';
+                }
+                if (!confirm(warn)) return;
+                delBtn.disabled = true;
+                delBtn.textContent = '删除中…';
+                setTimeout(function () {
+                    var r = EKA2L1.deleteDevice(d.index);
+                    if (r !== 0) {
+                        EKA2L1.toast('删除失败（' + r + '）');
+                        delBtn.disabled = false;
+                        delBtn.textContent = '删除';
+                        return;
+                    }
+                    // Full-mount sync so the removed firmware files are also
+                    // deleted from IndexedDB (a delete-heavy reconcile is
+                    // cheap — no file contents get cloned).
+                    EKA2L1.save().catch(function () {}).then(function () {
+                        if (d.current) {
+                            // The deleted device may still be mapped by the
+                            // kernel; only a fresh boot is safe.
+                            try {
+                                var devsLeft = JSON.parse(EKA2L1.module.ccall('wasm_get_devices', 'string', [], [])) || [];
+                                if (!devsLeft.length) localStorage.removeItem(HAS_DEVICE_KEY);
+                            } catch (e) {}
+                            location.reload();
+                            return;
+                        }
+                        EKA2L1.toast('已删除设备 ' + (d.name || d.index));
+                        renderDeviceList();
+                    });
+                }, 30);
+            });
+            row.appendChild(delBtn);
             box.appendChild(row);
         });
     };
@@ -768,15 +826,21 @@
     var prefScale = document.getElementById('prefScale');
     var prefKeypad = document.getElementById('prefKeypad');
     var prefShowSys = document.getElementById('prefShowSys');
+    var prefPerf = document.getElementById('prefPerf');
+    var prefFilter = document.getElementById('prefFilter');
     prefScale.value = localStorage.getItem('eka2l1_scale') || 'fit';
     prefKeypad.value = localStorage.getItem('eka2l1_keypad') || 'auto';
     prefShowSys.value = localStorage.getItem('eka2l1_show_sys') || '0';
+    prefPerf.value = localStorage.getItem('eka2l1_perf') || 'auto';
+    prefFilter.value = localStorage.getItem('eka2l1_filter') || 'auto';
     prefScale.addEventListener('change', function () { localStorage.setItem('eka2l1_scale', this.value); });
     prefKeypad.addEventListener('change', function () { localStorage.setItem('eka2l1_keypad', this.value); });
     prefShowSys.addEventListener('change', function () {
         localStorage.setItem('eka2l1_show_sys', this.value);
         renderGameList();
     });
+    prefPerf.addEventListener('change', function () { localStorage.setItem('eka2l1_perf', this.value); });
+    prefFilter.addEventListener('change', function () { localStorage.setItem('eka2l1_filter', this.value); });
 
     window.manualSave = function () {
         if (!coreReady) { EKA2L1.toast('核心未就绪'); return; }

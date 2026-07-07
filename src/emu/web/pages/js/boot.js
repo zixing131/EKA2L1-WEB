@@ -470,6 +470,68 @@
         ccall('wasm_set_screen_rotation', null, ['number'], [degrees | 0]);
     };
 
+    /** Delete an installed device (ROM) by index. Returns 0 on success. */
+    EKA2L1.deleteDevice = function (index) {
+        return ccall('wasm_delete_device', 'number', ['number'], [index | 0]);
+    };
+
+    // ---- performance tuning --------------------------------------------------
+
+    /** Cap the emulator main loop rate (15-120, default 60). */
+    EKA2L1.setMaxFps = function (fps) {
+        try { ccall('wasm_set_max_fps', null, ['number'], [fps | 0]); } catch (e) {}
+    };
+
+    /** Screen upscale filter: true = nearest (crisp/fast), false = linear. */
+    EKA2L1.setScreenFilter = function (nearest) {
+        try { ccall('wasm_set_screen_filter', null, ['number'], [nearest ? 1 : 0]); } catch (e) {}
+    };
+
+    /** Per-frame guest CPU budget in ms (clamped to [4,16] by the core). */
+    EKA2L1.setCpuBudget = function (ms) {
+        try { ccall('wasm_set_cpu_budget', null, ['number'], [+ms || 14]); } catch (e) {}
+    };
+
+    /**
+     * Heuristic: does this machine look like a low-performance device?
+     * deviceMemory / hardwareConcurrency are coarse but Chrome/Android report
+     * them; iOS Safari reports neither (undefined -> not low-end, its A-chips
+     * are fast anyway).
+     */
+    EKA2L1.isLowEndDevice = function () {
+        var mem = navigator.deviceMemory || 0;       // GB, 0 = unknown
+        var cores = navigator.hardwareConcurrency || 0;
+        if (mem && mem <= 4) return true;
+        if (cores && cores <= 4) return true;
+        return false;
+    };
+
+    /**
+     * Apply the persisted performance preferences to the booted core.
+     * perfMode: 'auto' (low-end heuristic) | 'high' (60fps) | 'low' (30fps).
+     * filter:   'smooth' | 'sharp'.
+     */
+    EKA2L1.applyPerfPrefs = function () {
+        var mode = localStorage.getItem('eka2l1_perf') || 'auto';
+        var lowPower = (mode === 'low') || (mode === 'auto' && EKA2L1.isLowEndDevice());
+
+        if (lowPower) {
+            EKA2L1.setMaxFps(30);
+            // With 33ms frames the guest can take the full budget and still
+            // leave present/audio plenty of headroom.
+            EKA2L1.setCpuBudget(16);
+        } else {
+            EKA2L1.setMaxFps(60);
+        }
+
+        var filter = localStorage.getItem('eka2l1_filter') || 'auto';
+        if (filter === 'auto') {
+            filter = lowPower ? 'sharp' : 'smooth';
+        }
+        EKA2L1.setScreenFilter(filter === 'sharp');
+        return lowPower;
+    };
+
     EKA2L1.fps = function () {
         return ccall('wasm_get_fps', 'number');
     };
