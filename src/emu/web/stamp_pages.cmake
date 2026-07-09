@@ -57,6 +57,7 @@ foreach(page ${STAMP_PAGES})
     string(REPLACE "src=\"js/i18n/en-US.js\"" "src=\"js/i18n/en-US.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "href=\"css/app.css\"" "href=\"css/app.css?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "href=\"manifest.json\"" "href=\"manifest.json?v=${BUILD_ID}\"" content "${content}")
+    string(REPLACE "./sw.js\"" "./sw.js?v=${BUILD_ID}\"" content "${content}")
     file(WRITE "${page}" "${content}")
 endforeach()
 
