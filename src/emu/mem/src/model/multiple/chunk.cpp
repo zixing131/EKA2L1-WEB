@@ -203,7 +203,11 @@ namespace eka2l1::mem {
                         off_start_just_unmapped = (poff << control_->page_size_bits_) + crr_base_addr + pt_base;
                     }
                 } else {
-                    // Map those just mapped to the CPU. It will love this
+                    // Invalidate the CPU TLB unconditionally: globally-visible pages
+                    // (shared/global sections, code) may sit in the running core's TLB
+                    // even when the chunk's owner is not the current address space, and
+                    // the host memory is about to be freed. Dirtying a stale-tagged or
+                    // foreign entry is always safe (it just re-resolves on next access).
                     if (size_just_unmapped != 0) {
                         // Notify every CPU even when the owning address space is
                         // not current: the instruction cache is ASID-tagged and
