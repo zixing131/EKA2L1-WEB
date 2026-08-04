@@ -481,6 +481,29 @@ namespace eka2l1::epoc {
 
             fps_count_++;
 
+            // A client (partial) redraw only repaints this window and does not
+            // recomposite the windows stacked on top of it. When this window is
+            // partially occluded (its visible region is fragmented rather than
+            // its whole bounding rect), a client-only redraw would bleed into
+            // the occluding windows' area and leave it stale, because those
+            // windows have no client content to repaint over it. This happens
+            // e.g. with a live camera viewfinder redrawing every frame beneath a
+            // stationary Avkon menu pane. Escalate to a full server recomposite
+            // so the occluding windows are redrawn on top, back-to-front.
+            bool fully_visible = false;
+            if (!visible_region.empty()) {
+                if (flags & flag_shape_region) {
+                    fully_visible = visible_region.identical(shape_region);
+                } else {
+                    fully_visible = (visible_region.rects_.size() == 1) &&
+                        (visible_region.rects_[0] == bounding_rect());
+                }
+            }
+
+            if (!visible_region.empty() && !fully_visible) {
+                scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
+            }
+
             // We need a redraw from the client side, so set this
             scr->set_client_draw_pending();
 

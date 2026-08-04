@@ -31,6 +31,24 @@
 #include <cstring>
 
 namespace eka2l1::dispatch {
+    // A camera viewfinder/image callback fires on the backend's own delivery
+    // thread and can race with the guest thread that armed the request being
+    // torn down (in-guest app exit, or a host-menu "close app" that kills the
+    // guest process while the AVFoundation session is still delivering frames).
+    // notify_info::complete() dereferences notify_info::requester, so completing
+    // against an already-destroyed thread is a use-after-free (observed crashing
+    // in notify_info::complete on the camera video queue). Validate the requester
+    // against the kernel's live thread list — the caller already holds the kernel
+    // lock — and drop the stale request instead of signalling a dangling thread.
+    // Mirrors complete_audio_notify_if_alive() in audio.cpp.
+    static void complete_camera_notify_if_alive(kernel_system *kern, epoc::notify_info &info, int err_code) {
+        if (!info.empty() && kern->is_thread_alive(info.requester)) {
+            info.complete(err_code);
+        } else {
+            info.sts = 0;
+        }
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, ecam_number_of_cameras) {
         return static_cast<std::int32_t>(drivers::camera::get_collection()->count());
     }
@@ -182,14 +200,14 @@ namespace eka2l1::dispatch {
             kern->lock();
 
             if (err < 0) {
-                cam->done_image_capture_notify_.complete(epoc::error_general);
+                complete_camera_notify_if_alive(kern, cam->done_image_capture_notify_, epoc::error_general);
             } else {
                 // Copy data to temporary buffer
                 cam->received_image_capture_.resize(buffer_size);
                 std::memcpy(cam->received_image_capture_.data(), buffer, buffer_size);
 
                 cam->image_capture_taken_ = false;
-                cam->done_image_capture_notify_.complete(epoc::error_none);
+                complete_camera_notify_if_alive(kern, cam->done_image_capture_notify_, epoc::error_none);
             }
 
             kern->unlock();
@@ -315,12 +333,12 @@ namespace eka2l1::dispatch {
             guard.lock();
 
             if (err < 0) {
-                cam->done_frame_viewfinder_notify_.complete(epoc::error_general);
+                complete_camera_notify_if_alive(kern, cam->done_frame_viewfinder_notify_, epoc::error_general);
             } else {
                 cam->received_viewfinder_frame_[++cam->current_frame_index_].resize(buffer_size);
                 std::memcpy(cam->received_viewfinder_frame_[cam->current_frame_index_].data(), buffer, buffer_size);
 
-                cam->done_frame_viewfinder_notify_.complete(epoc::error_none);
+                complete_camera_notify_if_alive(kern, cam->done_frame_viewfinder_notify_, epoc::error_none);
             }
 
             kern->unlock();
