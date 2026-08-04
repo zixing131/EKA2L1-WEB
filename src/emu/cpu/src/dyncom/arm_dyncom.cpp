@@ -37,6 +37,9 @@ namespace eka2l1::arm {
         , ticks_executed_(0)
         , mem_cache_(page_bits) {
         state_ = std::make_unique<ARMul_State>(this, USER32MODE);
+        // Cache the data TLB on the state so the inline memory accessors can hit
+        // it without needing the full dyncom_core definition in armstate.h.
+        state_->mem_cache_ = &mem_cache_;
     }
 
     dyncom_core::~dyncom_core() {
@@ -139,12 +142,14 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::load_context(const thread_context &ctx) {
-        // Translations deliberately survive thread switches. The scheduler runs
-        // switch_context after every single slice, so clearing here (the old
-        // behavior) forced a full retranslation of the working set every
-        // ~20K instructions. Cross-address-space safety is handled by
-        // flush_tlb(), which the scheduler calls exactly when the process
-        // (and therefore the code mapping) changes.
+        // When the scheduler drives asids (primary core), translated blocks are
+        // tagged per address space and stay valid across thread/process switches,
+        // so there is no need to wipe the cache here. Only the fallback-embedded
+        // interpreter, which never receives an asid, still clears eagerly.
+        if (!asid_instruction_cache_) {
+            clear_instruction_cache();
+        }
+
         for (uint8_t i = 0; i < 16; i++) {
             state_->Reg[i] = ctx.cpu_registers[i];
         }
@@ -165,36 +170,19 @@ namespace eka2l1::arm {
 
     void dyncom_core::dirty_tlb_page(address addr) {
         mem_cache_.make_dirty(addr);
-
-        // A page being unmapped invalidates any translation made from it
-        // (DLL unload, code chunk decommit). The bitmap filters out the
-        // common data-page case so heap decommits stay cheap.
-        //
-        // Don't invalidate inline: this can be called from the timer thread
-        // while the interpreter is running on the main thread, and clearing
-        // instruction_cache concurrently corrupts it. Request it instead;
-        // DISPATCH consumes the flag at the next block boundary.
-        if (state_->is_code_page(addr)) {
-            state_->icache_invalidate_pending.store(true, std::memory_order_release);
-        }
     }
 
     void dyncom_core::flush_tlb() {
-        // Flush only the data TLB. It is keyed by virtual address with no asid,
-        // so the same vaddr maps different host memory in the new process and
-        // must be dropped on an address-space switch.
-        //
-        // The *instruction* cache is NOT dropped here: it is ASID-tagged (see
-        // ARMul_State::make_instruction_cache_key), so translations from
-        // different processes coexist and survive IPC round-trips. Before this
-        // change, wiping it on every process switch made IPC-heavy apps
-        // re-decode their whole working set after each round-trip. The scheduler
-        // pushes the new asid via set_asid() right after this call.
         mem_cache_.flush();
     }
 
     void dyncom_core::clear_instruction_cache() {
-        state_->invalidate_translation_cache();
+        state_->instruction_cache.clear();
+        state_->trans_cache_buf_top = 0;
+        state_->flush_block_l1_cache();
+#ifdef __EMSCRIPTEN__
+        state_->clear_jit_blocks();
+#endif
     }
 
     void dyncom_core::imb_range(address addr, std::size_t size) {
@@ -203,6 +191,7 @@ namespace eka2l1::arm {
 
     void dyncom_core::set_asid(const std::uint32_t asid) {
         state_->instruction_cache_asid = asid;
+        asid_instruction_cache_ = true;
     }
 
     std::uint32_t dyncom_core::get_num_instruction_executed() {

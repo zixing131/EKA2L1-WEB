@@ -52,6 +52,8 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <common/log.h>
 #include <common/types.h>
 #include <cpu/dyncom/vfp/asm_vfp.h>
@@ -65,7 +67,7 @@ static struct vfp_single vfp_single_default_qnan = {
 };
 
 static void vfp_single_dump(const char *str, struct vfp_single *s) {
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "{}: sign={} exponent={} significand={:08x}", str, s->sign != 0,
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "{}: sign={} exponent={} significand={:08x}", str, s->sign != 0,
         s->exponent, s->significand);
 }
 
@@ -167,7 +169,7 @@ std::uint32_t vfp_single_normaliseround(ARMul_State *state, int sd, struct vfp_s
     } else if ((rmode == FPSCR_ROUND_PLUSINF) ^ (vs->sign != 0))
         incr = (1 << (VFP_SINGLE_LOW_BITS + 1)) - 1;
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "rounding increment = 0x{:08x}", incr);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "rounding increment = 0x{:08x}", incr);
 
     /*
      * Is our rounding going to overflow?
@@ -222,7 +224,7 @@ pack:
     vfp_single_dump("pack: final", vs);
     {
         std::int32_t d = vfp_single_pack(vs);
-        LOG_TRACE(eka2l1::CPU_DYNCOM, "{}: d(s{})={:08x} exceptions={:08x}", func, sd, d, exceptions);
+        VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "{}: d(s{})={:08x} exceptions={:08x}", func, sd, d, exceptions);
         vfp_put_float(state, d, sd);
     }
 
@@ -333,7 +335,7 @@ std::uint32_t vfp_estimate_sqrt_significand(std::uint32_t exponent, std::uint32_
     std::uint32_t z, a;
 
     if ((significand & 0xc0000000) != 0x40000000) {
-        LOG_TRACE(eka2l1::CPU_DYNCOM, "invalid significand");
+        VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "invalid significand");
     }
 
     a = significand << 1;
@@ -423,7 +425,7 @@ static std::uint32_t vfp_single_fsqrt(ARMul_State *state, int sd, std::int32_t u
             term = (std::uint64_t)vsd.significand * vsd.significand;
             rem = ((std::uint64_t)vsm.significand << 32) - term;
 
-            LOG_TRACE(eka2l1::CPU_DYNCOM, "term={} rem={}", term, rem);
+            VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "term={} rem={}", term, rem);
 
             while (rem < 0) {
                 vsd.significand -= 1;
@@ -660,7 +662,7 @@ static std::uint32_t vfp_single_ftoui(ARMul_State *state, int sd, std::int32_t u
         }
     }
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "ftoui: d(s{})={:08x} exceptions={:08x}", sd, d, exceptions);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "ftoui: d(s{})={:08x} exceptions={:08x}", sd, d, exceptions);
 
     vfp_put_float(state, d, sd);
 
@@ -741,7 +743,7 @@ static std::uint32_t vfp_single_ftosi(ARMul_State *state, int sd, std::int32_t u
         }
     }
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "ftosi: d(s{})={:08x} exceptions={:08x}", sd, d, exceptions);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "ftosi: d(s{})={:08x} exceptions={:08x}", sd, d, exceptions);
 
     vfp_put_float(state, (std::int32_t)d, sd);
 
@@ -893,7 +895,7 @@ static std::uint32_t vfp_single_multiply(struct vfp_single *vsd, struct vfp_sing
      */
     if (vsn->exponent < vsm->exponent) {
         std::swap(vsm, vsn);
-        LOG_TRACE(eka2l1::CPU_DYNCOM, "swapping M <-> N");
+        VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "swapping M <-> N");
     }
 
     vsd->sign = vsn->sign ^ vsm->sign;
@@ -945,7 +947,7 @@ static std::uint32_t vfp_single_multiply_accumulate(ARMul_State *state, int sd, 
     std::int32_t v;
 
     v = vfp_get_float(state, sn);
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, v);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, v);
     exceptions |= vfp_single_unpack(&vsn, v, fpscr);
     if (vsn.exponent == 0 && vsn.significand)
         vfp_single_normalise_denormal(&vsn);
@@ -960,7 +962,7 @@ static std::uint32_t vfp_single_multiply_accumulate(ARMul_State *state, int sd, 
         vsp.sign = vfp_sign_negate(vsp.sign);
 
     v = vfp_get_float(state, sd);
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sd, v);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sd, v);
     exceptions |= vfp_single_unpack(&vsn, v, fpscr);
     if (vsn.exponent == 0 && vsn.significand != 0)
         vfp_single_normalise_denormal(&vsn);
@@ -981,7 +983,7 @@ static std::uint32_t vfp_single_multiply_accumulate(ARMul_State *state, int sd, 
  * sd = sd + (sn * sm)
  */
 static std::uint32_t vfp_single_fmac(ARMul_State *state, int sd, int sn, std::int32_t m, std::uint32_t fpscr) {
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
     return vfp_single_multiply_accumulate(state, sd, sn, m, fpscr, 0, "fmac");
 }
 
@@ -990,7 +992,7 @@ static std::uint32_t vfp_single_fmac(ARMul_State *state, int sd, int sn, std::in
  */
 static std::uint32_t vfp_single_fnmac(ARMul_State *state, int sd, int sn, std::int32_t m, std::uint32_t fpscr) {
     // TODO: this one has its arguments inverted, investigate.
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sd, sn);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sd, sn);
     return vfp_single_multiply_accumulate(state, sd, sn, m, fpscr, NEG_MULTIPLY, "fnmac");
 }
 
@@ -998,7 +1000,7 @@ static std::uint32_t vfp_single_fnmac(ARMul_State *state, int sd, int sn, std::i
  * sd = -sd + (sn * sm)
  */
 static std::uint32_t vfp_single_fmsc(ARMul_State *state, int sd, int sn, std::int32_t m, std::uint32_t fpscr) {
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
     return vfp_single_multiply_accumulate(state, sd, sn, m, fpscr, NEG_SUBTRACT, "fmsc");
 }
 
@@ -1006,7 +1008,7 @@ static std::uint32_t vfp_single_fmsc(ARMul_State *state, int sd, int sn, std::in
  * sd = -sd - (sn * sm)
  */
 static std::uint32_t vfp_single_fnmsc(ARMul_State *state, int sd, int sn, std::int32_t m, std::uint32_t fpscr) {
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
     return vfp_single_multiply_accumulate(state, sd, sn, m, fpscr, NEG_SUBTRACT | NEG_MULTIPLY,
         "fnmsc");
 }
@@ -1019,7 +1021,7 @@ static std::uint32_t vfp_single_fmul(ARMul_State *state, int sd, int sn, std::in
     std::uint32_t exceptions = 0;
     std::int32_t n = vfp_get_float(state, sn);
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
 
     exceptions |= vfp_single_unpack(&vsn, n, fpscr);
     if (vsn.exponent == 0 && vsn.significand)
@@ -1041,7 +1043,7 @@ static std::uint32_t vfp_single_fnmul(ARMul_State *state, int sd, int sn, std::i
     std::uint32_t exceptions = 0;
     std::int32_t n = vfp_get_float(state, sn);
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
 
     exceptions |= vfp_single_unpack(&vsn, n, fpscr);
     if (vsn.exponent == 0 && vsn.significand)
@@ -1064,7 +1066,7 @@ static std::uint32_t vfp_single_fadd(ARMul_State *state, int sd, int sn, std::in
     std::uint32_t exceptions = 0;
     std::int32_t n = vfp_get_float(state, sn);
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
 
     /*
      * Unpack and normalise denormals.
@@ -1086,7 +1088,7 @@ static std::uint32_t vfp_single_fadd(ARMul_State *state, int sd, int sn, std::in
  * sd = sn - sm
  */
 static std::uint32_t vfp_single_fsub(ARMul_State *state, int sd, int sn, std::int32_t m, std::uint32_t fpscr) {
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, sd);
     /*
      * Subtraction is addition with one sign inverted. Unpack the second operand to perform FTZ if
      * necessary, we can't let fadd do this because a denormal in m might get flushed to +0 in FTZ
@@ -1115,7 +1117,7 @@ static std::uint32_t vfp_single_fdiv(ARMul_State *state, int sd, int sn, std::in
     std::int32_t n = vfp_get_float(state, sn);
     int tm, tn;
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "s{} = {:08x}", sn, n);
 
     exceptions |= vfp_single_unpack(&vsn, n, fpscr);
     exceptions |= vfp_single_unpack(&vsm, m, fpscr);
@@ -1228,6 +1230,132 @@ static struct op fops[] = {
 #define FREG_BANK(x) ((x)&0x18)
 #define FREG_IDX(x) ((x)&7)
 
+// Host fast path for VFP single-precision arithmetic. The interpreter's
+// VFP is the bit-accurate ARM softfloat reference (vfp_single_f*), which is the
+// dominant cost for float-heavy guest code. The host is arm64 / IEEE-754, so for
+// the common case -- scalar op, default FPSCR mode (round-to-nearest, no
+// flush-to-zero / default-NaN), and *normalized* finite operands AND result --
+// a native float op is bit-identical to the reference (both are IEEE-754 RN),
+// at a fraction of the cost. Anything outside that envelope (NaN/Inf/denormal/
+// zero in or out, non-default mode, vectors) falls back to softfloat, which
+// keeps exact flag/special-value semantics. VFPv3 VMLA/VMLS retain extra
+// product precision, but are not IEEE fused-FMA; their packed fast helper below
+// mirrors that guard/sticky sequence directly. Set EKA2L1_NO_VFP_HOST=1 to
+// force the reference path (A/B).
+#if defined(EKA2L1_DYNCOM_DIFFTEST)
+static bool g_vfp_host_fast = true;
+static std::uint64_t g_vfp_host_fast_hits = 0;
+
+void vfp_set_single_host_fast_for_test(bool enabled) {
+    g_vfp_host_fast = enabled;
+}
+
+void vfp_reset_single_host_fast_hits_for_test() {
+    g_vfp_host_fast_hits = 0;
+}
+
+std::uint64_t vfp_single_host_fast_hits_for_test() {
+    return g_vfp_host_fast_hits;
+}
+#else
+static const bool g_vfp_host_fast = (getenv("EKA2L1_NO_VFP_HOST") == nullptr);
+#endif
+
+static inline bool vfp_f32_normalized(std::int32_t bits) {
+    const std::uint32_t e = static_cast<std::uint32_t>(bits) & 0x7F800000u;
+    return e != 0u && e != 0x7F800000u; // exclude zero/denormal (e==0) and Inf/NaN (e==0xFF)
+}
+
+static inline bool vfp_host_f32_mac(std::int32_t nb, std::int32_t mb,
+    std::int32_t ab, std::uint32_t negate, std::int32_t &rb,
+    std::uint32_t &exceptions) {
+    auto exponent = [](std::uint32_t bits) -> int {
+        return static_cast<int>((bits >> 23) & 0xFFu);
+    };
+    auto significand = [](std::uint32_t bits) -> std::uint32_t {
+        return ((bits & 0x007FFFFFu) | 0x00800000u) << VFP_SINGLE_LOW_BITS;
+    };
+
+    const std::uint32_t nbits = static_cast<std::uint32_t>(nb);
+    const std::uint32_t mbits = static_cast<std::uint32_t>(mb);
+    const std::uint32_t abits = static_cast<std::uint32_t>(ab);
+    const std::uint32_t nsig = significand(nbits);
+    const std::uint32_t msig = significand(mbits);
+
+    std::uint32_t psig = vfp_hi64to32jamming(
+        static_cast<std::uint64_t>(nsig) * static_cast<std::uint64_t>(msig));
+    int pexp = exponent(nbits) + exponent(mbits) - 127 + 2;
+    bool psign = ((nbits ^ mbits) >> 31) != 0;
+    if (negate & NEG_MULTIPLY)
+        psign = !psign;
+
+    std::uint32_t asig = significand(abits);
+    int aexp = exponent(abits);
+    bool asign = (abits >> 31) != 0;
+    if (negate & NEG_SUBTRACT)
+        asign = !asign;
+
+    // vfp_single_add keeps the accumulator as N when exponents are equal.
+    std::uint32_t large_sig = asig, small_sig = psig;
+    int result_exp = aexp;
+    bool result_sign = asign, small_sign = psign;
+    if (aexp < pexp) {
+        large_sig = psig;
+        small_sig = asig;
+        result_exp = pexp;
+        result_sign = psign;
+        small_sign = asign;
+    }
+
+    const unsigned int exp_diff = static_cast<unsigned int>(
+        result_exp - ((aexp < pexp) ? aexp : pexp));
+    small_sig = vfp_shiftright32jamming(small_sig, exp_diff);
+
+    std::uint32_t result_sig;
+    if (result_sign != small_sign) {
+        result_sig = large_sig - small_sig;
+        if (static_cast<std::int32_t>(result_sig) < 0) {
+            result_sign = !result_sign;
+            result_sig = ~result_sig + 1;
+        } else if (result_sig == 0) {
+            result_sign = false; // round-to-nearest cancellation is +0
+        }
+    } else {
+        result_sig = large_sig + small_sig;
+    }
+
+    // Keep tiny/zero/overflow cases on the full softfloat path. For a normal
+    // result this is the RN portion of vfp_single_normaliseround, including
+    // ARM's guard/round/sticky tie handling.
+    if (result_sig == 0)
+        return false;
+    const unsigned int shift = static_cast<unsigned int>(__builtin_clz(result_sig));
+    result_exp -= static_cast<int>(shift);
+    result_sig <<= shift;
+    if (result_exp <= 0)
+        return false;
+
+    std::uint32_t increment = 1u << VFP_SINGLE_LOW_BITS;
+    if ((result_sig & (1u << (VFP_SINGLE_LOW_BITS + 1))) == 0)
+        --increment;
+    if (result_sig + increment < result_sig) {
+        ++result_exp;
+        result_sig = (result_sig >> 1) | (result_sig & 1u);
+        increment >>= 1;
+    }
+    if (result_exp >= 254)
+        return false;
+
+    exceptions = (result_sig & ((1u << (VFP_SINGLE_LOW_BITS + 1)) - 1u))
+        ? FPSCR_IXC : 0u;
+    result_sig += increment;
+    const std::uint32_t magnitude = (static_cast<std::uint32_t>(result_exp) << 23)
+        + (result_sig >> (VFP_SINGLE_LOW_BITS + 1));
+    const std::uint32_t packed = (result_sign ? 0x80000000u : 0u) | magnitude;
+    rb = static_cast<std::int32_t>(packed);
+    return vfp_f32_normalized(rb);
+}
+
 std::uint32_t vfp_single_cpdo(ARMul_State *state, std::uint32_t inst, std::uint32_t fpscr) {
     std::uint32_t op = inst & FOP_MASK;
     std::uint32_t exceptions = 0;
@@ -1261,13 +1389,80 @@ std::uint32_t vfp_single_cpdo(ARMul_State *state, std::uint32_t inst, std::uint3
     else
         veclen = fpscr & FPSCR_LENGTH_MASK;
 
-    LOG_TRACE(eka2l1::CPU_DYNCOM, "vecstride={} veclen={}", vecstride, (veclen >> FPSCR_LENGTH_BIT) + 1);
+    VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "vecstride={} veclen={}", vecstride, (veclen >> FPSCR_LENGTH_BIT) + 1);
 
     if (!fop->fn) {
         LOG_CRITICAL(eka2l1::CPU_DYNCOM, "could not find single op {}, inst=0x{:x}@0x{:x}",
             FEXT_TO_IDX(inst), inst, state->Reg[15]);
         //Crash();
         goto invalid;
+    }
+
+    // Host-float fast path (see vfp_f32_normalized comment above).
+    if (g_vfp_host_fast && veclen == 0 && op != FOP_EXT
+        && (fpscr & (FPSCR_RMODE_MASK | FPSCR_FLUSH_TO_ZERO | FPSCR_DEFAULT_NAN
+               | FPSCR_IDE | FPSCR_IXE | FPSCR_UFE | FPSCR_OFE | FPSCR_DZE | FPSCR_IOE)) == 0) {
+        const std::int32_t nb = state->ExtReg[sn];
+        const std::int32_t mb = state->ExtReg[sm];
+        if (vfp_f32_normalized(nb) && vfp_f32_normalized(mb)) {
+            float fn, fm, fr = 0.0f;
+            std::memcpy(&fn, &nb, sizeof(float));
+            std::memcpy(&fm, &mb, sizeof(float));
+            bool handled = true;
+            if (fop->fn == vfp_single_fadd)
+                fr = fn + fm;
+            else if (fop->fn == vfp_single_fsub)
+                fr = fn - fm;
+            else if (fop->fn == vfp_single_fmul)
+                fr = fn * fm;
+            else if (fop->fn == vfp_single_fdiv)
+                fr = fn / fm;
+            else if (fop->fn == vfp_single_fmac || fop->fn == vfp_single_fnmac
+                || fop->fn == vfp_single_fmsc || fop->fn == vfp_single_fnmsc) {
+                const std::int32_t ab = state->ExtReg[dest];
+                if (!vfp_f32_normalized(ab)) {
+                    handled = false;
+                } else {
+                    std::uint32_t negate = 0;
+                    if (fop->fn == vfp_single_fmac)
+                        negate = 0;
+                    else if (fop->fn == vfp_single_fnmac)
+                        negate = NEG_MULTIPLY;
+                    else if (fop->fn == vfp_single_fmsc)
+                        negate = NEG_SUBTRACT;
+                    else
+                        negate = NEG_MULTIPLY | NEG_SUBTRACT;
+
+                    std::int32_t rb;
+                    std::uint32_t mac_exceptions;
+                    if (vfp_host_f32_mac(nb, mb, ab, negate, rb, mac_exceptions)) {
+                        state->ExtReg[dest] = rb;
+#if defined(EKA2L1_DYNCOM_DIFFTEST)
+                        ++g_vfp_host_fast_hits;
+#endif
+                        return mac_exceptions;
+                    }
+                    handled = false;
+                }
+            } else {
+                handled = false;
+            }
+
+            if (handled) {
+                std::int32_t rb;
+                std::memcpy(&rb, &fr, sizeof(float));
+                // Only commit when the result is also normalized -- otherwise the
+                // reference would set overflow/underflow/inexact + apply FZ, which
+                // we don't replicate here.
+                if (vfp_f32_normalized(rb)) {
+                    state->ExtReg[dest] = rb;
+#if defined(EKA2L1_DYNCOM_DIFFTEST)
+                    ++g_vfp_host_fast_hits;
+#endif
+                    return 0;
+                }
+            }
+        }
     }
 
     for (vecitr = 0; vecitr <= veclen; vecitr += 1 << FPSCR_LENGTH_BIT) {
@@ -1277,14 +1472,14 @@ std::uint32_t vfp_single_cpdo(ARMul_State *state, std::uint32_t inst, std::uint3
 
         type = (fop->flags & OP_DD) ? 'd' : 's';
         if (op == FOP_EXT)
-            LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{} ({}{}) = op[{}] (s{}={:08x})", vecitr >> FPSCR_LENGTH_BIT,
+            VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{} ({}{}) = op[{}] (s{}={:08x})", vecitr >> FPSCR_LENGTH_BIT,
                 type, dest, sn, sm, m);
         else
-            LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{} ({}{}) = (s{}) op[{}] (s{}={:08x})",
+            VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{} ({}{}) = (s{}) op[{}] (s{}={:08x})",
                 vecitr >> FPSCR_LENGTH_BIT, type, dest, sn, FOP_TO_IDX(op), sm, m);
 
         except = fop->fn(state, dest, sn, m, fpscr);
-        LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{}: exceptions={:08x}", vecitr >> FPSCR_LENGTH_BIT, except);
+        VFP_LOG_TRACE(eka2l1::CPU_DYNCOM, "itr{}: exceptions={:08x}", vecitr >> FPSCR_LENGTH_BIT, except);
 
         exceptions |= except & ~VFP_NAN_FLAG;
 

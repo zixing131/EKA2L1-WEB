@@ -20,6 +20,7 @@ add_library(drivers
         include/drivers/audio/backend/dsp_shared.h
         include/drivers/audio/backend/player_shared.h
         include/drivers/camera/camera_collection.h
+        include/drivers/camera/backend/pattern/camera_pattern.h
         include/drivers/hwrm/backend/vibration_null.h
         include/drivers/hwrm/vibration.h
         include/drivers/graphics/buffer.h
@@ -54,6 +55,8 @@ add_library(drivers
         src/audio/backend/dsp_shared.cpp
         src/audio/backend/player_shared.cpp
         src/camera/camera_collection.cpp
+        src/camera/backend/pattern/camera_pattern.cpp
+        src/camera/backend/pattern/camera_pattern_pixel.cpp
         src/hwrm/backend/vibration_null.cpp
         src/hwrm/vibration.cpp
         src/input/common.cpp

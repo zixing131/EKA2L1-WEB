@@ -18,7 +18,7 @@
 #pragma once
 
 #include <array>
-#include <atomic>
+#include <common/bytes.h>
 #include <common/types.h>
 #include <unordered_map>
 
@@ -35,13 +35,9 @@ namespace eka2l1::arm {
     class exclusive_monitor;
 }
 
-// Translation-cache arena, an inline member of ARMul_State — the whole size is
-// malloc'd up front when the core is created. Overflow is safe: the
-// interpreter flushes and restarts the cache when the high-water mark nears
-// the end (see TRANS_CACHE_FLUSH_MARGIN), so this only sets how often that
-// happens. iOS Safari kills the tab well under ~1.2GB, so the web build trades
-// rare flushes for ~100MB less baseline footprint.
 #ifdef __EMSCRIPTEN__
+// Mobile browsers kill the tab well under ~1.2GB; trade rare flushes for a
+// smaller baseline footprint on the web build.
 #define TRANS_CACHE_SIZE (32 * 1024 * 1024)
 #else
 #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
@@ -173,118 +169,115 @@ public:
 
     // Reads/writes data in big/little endian format based on the
     // state of the E (endian) bit in the APSR.
-    //
-    // The TLB-hit fast path is inlined here so the interpreter does not pay an
-    // out-of-line call per guest memory access (these are the hottest helpers
-    // after the interpreter loop itself). Misses and big-endian mode take the
-    // *Slow out-of-line path, which keeps the original full logic.
+    // The common case (the address is in the dyncom TLB) is inlined here so the
+    // load/store handlers pay no call overhead; a miss falls through to the
+    // out-of-line slow path (page-table walk, fault handling, big-endian,
+    // logging). mem_cache_ is the same TLB as core->mem_cache(), cached so this
+    // header needn't see the full dyncom_core. Read fast paths return the raw
+    // little-endian value (matching the previous TLB-hit behaviour); writes swap
+    // first so the stored bytes match.
     std::uint8_t ReadMemory8(std::uint32_t address) const {
-        if (const std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+        if (std::uint8_t *ptr = mem_cache_->lookup(address))
             return *ptr;
-        }
         return ReadMemory8Slow(address);
     }
     std::uint16_t ReadMemory16(std::uint32_t address) const {
-        if (const std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
+        if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_->lookup(address)))
             return *ptr;
-        }
         return ReadMemory16Slow(address);
     }
     std::uint32_t ReadMemory32(std::uint32_t address) const {
-        if (const std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
+        if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_->lookup(address)))
             return *ptr;
-        }
         return ReadMemory32Slow(address);
     }
     std::uint64_t ReadMemory64(std::uint32_t address) const {
-        if (const std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
+        if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_->lookup(address)))
             return *ptr;
-        }
         return ReadMemory64Slow(address);
     }
     std::uint32_t ReadCode(std::uint32_t address) const;
     void WriteMemory8(std::uint32_t address, std::uint8_t data) {
-        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+        if (std::uint8_t *ptr = mem_cache_->lookup(address)) {
             *ptr = data;
             return;
         }
         WriteMemory8Slow(address, data);
     }
     void WriteMemory16(std::uint32_t address, std::uint16_t data) {
-        if (!InBigEndianMode()) {
-            if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
-                *ptr = data;
-                return;
-            }
+        if (InBigEndianMode())
+            data = eka2l1::common::byte_swap(data);
+        if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_->lookup(address))) {
+            *ptr = data;
+            return;
         }
         WriteMemory16Slow(address, data);
     }
     void WriteMemory32(std::uint32_t address, std::uint32_t data) {
-        if (!InBigEndianMode()) {
-            if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
-                *ptr = data;
-                return;
-            }
+        if (InBigEndianMode())
+            data = eka2l1::common::byte_swap(data);
+        if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_->lookup(address))) {
+            *ptr = data;
+            return;
         }
         WriteMemory32Slow(address, data);
     }
     void WriteMemory64(std::uint32_t address, std::uint64_t data) {
-        if (!InBigEndianMode()) {
-            if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
-                *ptr = data;
-                return;
-            }
+        if (InBigEndianMode())
+            data = eka2l1::common::byte_swap(data);
+        if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_->lookup(address))) {
+            *ptr = data;
+            return;
         }
         WriteMemory64Slow(address, data);
     }
 
-    // LDM/STM block cursor: a register-list transfer walks a contiguous,
-    // ascending run of words that almost always stays inside one guest page,
-    // but the plain per-word loop pays a full TLB lookup per word. The cursor
-    // resolves the host page once and serves subsequent words from it,
-    // re-resolving only on a page crossing. Misses fall back to the plain
-    // accessors, so semantics are identical to ReadMemory32/WriteMemory32.
-    // The cursor is stack-local to one LDM/STM execution and never outlives
-    // it, so TLB flushes can't leave a stale mapping behind.
-    struct mem_block_cursor {
-        std::uint32_t page{ 1 }; // 1 is never page-aligned, so it never matches
-        std::uint8_t *host{ nullptr };
+    // Cursor for bulk word transfers (LDM/STM). A register-list transfer touches a
+    // run of contiguous addresses that, in practice, all fall in one guest page, yet
+    // the naive loop pays a full TLB lookup per word. The cursor caches the resolved
+    // host page so a same-page run costs one lookup instead of one per word, and it
+    // re-resolves automatically when the run crosses a page boundary. Semantics are
+    // identical to ReadMemory32/WriteMemory32 (raw little-endian on a TLB hit, the
+    // out-of-line slow path on a miss, and the same big-endian write swap), so it is
+    // a drop-in replacement inside a single instruction's transfer loop.
+    struct block_cursor {
+        std::uint8_t *page_host = nullptr;
+        std::uint32_t page_base = 1; // sentinel: never equals a page-aligned address
     };
 
-    std::uint32_t ReadMemory32Block(mem_block_cursor &cur, std::uint32_t address) const {
-        const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
-        const std::uint32_t page = address - off;
-        if (cur.host && (cur.page == page)) {
-            return *reinterpret_cast<std::uint32_t *>(cur.host + off);
-        }
-        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
-            cur.page = page;
-            cur.host = ptr - off;
+    std::uint32_t ReadMemory32Block(std::uint32_t address, block_cursor &c) const {
+        const std::uint32_t page_off = address & static_cast<std::uint32_t>(mem_cache_->page_mask);
+        if (c.page_host && (address - page_off) == c.page_base)
+            return *reinterpret_cast<std::uint32_t *>(c.page_host + page_off);
+        if (std::uint8_t *ptr = mem_cache_->lookup(address)) {
+            c.page_host = ptr - page_off;
+            c.page_base = address - page_off;
             return *reinterpret_cast<std::uint32_t *>(ptr);
         }
-        cur.host = nullptr;
+        c.page_host = nullptr;
         return ReadMemory32Slow(address);
     }
 
-    void WriteMemory32Block(mem_block_cursor &cur, std::uint32_t address, std::uint32_t data) {
-        if (!InBigEndianMode()) {
-            const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
-            const std::uint32_t page = address - off;
-            if (cur.host && (cur.page == page)) {
-                *reinterpret_cast<std::uint32_t *>(cur.host + off) = data;
-                return;
-            }
-            if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
-                cur.page = page;
-                cur.host = ptr - off;
-                *reinterpret_cast<std::uint32_t *>(ptr) = data;
-                return;
-            }
-            cur.host = nullptr;
+    void WriteMemory32Block(std::uint32_t address, std::uint32_t data, block_cursor &c) {
+        if (InBigEndianMode())
+            data = eka2l1::common::byte_swap(data);
+        const std::uint32_t page_off = address & static_cast<std::uint32_t>(mem_cache_->page_mask);
+        if (c.page_host && (address - page_off) == c.page_base) {
+            *reinterpret_cast<std::uint32_t *>(c.page_host + page_off) = data;
+            return;
         }
+        if (std::uint8_t *ptr = mem_cache_->lookup(address)) {
+            c.page_host = ptr - page_off;
+            c.page_base = address - page_off;
+            *reinterpret_cast<std::uint32_t *>(ptr) = data;
+            return;
+        }
+        c.page_host = nullptr;
         WriteMemory32Slow(address, data);
     }
 
+    // Slow paths (TLB miss): out-of-line in armstate.cpp. Reads apply the
+    // big-endian swap themselves; writes receive data already swapped.
     std::uint8_t ReadMemory8Slow(std::uint32_t address) const;
     std::uint16_t ReadMemory16Slow(std::uint32_t address) const;
     std::uint32_t ReadMemory32Slow(std::uint32_t address) const;
@@ -365,109 +358,86 @@ public:
     unsigned bigendSig;
     unsigned syscallSig;
 
+    // Data TLB shared with the owning dyncom_core (== core->mem_cache()), cached
+    // here so the inline memory accessors above don't need the full dyncom_core
+    // definition. Set by dyncom_core right after construction.
+    eka2l1::arm::r12l1::tlb *mem_cache_ = nullptr;
+
     char trans_cache_buf[TRANS_CACHE_SIZE];
     size_t trans_cache_buf_top = 0;
 
-    // ASID-tagged translation cache. Translations from different address spaces
-    // coexist (key = (asid << 32) | virtual_pc) so the cache survives process
-    // switches instead of being wiped on every IPC round-trip. The scheduler
-    // pushes the running process's asid via dyncom_core::set_asid -> set_asid()
-    // below. asid 0 is used by the embedded-fallback interpreter (no asid ever
-    // pushed), which is also fine: it just keeps one un-tagged keyspace.
+    // Translated basic blocks are tagged with the address space (asid) they were
+    // decoded in, so blocks from different processes coexist and survive the
+    // frequent guest thread/process switches instead of being thrown away on
+    // every context switch. Key = (asid << 32) | virtual_pc. The asid is pushed
+    // in by the scheduler through dyncom_core::set_asid on every process switch.
+    // In the multiple memory model (used by all current frontends) asids are
+    // never recycled within a session, so cached blocks stay valid until the
+    // code itself changes (handled separately via imb_range / clear).
     std::unordered_map<std::uint64_t, std::size_t> instruction_cache;
     std::uint32_t instruction_cache_asid = 0;
 
-    std::uint64_t make_instruction_cache_key(const std::uint32_t vaddr) const {
+#ifdef EKA2L1_DYNCOM_PROFILE
+    // Guest-execution profiler scratch (see arm_dyncom_interpreter.cpp): the
+    // previous executed opcode index within the current block and the running
+    // block length. -1 prev means "block start".
+    int prof_prev = -1;
+    std::uint32_t prof_block_len = 0;
+#endif
+
+    std::uint64_t make_instruction_cache_key(std::uint32_t vaddr) const {
         return (static_cast<std::uint64_t>(instruction_cache_asid) << 32) | vaddr;
     }
 
-    // Direct-mapped lookaside in front of instruction_cache: DISPATCH runs on
-    // every taken branch and unordered_map::find dominated interpreter
-    // profiles. Invalidation is O(1) via the generation counter. The entry
-    // carries the asid so two same-PC blocks from different address spaces
-    // don't alias in the same direct-mapped slot.
-    struct block_lookup_entry {
-        std::uint32_t pc;
-        std::uint32_t asid;
-        std::uint32_t generation;
+    // Direct-mapped L1 in front of instruction_cache. DISPATCH runs on every
+    // taken branch; an index+compare here turns the common case into a hit that
+    // skips the unordered_map hash/bucket-walk/modulo. Entries are tagged with
+    // the full (asid|vpc) key so they coexist across processes; they only need
+    // clearing when the block map / translation buffer is flushed. Keys are
+    // seeded to a value no real key can take (real high word = asid <= 255).
+    static constexpr std::size_t BLOCK_L1_BITS = 11; // 2048 entries (~32 KB)
+    static constexpr std::size_t BLOCK_L1_COUNT = 1 << BLOCK_L1_BITS;
+    static constexpr std::uint64_t BLOCK_L1_EMPTY = ~static_cast<std::uint64_t>(0);
+
+    struct block_l1_entry {
+        std::uint64_t key;
         std::size_t ptr;
-        // wasm JIT bookkeeping (zero on (re)fill): execution counter towards
-        // the compile threshold, and the resolved verdict: 0 = unknown,
-        // -2 = uncompilable, > 0 = function-table index of the compiled block.
-        std::uint32_t jit_count;
-        std::int32_t jit_idx;
     };
-    static constexpr std::size_t BLOCK_LOOKUP_SIZE = 1 << 13;
-    std::array<block_lookup_entry, BLOCK_LOOKUP_SIZE> block_lookup{};
-    std::uint32_t block_lookup_generation = 1; // zero-init entries always miss
+    block_l1_entry block_l1_cache[BLOCK_L1_COUNT];
 
-    // One bit per 4KB guest page that holds at least one translated block.
-    // Lets dirty_tlb_page() ignore the frequent data-page unmaps (heap
-    // decommits) and only drop translations when an actual code page changes.
-    std::array<std::uint64_t, 1 << 14> code_page_bitmap{};
-
-    // dirty_tlb_page() can fire on the timer thread while the interpreter is
-    // mid-run on the main thread; mutating instruction_cache concurrently
-    // would corrupt it (a broken bucket chain makes find() loop forever).
-    // Off-thread invalidation requests land here and DISPATCH consumes them
-    // between blocks, where resetting the translation buffer is safe.
-    std::atomic_bool icache_invalidate_pending{ false };
-
-    block_lookup_entry &block_lookup_ref(const std::uint32_t pc) {
-        // Mix high bits in so ARM (4-aligned) PCs still populate odd slots.
-        return block_lookup[((pc >> 1) ^ (pc >> 14)) & (BLOCK_LOOKUP_SIZE - 1)];
+    void flush_block_l1_cache() {
+        for (std::size_t i = 0; i < BLOCK_L1_COUNT; i++) {
+            block_l1_cache[i].key = BLOCK_L1_EMPTY;
+        }
     }
 
-    void mark_code_page(const std::uint32_t pc) {
-        code_page_bitmap[(pc >> 12) >> 6] |= (1ull << ((pc >> 12) & 63));
+    static std::size_t block_l1_index(std::uint64_t key) {
+        return (key ^ (key >> 32)) & (BLOCK_L1_COUNT - 1);
     }
 
-    bool is_code_page(const std::uint32_t addr) const {
-        return (code_page_bitmap[(addr >> 12) >> 6] & (1ull << ((addr >> 12) & 63))) != 0;
-    }
-
-    // wasm JIT: compiled-block verdicts keyed by (asid << 32) | guest pc, same
-    // as instruction_cache (0 never stored; -2 = uncompilable, > 0 = table
-    // index). asid-tagged so a compiled block isn't reused for a different
-    // process that happens to share the guest PC. The lookaside entries cache
-    // these.
+#ifdef __EMSCRIPTEN__
+    // wasm JIT: compiled-block verdicts keyed by (asid << 32) | guest pc
+    // (0 never stored; -2 = uncompilable, > 0 = table index).
     std::unordered_map<std::uint64_t, std::int32_t> jit_block_map;
     bool jit_enabled = false;
-
-    // Cross-block chaining recursion depth: compiled blocks call each other
-    // directly (call_indirect) when the branch target was already compiled;
-    // this caps the wasm call stack. Reset by DISPATCH before each outer call.
+    // Cross-block chaining recursion depth for call_indirect chains.
     std::uint32_t jit_chain_depth = 0;
 
     eka2l1::arm::r12l1::tlb *jit_tlb() const {
-        return mem_cache_direct;
+        return mem_cache_;
     }
 
-    // Drop every cached translation. Replaces the old pattern of clearing
-    // instruction_cache/trans_cache_buf_top at each call site so the lookaside
-    // and the code-page bitmap can never get out of sync with them.
-    void invalidate_translation_cache() {
-        instruction_cache.clear();
-        trans_cache_buf_top = 0;
-        ++block_lookup_generation;
-        code_page_bitmap.fill(0);
-#ifdef __EMSCRIPTEN__
-        // Compiled blocks were built from the dropped translations: release
-        // their table slots for reuse and forget the verdicts.
+    void clear_jit_blocks() {
         for (const auto &kv : jit_block_map) {
             if (kv.second > 0) {
                 eka2l1::arm::dyncom_jit::release_index(kv.second);
             }
         }
         jit_block_map.clear();
-#endif
     }
+#endif
 
 private:
     void ResetMPCoreCP15Registers();
     eka2l1::arm::dyncom_core *core;
-
-    // Borrowed from core->mem_cache(), cached so the inlined memory fast
-    // paths above don't need the (incomplete here) dyncom_core type.
-    eka2l1::arm::r12l1::tlb *mem_cache_direct{ nullptr };
 };

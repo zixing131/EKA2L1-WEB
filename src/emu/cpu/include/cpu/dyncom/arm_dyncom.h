@@ -20,6 +20,12 @@ namespace eka2l1::arm {
 
         std::uint32_t ticks_executed_;
 
+        // True once the scheduler starts feeding us asids (primary core). While
+        // false (e.g. the dyncom interpreter embedded in another backend as a
+        // fallback) we keep the old behaviour of wiping the translation cache on
+        // every load_context, since nobody tells us when the address space flips.
+        bool asid_instruction_cache_ = false;
+
     public:
         explicit dyncom_core(arm::exclusive_monitor *monitor, const std::size_t page_bits);
         ~dyncom_core() override;
