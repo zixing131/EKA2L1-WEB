@@ -241,18 +241,27 @@ namespace eka2l1 {
             stream_->register_callback(
                 drivers::dsp_stream_notification_more_buffer, [this](void *userdata) {
                     kernel_system *kern = server<mmf_dev_server>()->get_kernel_object_owner();
-                    kern->lock();
-
-                    // Lock the access to this variable
-                    const std::lock_guard<std::mutex> guard(dev_access_lock_);
-
-                    if (last_buffer_) {
-                        complete_play(epoc::error_underflow);
-                    } else {
-                        do_report_buffer_to_be_filled();
+                    // RAII so the kernel lock is released even if the completion
+                    // body throws: this callback runs on the host audio render
+                    // thread, whose noexcept boundary swallows the exception, so
+                    // a manual unlock would leak the kernel lock and wedge the
+                    // whole emulator (os/timing/input threads block on it).
+                    std::unique_lock<kernel_system> kern_guard(*kern, std::try_to_lock);
+                    if (!kern_guard.owns_lock()) {
+                        return false;
                     }
 
-                    kern->unlock();
+                    {
+                        // Keep the established kernel -> session lock order.
+                        const std::lock_guard<std::mutex> guard(dev_access_lock_);
+                        if (last_buffer_) {
+                            complete_play(epoc::error_underflow);
+                        } else {
+                            do_report_buffer_to_be_filled();
+                        }
+                    }
+
+                    return true;
                 },
                 nullptr);
 
@@ -266,18 +275,24 @@ namespace eka2l1 {
             stream_->register_callback(
                 drivers::dsp_stream_notification_more_buffer, [this](void *userdata) {
                     kernel_system *kern = server<mmf_dev_server>()->get_kernel_object_owner();
-                    kern->lock();
-
-                    // Lock the access to this variable
-                    const std::lock_guard<std::mutex> guard(dev_access_lock_);
-
-                    if (last_buffer_) {
-                        complete_record(epoc::error_underflow);
-                    } else {
-                        do_report_buffer_to_be_emptied();
+                    // RAII so the kernel lock is released even if the completion
+                    // body throws (see the playback path above).
+                    std::unique_lock<kernel_system> kern_guard(*kern, std::try_to_lock);
+                    if (!kern_guard.owns_lock()) {
+                        return false;
                     }
 
-                    kern->unlock();
+                    {
+                        // Keep the established kernel -> session lock order.
+                        const std::lock_guard<std::mutex> guard(dev_access_lock_);
+                        if (last_buffer_) {
+                            complete_record(epoc::error_underflow);
+                        } else {
+                            do_report_buffer_to_be_emptied();
+                        }
+                    }
+
+                    return true;
                 },
                 nullptr);
 
