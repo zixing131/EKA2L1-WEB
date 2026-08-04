@@ -408,7 +408,7 @@ namespace eka2l1::epoc {
     }
 
     void screen::fire_focus_change_callbacks(const focus_change_property property) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(focus_callback_mutex);
 
         for (auto &callback : focus_callbacks) {
             if (callback.second)
@@ -417,6 +417,8 @@ namespace eka2l1::epoc {
     }
 
     void screen::fire_screen_redraw_callbacks(const bool is_dsa) {
+        const std::lock_guard<std::mutex> guard(screen_redraw_callback_mutex);
+
         for (auto &callback : screen_redraw_callbacks) {
             if (callback.second)
                 callback.second(callback.first, this, is_dsa);
@@ -424,6 +426,8 @@ namespace eka2l1::epoc {
     }
 
     void screen::fire_screen_mode_change_callbacks(const int old_mode) {
+        const std::lock_guard<std::mutex> guard(screen_mode_change_callback_mutex);
+
         for (auto &callback : screen_mode_change_callbacks) {
             if (callback.second)
                 callback.second(callback.first, this, old_mode);
@@ -431,38 +435,38 @@ namespace eka2l1::epoc {
     }
 
     std::size_t screen::add_focus_change_callback(void *userdata, focus_change_callback_handler handler) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(focus_callback_mutex);
 
         focus_change_callback callback_pair = { userdata, handler };
         return focus_callbacks.add(callback_pair);
     }
 
     bool screen::remove_focus_change_callback(const std::size_t cb) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(focus_callback_mutex);
         return focus_callbacks.remove(cb);
     }
 
     std::size_t screen::add_screen_redraw_callback(void *userdata, screen_redraw_callback_handler handler) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(screen_redraw_callback_mutex);
 
         screen_redraw_callback callback_pair = { userdata, handler };
         return screen_redraw_callbacks.add(callback_pair);
     }
 
     bool screen::remove_screen_redraw_callback(const std::size_t cb) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(screen_redraw_callback_mutex);
         return screen_redraw_callbacks.remove(cb);
     }
 
     std::size_t screen::add_screen_mode_change_callback(void *userdata, screen_mode_change_callback_handler handler) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(screen_mode_change_callback_mutex);
 
         screen_mode_change_callback callback_pair = { userdata, handler };
         return screen_mode_change_callbacks.add(callback_pair);
     }
 
     bool screen::remove_screen_mode_change_callback(const std::size_t cb) {
-        const std::lock_guard<std::mutex> guard(screen_mutex);
+        const std::lock_guard<std::mutex> guard(screen_mode_change_callback_mutex);
         return screen_mode_change_callbacks.remove(cb);
     }
 

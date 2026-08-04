@@ -100,7 +100,13 @@ namespace eka2l1::epoc {
         screen *next;
 
         kernel::chunk *screen_buffer_chunk;
+        // Keeps redraw/window-tree access separate from callback registries.
+        // Focus callbacks can be fired while screen_mutex is already held during
+        // window teardown, so sharing that non-recursive mutex deadlocks.
         std::mutex screen_mutex;
+        std::mutex focus_callback_mutex;
+        std::mutex screen_redraw_callback_mutex;
+        std::mutex screen_mode_change_callback_mutex;
 
         // Position of this screen in graphics driver
         // Update in graphics driver thread and read in os thread
