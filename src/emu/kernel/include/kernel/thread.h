@@ -363,6 +363,10 @@ namespace eka2l1 {
             void notify_sleep(const int errcode);
 
             bool stop();
+            // Logs PC/LR (module-resolved) and a heuristic stack backtrace of
+            // this thread; called when it panics so deaths are diagnosable.
+            void dump_panic_context();
+
             bool kill(const entity_exit_type exit_type, const std::u16string &category,
                 const std::int32_t reason);
 
