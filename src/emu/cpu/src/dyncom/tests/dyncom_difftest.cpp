@@ -23,10 +23,14 @@
  */
 
 #include <cpu/dyncom/arm_dyncom.h>
+#include <cpu/dyncom/arm_dyncom_thumb.h>
+#include <cpu/dyncom/vfp/asm_vfp.h>
+#include <cpu/dyncom/vfp/vfp.h>
 #include <cpu/12l1r/exclusive_monitor.h>
 
 #include <common/types.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -363,6 +367,147 @@ struct rng {
     std::uint32_t range(std::uint32_t n) { return e() % n; }
     bool flip() { return e() & 1; }
 };
+
+std::uint32_t random_normal_f32(rng &r) {
+    // Keep most products away from overflow/underflow so the host envelope is
+    // exercised heavily, while still varying signs and every significand bit.
+    const std::uint32_t sign = r.u32() & 0x80000000u;
+    const std::uint32_t exponent = 80u + r.range(96u);
+    return sign | (exponent << 23) | (r.u32() & 0x007FFFFFu);
+}
+
+std::uint32_t run_vfp_mac_differential(diff_env &env_a, diff_env &env_b,
+    dyncom_core &core_a, dyncom_core &core_b, std::uint32_t base_seed,
+    std::uint32_t count) {
+    struct mac_op {
+        const char *name;
+        std::uint32_t inst;
+    };
+    // vmla/vmls/vnmla/vnmls.f32 s0, s1, s2 (ARM state, AL condition).
+    static constexpr mac_op ops[] = {
+        { "vmla.f32", 0xEE000A81u },
+        { "vmls.f32", 0xEE000AC1u },
+        { "vnmla.f32", 0xEE100AC1u },
+        { "vnmls.f32", 0xEE100A81u },
+    };
+
+    const std::uint32_t cases = count < 50000u ? count : 50000u;
+    std::uint32_t failures = 0;
+    vfp_reset_single_host_fast_hits_for_test();
+
+    for (std::uint32_t i = 0; i < cases && failures < 20; ++i) {
+        const std::uint32_t case_seed = base_seed ^ (0x9E3779B9u * (i + 1u));
+        rng r(case_seed);
+        const std::uint32_t accumulator = random_normal_f32(r);
+        const std::uint32_t multiplicand = random_normal_f32(r);
+        const std::uint32_t multiplier = random_normal_f32(r);
+
+        for (const mac_op &op : ops) {
+            std::memcpy(env_a.mem.data(), &op.inst, 4);
+            std::memcpy(env_b.mem.data(), &op.inst, 4);
+            core_a.imb_range(0, 8);
+            core_b.imb_range(0, 8);
+
+            for (dyncom_core *core : { &core_a, &core_b }) {
+                core->set_cpsr(0x10); // USER mode, ARM state
+                core->set_pc(0);
+                core->set_fpscr(0);   // RN, gradual underflow, propagated NaNs
+                core->set_vfp(0, accumulator);
+                core->set_vfp(1, multiplicand);
+                core->set_vfp(2, multiplier);
+            }
+
+            vfp_set_single_host_fast_for_test(false);
+            core_a.run(1);
+            vfp_set_single_host_fast_for_test(true);
+            core_b.run(1);
+
+            const std::uint32_t slow = core_a.get_vfp(0);
+            const std::uint32_t fast = core_b.get_vfp(0);
+            const std::uint32_t slow_fpscr = core_a.get_fpscr();
+            const std::uint32_t fast_fpscr = core_b.get_fpscr();
+            if (slow != fast || slow_fpscr != fast_fpscr) {
+                std::printf("[DIVERGENCE] %s host-fast != softfloat seed=%u "
+                            "a=%08X n=%08X m=%08X slow=%08X fast=%08X "
+                            "slow_fpscr=%08X fast_fpscr=%08X\n",
+                    op.name, case_seed, accumulator, multiplicand,
+                    multiplier, slow, fast, slow_fpscr, fast_fpscr);
+                ++failures;
+                if (failures >= 20)
+                    break;
+            }
+        }
+    }
+
+    const std::uint64_t hits = vfp_single_host_fast_hits_for_test();
+    if (hits == 0) {
+        std::printf("[HARNESS BUG] VFP MAC host-fast envelope was never exercised\n");
+        ++failures;
+    } else {
+        std::printf("dyncom_difftest: VFP MAC host-fast %llu hits across %u randomized inputs\n",
+            static_cast<unsigned long long>(hits), cases);
+    }
+    vfp_set_single_host_fast_for_test(true);
+    return failures;
+}
+
+std::uint32_t benchmark_vfp_mac(diff_env &env_a, diff_env &env_b,
+    dyncom_core &core_a, dyncom_core &core_b) {
+    constexpr std::uint32_t inst = 0xEE000A81u; // vmla.f32 s0, s1, s2
+    constexpr std::uint32_t instructions = 8192;
+    constexpr std::uint32_t rounds = 20;
+    static_assert(instructions * sizeof(inst) <= MEM_SIZE);
+
+    for (std::uint32_t offset = 0; offset < instructions * sizeof(inst); offset += sizeof(inst)) {
+        std::memcpy(env_a.mem.data() + offset, &inst, sizeof(inst));
+        std::memcpy(env_b.mem.data() + offset, &inst, sizeof(inst));
+    }
+    core_a.imb_range(0, instructions * sizeof(inst));
+    core_b.imb_range(0, instructions * sizeof(inst));
+
+    auto prepare = [](dyncom_core &core) {
+        core.set_cpsr(0x10);
+        core.set_pc(0);
+        core.set_fpscr(0);
+        core.set_vfp(0, 0x3F800000u); // 1.0
+        core.set_vfp(1, 0x35800000u); // 2^-20
+        core.set_vfp(2, 0x3F800000u); // 1.0
+    };
+    using clock = std::chrono::steady_clock;
+    std::chrono::nanoseconds slow_time{ 0 }, fast_time{ 0 };
+    vfp_reset_single_host_fast_hits_for_test();
+
+    for (std::uint32_t round = 0; round < rounds; ++round) {
+        prepare(core_a);
+        vfp_set_single_host_fast_for_test(false);
+        const auto slow_start = clock::now();
+        core_a.run(instructions);
+        slow_time += clock::now() - slow_start;
+
+        prepare(core_b);
+        vfp_set_single_host_fast_for_test(true);
+        const auto fast_start = clock::now();
+        core_b.run(instructions);
+        fast_time += clock::now() - fast_start;
+    }
+
+    const std::uint32_t slow = core_a.get_vfp(0);
+    const std::uint32_t fast = core_b.get_vfp(0);
+    const std::uint64_t hits = vfp_single_host_fast_hits_for_test();
+    vfp_set_single_host_fast_for_test(true);
+    if (slow != fast || hits != static_cast<std::uint64_t>(instructions) * rounds) {
+        std::printf("[HARNESS BUG] VFP MAC benchmark mismatch slow=%08X fast=%08X "
+                    "hits=%llu expected=%u\n",
+            slow, fast, static_cast<unsigned long long>(hits), instructions * rounds);
+        return 1;
+    }
+
+    const double slow_ms = std::chrono::duration<double, std::milli>(slow_time).count();
+    const double fast_ms = std::chrono::duration<double, std::milli>(fast_time).count();
+    std::printf("dyncom_difftest: VFP MAC microbenchmark soft=%.2fms host-fast=%.2fms (%.2fx)\n",
+        slow_ms, fast_ms, slow_ms / fast_ms);
+    return 0;
+}
 
 // A random data-processing instruction. cond is AL most of the time but
 // sometimes a real condition (to exercise the conditional path). Operand
@@ -711,6 +856,20 @@ int main(int argc, char **argv) {
     std::vector<std::uint8_t> golden_mem(MEM_SIZE, 0);
 
     std::uint32_t failures = 0;
+
+    // Thumb BKPT must translate to the ARM form consumed by dyncom's existing
+    // breakpoint decoder. It once became SVC 0 instead.
+    {
+        std::uint32_t translated = 0;
+        std::uint32_t instruction_size = 0;
+        TranslateThumbInstruction(0, 0xBE00, &translated, &instruction_size);
+        if ((translated != 0xE1200070) || (instruction_size != 2)) {
+            std::printf("[THUMB BKPT] instruction=0x%08X size=%u\n",
+                translated, instruction_size);
+            failures++;
+        }
+    }
+
     auto window_eq = [](const std::vector<std::uint8_t> &x, const std::vector<std::uint8_t> &y) {
         return std::memcmp(x.data() + LS_DATA_LO, y.data() + LS_DATA_LO, LS_DATA_HI - LS_DATA_LO) == 0;
     };
@@ -788,6 +947,10 @@ int main(int argc, char **argv) {
         }
     }
 
+    failures += run_vfp_mac_differential(env_a, env_b, *core_a, *core_b,
+        base_seed, count);
+    failures += benchmark_vfp_mac(env_a, env_b, *core_a, *core_b);
+
     // Negative control: prove the comparator catches a deliberate divergence.
     {
         cpu_state x{}, y{};
@@ -799,7 +962,7 @@ int main(int argc, char **argv) {
     }
 
     if (failures == 0) {
-        std::printf("dyncom_difftest: PASS (%u cases, golden + self-A/B + negative control)\n", count);
+        std::printf("dyncom_difftest: PASS (%u integer cases + VFP MAC soft/host A/B + negative control)\n", count);
         return 0;
     }
     std::printf("dyncom_difftest: FAIL (%u divergences)\n", failures);

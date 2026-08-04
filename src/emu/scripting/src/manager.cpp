@@ -367,6 +367,15 @@ namespace eka2l1::manager {
 
         auto &source_insts = breakpoints[aligned].source_insts_;
 
+        if ((ite != breakpoints[aligned].list_.end())
+            && (ite->flags_ & breakpoint_info::FLAG_ROM_IMAGE)
+            && !source_insts.empty()) {
+            // A ROM instruction has one physical preimage shared by every
+            // process. Do not capture the already-installed BKPT again under
+            // another process UID.
+            return;
+        }
+
         if (ite == breakpoints[aligned].list_.end() || source_insts.find(pr->get_uid()) != source_insts.end() || !data) {
             return;
         }
@@ -401,6 +410,17 @@ namespace eka2l1::manager {
         auto source_value = sources.find(pr->get_uid());
 
         if (source_value == sources.end()) {
+            const breakpoint_info_list &list = breakpoints[target & ~1].list_;
+            if (!list.empty() && (list[0].flags_ & breakpoint_info::FLAG_ROM_IMAGE)
+                && !sources.empty()) {
+                // ROM instructions are physically shared by all processes, so
+                // the saved preimage may have been recorded under a different
+                // process UID from the one that ultimately hits the hook.
+                source_value = sources.begin();
+            }
+        }
+
+        if (source_value == sources.end()) {
             return false;
         }
 
@@ -421,7 +441,7 @@ namespace eka2l1::manager {
 
     void scripts::write_back_breakpoints(kernel::process *pr) {
         for (const auto &[addr, info] : breakpoints) {
-            if (!info.list_.empty()) {
+            if (!info.list_.empty() && !(info.list_[0].flags_ & breakpoint_info::FLAG_ROM_IMAGE)) {
                 write_back_breakpoint(pr, info.list_[0].addr_);
             }
         }
@@ -509,7 +529,8 @@ namespace eka2l1::manager {
         return static_cast<std::uint32_t>(handle);
     }
 
-    std::uint32_t scripts::register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid, const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func) {
+    std::uint32_t scripts::register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid,
+        const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func, const bool eager_resolve) {
         const std::string lib_name_lower = common::lowercase_string(lib_name);
         std::size_t handle = 0;
 
@@ -529,7 +550,7 @@ namespace eka2l1::manager {
             info.codeseg_uid3_ = 0;
         } else {
             hle::lib_manager *manager = sys->get_lib_manager();
-            if (manager) {
+            if (manager && eager_resolve) {
                 if (codeseg_ptr seg = manager->load(common::utf8_to_ucs2(lib_name))) {
                     std::vector<kernel::process*> processes = seg->attached_processes();
 
@@ -561,6 +582,10 @@ namespace eka2l1::manager {
                         info.invoke_->category_ = script_function::META_CATEGORY_BREAKPOINT;
                         info.addr_ += base;
                         info.flags_ = 0;
+                    }
+
+                    if (seg->is_rom() && !(info.flags_ & breakpoint_info::FLAG_BASED_IMAGE)) {
+                        info.flags_ |= breakpoint_info::FLAG_ROM_IMAGE;
                     }
                 }
             }
@@ -617,6 +642,16 @@ namespace eka2l1::manager {
                     patched.addr_ += new_code_addr;
                     patched.flags_ &= ~breakpoint_info::FLAG_BASED_IMAGE;
                     patched.invoke_->category_ = script_function::META_CATEGORY_BREAKPOINT;
+
+                    if (seg->is_rom()) {
+                        patched.flags_ |= breakpoint_info::FLAG_ROM_IMAGE;
+                        const breakpoint_info_list &existing = breakpoints[patched.addr_ & ~1].list_;
+                        if (std::find_if(existing.begin(), existing.end(), [&](const breakpoint_info &info) {
+                                return info.invoke_ == patched.invoke_;
+                            }) != existing.end()) {
+                            continue;
+                        }
+                    }
 
                     breakpoints[patched.addr_ & ~1].list_.push_back(patched);
 
@@ -700,12 +735,27 @@ namespace eka2l1::manager {
         running_core->save_context(correspond->get_thread_context());
 
         if (!last_breakpoint_script_hits[correspond->unique_id()].hit_) {
-            const vaddress cur_addr = addr | ((running_core->get_cpsr() & 0x20) >> 5);
+            bool is_thumb = (running_core->get_cpsr() & 0x20) != 0;
+            const auto registered = breakpoints.find(addr & ~1);
+            if ((registered != breakpoints.end()) && !registered->second.list_.empty()) {
+                // Dyncom translates Thumb instructions to its internal ARM
+                // form and may report CPSR.T clear while handling BKPT. The
+                // registered hook address retains the authoritative mode bit.
+                is_thumb = (registered->second.list_[0].addr_ & 1) != 0;
+            }
+            const vaddress cur_addr = addr | (is_thumb ? 1 : 0);
+
+            // Resume from the instruction temporarily restored below. Do this
+            // before invoking the patch so callbacks that intentionally change
+            // PC (for example, to skip a broken guest-code path) keep control
+            // of the final resume address.
+            correspond->get_thread_context().set_pc(addr);
+            running_core->set_pc(addr);
 
             if (call_breakpoints(cur_addr, correspond->owning_process()->get_uid())) {
                 breakpoint_hit_info &info = last_breakpoint_script_hits[correspond->unique_id()];
                 info.hit_ = true;
-                const std::uint32_t last_breakpoint_script_size_ = (running_core->get_cpsr() & 0x20) ? 2 : 4;
+                const std::uint32_t last_breakpoint_script_size_ = is_thumb ? 2 : 4;
                 info.addr_ = cur_addr;
 
                 bool should_full_flush = false;
@@ -719,9 +769,6 @@ namespace eka2l1::manager {
                 {
                     running_core->imb_range(addr, last_breakpoint_script_size_);
                 }
-
-                correspond->get_thread_context().set_pc(addr);
-                running_core->set_pc(addr);
             }
         }
     }

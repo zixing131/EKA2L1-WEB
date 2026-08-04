@@ -107,7 +107,8 @@ namespace eka2l1::manager {
 
         enum {
             FLAG_IS_ORDINAL = 1 << 0,
-            FLAG_BASED_IMAGE = 1 << 1
+            FLAG_BASED_IMAGE = 1 << 1,
+            FLAG_ROM_IMAGE = 1 << 2
         };
 
         std::uint8_t flags_;
@@ -222,7 +223,8 @@ namespace eka2l1::manager {
          * \param func              The hook.
          */
         std::uint32_t register_library_hook(const std::string &name, const std::uint32_t ord, const std::uint32_t process_uid, const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func);
-        std::uint32_t register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid, const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func);
+        std::uint32_t register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid,
+            const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func, const bool eager_resolve = true);
         std::uint32_t register_ipc(const std::string &server_name, const int opcode, const int invoke_when, void* func);
 
         bool call_breakpoints(const std::uint32_t addr, const std::uint32_t process_uid);

@@ -812,9 +812,13 @@ namespace eka2l1::kernel {
 
     void codeseg::calculate_hash() {
         XXH32_state_t *state = XXH32_createState();
+        std::uint8_t *mapped_code = nullptr;
+        if (is_rom()) {
+            get_code_run_addr(nullptr, &mapped_code);
+        }
 
         XXH32_reset(state, 0x5B001101);
-        XXH32_update(state, code_data.get(), code_size);
+        XXH32_update(state, is_rom() ? mapped_code : code_data.get(), code_size);
 
         hash_ = XXH32_digest(state);
         XXH32_freeState(state);
