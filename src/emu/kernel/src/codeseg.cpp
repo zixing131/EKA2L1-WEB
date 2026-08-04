@@ -254,6 +254,9 @@ namespace eka2l1::kernel {
 
         if (attaches.empty()) {
             if (!garbage_link.alone()) {
+                // Drops the collector's reference on this deceased codeseg;
+                // only safe because we already hold our own reference
+                // (increase_access_count() above).
                 kern->get_codedump_collector().remove(this);
             }
         }
