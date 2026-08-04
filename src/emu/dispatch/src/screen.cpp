@@ -27,6 +27,7 @@
 
 #include <drivers/graphics/graphics.h>
 #include <kernel/kernel.h>
+#include <kernel/thread.h>
 #include <services/window/common.h>
 #include <services/window/window.h>
 #include <services/window/classes/wingroup.h>
@@ -47,14 +48,29 @@ namespace eka2l1::dispatch {
     }
 
     void screen_post_transferer::complete_notify(epoc::notify_info *info) {
-        const std::lock_guard<std::mutex> guard(lock_);
+        {
+            const std::lock_guard<std::mutex> guard(lock_);
 
-        auto ite = std::find(vsync_notifies_.begin(), vsync_notifies_.end(), info);
-        if (ite != vsync_notifies_.end()) {
+            auto ite = std::find(vsync_notifies_.begin(), vsync_notifies_.end(), info);
+            if (ite == vsync_notifies_.end()) {
+                delete info;
+                return;
+            }
+
             vsync_notifies_.erase(ite);
         }
 
+        kernel_system *kern = info->requester ? info->requester->get_kernel_object_owner() : nullptr;
+        if (kern) {
+            kern->lock();
+        }
+
         info->complete(epoc::error_none);
+
+        if (kern) {
+            kern->unlock();
+        }
+
         delete info;
     }
 

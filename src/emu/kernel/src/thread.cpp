@@ -40,6 +40,37 @@
 
 namespace eka2l1 {
     namespace kernel {
+        static constexpr std::uint32_t WAIT_ANY_REQUEST_FAST_SVC = 0xEF800000;
+        static constexpr std::uint32_t WAIT_ANY_REQUEST_SVC = 0xEF000003;
+        static constexpr std::uint32_t WAIT_ANY_REQUEST_PATCHED_SVC = 0xEF000012;
+        static constexpr std::uint32_t ARM_BX_LR = 0xE12FFF1E;
+
+        struct wait_request_stub_info {
+            bool direct_wait_for_any_request = false;
+            bool wait_for_request_wrapper = false;
+        };
+
+        static wait_request_stub_info identify_wait_request_stub(memory_system *mem, kernel::process *owner,
+            const arm::core::thread_context &ctx, const bool allow_fast_wait_for_any) {
+            const std::uint32_t *svc_instruction = (ctx.get_pc() >= 4)
+                ? eka2l1::ptr<std::uint32_t>(ctx.get_pc() - 4).get(mem)
+                : nullptr;
+            const std::uint32_t *return_instruction = eka2l1::ptr<std::uint32_t>(ctx.get_pc()).get(mem);
+            const std::uint32_t svc_value = svc_instruction ? *svc_instruction : 0;
+            const std::uint32_t return_value = return_instruction ? *return_instruction : 0;
+            epoc::request_status *wait_target = eka2l1::ptr<epoc::request_status>(ctx.cpu_registers[0]).get(owner);
+
+            wait_request_stub_info info;
+            info.wait_for_request_wrapper = (svc_value == WAIT_ANY_REQUEST_FAST_SVC) && wait_target;
+            info.direct_wait_for_any_request = svc_instruction
+                && (return_value == ARM_BX_LR)
+                && ((svc_value == WAIT_ANY_REQUEST_SVC)
+                    || (svc_value == WAIT_ANY_REQUEST_PATCHED_SVC)
+                    || (allow_fast_wait_for_any && (svc_value == WAIT_ANY_REQUEST_FAST_SVC) && !info.wait_for_request_wrapper));
+
+            return info;
+        }
+
         int map_thread_priority_to_calc(thread_priority pri) {
             switch (pri) {
             case thread_priority::priority_much_less:
@@ -460,14 +491,15 @@ namespace eka2l1 {
                 return false;
             }
 
-            sleep_level = 0;
+            sleep_level = 1;
 
-            while (state == thread_state::run) {
-                wait_for_any_request();
-                sleep_level++;
+            // This HLE sleep is used for host-side frame pacing. It should not
+            // consume or restore guest request signals.
+            if (!scheduler->sleep(this, ussecs, true)) {
+                sleep_level = 0;
+                return false;
             }
 
-            scheduler->sleep(this, ussecs, false);
             return true;
         }
 
@@ -487,8 +519,8 @@ namespace eka2l1 {
 
                 signal_request();
             } else {
-                signal_request(sleep_level);
                 sleep_level = 0;
+                scheduler->dewait(this);
             }
 
             sleep_nof_sts = 0;
@@ -769,7 +801,38 @@ namespace eka2l1 {
         }
 
         void thread::wait_for_any_request() {
-            request_sema->wait(0);
+            kernel::process *owner = owning_process();
+
+            do {
+                const int before_count = request_sema->count();
+                utils::active_scheduler *act_sched_pre = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
+                const bool has_ready_request_pre = act_sched_pre && act_sched_pre->has_ready_request(owner);
+                const wait_request_stub_info stub_pre = identify_wait_request_stub(mem, owner, ctx, true);
+
+                if ((before_count <= 0) && has_ready_request_pre && stub_pre.direct_wait_for_any_request) {
+                    break;
+                }
+
+                request_sema->wait(0);
+
+                if (state != thread_state::run) {
+                    break;
+                }
+
+                utils::active_scheduler *act_sched = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
+                const bool has_ready_request = act_sched && act_sched->has_ready_request(owner);
+                // Only absorb stale signals from User::WaitForAnyRequest's direct
+                // stub, not from User::WaitForRequest wrappers or arbitrary waits.
+                const wait_request_stub_info stub = identify_wait_request_stub(mem, owner, ctx, false);
+
+                if (!act_sched || has_ready_request) {
+                    break;
+                }
+
+                if (!stub.direct_wait_for_any_request) {
+                    break;
+                }
+            } while (true);
         }
 
         void thread::signal_request(int count) {

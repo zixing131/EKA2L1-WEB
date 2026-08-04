@@ -82,6 +82,10 @@ namespace eka2l1::utils {
     }
 
     bool active_scheduler::check_stray(kernel::process *owner) {
+        if (has_ready_request(owner)) {
+            return false;
+        }
+
         eka2l1::ptr<double_queue_link> link = act_queue_.head_.next_;
 
         do {
@@ -95,10 +99,6 @@ namespace eka2l1::utils {
             eka2l1::ptr<active_object> act_obj_addr = (link + (-act_queue_.offset_to_link_)).cast<active_object>();
             active_object *obj = act_obj_addr.get(owner);
 
-            if (obj && ((obj->sts_.status != epoc::status_pending) && (obj->sts_.flags & epoc::request_status::active))) {
-                return false;
-            }
-
             obj->dump(owner);
 
             if (link == act_queue_.head_.prev_) {
@@ -110,5 +110,32 @@ namespace eka2l1::utils {
         } while (true);
 
         return true;
+    }
+
+    bool active_scheduler::has_ready_request(kernel::process *owner) {
+        eka2l1::ptr<double_queue_link> link = act_queue_.head_.next_;
+
+        do {
+            double_queue_link *real_link = link.get(owner);
+
+            if (!real_link) {
+                break;
+            }
+
+            eka2l1::ptr<active_object> act_obj_addr = (link + (-act_queue_.offset_to_link_)).cast<active_object>();
+            active_object *obj = act_obj_addr.get(owner);
+
+            if (obj && ((obj->sts_.status != epoc::status_pending) && (obj->sts_.flags & epoc::request_status::active))) {
+                return true;
+            }
+
+            if (link == act_queue_.head_.prev_) {
+                break;
+            }
+
+            link = real_link->next_;
+        } while (true);
+
+        return false;
     }
 }
