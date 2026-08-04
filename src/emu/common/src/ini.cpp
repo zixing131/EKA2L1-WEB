@@ -281,7 +281,10 @@ namespace eka2l1::common {
                 cto_stop = '\0';
             }
 
+            bool quoted = false;
+
             if (line[counter] == '"') {
+                quoted = true;
                 cto_stop = '"';
                 counter += 1;
             } else if (line[counter] == '[') {
@@ -290,15 +293,30 @@ namespace eka2l1::common {
 
             std::size_t begin = counter;
 
+            // A quoted token ends at its closing quote and nowhere else. Separators that
+            // normally break a token (comma, tab) are ordinary characters inside quotes:
+            // central repository entries store whole comma-separated setting lists that way.
             while (counter < line.length() && line[counter] != cto_stop
-                && line[counter] != ',' && line[counter] != '\t') {
+                && (quoted || (line[counter] != ',' && line[counter] != '\t'))) {
                 counter++;
             }
 
             std::size_t len = counter - begin + (cto_stop == ']' ? 1 : 0);
 
+            // Eat the closing quote, else the next token would start on it and be read as
+            // the opening quote of a string that never terminates.
+            if (quoted && (counter < line.length())) {
+                counter++;
+            }
+
             // Stage 1 of tokenizing
             std::string trim1 = line.substr(begin, len);
+
+            if (quoted) {
+                // Quoted content is literal: no key=value splitting inside it.
+                return trim1;
+            }
+
             std::size_t equal_pos = trim1.find('=');
 
             if ((trim1 != "=") && (equal_pos != std::string::npos)) {

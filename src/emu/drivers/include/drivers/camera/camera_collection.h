@@ -26,6 +26,10 @@
 namespace eka2l1::drivers::camera {
     class collection {
     public:
+        // The collection is owned through a unique_ptr<collection>, so deleting
+        // a backend through the base pointer needs this to be virtual.
+        virtual ~collection() = default;
+
         virtual std::uint32_t count() const = 0;
         virtual std::unique_ptr<instance> make_camera(const std::uint32_t camera_index) = 0;
     };

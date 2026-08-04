@@ -193,6 +193,15 @@ namespace eka2l1::epoc {
         // From Domain Server request
         DEFINE_INT_PROP(sys, 0x1020e406, 0x250, 0);
 
+        // Published by the system state manager at boot on a real device. Without them
+        // SysUtil's critical-disk-space check finds no threshold anywhere and fails, and
+        // a caller that checks free space before writing (Camera saving a photo) never
+        // finishes.
+        DEFINE_INT_PROP(sys, epoc::DISK_LEVEL_CATEGORY, epoc::RAM_DISK_CRITICAL_THRESHOLD_KEY,
+            epoc::RAM_DISK_CRITICAL_THRESHOLD);
+        DEFINE_INT_PROP(sys, epoc::DISK_LEVEL_CATEGORY, epoc::OTHER_DISK_CRITICAL_THRESHOLD_KEY,
+            epoc::OTHER_DISK_CRITICAL_THRESHOLD);
+
         DEFINE_BIN_PROP(sys, epoc::SYS_CATEGORY, epoc::LOCALE_LANG_KEY, sizeof(epoc::locale_language), lang);
         DEFINE_BIN_PROP(sys, epoc::SYS_CATEGORY, epoc::LOCALE_DATA_KEY, sizeof(epoc::locale), locale);
         DEFINE_BIN_PROP(sys, epoc::SYS_CATEGORY, epoc::LOCALE_LOCALE_SETTINGS_KEY, sizeof(epoc::locale_locale_settings), locale_settings);

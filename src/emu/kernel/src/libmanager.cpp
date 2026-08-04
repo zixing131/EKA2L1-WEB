@@ -849,7 +849,7 @@ namespace eka2l1::hle {
             std::pair<std::optional<loader::e32img>, std::optional<loader::romimg>>
                 result{ std::nullopt, std::nullopt };
 
-            if (io_->exist(lib_path)) {
+            if (io_->exist(path)) {
                 symfile f = io_->open_file(path, READ_MODE | BIN_MODE | additional_mode_);
                 if (!f) {
                     return result;
@@ -918,6 +918,26 @@ namespace eka2l1::hle {
                     if (only_once) {
                         break;
                     }
+                }
+            }
+
+            return std::pair<std::optional<loader::e32img>, std::optional<loader::romimg>>{};
+        }
+
+        if (!eka2l1::has_root_name(lib_path, true)) {
+            // A path like \sys\bin\foo.exe names a directory but no drive. Symbian's
+            // loader searches every drive for it; opening it verbatim finds nothing.
+            for (drive_number drv = drive_a; drv <= drive_z; drv = static_cast<drive_number>(static_cast<int>(drv) + 1)) {
+                std::u16string candidate(1, drive_to_char16(drv));
+                candidate += u':';
+                candidate += lib_path;
+
+                auto result = open_and_get(candidate);
+                if (result.first != std::nullopt || result.second != std::nullopt) {
+                    if (full_path)
+                        *full_path = candidate;
+
+                    return result;
                 }
             }
 

@@ -81,6 +81,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for Accessory single connection subsession 0x{:X}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else {
@@ -109,8 +110,56 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for Accessory connection subsession 0x{:X}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
+        }
+
+        return false;
+    }
+
+    accessory_mode_subsession::accessory_mode_subsession(accessory_server *svr)
+        : accessory_subsession(svr) {
+    }
+
+    void accessory_mode_subsession::get_accessory_mode(service::ipc_context *ctx) {
+        epoc::acc::accessory_mode mode;
+        mode.mode_ = epoc::acc::accessory_mode_hand_portable;
+        mode.audio_output_status_ = 0;
+
+        ctx->write_data_to_descriptor_argument<epoc::acc::accessory_mode>(0, mode);
+        ctx->complete(epoc::error_none);
+    }
+
+    bool accessory_mode_subsession::fetch(service::ipc_context *ctx) {
+        switch (ctx->msg->function) {
+        case epoc::acc::opcode_modern_get_accessory_mode:
+        case epoc::acc::opcode_modern_get_accessory_mode_async:
+            get_accessory_mode(ctx);
+            break;
+
+        case epoc::acc::opcode_modern_notify_accessory_mode_changed:
+            // Nothing ever plugs in or out, so this request stays pending for good.
+            mode_changed_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+            break;
+
+        case epoc::acc::opcode_modern_cancel_notify_accessory_mode_changed:
+            mode_changed_nof_.complete(epoc::error_cancel);
+            ctx->complete(epoc::error_none);
+            break;
+
+        case epoc::acc::opcode_modern_cancel_get_accessory_mode:
+            ctx->complete(epoc::error_none);
+            break;
+
+        case epoc::acc::opcode_modern_close_accessory_mode_subsession:
+            ctx->complete(epoc::error_none);
+            return true;
+
+        default:
+            LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for Accessory mode subsession 0x{:X}", ctx->msg->function);
+            ctx->complete(epoc::error_not_supported);
+            break;
         }
 
         return false;
@@ -123,6 +172,14 @@ namespace eka2l1 {
 
     void accessory_session::create_accessory_single_connection_subsession(service::ipc_context *ctx) {
         accessory_subsession_instance inst = std::make_unique<accessory_single_connection_subsession>(server<accessory_server>());
+        const std::uint32_t id = static_cast<std::uint32_t>(subsessions_.add(inst));
+
+        ctx->write_data_to_descriptor_argument<std::uint32_t>(3, id);
+        ctx->complete(epoc::error_none);
+    }
+
+    void accessory_session::create_accessory_mode_subsession(service::ipc_context *ctx) {
+        accessory_subsession_instance inst = std::make_unique<accessory_mode_subsession>(server<accessory_server>());
         const std::uint32_t id = static_cast<std::uint32_t>(subsessions_.add(inst));
 
         ctx->write_data_to_descriptor_argument<std::uint32_t>(3, id);
@@ -148,6 +205,10 @@ namespace eka2l1 {
                 create_accessory_single_connection_subsession(ctx);
                 return;
 
+            case epoc::acc::opcode_modern_create_accessory_mode_subsession:
+                create_accessory_mode_subsession(ctx);
+                return;
+
             default:
                 break;
             }
@@ -165,6 +226,9 @@ namespace eka2l1 {
             }
         }
 
+        // Every request must be answered: leaving one outstanding blocks the client
+        // thread forever, since these are all synchronous SendReceive calls.
         LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for accessory session 0x{:X}", ctx->msg->function);
+        ctx->complete(epoc::error_not_supported);
     }
 }

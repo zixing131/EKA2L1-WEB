@@ -699,6 +699,28 @@ namespace eka2l1::epoc {
         full_path_ptr.get(crr_pr)->assign(crr_pr, path_utf8);
     }
 
+    // Exec::GetModuleNameFromAddress. Unlike Dll::FileName's exec it reports whether the
+    // address could be attributed at all, and callers (TExtendedLocale::GetLocaleDllName,
+    // and the SQL server on startup) branch on that code.
+    BRIDGE_FUNC(std::int32_t, get_module_name_from_address, std::int32_t addr, eka2l1::ptr<epoc::des8> module_name_ptr) {
+        std::optional<std::u16string> full_path = get_dll_full_path(kern, addr);
+
+        if (!full_path) {
+            LOG_TRACE(KERNEL, "No module contains address 0x{:X}", static_cast<std::uint32_t>(addr));
+            return epoc::error_not_found;
+        }
+
+        kernel::process *crr_pr = kern->crr_process();
+        epoc::des8 *module_name = module_name_ptr.get(crr_pr);
+
+        if (!module_name) {
+            return epoc::error_argument;
+        }
+
+        module_name->assign(crr_pr, common::ucs2_to_utf8(*full_path));
+        return epoc::error_none;
+    }
+
     /***********************************/
     /* LOCALE */
     /**********************************/
@@ -842,6 +864,13 @@ namespace eka2l1::epoc {
         if ((int)msg->args.get_arg_type(param) & (int)ipc_arg_type::flag_des) {
             epoc::desc_base *base = eka2l1::ptr<epoc::desc_base>(msg->args.args[param]).get(msg->own_thr->owning_process());
 
+            // The slot is typed as a descriptor but the client may still have passed a
+            // null or unmapped address; Symbian answers KErrBadDescriptor rather than
+            // faulting the file server.
+            if (!base) {
+                return epoc::error_bad_descriptor;
+            }
+
             return base->get_length();
         }
 
@@ -863,7 +892,13 @@ namespace eka2l1::epoc {
 
         if ((int)type & (int)ipc_arg_type::flag_des) {
             kernel::process *own_pr = msg->own_thr->owning_process();
-            return eka2l1::ptr<epoc::des8>(msg->args.args[param]).get(own_pr)->get_max_length(own_pr);
+            epoc::des8 *base = eka2l1::ptr<epoc::des8>(msg->args.args[param]).get(own_pr);
+
+            if (!base) {
+                return epoc::error_bad_descriptor;
+            }
+
+            return base->get_max_length(own_pr);
         }
 
         return epoc::error_bad_descriptor;
@@ -6092,6 +6127,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xBA, message_queue_notify_data_available),
         BRIDGE_REGISTER(0xBB, message_queue_cancel_notify_available),
         BRIDGE_REGISTER(0xBD, property_define),
+        BRIDGE_REGISTER(0xBE, property_delete),
         BRIDGE_REGISTER(0xBF, property_attach),
         BRIDGE_REGISTER(0xC0, property_subscribe),
         BRIDGE_REGISTER(0xC1, property_cancel),
@@ -6119,6 +6155,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xDF, mutex_is_held),
         BRIDGE_REGISTER(0xE0, leave_start),
         BRIDGE_REGISTER(0xE1, leave_end),
+        BRIDGE_REGISTER(0xE3, get_module_name_from_address),
         BRIDGE_REGISTER(0xE3, get_locale_dll_name),
         BRIDGE_REGISTER(0xE6, session_security_info),
         BRIDGE_REGISTER(0xE9, btrace_out),
@@ -6299,6 +6336,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xDE, mutex_is_held),
         BRIDGE_REGISTER(0xDF, leave_start),
         BRIDGE_REGISTER(0xE0, leave_end),
+        BRIDGE_REGISTER(0xE2, get_module_name_from_address),
         BRIDGE_REGISTER(0xE5, session_security_info),
         BRIDGE_REGISTER(0xE8, btrace_out)
     };
@@ -6459,6 +6497,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xBF, property_cancel),
         BRIDGE_REGISTER(0xC0, property_get_int),
         BRIDGE_REGISTER(0xC1, property_get_bin),
+        BRIDGE_REGISTER(0xC2, property_set_int),
         BRIDGE_REGISTER(0xC3, property_set_bin),
         BRIDGE_REGISTER(0xC4, property_find_get_int),
         BRIDGE_REGISTER(0xC5, property_find_get_bin),
@@ -6476,6 +6515,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xDD, mutex_is_held),
         BRIDGE_REGISTER(0xDE, leave_start),
         BRIDGE_REGISTER(0xDF, leave_end),
+        BRIDGE_REGISTER(0xE1, get_module_name_from_address),
         BRIDGE_REGISTER(0xE4, session_security_info),
         BRIDGE_REGISTER(0xE7, btrace_out)
     };

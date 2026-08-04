@@ -357,7 +357,21 @@ namespace eka2l1 {
                     return;
                 }
 
-                LOG_WARN(SERVICE_TRACK, "Unimplemented IPC call: 0x{:x} for server: {}", func, obj_name);
+                // Error level on purpose: the normal-use log preset pins Service.Track at
+                // error, so this would otherwise be invisible in exactly the situation it
+                // exists for - a guest wedged on an opcode nobody implemented.
+                LOG_ERROR(SERVICE_TRACK, "Unimplemented IPC call: 0x{:x} for server: {}", func, obj_name);
+
+                // Leaving the message pending wedges the client for good: a synchronous
+                // SendReceive never returns, and an asynchronous one keeps its active
+                // object armed forever. A real server always completes, so answer with
+                // KErrNotSupported rather than dropping the message on the floor.
+                ipc_context context;
+
+                context.sys = sys;
+                context.msg = process_msg;
+                context.complete(epoc::error_not_supported);
+
                 return;
             }
 

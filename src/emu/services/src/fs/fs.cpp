@@ -328,8 +328,20 @@ namespace eka2l1 {
             ctx->complete(epoc::error_none);
             break;
 
+        // A disk-space notification legitimately stays outstanding until the free space
+        // crosses the client's threshold, which EKA2L1 never reports. Leave it pending
+        // rather than completing it, or a client that re-arms on completion spins.
+        case epoc::fs_msg_notify_disk_space:
+            LOG_TRACE(SERVICE_EFSRV, "Fs::NotifyDiskSpace left pending, not implemented");
+            break;
+
         default: {
             LOG_ERROR(SERVICE_EFSRV, "Unknown FSServer client opcode {}!", ctx->msg->function);
+
+            // Everything else is a request a real file server answers straight away, so
+            // dropping it wedges the client: the harvester mounts its file-system plugins
+            // with Fs::MountPlugin (108) and waits for the reply that never came.
+            ctx->complete(epoc::error_not_supported);
             break;
         }
 

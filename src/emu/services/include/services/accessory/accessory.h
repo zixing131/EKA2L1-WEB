@@ -56,6 +56,19 @@ namespace eka2l1 {
         void get_accessory_connection_status(service::ipc_context *ctx);
     };
 
+    // RAccessoryMode. The emulator has no removable accessory, so the mode is always
+    // hand-portable and a mode-changed notification simply never fires.
+    struct accessory_mode_subsession : public accessory_subsession {
+    protected:
+        epoc::notify_info mode_changed_nof_;
+
+    public:
+        explicit accessory_mode_subsession(accessory_server *svr);
+
+        bool fetch(service::ipc_context *ctx) override;
+        void get_accessory_mode(service::ipc_context *ctx);
+    };
+
     using accessory_subsession_instance = std::unique_ptr<accessory_subsession>;
 
     struct accessory_session : public service::typical_session {
@@ -67,5 +80,6 @@ namespace eka2l1 {
 
         void fetch(service::ipc_context *ctx) override;
         void create_accessory_single_connection_subsession(service::ipc_context *ctx);
+        void create_accessory_mode_subsession(service::ipc_context *ctx);
     };
 }
