@@ -132,12 +132,15 @@ namespace eka2l1::epoc {
         etel_mobile_phone_get_network_registration_status_cancel = 20554,
         etel_mobile_phone_notify_battery_info_change_cancel = 20567,
         etel_mobile_phone_notify_indicator_changes_cancel = 20584,
+        etel_mobile_phone_notify_network_registration_status_change_cancel = 20592,
+        etel_mobile_phone_notify_signal_strength_change_cancel = 20597,
         etel_mobile_phone_get_home_network = 22004,
         etel_mobile_phone_get_phone_id = 22012,
         etel_mobile_phone_get_subscriber_id = 22017,
         etel_mobile_phone_get_current_network = 26000,
         etel_mobile_phone_notify_current_network_change = 26001,
-        etel_mobile_phone_get_current_network_cancel = 26500
+        etel_mobile_phone_get_current_network_cancel = 26500,
+        etel_mobile_phone_notify_current_network_change_cancel = 26501
     };
 
     enum etel_network_type : std::uint32_t {

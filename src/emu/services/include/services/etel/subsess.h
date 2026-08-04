@@ -85,9 +85,12 @@ namespace eka2l1 {
         void get_signal_strength(eka2l1::service::ipc_context *ctx);
         void get_battery_info(eka2l1::service::ipc_context *ctx);
         void notify_network_registration_status_change(eka2l1::service::ipc_context *ctx);
+        void notify_network_registration_status_change_cancel(eka2l1::service::ipc_context *ctx);
         void get_network_registration_status_cancel(eka2l1::service::ipc_context *ctx);
         void notify_signal_strength_change(eka2l1::service::ipc_context *ctx);
+        void notify_signal_strength_change_cancel(eka2l1::service::ipc_context *ctx);
         void notify_current_network_change(eka2l1::service::ipc_context *ctx);
+        void notify_current_network_change_cancel(eka2l1::service::ipc_context *ctx);
         void notify_indicator_change(eka2l1::service::ipc_context *ctx);
         void cancel_indicator_change(eka2l1::service::ipc_context *ctx);
         void get_current_network_cancel(eka2l1::service::ipc_context *ctx);

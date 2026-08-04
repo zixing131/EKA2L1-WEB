@@ -239,12 +239,27 @@ namespace eka2l1 {
         network_registration_status_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
     }
 
+    void etel_phone_subsession::notify_network_registration_status_change_cancel(eka2l1::service::ipc_context *ctx) {
+        network_registration_status_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
     void etel_phone_subsession::notify_signal_strength_change(eka2l1::service::ipc_context *ctx) {
         signal_strength_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
     }
 
+    void etel_phone_subsession::notify_signal_strength_change_cancel(eka2l1::service::ipc_context *ctx) {
+        signal_strength_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
     void etel_phone_subsession::notify_current_network_change(eka2l1::service::ipc_context *ctx) {
         current_network_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+    }
+
+    void etel_phone_subsession::notify_current_network_change_cancel(eka2l1::service::ipc_context *ctx) {
+        current_network_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
     }
 
     void etel_phone_subsession::notify_indicator_change(eka2l1::service::ipc_context *ctx) {
@@ -405,8 +420,16 @@ namespace eka2l1 {
                 notify_network_registration_status_change(ctx);
                 break;
 
+            case epoc::etel_mobile_phone_notify_network_registration_status_change_cancel:
+                notify_network_registration_status_change_cancel(ctx);
+                break;
+
             case epoc::etel_mobile_phone_notify_signal_strength_change:
                 notify_signal_strength_change(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_signal_strength_change_cancel:
+                notify_signal_strength_change_cancel(ctx);
                 break;
 
             case epoc::etel_mobile_phone_get_network_registration_status_cancel:
@@ -431,6 +454,10 @@ namespace eka2l1 {
 
             case epoc::etel_mobile_phone_notify_current_network_change:
                 notify_current_network_change(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_current_network_change_cancel:
+                notify_current_network_change_cancel(ctx);
                 break;
 
             case epoc::etel_mobile_phone_get_current_network_cancel:
