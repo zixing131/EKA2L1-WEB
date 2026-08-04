@@ -201,7 +201,8 @@ namespace eka2l1::dispatch {
 
         const std::string url_u8 = common::ucs2_to_utf8(url_str);
 
-        if (!eplayer->impl_ || !eplayer->impl_->open_url(url_u8)) {
+        bool supplied = eplayer->impl_ && eplayer->impl_->open_url(url_u8);
+        if (!supplied) {
             drivers::audio_driver *driver = sys->get_audio_driver();
             std::vector<drivers::player_type> types = driver->get_suitable_player_types(url_u8);
 
@@ -210,22 +211,15 @@ namespace eka2l1::dispatch {
                     continue;
                 }
                 auto new_player = drivers::new_audio_player(driver, types[i]);
-                if (new_player) {
-                    bool open_res = new_player->open_url(url_u8);
-
-                    if (!eplayer->impl_ || open_res)
-                        eplayer->impl_ = std::move(new_player);
-
-                    if (open_res)
-                        break;
+                if (new_player && new_player->open_url(url_u8)) {
+                    eplayer->impl_ = std::move(new_player);
+                    supplied = true;
+                    break;
                 }
             }
         }
 
-        if (!eplayer->impl_) {
-            // No backend can play this format on this platform (e.g. WASM has
-            // no ffmpeg): report instead of dereferencing a null player.
-            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports URL {}", url_u8);
+        if (!supplied) {
             return epoc::error_not_supported;
         }
 
@@ -256,7 +250,8 @@ namespace eka2l1::dispatch {
         eplayer->custom_stream_ = std::make_unique<epoc::rw_des_stream>(buffer, pr);
         common::rw_stream *custom_good_stream = reinterpret_cast<common::rw_stream *>(eplayer->custom_stream_.get());
 
-        if (!eplayer->impl_ || !eplayer->impl_->open_custom(custom_good_stream)) {
+        bool supplied = eplayer->impl_ && eplayer->impl_->open_custom(custom_good_stream);
+        if (!supplied) {
             drivers::audio_driver *driver = sys->get_audio_driver();
             std::vector<drivers::player_type> types = driver->get_suitable_player_types("");
 
@@ -265,20 +260,15 @@ namespace eka2l1::dispatch {
                     continue;
                 }
                 auto new_player = drivers::new_audio_player(driver, types[i]);
-                if (new_player) {
-                    const bool open_res = new_player->open_custom(custom_good_stream);
-                    if (open_res || !eplayer->impl_) {
-                        eplayer->impl_ = std::move(new_player);
-                    }
-
-                    if (open_res)
-                        break;
+                if (new_player && new_player->open_custom(custom_good_stream)) {
+                    eplayer->impl_ = std::move(new_player);
+                    supplied = true;
+                    break;
                 }
             }
         }
 
-        if (!eplayer->impl_) {
-            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports the supplied buffer on this platform");
+        if (!supplied) {
             return epoc::error_not_supported;
         }
 
@@ -302,10 +292,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->play()) {
@@ -399,21 +385,13 @@ namespace eka2l1::dispatch {
     // use-after-free (observed crashing in notify_info::complete on the CoreAudio render
     // thread). Validate the requester against the kernel's live thread list under the kernel
     // lock and drop the stale notification instead of dereferencing a dangling pointer.
-    static void complete_audio_notify_if_alive(kernel_system *kern, epoc::notify_info &info) {
-        if (kern == nullptr) {
-            return;
-        }
-
-        kern->lock();
-
+    static void complete_audio_notify_if_alive_locked(kernel_system *kern, epoc::notify_info &info) {
         if (!info.empty() && kern->is_thread_alive(info.requester)) {
             info.complete(epoc::error_none);
         } else {
             // Requester is gone; drop the stale notification without signalling it.
             info.sts = 0;
         }
-
-        kern->unlock();
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_notify_any_done, eka2l1::ptr<void> handle, eka2l1::ptr<epoc::request_status> sts) {
@@ -425,20 +403,32 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
-        }
-
         epoc::notify_info info;
 
         info.requester = sys->get_kernel_system()->crr_thread();
         info.sts = sts;
 
         kernel_system *kern = sys->get_kernel_system();
+        const std::uint32_t player_handle = handle.ptr_address();
 
-        if (!eplayer->impl_->notify_any_done([eplayer, kern](std::uint8_t *data) {
+        // The play-done callback runs on the audio backend's render thread, which must never
+        // block on the kernel lock: the guest stops or destroys a player from a dispatch call
+        // that runs under that lock, and the host stop waits for the render callback in flight
+        // to return (AudioOutputUnitStop is synchronous). Blocking here deadlocks the two, and
+        // with them every other thread that wants the kernel lock afterwards - seen on iOS as a
+        // scene-update watchdog kill with the guest inside eaudio_player_play, which stops the
+        // previous stream first. Complete only when the lock happens to be free, and otherwise
+        // let the emulation thread do it.
+        if (!eplayer->impl_->notify_any_done([eplayer, kern, dispatcher, player_handle](std::uint8_t *data) {
+                if (!kern->try_lock()) {
+                    dispatcher->defer_player_notify(player_handle);
+                    return;
+                }
+
                 epoc::notify_info *info = reinterpret_cast<epoc::notify_info *>(data);
-                complete_audio_notify_if_alive(kern, *info);
+                complete_audio_notify_if_alive_locked(kern, *info);
+
+                kern->unlock();
 
                 eplayer->impl_->clear_notify_done();
             },
@@ -456,10 +446,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_none;
         }
 
         const std::lock_guard<std::mutex> guard(eplayer->impl_->lock_);
@@ -503,10 +489,6 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
-        }
-
         return static_cast<std::int32_t>(eplayer->impl_->get_dest_freq());
     }
 
@@ -517,10 +499,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_freq(sample_rate)) {
@@ -539,10 +517,6 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
-        }
-
         return static_cast<std::int32_t>(eplayer->impl_->get_dest_channel_count());
     }
 
@@ -553,10 +527,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_channel_count(channel_count)) {
@@ -579,10 +549,6 @@ namespace eka2l1::dispatch {
             return epoc::error_argument;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
-        }
-
         *encoding = eplayer->impl_->get_dest_encoding();
         return epoc::error_none;
     }
@@ -594,10 +560,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_encoding(encoding)) {
@@ -614,10 +576,6 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
-        }
-
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
         }
 
         eplayer->impl_->set_dest_container_format(container_format);
@@ -652,10 +610,6 @@ namespace eka2l1::dispatch {
             return epoc::error_argument;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
-        }
-
         *pos_get = eplayer->impl_->position();
         return epoc::error_none;
     }
@@ -687,9 +641,17 @@ namespace eka2l1::dispatch {
         stream_org_new->ll_stream_->register_callback(
             drivers::dsp_stream_notification_more_buffer, [kern](void *userdata) {
                 dsp_epoc_stream *epoc_stream = reinterpret_cast<dsp_epoc_stream *>(userdata);
-                const std::lock_guard<std::mutex> guard(epoc_stream->lock_);
+                if (!kern->try_lock()) {
+                    return false;
+                }
 
-                complete_audio_notify_if_alive(kern, epoc_stream->copied_info_);
+                {
+                    const std::lock_guard<std::mutex> guard(epoc_stream->lock_);
+                    complete_audio_notify_if_alive_locked(kern, epoc_stream->copied_info_);
+                }
+
+                kern->unlock();
+                return true;
             },
             stream_new.get());
 

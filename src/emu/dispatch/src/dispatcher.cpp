@@ -37,6 +37,8 @@
 
 #include <mem/mem.h>
 
+#include <algorithm>
+
 namespace eka2l1::dispatch {
     static std::uint32_t MAX_TRAMPOLINE_CHUNK_SIZE = 0x4000;
 
@@ -52,6 +54,7 @@ namespace eka2l1::dispatch {
         , egl_controller_(std::make_unique<egl_controller>(nullptr))
         , graphics_string_added_(false)
         , has_mediums_pending_destroy_(false)
+        , has_players_notify_deferred_(false)
         , process_exit_callback_handle_(0) {
         trampoline_chunk_ = kern->create<kernel::chunk>(kern->get_memory_system(), nullptr, "DispatcherTrampolines", 0,
             MAX_TRAMPOLINE_CHUNK_SIZE, MAX_TRAMPOLINE_CHUNK_SIZE, prot_read_write_exec, kernel::chunk_type::normal,
@@ -108,20 +111,80 @@ namespace eka2l1::dispatch {
         has_mediums_pending_destroy_ = true;
     }
 
+    void dispatcher::defer_player_notify(const std::uint32_t player_handle) {
+        const std::lock_guard<std::mutex> guard(players_notify_deferred_lock_);
+
+        if (std::find(players_notify_deferred_.begin(), players_notify_deferred_.end(), player_handle)
+            == players_notify_deferred_.end()) {
+            players_notify_deferred_.push_back(player_handle);
+        }
+
+        has_players_notify_deferred_ = true;
+    }
+
     void dispatcher::flush_pending_teardown() {
-        if (!has_mediums_pending_destroy_.exchange(false)) {
+        if (has_mediums_pending_destroy_.exchange(false)) {
+            std::vector<std::unique_ptr<dsp_medium>> to_destroy;
+            {
+                const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
+                to_destroy.swap(mediums_pending_destroy_);
+            }
+
+            // Destroyed outside of the lock: a medium destructor blocks until the audio backend
+            // has drained its render callback.
+            to_destroy.clear();
+        }
+
+        if (has_players_notify_deferred_.load(std::memory_order_relaxed)) {
+            kern_->lock();
+            complete_deferred_player_notifies_locked();
+
+            kern_->unlock();
+        }
+    }
+
+    void dispatcher::complete_deferred_player_notifies_locked() {
+        // Relaxed load first: this runs on every dispatch call, and the deferral is rare
+        // enough that the read-modify-write below should not be on that path.
+        if (!has_players_notify_deferred_.load(std::memory_order_relaxed)
+            || !has_players_notify_deferred_.exchange(false)) {
             return;
         }
 
-        std::vector<std::unique_ptr<dsp_medium>> to_destroy;
+        std::vector<std::uint32_t> to_complete;
         {
-            const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
-            to_destroy.swap(mediums_pending_destroy_);
+            const std::lock_guard<std::mutex> guard(players_notify_deferred_lock_);
+            to_complete.swap(players_notify_deferred_);
         }
 
-        // Destroyed outside of the lock: a medium destructor blocks until the audio backend
-        // has drained its render callback.
-        to_destroy.clear();
+        for (const std::uint32_t handle : to_complete) {
+            // The player may have been destroyed (or its request cancelled) while the
+            // notification was waiting here; both leave nothing to complete.
+            dsp_epoc_player *player = dsp_manager_.get_object<dsp_epoc_player>(handle);
+
+            if (!player || !player->impl_) {
+                continue;
+            }
+
+            const std::lock_guard<std::mutex> guard(player->impl_->lock_);
+            std::uint8_t *notify = player->impl_->get_notify_userdata(nullptr);
+
+            if (!notify) {
+                continue;
+            }
+
+            epoc::notify_info *info = reinterpret_cast<epoc::notify_info *>(notify);
+
+            // The requester thread may be gone (app exit, player teardown): completing against
+            // a destroyed thread dereferences a dangling pointer.
+            if (!info->empty() && kern_->is_thread_alive(info->requester)) {
+                info->complete(epoc::error_none);
+            } else {
+                info->sts = 0;
+            }
+
+            player->impl_->clear_notify_done();
+        }
     }
 
     void dispatcher::set_graphics_driver(drivers::graphics_driver *driver) {
@@ -151,6 +214,12 @@ namespace eka2l1::dispatch {
     }
 
     void dispatcher::resolve(eka2l1::system *sys, const std::uint32_t function_ord) {
+        // Runs under the kernel lock (see lib_manager::call_svc). Notifications the audio render
+        // thread handed over are delivered before the dispatch call below, so that a guest that
+        // cancels or re-arms its request in this very call sees the completion first, exactly as
+        // it would have if the render thread had taken the lock itself.
+        complete_deferred_player_notifies_locked();
+
         auto dispatch_find_result = dispatch::dispatch_funcs.find(function_ord);
 
         if (dispatch_find_result == dispatch::dispatch_funcs.end()) {
@@ -179,6 +248,13 @@ namespace eka2l1::dispatch {
         {
             const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
             mediums_pending_destroy_.clear();
+        }
+
+        // The players those handles refer to are gone with the manager above.
+        has_players_notify_deferred_ = false;
+        {
+            const std::lock_guard<std::mutex> guard(players_notify_deferred_lock_);
+            players_notify_deferred_.clear();
         }
 
         egl_controller_ = std::make_unique<egl_controller>(driver);
