@@ -45,9 +45,15 @@ namespace eka2l1 {
 
         default: {
             if (ctx->msg->function >= 1000) {
-                resource_->execute_command(*ctx);
+                if (!resource_) {
+                    LOG_ERROR(SERVICE_HWRM, "HWRM resource opcode 0x{:X} with no resource created", ctx->msg->function);
+                    ctx->complete(epoc::error_not_ready);
+                } else {
+                    resource_->execute_command(*ctx);
+                }
             } else {
                 LOG_ERROR(SERVICE_HWRM, "Unimplemented opcode for HWMR session 0x{:X}", ctx->msg->function);
+                ctx->complete(epoc::error_none);
             }
 
             break;

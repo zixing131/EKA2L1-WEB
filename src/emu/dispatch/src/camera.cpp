@@ -397,6 +397,7 @@ namespace eka2l1::dispatch {
 
         const std::lock_guard<std::mutex> guard(cam->lock_);
         if (!cam->impl_->set_parameter(static_cast<drivers::camera::parameter_key>(key), value)) {
+            LOG_WARN(HLE_DISPATCHER, "ecam_set_parameter unsupported: handle={} key={} value={}", handle, key, value);
             return epoc::error_not_supported;
         }
 

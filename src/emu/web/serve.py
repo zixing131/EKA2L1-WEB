@@ -33,6 +33,11 @@ class COOPCOEPHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        # Required under COEP require-corp; without it the browser reports
+        # net::ERR_FAILED for same-origin assets (icons, sw.js updates, …).
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        # Allow getUserMedia for the emulated Camera / ECam path.
+        self.send_header("Permissions-Policy", "camera=(self), microphone=()")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
         super().end_headers()

@@ -168,4 +168,101 @@ namespace eka2l1::drivers {
             return 44100;
         }
     };
+
+    // Accepts any URL/buffer and completes play immediately. Used on platforms
+    // without ffmpeg/WMF so guest MMF (Camera shutter sounds, etc.) does not
+    // Leave when open_url returns KErrNotSupported.
+    struct player_silent : public player {
+        bool playing_ = false;
+        std::uint32_t dest_freq_ = 16000;
+        std::uint32_t dest_channels_ = 1;
+        std::uint32_t dest_encoding_ = AUDIO_PCM16_CODEC_4CC;
+
+        bool play() override {
+            playing_ = true;
+            finish_callback cb;
+            std::vector<std::uint8_t> data;
+            {
+                const std::lock_guard<std::mutex> guard(lock_);
+                cb = callback_;
+                data = userdata_;
+            }
+            if (cb) {
+                cb(data.empty() ? nullptr : data.data());
+            }
+            playing_ = false;
+            return true;
+        }
+
+        bool record() override {
+            return false;
+        }
+
+        bool stop() override {
+            playing_ = false;
+            return true;
+        }
+
+        void pause() override {
+            playing_ = false;
+        }
+
+        bool crop() override {
+            return true;
+        }
+
+        bool open_url(const std::string &) override {
+            return true;
+        }
+
+        bool open_custom(common::rw_stream *) override {
+            return true;
+        }
+
+        void set_repeat(const std::int32_t, const std::int64_t) override {}
+        void set_position(const std::uint64_t) override {}
+        std::uint64_t position() const override {
+            return 0;
+        }
+        std::uint64_t duration() const override {
+            // Non-zero so callers that divide by duration / wait on progress
+            // do not special-case a zero clip as "not ready".
+            return 1000;
+        }
+
+        bool set_dest_freq(const std::uint32_t freq) override {
+            dest_freq_ = freq;
+            return true;
+        }
+        bool set_dest_channel_count(const std::uint32_t cn) override {
+            dest_channels_ = cn;
+            return true;
+        }
+        bool set_dest_encoding(const std::uint32_t enc) override {
+            dest_encoding_ = enc;
+            return true;
+        }
+        void set_dest_container_format(const std::uint32_t) override {}
+
+        std::uint32_t get_dest_freq() override {
+            return dest_freq_;
+        }
+        std::uint32_t get_dest_channel_count() override {
+            return dest_channels_;
+        }
+        std::uint32_t get_dest_encoding() override {
+            return dest_encoding_;
+        }
+
+        bool is_playing() const override {
+            return playing_;
+        }
+
+        player_type get_player_type() const override {
+            // Reuse tsf slot only for type tagging; silent is never selected via
+            // get_suitable_player_types — installed explicitly as a last-resort
+            // fallback when no real decoder exists for the clip.
+            return player_type_tsf;
+        }
+    };
 }

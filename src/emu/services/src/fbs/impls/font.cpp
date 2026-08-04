@@ -583,7 +583,10 @@ namespace eka2l1 {
     }
 
     void fbscli::get_nearest_font(service::ipc_context *ctx) {
-        std::optional<epoc::font_spec_v1> spec_arg = ctx->get_argument_data_from_descriptor<epoc::font_spec_v1>(0);
+        // EKA2 guests pass TFontSpec (= font_spec_v2, 72 bytes). EKA1 and our
+        // lookup only need the v1 prefix (64 bytes). Ignore the size delta so
+        // we do not warn-clamp and so reserved style pointers stay untouched.
+        std::optional<epoc::font_spec_v1> spec_arg = ctx->get_argument_data_from_descriptor<epoc::font_spec_v1>(0, true);
         if (!spec_arg) {
             ctx->complete(epoc::error_argument);
             return;

@@ -149,6 +149,8 @@ elseif(HAIKU)
     )
 elseif(EMSCRIPTEN)
     target_sources(drivers PRIVATE
+        include/drivers/camera/backend/web/camera_web.h
+        src/camera/backend/web/camera_web.cpp
         src/graphics/backend/context_emscripten.cpp
         src/graphics/backend/context_emscripten.h
     )

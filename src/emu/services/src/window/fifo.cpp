@@ -24,8 +24,6 @@
 #include <common/log.h>
 #include <services/window/fifo.h>
 
-#include <cassert>
-
 namespace eka2l1::epoc {
     bool event_fifo::is_my_priority_really_high(epoc::event_code evt) {
         switch (evt) {
@@ -76,50 +74,69 @@ namespace eka2l1::epoc {
     // Lone pointer ups
     // Lone focus lost/gain
     void event_fifo::do_purge() {
-        for (size_t i = 0; i < q_.size(); i++) {
+        // Walk with an explicit index bump so erasing at i does not skip the
+        // element that slides into that slot. An earlier version left key_up /
+        // key_down (and any other unhandled type) in the queue; with NDEBUG the
+        // assert was a no-op, the queue never shrank below maximum_element, and
+        // every subsequent queue_event re-ran purge + logged — Settings looked
+        // frozen because the console was flooded on the browser main thread.
+        for (std::size_t i = 0; i < q_.size();) {
+            bool erased = false;
+
             switch (q_[i].evt.type) {
             case epoc::event_code::event_password:
                 break;
 
             case epoc::event_code::null:
             case epoc::event_code::key:
+            case epoc::event_code::key_up:
+            case epoc::event_code::key_down:
+            case epoc::event_code::modifier_change:
             case epoc::event_code::touch_enter:
             case epoc::event_code::touch_exit: {
-                q_.erase(q_.begin() + i);
+                q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i));
+                erased = true;
                 break;
             }
 
             case epoc::event_code::touch: {
-                // TODO: implement logics in
-                // https://github.com/SymbianSource/oss.FCL.sf.os.graphics/blob/ff133bc50e6158bfb08cc093b0f0055321dcde99/windowing/windowserver/nga/SERVER/EVQUEUE.CPP#L630
-                // just purge it right now
-                q_.erase(q_.begin() + i);
+                // TODO: implement pair-aware pointer purge from Symbian EVQUEUE.
+                q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i));
+                erased = true;
                 break;
             }
 
             case epoc::event_code::focus_gained:
             case epoc::event_code::focus_lost: {
-                if ((i + 1 < q_.size()) && ((q_[i + 1].evt.type == epoc::event_code::focus_gained) || (q_[i + 1].evt.type == epoc::event_code::focus_lost))) {
-                    q_.erase(q_.begin() + i + 1);
-                    q_.erase(q_.begin() + i);
+                if ((i + 1 < q_.size()) && ((q_[i + 1].evt.type == epoc::event_code::focus_gained)
+                        || (q_[i + 1].evt.type == epoc::event_code::focus_lost))) {
+                    q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                    q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i));
+                    erased = true;
                 }
-
                 break;
             }
 
             case epoc::event_code::switch_on: {
-                if (i + 1 < q_.size() && (q_[i + 1].evt.type == epoc::event_code::switch_on)) {
-                    q_.erase(q_.begin() + i);
-                    break;
+                if ((i + 1 < q_.size()) && (q_[i + 1].evt.type == epoc::event_code::switch_on)) {
+                    q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i));
+                    erased = true;
                 }
+                break;
             }
 
             default: {
-                LOG_ERROR(SERVICE_WINDOW, "Unhandled purge of event type: {}", static_cast<int>(q_[i].evt.type));
-                assert(false);
-
+                // Unknown / not-yet-classified types must still leave the queue
+                // so purge can make room; otherwise we livelock as above.
+                LOG_WARN(SERVICE_WINDOW, "Purging unhandled event type: {}", static_cast<int>(q_[i].evt.type));
+                q_.erase(q_.begin() + static_cast<std::ptrdiff_t>(i));
+                erased = true;
                 break;
             }
+            }
+
+            if (!erased) {
+                ++i;
             }
         }
     }

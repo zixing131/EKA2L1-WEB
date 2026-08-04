@@ -404,6 +404,7 @@ namespace eka2l1::epoc {
 
         default: {
             LOG_WARN(SERVICE_WINDOW, "Unimplemented IPC call for screen driver: 0x{:x}", cmd.header.op);
+            ctx.complete(epoc::error_none);
             break;
         }
         }

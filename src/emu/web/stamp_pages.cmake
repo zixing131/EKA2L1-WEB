@@ -57,8 +57,19 @@ foreach(page ${STAMP_PAGES})
     string(REPLACE "src=\"js/i18n/en-US.js\"" "src=\"js/i18n/en-US.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "href=\"css/app.css\"" "href=\"css/app.css?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "href=\"manifest.json\"" "href=\"manifest.json?v=${BUILD_ID}\"" content "${content}")
+    # Version the SW URL in register('./sw.js'…) — single or double quotes.
+    string(REPLACE "register('./sw.js'" "register('./sw.js?v=${BUILD_ID}'" content "${content}")
+    string(REPLACE "register(\"./sw.js\"" "register(\"./sw.js?v=${BUILD_ID}\"" content "${content}")
     string(REPLACE "./sw.js\"" "./sw.js?v=${BUILD_ID}\"" content "${content}")
     file(WRITE "${page}" "${content}")
 endforeach()
+
+# edgeone.json (COOP/COEP/CORP/Permissions-Policy) is copied with pages/ above
+# so EdgeOne Pages deploys pick up the same isolation headers as serve.py.
+if(EXISTS "${STAGE_DIR}/edgeone.json")
+    message(STATUS "edgeone.json present in stage dir (isolation headers)")
+else()
+    message(WARNING "edgeone.json missing from ${STAGE_DIR} — EdgeOne deploys need it for SAB")
+endif()
 
 message(STATUS "Stamped web pages with build id ${BUILD_ID}")

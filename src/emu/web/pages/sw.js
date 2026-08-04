@@ -42,11 +42,23 @@ const APP_SHELL = [
     './icons/icon-512.png',
 ];
 
+function cacheShell(cache) {
+    // Prefer allSettled so one missing optional asset cannot abort install
+    // (addAll rejects the whole install on the first failure).
+    return Promise.all(
+        APP_SHELL.map((url) =>
+            cache.add(url).catch((err) => {
+                console.warn('[SW] precache skip', url, err && err.message);
+            })
+        )
+    );
+}
+
 // ─── 安装：预缓存应用外壳 ─────────────────────────────────────────────────────
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => cache.addAll(APP_SHELL))
+            .then((cache) => cacheShell(cache))
             .then(() => self.skipWaiting())
     );
 });
@@ -80,17 +92,17 @@ self.addEventListener('activate', (event) => {
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
 /**
- * 为响应注入 COOP / COEP / CORP 头，使 SharedArrayBuffer 在离线状态下可用。
- * 仅对可读的同源响应（非 opaque）执行注入。
+ * 为响应注入 COOP / COEP / CORP / Permissions-Policy，使 SharedArrayBuffer
+ * 与摄像头权限策略在离线状态下仍可用。仅对可读的同源响应执行注入。
  */
 function injectCrossOriginHeaders(response) {
-    // opaque 响应（type === 'opaque'）无法读取，跳过
     if (!response || response.type === 'opaque') return response;
 
     const headers = new Headers(response.headers);
     headers.set('Cross-Origin-Opener-Policy',   'same-origin');
     headers.set('Cross-Origin-Embedder-Policy',  'require-corp');
     headers.set('Cross-Origin-Resource-Policy',  'same-origin');
+    headers.set('Permissions-Policy', 'camera=(self), microphone=()');
 
     return new Response(response.body, {
         status:     response.status,
@@ -102,71 +114,72 @@ function injectCrossOriginHeaders(response) {
 /** 将网络响应存入缓存（仅成功响应）*/
 function storeInCache(request, response) {
     if (!response || !response.ok) return;
-    // Clone SYNCHRONOUSLY: the caller consumes response.body right after this
-    // returns (injectCrossOriginHeaders does `new Response(response.body,…)`),
-    // so cloning inside the async caches.open().then() would fail with
-    // "Response body is already used".
     const copy = response.clone();
-    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)).catch(() => {});
+}
+
+/** 网络优先，失败时回落缓存；永远不把 TypeError 抛给控制台。 */
+function networkThenCache(request) {
+    return fetch(request)
+        .then((r) => {
+            storeInCache(request, r);
+            return injectCrossOriginHeaders(r);
+        })
+        .catch(() =>
+            caches.match(request).then((cached) =>
+                cached ? injectCrossOriginHeaders(cached) : Response.error()
+            )
+        );
+}
+
+/** 缓存优先，未命中再走网络；网络失败时返回 Response.error()。 */
+function cacheThenNetwork(request) {
+    return caches.match(request).then((cached) => {
+        if (cached) return injectCrossOriginHeaders(cached);
+        return networkThenCache(request);
+    });
 }
 
 // ─── 请求拦截 ─────────────────────────────────────────────────────────────────
 self.addEventListener('fetch', (event) => {
     const { request } = event;
 
-    // 只处理 GET 请求
     if (request.method !== 'GET') return;
 
     let url;
     try { url = new URL(request.url); } catch { return; }
 
-    // 只处理同源请求（WASM 加载器也只请求同源资源）
     if (url.origin !== self.location.origin) return;
 
-    const path      = url.pathname;
-    const isHTML    = request.mode === 'navigate';
+    // Never intercept the SW script itself — lets updates bypass a broken
+    // controlling worker (otherwise "Failed to update a ServiceWorker" loops).
+    if (url.pathname.endsWith('/sw.js')) return;
+
+    const path = url.pathname;
+    const isHTML = request.mode === 'navigate';
     const isVersioned = url.searchParams.has('v');
-    const isBinary  = path.endsWith('.wasm') || path.endsWith('.data');
+    const isBinary = path.endsWith('.wasm') || path.endsWith('.data');
 
     if (isHTML) {
-        // 页面导航：始终绕过 HTTP 缓存拉最新 HTML；仅离线时才降级到 SW 缓存。
-        // 避免「新 run.js + 旧 run.html（缺 i18n 引用）」这类外壳/脚本不匹配。
-        event.respondWith(
-            fetch(request, { cache: 'no-store' })
-                .then((r) => {
-                    storeInCache(request, r);
-                    return injectCrossOriginHeaders(r);
-                })
-                .catch(() =>
-                    caches.match(request).then((cached) =>
-                        cached ? injectCrossOriginHeaders(cached) : Response.error()
-                    )
-                )
-        );
-
+        event.respondWith(networkThenCache(request));
     } else if (isVersioned || isBinary) {
-        // 带版本号的 JS/CSS 及大型二进制：缓存优先（版本号确保永久可用）
-        event.respondWith(
-            caches.match(request).then((cached) => {
-                if (cached) return injectCrossOriginHeaders(cached);
-                return fetch(request).then((r) => {
-                    storeInCache(request, r);
-                    return injectCrossOriginHeaders(r);
-                });
-            })
-        );
-
+        event.respondWith(cacheThenNetwork(request));
     } else {
-        // 其他静态资源：过时时重新验证
+        // stale-while-revalidate：有缓存先回；后台刷新失败也不抛错
         event.respondWith(
             caches.match(request).then((cached) => {
-                const networkFetch = fetch(request).then((r) => {
-                    storeInCache(request, r);
-                    return injectCrossOriginHeaders(r);
-                });
-                return cached
-                    ? (networkFetch.catch(() => {}), injectCrossOriginHeaders(cached))
-                    : networkFetch;
+                const refreshing = fetch(request)
+                    .then((r) => {
+                        storeInCache(request, r);
+                        return injectCrossOriginHeaders(r);
+                    })
+                    .catch(() => null);
+
+                if (cached) {
+                    refreshing.catch(() => {});
+                    return injectCrossOriginHeaders(cached);
+                }
+                return refreshing.then((r) => r || Response.error());
             })
         );
     }

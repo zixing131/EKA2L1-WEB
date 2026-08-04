@@ -59,6 +59,7 @@ namespace eka2l1::epoc {
 
         default: {
             LOG_ERROR(SERVICE_WINDOW, "Unimplemented ClickDll opcode: 0x{:x}", cmd.header.op);
+            ctx.complete(epoc::error_none);
             break;
         }
         }

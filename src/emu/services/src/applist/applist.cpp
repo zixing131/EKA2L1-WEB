@@ -963,6 +963,18 @@ namespace eka2l1 {
         get_app_for_document_impl(ctx, path.value());
     }
 
+    void applist_server::get_app_for_data_type(service::ipc_context &ctx) {
+        // RApaLsSession::AppForDataType(const TDataType &, TUid &). No MIME→app
+        // mapping table yet, so report "no handler" the way the real server does:
+        // KErrNone with a null UID. Leaving this opcode uncompleted wedges the
+        // client forever (QQ2010 hangs on the splash after AppForDataType).
+        LOG_TRACE(SERVICE_APPLIST, "AppList::AppForDataType stubbed (null UID)");
+
+        const epoc::uid null_uid = 0;
+        ctx.write_data_to_descriptor_argument<epoc::uid>(1, null_uid);
+        ctx.complete(epoc::error_none);
+    }
+
     data_recog_result applist_server::recognize_data_impl(common::ro_stream &stream, const std::u16string &name) {
         data_recog_result result{};
         const std::u16string extension = eka2l1::path_extension(name);
@@ -1222,6 +1234,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_APPLIST, "Unimplemented applist opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else if (llevel == APA_LEGACY_LEVEL_S60V2) {
@@ -1236,6 +1249,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_APPLIST, "Unimplemented applist opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else if (llevel == APA_LEGACY_LEVEL_TRANSITION) {
@@ -1266,6 +1280,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_APPLIST, "Unimplemented applist opcode 0x{:X}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else {
@@ -1318,6 +1333,10 @@ namespace eka2l1 {
                 server<applist_server>()->get_app_for_document_by_file_handle(*ctx);
                 break;
 
+            case applist_request_app_for_data_type:
+                server<applist_server>()->get_app_for_data_type(*ctx);
+                break;
+
             case applist_request_recognize_data:
                 server<applist_server>()->recognize_data(*ctx);
                 break;
@@ -1348,6 +1367,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_APPLIST, "Unimplemented applist opcode 0x{:X}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         }

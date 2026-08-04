@@ -23,31 +23,22 @@
 #include <drivers/camera/camera_collection.h>
 
 #include <cstdint>
-#include <vector>
+#include <memory>
 
 namespace eka2l1::drivers::camera {
-    // Portable test-pattern camera used as a fallback when the Android backend
-    // reports zero devices (and historically for WASM before getUserMedia).
-    // Mirrors yeatse's iOS simulator fixture: colour bars, corner marker, grid,
-    // grey ramp, sweeping bar.
+    // Browser getUserMedia camera for the WASM frontend. Samples the live
+    // MediaStream on the main thread (DOM APIs are main-only under pthreads)
+    // into a shared RGBA buffer; a C++ feed thread converts to guest formats
+    // with the same helpers as the pattern backend.
 
-    extern const frame_format PATTERN_SUPPORTED_FORMATS[7];
-
-    bool pattern_is_supported_format(const frame_format format);
-
-    // Repack top-down BGRA into the guest-facing layout (same rules as the
-    // Android / iOS backends).
-    bool pattern_convert_bgra_to_guest(const std::uint8_t *src, const std::size_t src_stride,
-        const int width, const int height, const frame_format format,
-        std::vector<std::uint8_t> &dest);
-
-    // JPEG-encode tightly packed top-down BGRA via stb_image_write.
-    bool pattern_encode_bgra_to_jpeg(const std::uint8_t *bgra, const int width, const int height,
-        std::vector<std::uint8_t> &out);
-
-    class collection_pattern : public collection {
+    class collection_web : public collection {
     public:
         std::uint32_t count() const override;
         std::unique_ptr<instance> make_camera(const std::uint32_t camera_index) override;
     };
+
+    // Ask the browser for camera permission / warm the default stream.
+    // Returns 1 if a request was kicked off (or already granted), 0 if
+    // MediaDevices is unavailable. Safe to call from JS on a user gesture.
+    int web_request_camera_permission();
 }

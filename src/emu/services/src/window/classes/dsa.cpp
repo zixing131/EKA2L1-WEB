@@ -311,6 +311,7 @@ namespace eka2l1::epoc {
 
             default: {
                 LOG_ERROR(SERVICE_WINDOW, "Unimplemented DSA opcode {}", cmd.header.op);
+                ctx.complete(epoc::error_none);
                 break;
             }
             }

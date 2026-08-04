@@ -36,22 +36,6 @@
             "purpose": "any maskable"
         }
     ],
-    "screenshots": [
-        {
-            "src": "icons/screenshot-wide.png",
-            "sizes": "1280x800",
-            "type": "image/png",
-            "form_factor": "wide",
-            "label": "EKA2L1 程序库"
-        },
-        {
-            "src": "icons/screenshot-narrow.png",
-            "sizes": "390x844",
-            "type": "image/png",
-            "form_factor": "narrow",
-            "label": "EKA2L1 程序库（移动端）"
-        }
-    ],
     "shortcuts": [
         {
             "name": "程序库",

@@ -511,6 +511,10 @@
     };
 
     EKA2L1.launchApp = function (uid) {
+        // Camera permission must be requested from a user gesture; launching an
+        // app is one. Warm getUserMedia so ECam / Camera opens without a second
+        // prompt when the guest later reserves the device.
+        try { EKA2L1.requestCamera(); } catch (e) {}
         return ccall('wasm_launch_app', 'number', ['number'], [uid]);
     };
 
@@ -532,6 +536,19 @@
 
     EKA2L1.setVolume = function (vol) {
         ccall('wasm_set_volume', null, ['number'], [vol | 0]);
+    };
+
+    /**
+     * Ask the browser for camera permission (getUserMedia). Best called from a
+     * user-gesture handler before launching the Camera app. Returns 1 if a
+     * request was started / already granted, 0 if MediaDevices is missing.
+     */
+    EKA2L1.requestCamera = function () {
+        try {
+            return ccall('wasm_request_camera', 'number', [], []) | 0;
+        } catch (e) {
+            return 0;
+        }
     };
 
     EKA2L1.sendKey = function (scancode, pressed) {

@@ -40,8 +40,16 @@ namespace eka2l1::drivers::camera {
 
         std::mutex callback_lock_;
 
+        // CAPTURE_OPTION_ALL advertises contrast/brightness/zoom/WB. CameraX has
+        // no stable mapping for those scalars, so keep instance-level caches —
+        // same contract as the iOS backend. Returning unsupported here makes the
+        // guest ecam patch Leave into a KERN-EXEC 3 on 5320 Camera.
+        std::uint32_t stub_optical_zoom_;
         std::uint32_t stub_exposure_;
         std::uint32_t stub_digital_zoom_;
+        std::uint32_t stub_contrast_;
+        std::uint32_t stub_brightness_;
+        std::uint32_t stub_white_balance_;
 
     public:
         explicit instance_android(collection_android *collection, const int index);

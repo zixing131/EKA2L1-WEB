@@ -130,10 +130,21 @@ if ('serviceWorker' in navigator) {
         }
     });
     window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./sw.js', { scope: './' })
-            .then(function (reg) { reg.update(); })
+        var buildId = (window.EKA2L1_BUILD_ID || 'dev');
+        var swUrl = './sw.js?v=' + encodeURIComponent(buildId);
+        navigator.serviceWorker.register(swUrl, { scope: './' })
+            .then(function (reg) {
+                return reg.update().catch(function () { /* ignore update race */ });
+            })
             .catch(function (err) {
-                console.warn('[SW] 注册失败（不影响正常使用）:', err);
+                console.warn('[SW] 注册失败，尝试清除旧 SW:', err);
+                navigator.serviceWorker.getRegistrations().then(function (regs) {
+                    return Promise.all(regs.map(function (r) { return r.unregister(); }));
+                }).then(function () {
+                    if (sessionStorage.getItem('eka2l1-sw-retry') === buildId) return;
+                    sessionStorage.setItem('eka2l1-sw-retry', buildId);
+                    location.reload();
+                }).catch(function () {});
             });
     });
 }

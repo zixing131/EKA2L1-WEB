@@ -149,9 +149,28 @@ namespace eka2l1 {
             break;
         }
 
+        // Soft no-ops: Settings / Avkon issue these during Personalisation and
+        // skin bootstrap. Leaving them incomplete wedged the client thread the
+        // same way AppForDataType did for QQ — UI looked frozen while key events
+        // piled up and were only occasionally drained after a purge.
+        case epoc::akn_skin_server_enable_notify_skin_change:
+        case epoc::akn_skin_server_disable_notify_skin_change:
+        case epoc::akn_skin_server_acknowledge_notification:
+        case epoc::akn_skin_server_client_error:
+        case epoc::akn_skin_server_clear_storeable_gfx:
+        case epoc::akn_skin_server_free_layout_bitmaps:
+        case epoc::akn_skin_server_set_all_item_def_sets:
+        case epoc::akn_skin_server_set_item_def_set:
+        case epoc::akn_skin_server_set_idle_wallpaper:
+        case epoc::akn_skin_server_set_pinboard_wallpaper:
+        case epoc::akn_skin_server_stop_ssini_file_observer: {
+            ctx->complete(epoc::error_none);
+            break;
+        }
+
         default: {
             LOG_ERROR(SERVICE_UI, "Unimplemented opcode: {}", epoc::akn_skin_server_opcode_to_str(static_cast<const epoc::akn_skin_server_opcode>(ctx->msg->function)));
-
+            ctx->complete(epoc::error_none);
             break;
         }
         }

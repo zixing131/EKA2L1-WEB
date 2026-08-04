@@ -27,6 +27,10 @@
 #include <drivers/camera/backend/android/camera_collection_android.h>
 #endif
 
+#if EKA2L1_PLATFORM(WASM)
+#include <drivers/camera/backend/web/camera_web.h>
+#endif
+
 namespace eka2l1::drivers::camera {
     std::unique_ptr<collection> collection_detail = nullptr;
 
@@ -42,7 +46,9 @@ namespace eka2l1::drivers::camera {
                 collection_detail = std::make_unique<collection_pattern>();
             }
 #elif EKA2L1_PLATFORM(WASM)
-            collection_detail = std::make_unique<collection_pattern>();
+            // Prefer the browser camera (getUserMedia). Pattern remains the
+            // compile-time fallback if the web backend is unavailable.
+            collection_detail = std::make_unique<collection_web>();
 #else
             collection_detail = std::make_unique<collection_null>();
 #endif

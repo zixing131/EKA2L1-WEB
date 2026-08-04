@@ -22,7 +22,9 @@
 #include <vfs/vfs.h>
 
 #include <drivers/audio/audio.h>
+#include <drivers/audio/backend/null/audio_null.h>
 #include <system/epoc.h>
+#include <common/platform.h>
 
 #include <kernel/kernel.h>
 #include <kernel/process.h>
@@ -220,10 +222,13 @@ namespace eka2l1::dispatch {
         }
 
         if (!supplied || !eplayer->impl_) {
-            // No backend can play this format on this platform (e.g. WASM has
-            // no ffmpeg): report instead of dereferencing a null player.
-            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports URL {}", url_u8);
-            return epoc::error_not_supported;
+            // No real decoder for this clip (WASM/OHOS have no ffmpeg; some
+            // formats miss even with ffmpeg). Returning KErrNotSupported makes
+            // Camera/QQ Leave into a guest access violation (KERN-EXEC 3 at a
+            // near-null address). Accept with a silent stub instead.
+            LOG_WARN(HLE_DISPATCHER, "No audio decoder for URL {}; using silent player", url_u8);
+            eplayer->impl_ = std::make_unique<drivers::player_silent>();
+            eplayer->impl_->open_url(url_u8);
         }
 
         // Restore old stream values
@@ -272,8 +277,9 @@ namespace eka2l1::dispatch {
         }
 
         if (!supplied || !eplayer->impl_) {
-            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports the supplied buffer on this platform");
-            return epoc::error_not_supported;
+            LOG_WARN(HLE_DISPATCHER, "No audio decoder for supplied buffer; using silent player");
+            eplayer->impl_ = std::make_unique<drivers::player_silent>();
+            eplayer->impl_->open_custom(custom_good_stream);
         }
 
         // Restore old stream values

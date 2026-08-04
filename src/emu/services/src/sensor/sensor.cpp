@@ -84,6 +84,7 @@ namespace eka2l1 {
 
         default: {
             LOG_ERROR(SERVICE_SENSOR, "Unimplemented opcode for Sensor server 0x{:X}", ctx->msg->function);
+            ctx->complete(epoc::error_none);
             break;
         }
         }
