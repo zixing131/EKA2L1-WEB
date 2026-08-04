@@ -110,6 +110,17 @@ namespace eka2l1::epoc {
     }
 
     canvas_base::~canvas_base() {
+        // Detach observers first, while this object is still intact: EGL
+        // surfaces keep a raw backed-window pointer and outlive windows whose
+        // owner exited without destroying them (freed later by the dispatcher,
+        // which would then unregister against a dangling window).
+        while (!observers_.empty()) {
+            canvas_observer *ob = observers_.back();
+            observers_.pop_back();
+
+            ob->on_window_destroyed(this);
+        }
+
         if (in_visibility_delay_report_) {
             ntimer *timer = client->get_ws().get_ntimer();
             timer->unschedule_event(client->get_ws().get_deliver_delay_report_visiblity_event(),
