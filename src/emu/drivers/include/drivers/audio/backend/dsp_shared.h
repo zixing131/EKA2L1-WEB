@@ -24,6 +24,7 @@
 
 #include <common/container.h>
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -44,7 +45,10 @@ namespace eka2l1::drivers {
         std::size_t avg_frame_count_;
 
         bool virtual_stop;
-        bool more_requested;
+
+        // Written by the guest thread (write()/stop()) and by the host audio
+        // render thread (data_callback()), with no lock in common.
+        std::atomic<bool> more_requested;
 
     protected:
         virtual bool internal_decode_running_out();

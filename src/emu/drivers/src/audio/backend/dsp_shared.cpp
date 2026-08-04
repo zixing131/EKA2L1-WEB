@@ -29,10 +29,20 @@ namespace eka2l1::drivers {
         , avg_frame_count_(0) {
     }
 
-    dsp_output_stream_shared::~dsp_output_stream_shared() {
+    void dsp_output_stream_shared::shutdown_stream() {
         if (stream_) {
             stream_->stop();
+            stream_.reset();
         }
+    }
+
+    dsp_output_stream_shared::~dsp_output_stream_shared() {
+        // Safety net for a stream that a derived class did not tear down itself.
+        // The most-derived destructor is expected to have already called
+        // shutdown_stream() while its vtable was still intact (see the header);
+        // by this point calling back into a virtual would be unsafe, so this
+        // only stops a stream that is somehow still alive.
+        shutdown_stream();
     }
 
     bool dsp_output_stream_shared::set_properties(const std::uint32_t freq, const std::uint8_t channels) {
@@ -62,9 +72,7 @@ namespace eka2l1::drivers {
         if (stream_)
             stream_->set_volume(static_cast<float>(volume_) / 10.0f);
 
-        // stream_ may be null with a backend-less audio driver (null driver on
-        // OHOS). Skip the restart in that case; the stream stays virtual/silent.
-        if (!was_already_stopped && stream_) {
+        if (!was_already_stopped) {
             stream_->start();
         }
 
@@ -96,14 +104,6 @@ namespace eka2l1::drivers {
         }
 
         avg_frame_count_ = 0;
-
-        // The audio driver may have no real backend (e.g. the null driver used on
-        // OHOS): new_output_stream returns null. Treat that as a silent/virtual
-        // stream so the guest's MMF pipeline keeps running instead of crashing.
-        if (!stream_) {
-            virtual_stop = false;
-            return true;
-        }
 
         if (virtual_stop) {
             if (!stream_->start()) {
@@ -180,13 +180,18 @@ namespace eka2l1::drivers {
 
         // If the amount of buffer left is deemed to be insufficient (this takes account of current frame count that is needed)
         if (internal_decode_running_out()) {
-            if (!more_requested) {
+            // Claim the request slot before invoking the callback, not after.
+            // The callback wakes the guest thread, which may hand us data --
+            // and clear this flag via write() -- before the call even returns.
+            // Publishing the flag afterwards would overwrite that clear, so no
+            // further data would ever be requested and the stream would starve.
+            if (!more_requested.exchange(true)) {
                 const std::lock_guard<std::mutex> guard(callback_lock_);
-                if (more_buffer_callback_) {
-                    more_buffer_callback_(more_buffer_userdata_);
+                if (more_buffer_callback_ && !more_buffer_callback_(more_buffer_userdata_)) {
+                    // The request did not go through, so nothing will clear the
+                    // flag for us; release it so the next callback can retry.
+                    more_requested = false;
                 }
-                
-                more_requested = true;
             }
         }
 
@@ -197,16 +202,7 @@ namespace eka2l1::drivers {
             std::memset(&buffer[frame_wrote * channels_], 0, (frame_count - frame_wrote) * channels_ * sizeof(std::int16_t));
         }
 
-#ifdef __EMSCRIPTEN__
-        // The web backend pre-pulls ahead of real time into a ring buffer; an
-        // honest count lets it commit only real frames instead of baking the
-        // zero-padded tail (audible as crackle) into the stream. Desktop
-        // backends (cubeb) pull at device rate and treat a short return as
-        // end-of-stream, so they keep the padded full count.
-        return frame_wrote;
-#else
         return frame_count;
-#endif
     }
 
     std::uint64_t dsp_output_stream_shared::position() {
@@ -214,11 +210,6 @@ namespace eka2l1::drivers {
     }
 
     std::uint64_t dsp_output_stream_shared::real_time_position() {
-        // No real backend (null driver): fall back to the computed position.
-        if (!stream_) {
-            return position();
-        }
-
         std::uint64_t frame_streamed = 0;
         if (!stream_->current_frame_position(&frame_streamed)) {
             LOG_ERROR(DRIVER_AUD, "Fail to retrieve streamed sample count!");
@@ -358,15 +349,22 @@ namespace eka2l1::drivers {
         }
 
         if (bytes_to_copy + read_bytes_ >= request.second) {
+            bool notification_delivered = true;
             {
                 const std::lock_guard<std::mutex> guard(callback_lock_);
                 if (more_buffer_callback_) {
-                    more_buffer_callback_(more_buffer_userdata_);
+                    notification_delivered = more_buffer_callback_(more_buffer_userdata_);
                 }
             }
 
-            read_bytes_ = 0;
-            read_queue_.pop();
+            if (notification_delivered) {
+                read_bytes_ = 0;
+                read_queue_.pop();
+            } else {
+                // The data is already in the guest buffer. Retain the request
+                // at its completed size so only the notification is retried.
+                read_bytes_ += bytes_to_copy;
+            }
         } else {
             read_bytes_ += bytes_to_copy;
         }
