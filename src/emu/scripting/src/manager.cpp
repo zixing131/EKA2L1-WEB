@@ -33,6 +33,8 @@
 #include <kernel/kernel.h>
 #include <system/epoc.h>
 
+#include <xxhash.h>
+
 namespace eka2l1::manager {
     static void script_file_changed_callback(void *data, common::directory_changes &changes) {
         scripts *manager = reinterpret_cast<scripts*>(data);
@@ -605,6 +607,55 @@ namespace eka2l1::manager {
         }
 
         return static_cast<std::uint32_t>(handle);
+    }
+
+    std::uint32_t scripts::register_rom_export_breakpoint(const std::string &lib_name, const std::uint32_t ordinal,
+        const std::uint32_t method_hash, const std::uint32_t hook_offset, const std::uint32_t process_uid,
+        const std::uint32_t uid3, breakpoint_hit_func func) {
+        hle::lib_manager *manager = sys->get_lib_manager();
+        if (!manager) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        codeseg_ptr seg = manager->load(common::utf8_to_ucs2(lib_name));
+        if (!seg || !seg->is_rom() || (uid3 && (std::get<2>(seg->get_uids()) != uid3))) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        std::vector<std::uint32_t> &exports = seg->get_export_table_raw();
+        if ((ordinal == 0) || (ordinal > exports.size())) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        const address method_entry = exports[ordinal - 1];
+        const address method_start = method_entry & ~1;
+        std::uint8_t *mapped_code = nullptr;
+        const address code_start = seg->get_code_run_addr(nullptr, &mapped_code);
+        const address code_end = code_start + seg->get_code_size();
+        if (!mapped_code || (method_start < code_start) || (method_start >= code_end)) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        address method_end = code_end;
+        for (const std::uint32_t exported : exports) {
+            const address candidate = exported & ~1;
+            if ((candidate > method_start) && (candidate < method_end)) {
+                method_end = candidate;
+            }
+        }
+
+        if ((method_end <= method_start) || (hook_offset >= (method_end - method_start))) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        const std::uint32_t actual_hash = XXH32(mapped_code + (method_start - code_start),
+            method_end - method_start, 0x5B001101);
+        if (actual_hash != method_hash) {
+            return INVALID_HOOK_HANDLE;
+        }
+
+        const address hook_address = (method_start + hook_offset) | (method_entry & 1);
+        return register_breakpoint(lib_name, hook_address, process_uid, uid3, 0, func);
     }
 
     void scripts::patch_library_hook(const codeseg_ptr &seg) {

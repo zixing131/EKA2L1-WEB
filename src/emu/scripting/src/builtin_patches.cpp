@@ -80,19 +80,19 @@ namespace eka2l1::manager {
     // These Avkon builds index Count()-1 without checking for an empty
     // menu-title array. Later versions end menu display through the existing
     // cleanup path instead.
-    static void skip_empty_avkon_menu(const std::uint32_t cleanup_address) {
+    static void skip_empty_avkon_menu(const std::uint32_t cleanup_offset) {
         if (static_cast<std::int32_t>(scripting::cpu::get_register(1)) < 0) {
             scripting::cpu::set_register(7, 0);
-            scripting::cpu::set_register(15, cleanup_address);
+            scripting::cpu::set_register(15, scripting::cpu::get_pc() + cleanup_offset);
         }
     }
 
     static void rm409_skip_empty_avkon_menu() {
-        skip_empty_avkon_menu(0x814F5210);
+        skip_empty_avkon_menu(0xF4);
     }
 
     static void rm320_skip_empty_avkon_menu() {
-        skip_empty_avkon_menu(0x82ED3068);
+        skip_empty_avkon_menu(0x12C);
     }
 
     void scripts::register_builtin_patches() {
@@ -145,15 +145,13 @@ namespace eka2l1::manager {
             }
         }
 
-        // Nokia 5320 / RM-409 eikcoctl.dll. The absolute address includes the
-        // Thumb bit; the mapped-code hash keeps this firmware-specific hook
-        // from applying to other Avkon builds with the same UID3.
-        register_breakpoint("eikcoctl.dll", 0x814F511D, 0, 0x1000489E,
-            0x17EDD4DD, rm409_skip_empty_avkon_menu, false);
-
-        // Nokia N95 8GB / RM-320 variant of the same old Avkon behavior.
-        register_breakpoint("eikcoctl.dll", 0x82ED2F3D, 0, 0x1000489E,
-            0xF2CDB190, rm320_skip_empty_avkon_menu);
+        // CEikMenuBar::StartDisplayingMenuBarL is export 70 in these Avkon
+        // builds. Resolve it dynamically and verify only that method's bytes;
+        // the hook offset is relative to the method, not a firmware address.
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x39A36149,
+            0x182, 0, 0x1000489E, rm409_skip_empty_avkon_menu);
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x1595EE13,
+            0x17E, 0, 0x1000489E, rm320_skip_empty_avkon_menu);
 
         current_module = nullptr;
 

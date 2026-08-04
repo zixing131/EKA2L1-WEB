@@ -26,10 +26,11 @@ header, so the breakpoint address and mapped-image XXH32 fingerprint must be
 calculated from the runtime code view. Confusing those two coordinate systems
 initially produced the wrong fingerprint.
 
-RM-409 and RM-320 contain the same faulty instruction sequence but at different
-addresses, and their cleanup blocks are not identical. Their mapped-code hashes
-are `0x17EDD4DD` and `0xF2CDB190`, respectively. This rules out using one raw
-address or dropping the firmware fingerprint to cover both devices.
+RM-409 and RM-320 contain the same faulty behavior at different image addresses,
+and their cleanup blocks are not identical. A raw address therefore cannot cover
+both devices. Conversely, hashing the complete DLL makes a hook unnecessarily
+firmware-specific: unrelated changes elsewhere in `eikcoctl.dll` invalidate it
+even when the target method is unchanged.
 
 RM-320 also loads `eikcoctl.dll` before the scripting manager registers built-in
 patches. A purely deferred hook therefore never sees a later codeseg-loaded
@@ -56,22 +57,31 @@ Avkon call and eventually corrupted Calculator's menu-close path.
 
 ## Fix
 
-The scripting breakpoint engine registers one hook for each verified S60v3
-`eikcoctl.dll`, guarded by the DLL UID3 and its full mapped-code XXH32. At the
-array-accessor call after `Count()-1`, the native callback checks that explicit
-index in `r1` and leaves the normal path untouched. When it is negative, it
-clears `r7` and moves the guest PC to that build's existing null-safe cleanup
-block. No ROM bytes, application UID, or title-specific condition are involved.
-A matching Lua patch keeps desktop and Android behavior in sync with the
-native-only iOS patch.
+The scripting manager now has a ROM-export breakpoint primitive. It locates the
+method through its stable Symbian export ordinal, defines that method's code span
+as its entry through the next higher export (or the end of the code segment), and
+computes XXH32 only over that span. A breakpoint is installed at a method-relative
+offset only when the DLL UID3 and method fingerprint both match. Image relocation
+and unrelated changes elsewhere in the DLL no longer require a new patch entry,
+while an unknown implementation is still rejected rather than patched by an
+unsafe byte search.
 
-The breakpoint engine now treats resolved ROM hooks as shared: it registers one
+For these builds, `CEikMenuBar::StartDisplayingMenuBarL` is export 70. The known
+method fingerprints are `0x39A36149` (RM-409) and `0x1595EE13` (RM-320), with
+breakpoint offsets `0x182` and `0x17E`. At the array-accessor call after
+`Count()-1`, the native callback checks that explicit index in `r1` and leaves
+the normal path untouched. When it is negative, it clears `r7` and moves the
+guest PC by a build-specific relative offset into the method's existing
+null-safe cleanup block. No application UID or title-specific condition is
+involved. A matching Lua patch keeps desktop and Android behavior in sync with
+the native-only iOS patch.
+
+The breakpoint engine treats resolved ROM hooks as shared: it registers one
 hook, keeps one true preimage, and does not restore it on every process switch.
 The original instruction is restored only for the normal single-step performed
-after a hit. RM-409 registration remains deferred until the ROM codeseg naturally
-attaches. RM-320 resolves the already-loaded ROM codeseg eagerly; ROM addresses
-are absolute, so this no longer depends on finding a process attachment. Eager
-resolution now checks UID and code hash before accepting any codeseg.
+after a hit. Export-based registration resolves an already-loaded ROM codeseg
+without depending on a process attachment and validates its UID and local method
+hash before delegating to the normal shared-ROM breakpoint path.
 
 Dyncom now translates Thumb `BKPT` to the ARM breakpoint form understood by its
 internal decoder. Breakpoint dispatch takes the authoritative Thumb bit from the

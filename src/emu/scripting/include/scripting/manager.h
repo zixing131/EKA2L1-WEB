@@ -225,6 +225,9 @@ namespace eka2l1::manager {
         std::uint32_t register_library_hook(const std::string &name, const std::uint32_t ord, const std::uint32_t process_uid, const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func);
         std::uint32_t register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid,
             const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func, const bool eager_resolve = true);
+        std::uint32_t register_rom_export_breakpoint(const std::string &lib_name, const std::uint32_t ordinal,
+            const std::uint32_t method_hash, const std::uint32_t hook_offset, const std::uint32_t process_uid,
+            const std::uint32_t uid3, breakpoint_hit_func func);
         std::uint32_t register_ipc(const std::string &server_name, const int opcode, const int invoke_when, void* func);
 
         bool call_breakpoints(const std::uint32_t addr, const std::uint32_t process_uid);
