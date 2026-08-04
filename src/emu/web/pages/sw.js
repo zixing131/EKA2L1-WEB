@@ -2,10 +2,14 @@
  * EKA2L1 Service Worker
  *
  * 策略：
- *  - 应用外壳（HTML / CSS / JS）: 网络优先，降级到缓存（保证新构建立即生效）
+ *  - HTML 页面：始终 no-store 拉网络最新版，仅离线才降级 SW 缓存
  *  - 带版本号的资源（?v=…）   : 缓存优先（版本号变化时缓存名同步更新）
  *  - 大型二进制（.wasm/.data）  : 缓存优先，按请求完整 URL 缓存（含 ?v=）
  *  - 其他同源资源               : 过时时重新验证（stale-while-revalidate）
+ *
+ * 版本更新：
+ *  - BUILD_ID 变化 → 新 CACHE_NAME → 删除旧缓存 → skipWaiting → 刷新已开标签页
+ *  - HTML 中 sw.js 引用带 ?v=BUILD_ID，确保浏览器检测到 SW 脚本变更
  *
  * COOP/COEP 头注入：
  *  SharedArrayBuffer / Atomics 需要跨源隔离（cross-origin isolation）。
@@ -16,17 +20,22 @@
 
 const CACHE_VERSION = 'BUILD_ID_PLACEHOLDER';
 const CACHE_NAME    = 'eka2l1-' + CACHE_VERSION;
+// Must match the ?v=… query string stamped into HTML by stamp_pages.cmake.
+const ASSET_V       = '?v=' + CACHE_VERSION;
 
-/** 应用外壳：安装时预缓存 */
+/** 应用外壳：安装时预缓存（JS/CSS 用带版本号的 URL，与 HTML 引用一致） */
 const APP_SHELL = [
     './index.html',
     './run.html',
-    './manifest.json',
-    './css/app.css',
-    './js/boot.js',
-    './js/build_id.js',
-    './js/index.js',
-    './js/run.js',
+    './manifest.json' + ASSET_V,
+    './css/app.css' + ASSET_V,
+    './js/boot.js' + ASSET_V,
+    './js/build_id.js' + ASSET_V,
+    './js/i18n.js' + ASSET_V,
+    './js/i18n/zh-CN.js' + ASSET_V,
+    './js/i18n/en-US.js' + ASSET_V,
+    './js/index.js' + ASSET_V,
+    './js/run.js' + ASSET_V,
     './icons/icon.svg',
     './icons/icon-maskable.svg',
     './icons/icon-192.png',
@@ -42,7 +51,7 @@ self.addEventListener('install', (event) => {
     );
 });
 
-// ─── 激活：清理旧版本缓存 ─────────────────────────────────────────────────────
+// ─── 激活：清理旧版本缓存，并刷新已打开的标签页 ─────────────────────────────
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys()
@@ -52,6 +61,13 @@ self.addEventListener('activate', (event) => {
                     .map((k) => caches.delete(k))
             ))
             .then(() => self.clients.claim())
+            // New build: force every open tab to reload so it picks up the
+            // stamped HTML (script tags, i18n includes, etc.) instead of a
+            // stale shell left in Cache Storage by the previous SW generation.
+            .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+            .then((clients) => Promise.all(
+                clients.map((client) => client.navigate(client.url))
+            ))
     );
 });
 
@@ -107,9 +123,10 @@ self.addEventListener('fetch', (event) => {
     const isBinary  = path.endsWith('.wasm') || path.endsWith('.data');
 
     if (isHTML) {
-        // 页面导航：网络优先 → 降级缓存
+        // 页面导航：始终绕过 HTTP 缓存拉最新 HTML；仅离线时才降级到 SW 缓存。
+        // 避免「新 run.js + 旧 run.html（缺 i18n 引用）」这类外壳/脚本不匹配。
         event.respondWith(
-            fetch(request)
+            fetch(request, { cache: 'no-store' })
                 .then((r) => {
                     storeInCache(request, r);
                     return injectCrossOriginHeaders(r);

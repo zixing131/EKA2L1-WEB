@@ -566,6 +566,18 @@ static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
 // still run each frame.
 static double g_frame_cpu_budget_ms = 14.0;
 
+// Frame gate (ms) between executed main-loop ticks. 15.5 = 60fps. Low-power
+// mode raises it to ~32.3 (30fps): every skipped tick costs near-zero host
+// CPU, halving the total main-thread burn on weak devices (thermal headroom,
+// responsive UI) at the price of presenting half the frames.
+// Runtime-tunable via wasm_set_max_fps().
+static double g_frame_gate_ms = 15.5;
+
+// Screen upscale filter: linear (default, smooth) or nearest. Nearest is the
+// cheaper sample on weak GPUs and gives crisp integer-ish pixels; toggled by
+// the web UI's "像素滤镜" preference via wasm_set_screen_filter().
+static bool g_screen_filter_nearest = false;
+
 // perf probe accumulators (reset each 1s window in the FPS block)
 static double s_probe_cpu_ms_acc = 0.0;
 static int s_probe_raf_frames = 0;
@@ -638,8 +650,11 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
 
         src.size *= scr->display_scale_factor;
 
-        builder.set_texture_filter(scr->screen_texture, true, eka2l1::drivers::filter_option::linear);
-        builder.set_texture_filter(scr->screen_texture, false, eka2l1::drivers::filter_option::linear);
+        const eka2l1::drivers::filter_option screen_filter = g_screen_filter_nearest
+            ? eka2l1::drivers::filter_option::nearest
+            : eka2l1::drivers::filter_option::linear;
+        builder.set_texture_filter(scr->screen_texture, true, screen_filter);
+        builder.set_texture_filter(scr->screen_texture, false, screen_filter);
         builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
             static_cast<float>(scr->ui_rotation), 0);
     }
@@ -991,13 +1006,14 @@ static void main_loop() {
         }
     }
 
-    // Cap at 60fps. The loop runs on requestAnimationFrame, which fires at
-    // display refresh — 120Hz on ProMotion phones/laptops would double the
-    // per-second CPU burn for no visible benefit. Skipped ticks still polled
-    // events above and keep the audio queue fed below.
+    // Cap at 60fps (30fps in low-power mode, see g_frame_gate_ms). The loop
+    // runs on requestAnimationFrame, which fires at display refresh — 120Hz on
+    // ProMotion phones/laptops would double the per-second CPU burn for no
+    // visible benefit. Skipped ticks still polled events above and keep the
+    // audio queue fed below.
     static double s_last_frame_ms = 0.0;
     const double now_ms = emscripten_get_now();
-    if ((now_ms - s_last_frame_ms) < 15.5) {
+    if ((now_ms - s_last_frame_ms) < g_frame_gate_ms) {
         if (g_state.audio_driver) {
             static_cast<eka2l1::drivers::web_audio_driver *>(g_state.audio_driver.get())->pump();
         }
@@ -1574,6 +1590,61 @@ int wasm_set_device(int index) {
 
     g_state.conf.device = index;
     wasm_save_config();
+    return 0;
+}
+
+/**
+ * Delete an installed device (ROM) by index: unregisters it from devices.yml
+ * and removes its firmware payload (roms/<firmcode>/ + drives/z/<firmcode>/)
+ * from the VFS. The caller must persist (IDBFS sync) afterwards so the
+ * deletion reaches IndexedDB, and reload the page when the deleted device
+ * was the active one (its ROM image may still be mapped by the kernel).
+ * Returns 0 on success.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_delete_device(int index) {
+    if (!g_state.symsys) {
+        return -1;
+    }
+
+    eka2l1::device_manager *dvcmngr = g_state.symsys->get_device_manager();
+    if (!dvcmngr || (index < 0) || (index >= static_cast<int>(dvcmngr->total()))) {
+        return -2;
+    }
+
+    eka2l1::device *dvc = dvcmngr->get(static_cast<std::uint8_t>(index));
+    if (!dvc) {
+        return -2;
+    }
+
+    const std::string firmcode = dvc->firmware_code;
+    const std::string firmcode_low = eka2l1::common::lowercase_string(firmcode);
+
+    // Unregister first (also rewrites devices.yml).
+    if (!dvcmngr->delete_device(firmcode)) {
+        return -3;
+    }
+
+    // Remove the firmware payload. Both the EKA1 (install_rom) and EKA2
+    // (install_rpkg / streaming) installers lay files out the same way.
+    const std::string &storage = g_state.conf.storage;
+    eka2l1::common::delete_folder(eka2l1::add_path(storage, "roms/" + firmcode_low + "/"));
+    eka2l1::common::delete_folder(eka2l1::add_path(storage, "drives/z/" + firmcode_low + "/"));
+
+    // Keep the persisted active-device index pointing at the same device
+    // (or a valid one) after the list shrank.
+    if (g_state.conf.device == index) {
+        g_state.conf.device = 0;
+    } else if (g_state.conf.device > index) {
+        g_state.conf.device--;
+    }
+    if (g_state.conf.device >= static_cast<int>(dvcmngr->total())) {
+        g_state.conf.device = 0;
+    }
+    wasm_save_config();
+
+    LOG_INFO(FRONTEND_CMDLINE, "Device deleted: {} ({} device(s) remain)",
+        firmcode, dvcmngr->total());
     return 0;
 }
 
@@ -2346,6 +2417,35 @@ void wasm_set_cpu_budget(double ms) {
     }
     g_frame_cpu_budget_ms = ms;
     LOG_WARN(FRONTEND_CMDLINE, "[perf] post-boot CPU budget set to {:.1f}ms", ms);
+}
+
+/**
+ * Cap the emulator main-loop rate. 60 (default) presents every RAF tick;
+ * 30 halves the executed ticks — on low-end devices that roughly halves the
+ * main-thread CPU burn (guest slices + GL submit + present), trading FPS for
+ * thermals/responsiveness. Clamped to [15, 120].
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_max_fps(int fps) {
+    if (fps < 15) {
+        fps = 15;
+    } else if (fps > 120) {
+        fps = 120;
+    }
+    // Gate slightly under the ideal interval so a RAF tick arriving a hair
+    // early (timer jitter) isn't skipped, which would drop to the next tick
+    // and halve the effective rate.
+    g_frame_gate_ms = (1000.0 / fps) - 1.1;
+    LOG_WARN(FRONTEND_CMDLINE, "[perf] max fps set to {} (frame gate {:.1f}ms)", fps, g_frame_gate_ms);
+}
+
+/**
+ * Screen upscale filter: 1 = nearest (crisp pixels, cheapest sample on weak
+ * GPUs), 0 = linear (smooth, default). Takes effect on the next redraw.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_screen_filter(int nearest) {
+    g_screen_filter_nearest = (nearest != 0);
 }
 
 /**

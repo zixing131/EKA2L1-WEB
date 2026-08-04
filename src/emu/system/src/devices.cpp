@@ -24,6 +24,7 @@
 
 #include <common/algorithm.h>
 #include <common/dynamicfile.h>
+#include <common/fileutils.h>
 #include <common/log.h>
 #include <common/path.h>
 #include <common/types.h>
@@ -428,6 +429,12 @@ namespace eka2l1 {
         }
 
         if (parsed_with_yaml) {
+            if (devices_node.IsNull()) {
+                // Empty document (0-byte file, e.g. after deleting the last
+                // device) legitimately means "no devices" — not an error.
+                return;
+            }
+
             if (!devices_node.IsMap()) {
                 LOG_ERROR(SYSTEM, "Invalid devices.yml root node (expected map)");
                 return;
@@ -507,6 +514,14 @@ namespace eka2l1 {
         };
 
         std::string out;
+        if (devices.empty()) {
+            // Keep this a valid, explicit empty map rather than a 0-byte
+            // file: YAML::Load("") yields a Null node (not a Map), which
+            // load_devices() must special-case anyway, and an explicit "{}"
+            // makes the on-disk state unambiguous after the last device is
+            // deleted.
+            out = "{}\n";
+        }
         for (const auto &device : devices) {
             out += sq(device.firmware_code) + ":\n";
             out += "  platver: " + sq(epocver_to_string(device.ver)) + "\n";
@@ -646,6 +661,26 @@ namespace eka2l1 {
         devices.push_back(dvc);
 
         return add_device_none;
+    }
+
+    bool device_manager::heal_ghost_registration(const std::string &firmcode, const std::string &drives_z_root) {
+        if (!get(firmcode)) {
+            // Not registered at all - nothing to heal, and not a duplicate.
+            return false;
+        }
+
+        const std::string firmcode_low = common::lowercase_string(firmcode);
+        const bool payload_present = common::exists(add_path(drives_z_root, firmcode_low + "\\"))
+            || common::exists(add_path(drives_z_root, firmcode_low));
+
+        if (payload_present) {
+            // Genuinely still installed.
+            return true;
+        }
+
+        LOG_WARN(SYSTEM, "Removing stale device registration with no firmware payload: {}", firmcode);
+        delete_device(firmcode);
+        return false;
     }
 
     bool device_manager::delete_device(const std::string &firmcode) {

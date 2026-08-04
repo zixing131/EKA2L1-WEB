@@ -10,10 +10,11 @@
 (function () {
     'use strict';
 
-    var EKA2L1 = {
-        module: null,
-        ready: false
-    };
+    // i18n.js (loaded first) already created window.EKA2L1 with t()/setLocale()
+    // etc.; merge into that same object instead of replacing it.
+    var EKA2L1 = window.EKA2L1 = window.EKA2L1 || {};
+    EKA2L1.module = null;
+    EKA2L1.ready = false;
 
     // ---- IDBFS patch -------------------------------------------------------
     // Stock IDBFS caches its IndexedDB connection in IDBFS.dbs[] and reuses it
@@ -91,12 +92,9 @@
             var ctx = (location.protocol === 'https:' || location.hostname === 'localhost' ||
                        location.hostname === '127.0.0.1');
             var hint = ctx
-                ? '服务器缺少 COOP/COEP 响应头（serve.py 已带，换其它服务器要自行加）。'
-                : '当前以 ' + location.protocol + '//' + location.hostname +
-                  ' 打开，不是安全上下文。iPhone 请改用 https:// 访问（或本机 localhost），' +
-                  '用「http://局域网IP」会导致多线程不可用。自带的 serve.py 加 --tls 参数' +
-                  '即可提供 https（自签证书，首次访问需在警告页选择「仍要访问」）。';
-            return '无法启用多线程（SharedArrayBuffer 不可用），模拟器核心无法启动。\n' + hint;
+                ? EKA2L1.t('error.env.missingHeaders')
+                : EKA2L1.t('error.env.insecureContext', { origin: location.protocol + '//' + location.hostname });
+            return EKA2L1.t('error.env.noThreads', { hint: hint });
         }
         return null;
     };
@@ -111,7 +109,7 @@
 
         return new Promise(function (resolve, reject) {
             if (typeof createEKA2L1Module === 'undefined') {
-                reject(new Error('eka2l1.js 未加载'));
+                reject(new Error(EKA2L1.t('error.jsNotLoaded')));
                 return;
             }
 
@@ -123,7 +121,7 @@
 
             boostWebGLContext(opts.canvas);
 
-            onProgress(8, '加载 WebAssembly 模块…');
+            onProgress(8, EKA2L1.t('progress.loadingWasm'));
 
             var totalDeps = 0;
             createEKA2L1Module({
@@ -142,7 +140,7 @@
                 monitorRunDependencies: function (left) {
                     totalDeps = Math.max(totalDeps, left);
                     if (left && totalDeps) {
-                        onProgress(8 + Math.round((1 - left / totalDeps) * 50), '加载资源…');
+                        onProgress(8 + Math.round((1 - left / totalDeps) * 50), EKA2L1.t('progress.loadingAssets'));
                     }
                 }
             }).then(function (mod) {
@@ -152,11 +150,11 @@
                 try { mod.FS.mkdir('/eka2l1'); } catch (e) { /* exists */ }
                 mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
 
-                onProgress(62, '恢复存档数据…');
+                onProgress(62, EKA2L1.t('progress.restoringData'));
                 mod.FS.syncfs(true, function (err) {
                     if (err) console.warn('[EKA2L1] initial restore error (OK on first run):', err);
 
-                    onProgress(82, '启动模拟器核心…');
+                    onProgress(82, EKA2L1.t('progress.startingCore'));
                     // main() registers the RAF loop then throws "unwind" by
                     // design (simulate_infinite_loop); treat that as success.
                     try {
@@ -186,7 +184,7 @@
                     } catch (e) {}
 
                     EKA2L1.ready = true;
-                    onProgress(92, '核心已启动');
+                    onProgress(92, EKA2L1.t('progress.coreStarted'));
                     resolve(mod);
                 });
             }).catch(reject);
@@ -240,7 +238,7 @@
 
         function stage(s) { if (onStage) { try { onStage(s); } catch (e) {} } }
 
-        stage('打开数据库');
+        stage(EKA2L1.t('stage.openDb'));
         return new Promise(function (resolve, reject) {
             var req;
             try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
@@ -254,11 +252,11 @@
                     st.createIndex('timestamp', 'timestamp', { unique: false });
                 }
             };
-            req.onblocked = function () { stage('数据库被占用'); };
-            req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
+            req.onblocked = function () { stage(EKA2L1.t('stage.dbBusy')); };
+            req.onerror = function () { reject(req.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
             req.onsuccess = function () { resolve(req.result); };
         }).then(function (db) {
-            stage('扫描文件');
+            stage(EKA2L1.t('stage.scanFiles'));
             var paths = [];
             var bytesTotal = 0;
             (function walk(dir) {
@@ -271,7 +269,7 @@
                     else if (FS.isFile(st.mode)) bytesTotal += (st.size || 0);
                 });
             })(MOUNT);
-            stage('共 ' + paths.length + ' 项 ' + Math.floor(bytesTotal / 1048576) + 'MB');
+            stage(EKA2L1.t('stage.fileCount', { count: paths.length, mb: Math.floor(bytesTotal / 1048576) }));
 
             var i = 0;
             var written = 0;
@@ -285,7 +283,7 @@
                 return new Promise(function (res, rej) {
                     var tx = db.transaction([STORE], 'readwrite');
                     tx.onerror = tx.onabort = function (e) {
-                        rej((e.target && e.target.error) || new Error('IndexedDB 写入失败'));
+                        rej((e.target && e.target.error) || new Error(EKA2L1.t('error.idbWriteFailed')));
                         if (e.preventDefault) e.preventDefault();
                     };
                     tx.oncomplete = function () { res(); };
@@ -360,7 +358,7 @@
                     st.createIndex('timestamp', 'timestamp', { unique: false });
                 }
             };
-            req.onerror = function () { reject(req.error || new Error('IndexedDB 打开失败')); };
+            req.onerror = function () { reject(req.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
             req.onsuccess = function () { resolve(req.result); };
         }).then(function (db) {
             var i = 0;
@@ -375,7 +373,7 @@
                 return new Promise(function (res, rej) {
                     var tx = db.transaction([STORE], 'readwrite');
                     tx.onerror = tx.onabort = function (e) {
-                        rej((e.target && e.target.error) || new Error('IndexedDB 写入失败'));
+                        rej((e.target && e.target.error) || new Error(EKA2L1.t('error.idbWriteFailed')));
                         if (e.preventDefault) e.preventDefault();
                     };
                     tx.oncomplete = function () { res(); };
@@ -406,6 +404,65 @@
             return nextBatch().catch(function (err) {
                 try { db.close(); } catch (e) {}
                 throw err;
+            });
+        });
+    };
+
+    /**
+     * Directly delete every IndexedDB record whose path falls under one of
+     * the given directory prefixes (e.g. '/eka2l1/roms/rm-159'), plus the
+     * directory entry itself. Unlike FS.syncfs(false, ...), whose reconcile
+     * is oriented around discovering *new/changed* local files, this doesn't
+     * depend on it also detecting and propagating removals for a whole
+     * subtree that MEMFS no longer has — a full-mount syncfs left stale
+     * firmware records behind often enough (see the "device already exists"
+     * ghost-entry bug) that a targeted, guaranteed cursor-delete is used
+     * instead for uninstall/device-delete flows.
+     */
+    EKA2L1.deletePathPrefixes = function (prefixes) {
+        var MOUNT = '/eka2l1';
+        var STORE = 'FILE_DATA';
+        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
+
+        prefixes = (prefixes || []).filter(function (p) { return p && p.indexOf(MOUNT) === 0; });
+        if (!prefixes.length) return Promise.resolve();
+
+        return new Promise(function (resolve, reject) {
+            var req;
+            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
+            req.onupgradeneeded = function (e) {
+                var db = e.target.result;
+                var st = db.objectStoreNames.contains(STORE)
+                    ? e.target.transaction.objectStore(STORE)
+                    : db.createObjectStore(STORE);
+                if (!st.indexNames.contains('timestamp')) {
+                    st.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+            req.onerror = function () { reject(req.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
+            req.onsuccess = function () { resolve(req.result); };
+        }).then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction([STORE], 'readwrite');
+                tx.onerror = tx.onabort = function (e) {
+                    reject((e.target && e.target.error) || new Error(EKA2L1.t('error.idbDeleteFailed')));
+                    if (e.preventDefault) e.preventDefault();
+                };
+                tx.oncomplete = function () { db.close(); resolve(); };
+
+                var store = tx.objectStore(STORE);
+                prefixes.forEach(function (prefix) {
+                    store.delete(prefix); // the directory entry itself (if any)
+                    var range = IDBKeyRange.bound(prefix + '/', prefix + '/\uffff');
+                    var cursorReq = store.openCursor(range);
+                    cursorReq.onsuccess = function (e) {
+                        var cursor = e.target.result;
+                        if (cursor) {
+                            cursor.delete();
+                            cursor.continue();
+                        }
+                    };
+                });
             });
         });
     };
@@ -468,6 +525,68 @@
     /** Rotate the presented screen clockwise by 0/90/180/270 degrees. */
     EKA2L1.setRotation = function (degrees) {
         ccall('wasm_set_screen_rotation', null, ['number'], [degrees | 0]);
+    };
+
+    /** Delete an installed device (ROM) by index. Returns 0 on success. */
+    EKA2L1.deleteDevice = function (index) {
+        return ccall('wasm_delete_device', 'number', ['number'], [index | 0]);
+    };
+
+    // ---- performance tuning --------------------------------------------------
+
+    /** Cap the emulator main loop rate (15-120, default 60). */
+    EKA2L1.setMaxFps = function (fps) {
+        try { ccall('wasm_set_max_fps', null, ['number'], [fps | 0]); } catch (e) {}
+    };
+
+    /** Screen upscale filter: true = nearest (crisp/fast), false = linear. */
+    EKA2L1.setScreenFilter = function (nearest) {
+        try { ccall('wasm_set_screen_filter', null, ['number'], [nearest ? 1 : 0]); } catch (e) {}
+    };
+
+    /** Per-frame guest CPU budget in ms (clamped to [4,16] by the core). */
+    EKA2L1.setCpuBudget = function (ms) {
+        try { ccall('wasm_set_cpu_budget', null, ['number'], [+ms || 14]); } catch (e) {}
+    };
+
+    /**
+     * Heuristic: does this machine look like a low-performance device?
+     * deviceMemory / hardwareConcurrency are coarse but Chrome/Android report
+     * them; iOS Safari reports neither (undefined -> not low-end, its A-chips
+     * are fast anyway).
+     */
+    EKA2L1.isLowEndDevice = function () {
+        var mem = navigator.deviceMemory || 0;       // GB, 0 = unknown
+        var cores = navigator.hardwareConcurrency || 0;
+        if (mem && mem <= 4) return true;
+        if (cores && cores <= 4) return true;
+        return false;
+    };
+
+    /**
+     * Apply the persisted performance preferences to the booted core.
+     * perfMode: 'auto' (low-end heuristic) | 'high' (60fps) | 'low' (30fps).
+     * filter:   'smooth' | 'sharp'.
+     */
+    EKA2L1.applyPerfPrefs = function () {
+        var mode = localStorage.getItem('eka2l1_perf') || 'auto';
+        var lowPower = (mode === 'low') || (mode === 'auto' && EKA2L1.isLowEndDevice());
+
+        if (lowPower) {
+            EKA2L1.setMaxFps(30);
+            // With 33ms frames the guest can take the full budget and still
+            // leave present/audio plenty of headroom.
+            EKA2L1.setCpuBudget(16);
+        } else {
+            EKA2L1.setMaxFps(60);
+        }
+
+        var filter = localStorage.getItem('eka2l1_filter') || 'auto';
+        if (filter === 'auto') {
+            filter = lowPower ? 'sharp' : 'smooth';
+        }
+        EKA2L1.setScreenFilter(filter === 'sharp');
+        return lowPower;
     };
 
     EKA2L1.fps = function () {
@@ -577,7 +696,7 @@
 
         var rc = mod.ccall('wasm_rpkg_stream_begin', 'number', [], []);
         if (rc !== 0) {
-            return Promise.reject(new Error('安装失败：' + EKA2L1.decodeInstallError(rc)));
+            return Promise.reject(new Error(EKA2L1.t('error.installFailed', { reason: EKA2L1.decodeInstallError(rc) })));
         }
 
         var offset = 0;
@@ -588,10 +707,10 @@
             return slice.arrayBuffer().then(function (ab) {
                 var u8 = new Uint8Array(ab);
                 var ptr = mod.ccall('wasm_rpkg_stream_buffer', 'number', ['number'], [u8.length]);
-                if (!ptr) throw new Error('RPKG 流缓冲分配失败');
+                if (!ptr) throw new Error(EKA2L1.t('error.rpkgBufferAllocFailed'));
                 mod.HEAPU8.set(u8, ptr);
                 var r = mod.ccall('wasm_rpkg_stream_feed', 'number', ['number'], [u8.length]);
-                if (r !== 0) throw new Error('安装失败：' + EKA2L1.decodeInstallError(r));
+                if (r !== 0) throw new Error(EKA2L1.t('error.installFailed', { reason: EKA2L1.decodeInstallError(r) }));
                 offset += u8.length;
                 if (onProgress) onProgress(offset, file.size);
                 // Macrotask yield between chunks: gives iOS Safari a chance to
@@ -602,7 +721,7 @@
 
         return pump().then(function () {
             var r = mod.ccall('wasm_rpkg_stream_finish', 'number', [], []);
-            if (r !== 0) throw new Error('安装失败：' + EKA2L1.decodeInstallError(r));
+            if (r !== 0) throw new Error(EKA2L1.t('error.installFailed', { reason: EKA2L1.decodeInstallError(r) }));
             return mod.ccall('wasm_rpkg_stream_rom_target', 'string', [], []);
         }).catch(function (err) {
             try { mod.ccall('wasm_rpkg_stream_abort', null, [], []); } catch (e) {}
@@ -612,23 +731,23 @@
 
     // ---- error decoding ----------------------------------------------------
 
-    var installErrNames = [
-        'none', '文件不存在', '空间不足', 'RPKG 损坏',
-        '无法确定机型', '设备已存在', '一般错误',
-        'ROM 复制失败', 'VPL 文件无效', 'ROFS 损坏',
-        'ROM 文件损坏', 'FPSX 损坏'
+    var installErrKeys = [
+        'err.none', 'err.fileNotExist', 'err.insufficientSpace', 'err.rpkgCorrupt',
+        'err.cannotDetermineModel', 'err.deviceExists', 'err.generalError',
+        'err.romCopyFailed', 'err.vplInvalid', 'err.rofsCorrupt',
+        'err.romFileCorrupt', 'err.fpsxCorrupt'
     ];
 
     EKA2L1.decodeInstallError = function (result) {
         if (result === 0) return null;
         if (result <= -1000) {
             var idx = -(result + 1000);
-            return installErrNames[idx] || ('错误 ' + idx);
+            return installErrKeys[idx] ? EKA2L1.t(installErrKeys[idx]) : EKA2L1.t('err.unknownIndexed', { idx: idx });
         }
-        if (result === -3) return '未找到 ROM 文件';
-        if (result === -4) return '设备激活失败';
-        if (result === -5) return 'ROM 复制失败';
-        return '错误码 ' + result;
+        if (result === -3) return EKA2L1.t('err.romNotFound');
+        if (result === -4) return EKA2L1.t('err.deviceActivationFailed');
+        if (result === -5) return EKA2L1.t('err.romCopyFailed');
+        return EKA2L1.t('err.genericCode', { code: result });
     };
 
     // ---- shared UI helpers -------------------------------------------------
@@ -653,6 +772,4 @@
         D0: 0x30, D1: 0x31, D2: 0x32, D3: 0x33, D4: 0x34,
         D5: 0x35, D6: 0x36, D7: 0x37, D8: 0x38, D9: 0x39
     };
-
-    window.EKA2L1 = EKA2L1;
 })();

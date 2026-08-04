@@ -113,6 +113,25 @@ REM 产物:build_wasm_hos\bin  (eka2l1_wasm,EKA2L1_HOS_BUILD=ON)
 
 WASM 版会**自动受益于 ASID 缓存 + ReadCode-TLB**(都在 dyncom 共享路径上),不需额外开关。
 
+## 2026-07-07 追加：Web 前端低端设备优化（frontend 层，零 CPU 内核风险）
+
+dyncom 内核侧可安全落地的项目（ASID 缓存、ReadCode-TLB、LDM/STM cursor、内联内存
+快路径）已全部完成；iOS 结论中剩余的大杠杆（指令融合、lazy flags、shifter 特化）
+均被实测判定为中性或负收益（见上文与 [docs/ios/](./ios/)）。本轮把优化面移到
+**Web 前端层**，对标 iOS fork 的「simulator render-scale cap」思路——在弱设备上
+削减渲染/主线程开销而非解释器语义：
+
+- **省电模式（30 FPS 帧率门）**：`wasm_set_max_fps()` 把主循环帧率门从 15.5ms 提到
+  ~32.3ms。跳过的 RAF tick 只做事件轮询+音频喂送（近零开销），guest 切片、GL 提交、
+  present 全部减半 → 弱设备总主线程负担约砍半（发热/卡顿显著缓解）。配合把 guest
+  CPU 配额提到 16ms（33ms 帧内仍有充足 present 余量），CPU-bound 游戏损失有限。
+- **nearest 上采样滤镜**：`wasm_set_screen_filter()`。弱 GPU 上 nearest 采样比
+  linear 便宜，且像素风更贴合 Symbian 原生观感。
+- **低端设备自动检测**（JS 侧）：`navigator.deviceMemory <= 4GB` 或
+  `hardwareConcurrency <= 4` 时自动启用省电预设（设置页可强制高性能/省电）。
+- **程序库页 JS 渲染优化**：搜索输入 120ms 防抖（原来每键击全量重建 DOM）、列表用
+  DocumentFragment 单次插入（原来逐项 append 逐项 reflow）。
+
 ## 预期收益
 
 ASID 缓存是 IPC 重户(任何带图形的 app)上最大的单项 CPU 削减(iOS 上消掉了约 17% 的重

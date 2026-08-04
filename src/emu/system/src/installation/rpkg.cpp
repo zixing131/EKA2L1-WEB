@@ -154,7 +154,7 @@ namespace eka2l1::loader {
             return device_installation_determine_product_failure;
         }
 
-        if (dvcmngr->get(firmcode)) {
+        if (dvcmngr->heal_ghost_registration(firmcode, drives_z_resident_path)) {
             LOG_ERROR(SYSTEM, "The device already exists, revert all changes");
             eka2l1::common::delete_folder(temp_z_path);
 
@@ -335,7 +335,7 @@ namespace eka2l1::loader {
             return device_installation_determine_product_failure;
         }
 
-        if (dvcmngr->get(firmcode)) {
+        if (dvcmngr->heal_ghost_registration(firmcode, devices_rom_path)) {
             LOG_ERROR(SYSTEM, "The device already exists, revert all changes");
             common::delete_folder(folder_extracted);
 
