@@ -219,7 +219,10 @@ namespace eka2l1::dispatch {
             }
         }
 
-        if (!supplied) {
+        if (!supplied || !eplayer->impl_) {
+            // No backend can play this format on this platform (e.g. WASM has
+            // no ffmpeg): report instead of dereferencing a null player.
+            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports URL {}", url_u8);
             return epoc::error_not_supported;
         }
 
@@ -268,7 +271,8 @@ namespace eka2l1::dispatch {
             }
         }
 
-        if (!supplied) {
+        if (!supplied || !eplayer->impl_) {
+            LOG_ERROR(HLE_DISPATCHER, "No audio player backend supports the supplied buffer on this platform");
             return epoc::error_not_supported;
         }
 
@@ -292,6 +296,10 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->play()) {
@@ -403,6 +411,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
+        }
+
         epoc::notify_info info;
 
         info.requester = sys->get_kernel_system()->crr_thread();
@@ -448,6 +460,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (!eplayer->impl_) {
+            return epoc::error_none;
+        }
+
         const std::lock_guard<std::mutex> guard(eplayer->impl_->lock_);
         std::uint8_t *notify = eplayer->impl_->get_notify_userdata(nullptr);
 
@@ -489,6 +505,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
+        }
+
         return static_cast<std::int32_t>(eplayer->impl_->get_dest_freq());
     }
 
@@ -499,6 +519,10 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_freq(sample_rate)) {
@@ -517,6 +541,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
+        }
+
         return static_cast<std::int32_t>(eplayer->impl_->get_dest_channel_count());
     }
 
@@ -527,6 +555,10 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_channel_count(channel_count)) {
@@ -549,6 +581,10 @@ namespace eka2l1::dispatch {
             return epoc::error_argument;
         }
 
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
+        }
+
         *encoding = eplayer->impl_->get_dest_encoding();
         return epoc::error_none;
     }
@@ -560,6 +596,10 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         if (!eplayer->impl_->set_dest_encoding(encoding)) {
@@ -576,6 +616,10 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         eplayer->impl_->set_dest_container_format(container_format);
@@ -608,6 +652,10 @@ namespace eka2l1::dispatch {
 
         if (!pos_get) {
             return epoc::error_argument;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
         }
 
         *pos_get = eplayer->impl_->position();

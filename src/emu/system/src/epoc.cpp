@@ -29,6 +29,8 @@
 #include <common/path.h>
 #include <common/platform.h>
 #include <common/random.h>
+#include <common/time.h>
+#include <common/virtualmem.h>
 
 #include <disasm/disasm.h>
 
@@ -138,6 +140,7 @@ namespace eka2l1 {
 
         config::state *conf_;
         config::app_settings *app_settings_;
+        std::string cache_root_;
 
         std::atomic<bool> exit = false;
         std::atomic<bool> paused = false;
@@ -610,6 +613,13 @@ namespace eka2l1 {
     void system_impl::startup() {
         exit = false;
 
+#ifdef __EMSCRIPTEN__
+        // On WASM the scheduler runs on the main browser thread and cannot block.
+        // cpu_load_save uses idle_event.wait() which deadlocks because the timer thread
+        // cannot fire while the main thread holds mut and waits on idle_event.
+        conf_->cpu_load_save = false;
+#endif
+
         // Initialize all the system that doesn't depend on others first
         timing_ = std::make_unique<ntimer>(DEFAULT_CPU_HZ);
         timing_->set_realtime_level(get_realtime_level_from_string(conf_->rtos_level.c_str()));
@@ -633,22 +643,29 @@ namespace eka2l1 {
         , adriver(param.audio_)
         , conf_(param.conf_)
         , app_settings_(param.settings_)
+        , cache_root_(param.cache_root_)
         , exit(false) {
 #if EKA2L1_ARCH(ARM)
         cpu_type = arm_emulator_type::r12l1;
+#elif EKA2L1_PLATFORM(WASM)
+        cpu_type = arm_emulator_type::dyncom;
+#elif EKA2L1_PLATFORM(OHOS)
+        // HarmonyOS allows JIT in a developer/debug build but a store-distributed
+        // (signed) app is denied executable memory - dynarmic's oaknut emitter then
+        // crashes writing the first JIT prelude. Probe at runtime: use the dynarmic
+        // JIT when the host actually grants executable pages, otherwise fall back to
+        // the dyncom interpreter so store builds still run (slower, but no crash).
+        // Note: aarch64 evaluates EKA2L1_ARCH(ARM) as false (that macro is 32-bit
+        // __arm__ only), so OHOS arm64 lands here rather than the r12l1 branch.
+        cpu_type = common::is_executable_memory_available()
+            ? arm_emulator_type::dynarmic
+            : arm_emulator_type::dyncom;
 #elif EKA2L1_PLATFORM(IOS)
         // iOS defaults to dyncom. Dynarmic is not robust enough to be the
-        // default (Calculator 0x10005902 still SIGSEGVs inside
-        // Dynarmic::A32::Jit::Impl::Run() — the known A32 issue) and the JIT
-        // win is in sustained execution, not one-shot launch. Builds that
-        // carry dynarmic (EKA2L1_IOS_DYNARMIC: simulator, or sideload device
-        // builds) let the user opt in from the settings screen;
-        // the opt-in is the dedicated ios_use_jit flag — NOT cpu_backend,
-        // whose "dynarmic" desktop default may already be persisted in
-        // config.yml — and is honored only when the process actually has JIT
-        // permission (host_can_jit() runtime probe), else stay on dyncom.
+        // default; builds that carry dynarmic (EKA2L1_IOS_DYNARMIC) let the user
+        // opt in via ios_use_jit when the process actually has JIT permission.
         cpu_type = arm_emulator_type::dyncom;
-#if EKA2L1_IOS_DYNARMIC
+#if defined(EKA2L1_IOS_DYNARMIC) && EKA2L1_IOS_DYNARMIC
         if (conf_->ios_use_jit && arm::host_can_jit()) {
             cpu_type = arm_emulator_type::dynarmic;
         }
@@ -729,6 +746,10 @@ namespace eka2l1 {
             return 1;
         }
 
+        if (!mem_) {
+            return 1;
+        }
+
         if (dispatcher_) {
             // Objects orphaned by a dead process are destroyed here: this thread holds no
             // kernel lock, so a teardown that waits on an audio render callback can't deadlock.
@@ -770,6 +791,10 @@ namespace eka2l1 {
 
         if (to_run != nullptr) {
             if (!should_step) {
+                // On WASM the dyncom interpreter has its own wall-clock
+                // watchdog (~8ms) that returns control mid-timeslice, so the
+                // full timeslice can be requested here without freezing the
+                // browser main thread.
                 cpu->run(to_run->get_remaining_screenticks());
             } else {
                 cpu->step();
@@ -896,7 +921,10 @@ namespace eka2l1 {
         std::string current_dir;
         common::get_current_directory(current_dir);
 
-        const std::string temp_folder = eka2l1::absolute_path("cache/temp/", current_dir);
+        const std::string cache_root = cache_root_.empty()
+            ? eka2l1::absolute_path("cache/", current_dir)
+            : cache_root_;
+        const std::string temp_folder = eka2l1::add_path(cache_root, "temp/");
 
         eka2l1::common::delete_folder(temp_folder);
         eka2l1::common::create_directories(temp_folder);
@@ -1197,7 +1225,7 @@ namespace eka2l1 {
     }
 
     void system_impl::initialize_user_parties() {
-        get_lib_manager()->load_patch_libraries(PATCH_FOLDER_PATH);
+        get_lib_manager()->load_patch_libraries(runtime_resource_path(PATCH_FOLDER_PATH));
         dispatch::libraries::register_functions(kern_.get(), dispatcher_.get());
 
         service::init_services_post_bootup(parent_);

@@ -1,9 +1,12 @@
-# iOS Port — Investigation Log Index
+# Emulator Investigation Log Index
 
-Each entry below is a deep-dive into a non-trivial bug or design question hit during
-the iOS port: symptom, how it was narrowed down, and the conclusion/fix. See
-`AGENTS.md` for when and how to add a new one — no fixed template, write whatever
-fits the problem. Newest first.
+Synced from [yeatse/EKA2L1](https://github.com/yeatse/EKA2L1) `ios` branch. Entries
+document shared emulator bug fixes (kernel/services/graphics/audio/…); iOS-prefixed
+filenames are still useful as the root-cause write-ups even when the frontend is
+not iOS. Project-local docs (WASM/OHOS build notes) live alongside this index.
+
+Each entry is a deep-dive into a non-trivial bug: symptom, how it was
+narrowed down, and the conclusion/fix.
 
 | Date | Doc | Summary |
 |---|---|---|
