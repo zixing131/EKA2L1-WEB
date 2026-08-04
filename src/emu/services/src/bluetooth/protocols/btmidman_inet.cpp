@@ -117,8 +117,8 @@ namespace eka2l1::epoc::bt {
                 handle_queries_request(reinterpret_cast<sockaddr*>(&sender_ced.value()), event.data.get(), event.length);
             });
 
-            bluetooth_queries_server_socket_->on<uvw::error_event>([this](const uvw::error_event &event, uvw::udp_handle &handle) {
-                handle_queries_request(nullptr, nullptr, event.code());
+            bluetooth_queries_server_socket_->on<uvw::error_event>([](const uvw::error_event &event, uvw::udp_handle &handle) {
+                LOG_ERROR(SERVICE_BLUETOOTH, "Error on the Bluetooth queries socket! Libuv error code={}", event.code());
             });
 
             bluetooth_queries_server_socket_->recv();
@@ -142,12 +142,30 @@ namespace eka2l1::epoc::bt {
 
         send_logout(true);
 
-        auto lan_discovery_call_listener_socket_copy = lan_discovery_call_listener_socket_;
-        auto bluetooth_queries_server_socket_copy = bluetooth_queries_server_socket_;
-        auto hearing_timeout_timer_copy = hearing_timeout_timer_;
+        if (!libuv::default_looper->started()) {
+            return;
+        }
 
-        libuv::default_looper->one_shot([lan_discovery_call_listener_socket_copy, bluetooth_queries_server_socket_copy, hearing_timeout_timer_copy]() {
+        // Every handle below dispatches into a listener that captured this, and stays
+        // alive on its own until closed, so this object may not go away until the loop
+        // thread has torn them all down. Blocking is safe: the default looper is started
+        // once and never stopped, so the task is always picked up.
+        common::event teardown_done;
+
+        libuv::default_looper->one_shot([this, &teardown_done]() {
+            // The asker goes first: its retry timer completes requests through a callback
+            // that reaches back into this object, which is already half torn down.
+            device_addr_asker_.shutdown_handles();
+
+            shutdown_uv_handle(lan_discovery_call_listener_socket_);
+            shutdown_uv_handle(bluetooth_queries_server_socket_);
+            shutdown_uv_handle(matching_server_socket_);
+            shutdown_uv_handle(hearing_timeout_timer_);
+
+            teardown_done.set();
         });
+
+        teardown_done.wait();
     }
 
     void midman_inet::on_timeout_friend_search() {
@@ -194,9 +212,44 @@ namespace eka2l1::epoc::bt {
     }
 
     void midman_inet::handle_queries_request(const sockaddr *sender, const char *buf, std::int64_t nread) {
-        const std::uint32_t asker_id = *reinterpret_cast<const std::uint32_t*>(buf);
+        // The datagram comes from the network, so it may be truncated or hostile. Every
+        // opcode below needs the asker ID plus the opcode byte before anything else.
+        static constexpr std::int64_t QUERY_HEADER_SIZE = 5;
+
+        if (!sender || !buf || (nread < QUERY_HEADER_SIZE)) {
+            return;
+        }
+
+        std::uint32_t asker_id = 0;
+        std::memcpy(&asker_id, buf, sizeof(asker_id));
+
         query_opcode opcode = static_cast<query_opcode>(buf[4]);
         char opcode_result_signature = QUERY_OPCODE_RESULT_START + opcode;
+
+        std::int64_t payload_size_needed = 0;
+
+        switch (opcode) {
+        case QUERY_OPCODE_GET_NAME:
+        case QUERY_OPCODE_GET_VIRTUAL_BLUETOOTH_ADDRESS:
+            break;
+
+        case QUERY_OPCODE_IS_REAL_PORT_MAPPED_TO_VIRTUAL_PORT:
+            payload_size_needed = 4;
+            break;
+
+        case QUERY_OPCODE_GET_REAL_PORT_FROM_VIRTUAL_PORT:
+            payload_size_needed = 2;
+            break;
+
+        default:
+            LOG_ERROR(SERVICE_BLUETOOTH, "Unhandeled query opcode: {}", static_cast<int>(opcode));
+            return;
+        }
+
+        if (nread < QUERY_HEADER_SIZE + payload_size_needed) {
+            LOG_ERROR(SERVICE_BLUETOOTH, "Query request with opcode {} is truncated (got {} bytes)", static_cast<int>(opcode), nread);
+            return;
+        }
 
         switch (opcode) {
         case QUERY_OPCODE_GET_NAME: {
@@ -255,7 +308,6 @@ namespace eka2l1::epoc::bt {
         }
 
         default:
-            LOG_ERROR(SERVICE_BLUETOOTH, "Unhandeled query opcode: {}", static_cast<int>(opcode));
             break;
         }
     }
@@ -377,7 +429,7 @@ lookup:
             return false;
         }
         const std::lock_guard<std::mutex> guard(friends_lock_);
-        if ((index >= friends_.size()) && (friends_[index].real_addr_.family_ == 0)) {
+        if ((index >= friends_.size()) || (friends_[index].real_addr_.family_ == 0)) {
             return false;
         }
 

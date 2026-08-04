@@ -39,6 +39,25 @@ typedef struct uv_timer_s uv_timer_t;
 typedef struct uv_buf_t uv_buf_t;
 
 namespace eka2l1::epoc::bt {
+    /**
+     * @brief Disconnect and close a libuv handle. Must be called on the loop thread.
+     *
+     * A uvw handle keeps a self-reference alive inside libuv from init() until close(),
+     * so releasing the owning shared_ptr does not stop it: it keeps dispatching events
+     * into listeners that captured a `this` which is about to be freed. Owners have to
+     * drop the listeners and close the handle before they go away.
+     */
+    template <typename T>
+    inline void shutdown_uv_handle(std::shared_ptr<T> &handle) {
+        if (!handle) {
+            return;
+        }
+
+        handle->reset();
+        handle->close();
+        handle.reset();
+    }
+
     static constexpr std::uint32_t TIMEOUT_HEARING_STRANGER_MS = 2000;
     static constexpr std::uint16_t CENTRAL_SERVER_STANDARD_PORT = 27138;
     static constexpr std::uint16_t HARBOUR_PORT = 35689;

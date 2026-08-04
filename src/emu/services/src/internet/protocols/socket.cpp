@@ -1332,20 +1332,47 @@ namespace eka2l1::epoc::internet {
         opaque_interface_info_current_ = adapter_info_current->Next;
 #else
         ifaddrs *current_addr_info_posix = reinterpret_cast<ifaddrs*>(opaque_interface_info_current_);
+
+        // getifaddrs also reports link-layer entries (AF_LINK on BSD/Apple, AF_PACKET on Linux),
+        // which carry no netmask or broadcast address at all. Only IP-bearing entries are usable.
         while (current_addr_info_posix && ((strncmp(current_addr_info_posix->ifa_name, "vmnet", 5) == 0) ||
-                ((current_addr_info_posix->ifa_flags & IFF_RUNNING) != IFF_RUNNING))) {
+                ((current_addr_info_posix->ifa_flags & IFF_RUNNING) != IFF_RUNNING) ||
+                (current_addr_info_posix->ifa_addr == nullptr) ||
+                ((current_addr_info_posix->ifa_addr->sa_family != AF_INET) &&
+                    (current_addr_info_posix->ifa_addr->sa_family != AF_INET6)))) {
             current_addr_info_posix = current_addr_info_posix->ifa_next;
-            opaque_interface_info_current_ = current_addr_info_posix;
-            continue;
         }
+
+        opaque_interface_info_current_ = current_addr_info_posix;
+
+        if (!current_addr_info_posix) {
+            return MAKE_SOCKET_GETOPT_ERROR(epoc::error_eof);
+        }
+
         info.name_.assign(nullptr, common::utf8_to_ucs2(current_addr_info_posix->ifa_name));
         host_sockaddr_to_guest_saddress(current_addr_info_posix->ifa_addr, info.addr_, &info.addr_len_, true);
-        host_sockaddr_to_guest_saddress(current_addr_info_posix->ifa_netmask, info.netmask_addr_, &info.netmask_addr_len_, true);
+
+        const bool has_netmask = (current_addr_info_posix->ifa_netmask != nullptr);
+
+        if (has_netmask) {
+            host_sockaddr_to_guest_saddress(current_addr_info_posix->ifa_netmask, info.netmask_addr_, &info.netmask_addr_len_, true);
+        } else {
+            std::memset(&info.netmask_addr_, 0, sizeof(info.netmask_addr_));
+            info.netmask_addr_.family_ = epoc::socket::INVALID_FAMILY_ID;
+            info.netmask_addr_len_ = 0;
+        }
 
 #if !EKA2L1_PLATFORM(ANDROID)
-        host_sockaddr_to_guest_saddress(current_addr_info_posix->ifa_broadaddr, info.broadcast_addr_, &info.broadcast_addr_len_, true);
+        // Point-to-point interfaces (tunnels) have no broadcast address.
+        if (current_addr_info_posix->ifa_broadaddr) {
+            host_sockaddr_to_guest_saddress(current_addr_info_posix->ifa_broadaddr, info.broadcast_addr_, &info.broadcast_addr_len_, true);
+        } else {
+            std::memset(&info.broadcast_addr_, 0, sizeof(info.broadcast_addr_));
+            info.broadcast_addr_.family_ = epoc::socket::INVALID_FAMILY_ID;
+            info.broadcast_addr_len_ = 0;
+        }
 #else
-        if (info.addr_.family_ == INET_ADDRESS_FAMILY) {
+        if ((info.addr_.family_ == INET_ADDRESS_FAMILY) && has_netmask) {
             epoc::set_descriptor_length_variable(info.broadcast_addr_len_, sinet_address::DATA_SIZE);
             info.broadcast_addr_max_len_ = sinet_address::DATA_SIZE;
             info.broadcast_addr_.family_ = INET_ADDRESS_FAMILY;
