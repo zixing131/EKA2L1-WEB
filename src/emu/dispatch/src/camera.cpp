@@ -73,6 +73,23 @@ namespace eka2l1::dispatch {
         return static_cast<std::int32_t>(result_h);
     }
 
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, ecam_duplicate, std::uint32_t handle, drivers::camera::info *cam_info) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        epoc_camera *cam = dispatcher->cameras_.get_object(handle);
+        if (!cam) {
+            return epoc::error_bad_handle;
+        }
+
+        if (cam_info) {
+            *cam_info = cam->cached_info_;
+        }
+
+        // ECam duplicates share the underlying camera instance. Camera
+        // dispatcher handles have no independent close operation, so the
+        // existing handle already has the required lifetime semantics.
+        return static_cast<std::int32_t>(handle);
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, ecam_claim, std::uint32_t handle) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         epoc_camera *cam = dispatcher->cameras_.get_object(handle);

@@ -88,6 +88,7 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER(0x68, ecam_query_still_image_size),
         BRIDGE_REGISTER_DISPATCHER(0x69, ecam_take_image),
         BRIDGE_REGISTER_DISPATCHER(0x6B, ecam_receive_image),
+        BRIDGE_REGISTER_DISPATCHER(0x71, ecam_duplicate),
         BRIDGE_REGISTER_DISPATCHER(0x72, ecam_start_viewfinder),
         BRIDGE_REGISTER_DISPATCHER(0x73, ecam_next_viewfinder_frame),
         BRIDGE_REGISTER_DISPATCHER(0x74, ecam_stop_viewfinder_frame),

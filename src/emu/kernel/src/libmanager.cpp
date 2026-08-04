@@ -1039,16 +1039,29 @@ namespace eka2l1::hle {
     }
 
     void lib_manager::jump_trampoline_through_svc() {
-        kernel::thread *crr = kern_->crr_thread();
-        arm::core::thread_context &context = crr->get_thread_context();
-        address lookup_addr = (context.get_pc() | ((context.cpsr & 0x20) ? 1 : 0));
+        arm::core *cpu = kern_->get_cpu();
+        const bool thumb = (cpu->get_cpsr() & 0x20) != 0;
+
+        // CPU backends advance PC before invoking the SVC handler. The
+        // trampoline map is keyed by the address at which the SVC was
+        // installed, so recover that instruction address before lookup.
+        const address lookup_addr = (cpu->get_pc() - (thumb ? 2 : 4)) | (thumb ? 1 : 0);
+
+        auto branch_to = [cpu](const address target) {
+            std::uint32_t cpsr = cpu->get_cpsr() & ~0x20;
+            if (target & 1) {
+                cpsr |= 0x20;
+            }
+            cpu->set_cpsr(cpsr);
+            cpu->set_pc(target & ~1);
+        };
 
         auto ite = trampoline_lookup_.find(lookup_addr);
         if (ite != trampoline_lookup_.end()) {
-            context.set_pc(ite->second);
+            branch_to(ite->second);
         } else {
             LOG_ERROR(KERNEL, "Unable to find jump for patched address 0x{:X} (impossible)", lookup_addr);
-            context.set_pc(context.get_lr());
+            branch_to(cpu->get_lr());
         }
     }
 
