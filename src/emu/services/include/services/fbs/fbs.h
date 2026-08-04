@@ -492,6 +492,19 @@ namespace eka2l1 {
             return static_cast<std::int32_t>(reinterpret_cast<std::uint8_t *>(ptr) - base_shared_chunk);
         }
 
+        /**
+         * @brief   Get the number of bytes readable from a host pointer that lives in
+         *          the shared or large bitmap chunk.
+         *
+         * Bitmap headers sit in guest-writable memory, so sizes derived from them can
+         * claim more data than the backing chunk actually commits. Use this to bound
+         * host-side reads of bitmap data.
+         *
+         * @returns Bytes readable up to the containing chunk's committed end, or
+         *          the given fallback if the pointer belongs to neither chunk.
+         */
+        std::size_t readable_bytes_from(const std::uint8_t *ptr, const std::size_t fallback) const;
+
         template <typename T>
         void destroy_bitmap_font(T *bitmapfont);
 

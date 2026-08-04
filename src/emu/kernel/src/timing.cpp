@@ -54,11 +54,19 @@ namespace eka2l1 {
         pause_evt_.set();
 
         if (timer_thread_) {
-            timer_thread_->join();
+            if (timer_thread_->joinable()) {
+                timer_thread_->join();
+            }
+
+            timer_thread_.reset();
         }
 
         events_.clear();
         teletimer_->stop();
+    }
+
+    void ntimer::stop() {
+        wipeout();
     }
 
     void ntimer::reset() {

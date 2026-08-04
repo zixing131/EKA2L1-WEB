@@ -873,6 +873,23 @@ namespace eka2l1 {
         return no_failure;
     }
 
+    std::size_t fbs_server::readable_bytes_from(const std::uint8_t *ptr, const std::size_t fallback) const {
+        // Membership is tested against the whole reserved range so a pointer past
+        // the committed end still resolves to this chunk (and clamps to zero)
+        // instead of falling through with an unbounded size.
+        if (shared_chunk && base_shared_chunk && (ptr >= base_shared_chunk) && (ptr < base_shared_chunk + shared_chunk->max_size())) {
+            const std::uint8_t *committed_end = base_shared_chunk + shared_chunk->committed();
+            return (ptr < committed_end) ? static_cast<std::size_t>(committed_end - ptr) : 0;
+        }
+
+        if (large_chunk && base_large_chunk && (ptr >= base_large_chunk) && (ptr < base_large_chunk + large_chunk->max_size())) {
+            const std::uint8_t *committed_end = base_large_chunk + large_chunk->committed();
+            return (ptr < committed_end) ? static_cast<std::size_t>(committed_end - ptr) : 0;
+        }
+
+        return fallback;
+    }
+
     bool fbs_server::is_large_bitmap(const std::uint32_t compressed_size) const {
         static constexpr std::uint32_t RANGE_START_LARGE = 1 << 12;
         static constexpr std::uint32_t RANGE_START_LARGE_TRANS = 1 << 16;

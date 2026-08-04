@@ -99,6 +99,16 @@ namespace eka2l1 {
         }
 
         drivers::sensor_driver *ssdriver = ctx->sys->get_sensor_driver();
+        if (!ssdriver) {
+            // Frontends without a sensor backend (e.g. iOS) leave the driver
+            // unset; report no channels instead of dereferencing null.
+            std::uint32_t channel_info_count = 0;
+            ctx->write_data_to_descriptor_argument(2, channel_info_count);
+            ctx->set_descriptor_argument_length(1, 0);
+            ctx->complete(epoc::error_none);
+            return;
+        }
+
         drivers::sensor_info search_info_driver;
 
         // TODO: I don't copy vendor and location in because.. don't feel like needed. In future cases, please do.
@@ -144,6 +154,12 @@ namespace eka2l1 {
         }
 
         drivers::sensor_driver *ssdriver = ctx->sys->get_sensor_driver();
+        if (!ssdriver) {
+            LOG_ERROR(SERVICE_SENSOR, "No sensor driver available, unable to open channel {}", channel_id);
+            ctx->complete(epoc::error_not_supported);
+
+            return;
+        }
 
         auto controller = ssdriver->new_sensor_controller(channel_id);
         if (!controller) {

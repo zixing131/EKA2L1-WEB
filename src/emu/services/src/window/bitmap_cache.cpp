@@ -214,7 +214,18 @@ namespace eka2l1::epoc {
         XXH64_update(state, reinterpret_cast<const void *>(&bw_bmp->uid_), sizeof(bw_bmp->uid_));
 
         // Lastly, we needs to hash the data, to see if anything changed
-        XXH64_update(state, bw_bmp->data_pointer(fbss_), bw_bmp->header_.bitmap_size - sizeof(bw_bmp->header_));
+        // The header lives in guest-writable memory, so bitmap_size may claim more
+        // data than the backing chunk commits; clamp to what the host can read.
+        std::uint8_t *data = bw_bmp->data_pointer(fbss_);
+        std::size_t data_len = bw_bmp->header_.bitmap_size - sizeof(bw_bmp->header_);
+
+        if (bw_bmp->header_.bitmap_size < sizeof(bw_bmp->header_)) {
+            data_len = 0;
+        } else if (fbss_) {
+            data_len = std::min<std::size_t>(data_len, fbss_->readable_bytes_from(data, data_len));
+        }
+
+        XXH64_update(state, data, data_len);
 
         hash = XXH64_digest(state);
         XXH64_freeState(state);

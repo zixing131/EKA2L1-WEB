@@ -136,14 +136,17 @@ namespace eka2l1 {
         OBJECT_CONTAINER_CLEANUP(undertakers_);
         OBJECT_CONTAINER_CLEANUP(prop_refs_);
         OBJECT_CONTAINER_CLEANUP(props_);
-        OBJECT_CONTAINER_CLEANUP(chunks_);
 
         for (std::size_t i = 0; i < msgs_.size(); i++) {
-            msgs_[i].reset();   
+            msgs_[i].reset();
         }
 
         OBJECT_CONTAINER_CLEANUP_KEEP_OBJECTS(threads_);
         OBJECT_CONTAINER_CLEANUP_KEEP_OBJECTS(processes_);
+        // Chunks must outlive processes: killing a process destroys its memory
+        // model, whose destructor walks the still-attached chunks (global /
+        // DLL-static ones opened into it) to detach its mappings.
+        OBJECT_CONTAINER_CLEANUP(chunks_);
         OBJECT_CONTAINER_CLEANUP(libraries_);
         OBJECT_CONTAINER_CLEANUP(codesegs_);
         OBJECT_CONTAINER_CLEANUP(message_queues_)

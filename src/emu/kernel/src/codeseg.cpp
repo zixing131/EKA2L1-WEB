@@ -385,6 +385,11 @@ namespace eka2l1::kernel {
             kern->destroy(info.code_chunk);
         }
 
+        // A previous non-fatal detach may have parked this attach info in the
+        // codedump collector; erasing it below while its garbage link is still
+        // enqueued leaves the collector walking freed memory on its next clean.
+        kern->get_codedump_collector().remove(info);
+
         info.closing_lib_link.deque();
         info.process_link.deque();
 

@@ -437,6 +437,22 @@ namespace eka2l1::kernel {
             process_handles.reset();
         }
 
+        // Break parent/child links now (after logons, which may inspect the
+        // child list). A dead process must not linger in its parent's child
+        // list nor keep children pointing back at it: launch-exit callbacks
+        // walk those raw pointers long after this object is freed.
+        while (!child_processes_.empty()) {
+            kernel::process *child = child_processes_.back();
+
+            if (child->parent_process_ == this) {
+                child->detatch_from_parent();
+            } else {
+                child_processes_.pop_back();
+            }
+        }
+
+        detatch_from_parent();
+
         kern->destroy(dll_lock);
 
         if (dll_static_chunk) {
