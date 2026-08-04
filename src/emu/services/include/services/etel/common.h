@@ -116,6 +116,7 @@ namespace eka2l1::epoc {
         etel_mobile_line_get_mobile_line_status = 20023,
         etel_mobile_line_notify_status_change = 20024,
         etel_mobile_phone_get_battery_info = 20030,
+        etel_mobile_phone_get_current_mode = 20037,
         etel_mobile_phone_get_identity_caps = 20043,
         etel_mobile_phone_get_indicator = 20046,
         etel_mobile_phone_get_indicator_caps = 20047,

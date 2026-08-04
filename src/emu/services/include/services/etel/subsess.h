@@ -75,6 +75,7 @@ namespace eka2l1 {
         void get_indicator_caps(service::ipc_context *ctx);
         void get_indicator(service::ipc_context *ctx);
         void get_network_caps(service::ipc_context *ctx);
+        void get_current_mode(service::ipc_context *ctx);
         void get_network_registration_status(eka2l1::service::ipc_context *ctx);
         void get_home_network(eka2l1::service::ipc_context *ctx);
         void get_phone_id(eka2l1::service::ipc_context *ctx);
