@@ -301,7 +301,7 @@ namespace eka2l1 {
         void get_app_icon_sizes(service::ipc_context &ctx);
         void get_native_executable_name_if_non_native(service::ipc_context &ctx);
         void app_info_provided_by_reg_file(service::ipc_context &ctx);
-        std::string recognize_data_impl(common::ro_stream &stream);
+        data_recog_result recognize_data_impl(common::ro_stream &stream, const std::u16string &name);
 
         void launch_app(service::ipc_context &ctx);
         void is_program(service::ipc_context &ctx);
@@ -310,6 +310,7 @@ namespace eka2l1 {
         void get_app_for_document_by_file_handle(service::ipc_context &ctx);
         void get_app_for_document_impl(service::ipc_context &ctx, const std::u16string &path);
         void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
+        void recognize_data(service::ipc_context &ctx);
         void recognize_data_by_file_handle(service::ipc_context &ctx);
         void get_supported_data_types_phase1(service::ipc_context &ctx);
         void get_supported_data_types_phase2(service::ipc_context &ctx);

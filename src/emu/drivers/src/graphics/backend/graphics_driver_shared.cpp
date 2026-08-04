@@ -21,13 +21,17 @@
 #include <common/log.h>
 #include <common/platform.h>
 
+#include <cstdint>
+#include <limits>
+#include <vector>
+
 #include <drivers/graphics/backend/graphics_driver_shared.h>
-#include <cstdio>
-#include <map>
 #include <drivers/graphics/buffer.h>
 #include <drivers/graphics/shader.h>
 
+#if !EKA2L1_PLATFORM(IOS)
 #include <glad/glad.h>
+#endif
 
 namespace eka2l1::drivers {
     static void translate_bpp_to_format(const int bpp, texture_format &internal_format, texture_format &format,
@@ -36,51 +40,25 @@ namespace eka2l1::drivers {
         internal_format = texture_format::rgba;
         data_type = texture_data_type::ubyte;
 
-#ifdef __EMSCRIPTEN__
-        // WebGL2 supports neither BGRA formats nor texture swizzling, so all
-        // combos must be plain RGB(A). BGR(A) source data gets its R/B
-        // channels reordered CPU-side in update_bitmap() before upload.
         switch (bpp) {
         case 8:
-            format = texture_format::r;
-            internal_format = texture_format::r8;
-            break;
-
-        case 12:
-            format = texture_format::rgba;
-            internal_format = texture_format::rgba4;
-            data_type = texture_data_type::ushort_4_4_4_4;
-            break;
-
-        case 16:
-            format = texture_format::rgb;
-            internal_format = texture_format::rgb;
-            data_type = texture_data_type::ushort_5_6_5;
-            break;
-
-        case 24:
-            format = texture_format::rgb;
-            internal_format = texture_format::rgb;
-            break;
-
-        case 32:
+#if EKA2L1_PLATFORM(IOS)
+            // The iOS GLES simulator samples single-channel R8 / GL_RED
+            // textures as 0 (black) even though the byte data uploads without
+            // any GL error (and renders fine on desktop GL). This breaks every
+            // AVKON glyph/icon alpha mask (gray256), which S60v5 apps lean on
+            // heavily — the masked text ended up as solid black blocks. Promote
+            // 8bpp bitmaps to RGBA8 instead; the source bytes are expanded to
+            // (v,v,v,v) at upload time (see update_bitmap), so the mask shader's
+            // maskValue.r still reads the coverage.
             format = texture_format::rgba;
             internal_format = texture_format::rgba;
-            break;
-
-        default:
-            break;
-        }
-
-        return;
-#endif
-
-        switch (bpp) {
-        case 8:
+#else
             format = texture_format::r;
 
             if (stricted)
                 internal_format = texture_format::r8;
+#endif
 
             break;
 
@@ -92,29 +70,48 @@ namespace eka2l1::drivers {
             break;
 
         case 16:
+#if EKA2L1_PLATFORM(IOS)
+            // Same iOS GLES story as the 8bpp case: a GL_RGB / RGB565 texture
+            // that AVKON renders glyph runs into (window-server backing bitmaps)
+            // comes back black on the simulator. Promote to RGBA8 and unpack the
+            // 565 source to RGBA at upload time (see update_bitmap).
+            format = texture_format::rgba;
+            internal_format = texture_format::rgba;
+#else
             format = texture_format::rgb;
             data_type = texture_data_type::ushort_5_6_5;
 
             if (stricted)
                 internal_format = texture_format::rgb;
+#endif
 
             break;
 
         case 24:
+#if EKA2L1_PLATFORM(IOS)
+            format = texture_format::rgba;
+            internal_format = texture_format::rgba;
+#else
             if (stricted) {
                 format = texture_format::rgb;
                 internal_format = texture_format::rgb;
             } else {
                 format = texture_format::bgr;
             }
+#endif
 
             break;
 
         case 32:
+#if EKA2L1_PLATFORM(IOS)
+            format = texture_format::rgba;
+            internal_format = texture_format::rgba;
+#else
             format = texture_format::bgra;
 
             if (stricted)
                 internal_format = texture_format::bgra;
+#endif
 
             break;
 
@@ -136,13 +133,10 @@ namespace eka2l1::drivers {
         texture->set_filter_minmag(false, drivers::filter_option::linear);
         texture->set_filter_minmag(true, drivers::filter_option::linear);
 
-#ifndef __EMSCRIPTEN__
-        // WebGL2 removed TEXTURE_SWIZZLE_*.
         if (bpp == 12) {
             texture->set_channel_swizzle({ channel_swizzle::green, channel_swizzle::blue,
                 channel_swizzle::alpha, channel_swizzle::one });
         }
-#endif
 
         return texture;
     }
@@ -270,145 +264,83 @@ namespace eka2l1::drivers {
 
         translate_bpp_to_format(bmp->bpp, internal_format, data_format, data_type, is_stricted());
 
-#ifdef __EMSCRIPTEN__
-        // N-Gage 2.0 games write RGB565 straight into their 32bpp window
-        // backing bitmap (their RGA path takes the raw Bits() pointer and
-        // assumes the 64K-colour layout of real hardware). Presented as-is,
-        // two 16-bit pixels land in each 32-bit slot and the screen turns to
-        // coloured noise. Fingerprint per upload: in legit XRGB8888 content
-        // the two 16-bit halves of a pixel almost never match (needs R==B и
-        // X==G), while 565 streams match on every flat-colour pixel pair.
-        // Once a bitmap trips the detector twice it stays converted.
-        if (data && (bmp->bpp == 32) && (dim.x >= 100) && (dim.y >= 100) && (offset.x == 0) && (offset.y == 0)) {
-            static std::map<drivers::handle, int> verdicts;
-            int &verdict = verdicts[h];
-
-            {
-                const std::uint32_t *slots = reinterpret_cast<const std::uint32_t *>(data);
-                const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
-                std::uint32_t nonzero = 0, pair_eq = 0, alpha_odd = 0;
-                for (std::size_t i = 0; i < total; i += 5) {
-                    const std::uint32_t v = slots[i];
-                    if (!v || (v == 0xFFFFFFFFu)) {
-                        continue; // blank black/white fills are ambiguous in both encodings
-                    }
-                    // All four bytes equal = grayscale RGBA (the font atlases are
-                    // exactly this), not 565 evidence: a doubled 565 pair matches
-                    // as 0xXYXY with X != Y in real content.
-                    const std::uint32_t b = v & 0xFF;
-                    if (v == (b * 0x01010101u)) {
-                        continue;
-                    }
-                    nonzero++;
-                    if ((v >> 16) == (v & 0xFFFF)) {
-                        pair_eq++;
-                    }
-                    const std::uint32_t top = v >> 24;
-                    if ((top != 0) && (top != 0xFF)) {
-                        alpha_odd++;
-                    }
-                }
-
-                // +1 looks-565, -1 looks-32bpp, 0 inconclusive (blank/flat frame).
-                // Both fingerprints must hold: doubled 16-bit halves AND varying
-                // top bytes (a doubled 565 slot's top byte carries colour bits;
-                // legit X/ARGB content keeps it 00/FF - dark magenta 32bpp frames
-                // match the pair test alone and would flap the conversion).
-                const int cls = (nonzero <= 1000) ? 0
-                    : (((pair_eq * 20 >= nonzero) && (alpha_odd * 10 >= nonzero)) ? 1 : -1);
-
-                if (verdict >= 0) {
-                    if (cls > 0) {
-                        if (++verdict >= 2) {
-                            LOG_WARN(DRIVER_GRAPHICS, "Bitmap {}x{} detected as RGB565-in-32bpp, converting uploads", dim.x, dim.y);
-                            verdict = -1;
-                        }
-                    } else if (cls < 0) {
-                        verdict = 0;
-                    }
-                } else {
-                    // Locked on: a transient misdetection (e.g. a launch
-                    // transition frame) heals after two conclusive 32bpp
-                    // frames; blank or ambiguous uploads keep the state.
-                    if (cls > 0) {
-                        verdict = -1;
-                    } else if ((cls < 0) && (--verdict <= -3)) {
-                        LOG_WARN(DRIVER_GRAPHICS, "Bitmap {}x{} RGB565 conversion disengaged (content looks 32bpp again)", dim.x, dim.y);
-                        verdict = 0;
-                    }
-                }
-            }
-
-            if (verdict <= -1) {
-                static std::vector<std::uint32_t> conv;
-                const std::size_t total = static_cast<std::size_t>(dim.x) * dim.y;
-                conv.resize(total);
-                const std::uint16_t *src = reinterpret_cast<const std::uint16_t *>(data);
-                for (std::size_t i = 0; i < total; i++) {
-                    const std::uint16_t px = src[i];
-                    const std::uint32_t r = ((px >> 11) & 0x1F) * 255 / 31;
-                    const std::uint32_t g = ((px >> 5) & 0x3F) * 255 / 63;
-                    const std::uint32_t b = (px & 0x1F) * 255 / 31;
-                    conv[i] = 0xFF000000u | (b << 16) | (g << 8) | r;
-                }
-                data = conv.data();
-                // Data is now RGBA in natural byte order: skip the BGR swap below.
+#if EKA2L1_PLATFORM(IOS)
+        // Counterpart to the 8/16/24/32bpp -> RGBA8 promotion in
+        // translate_bpp_to_format. The iOS GLES simulator renders these
+        // sub-32bpp window-server bitmaps as solid black (R8 samples 0,
+        // GL_RGB/565 textures that AVKON draws glyph runs into come back
+        // empty), and GLES has no GL_BGR upload path for 24/32bpp Symbian
+        // BGR/BGRA memory. Unpack the source straight to RGBA8 here to match
+        // the RGBA8 texture the create path now allocates. Packed tightly, so
+        // the texture row length is just dim.x.
+        std::vector<std::uint8_t> expanded_rgba;
+        const std::size_t bytes_pp = static_cast<std::size_t>(bmp->bpp) / 8;
+        const bool can_expand = data && (bmp->bpp == 8 || bmp->bpp == 16 || bmp->bpp == 24 || bmp->bpp == 32)
+            && (dim.x > 0) && (dim.y > 0)
+            && (static_cast<std::size_t>(dim.x) <= (std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(dim.y) / 4));
+        if (can_expand) {
+            const std::uint8_t *src = reinterpret_cast<const std::uint8_t *>(data);
+            const std::size_t src_pixels_per_line = (pixels_per_line != 0)
+                ? pixels_per_line
+                : static_cast<std::size_t>(dim.x);
+            // Match GL_UNPACK_ALIGNMENT=4 used by the normal upload path.
+            // A 24-bpp row can contain padding that cannot be represented by
+            // an integral pixels-per-line value (for example, 246 pixels use
+            // 740 bytes rather than 246 * 3). Advancing by pixels alone makes
+            // every following row start two bytes early.
+            const std::size_t src_row_bytes = ((src_pixels_per_line * bytes_pp) + 3) & ~std::size_t(3);
+            const std::size_t source_end = (static_cast<std::size_t>(dim.y) - 1) * src_row_bytes
+                + static_cast<std::size_t>(dim.x) * bytes_pp;
+            if (size && (source_end > size)) {
                 bmp->tex->update_data(this, 0, eka2l1::vec3(offset.x, offset.y, 0), eka2l1::vec3(dim.x, dim.y, 0), pixels_per_line,
                     data_format, data_type, data, 0, 4);
                 return;
             }
-        }
-#endif
 
-#ifdef __EMSCRIPTEN__
-        // WebGL2 has neither BGRA pixel formats nor texture swizzling: the
-        // guest's BGR(A) data must be reordered to RGB(A) on the CPU before
-        // the upload (matches the RGB(A) formats from translate_bpp_to_format).
-        // The data pointer is always a heap copy made by the producers
-        // (bitmap_cache decompress/memcpy), so converting in place is safe.
-        if (data && ((bmp->bpp == 32) || (bmp->bpp == 24))) {
-            std::uint8_t *bytes = reinterpret_cast<std::uint8_t *>(const_cast<void *>(data));
-            const std::size_t pixel_size = bmp->bpp / 8;
-            const std::size_t stride_pixels = pixels_per_line ? pixels_per_line : static_cast<std::size_t>(dim.x);
-            const std::size_t row_bytes = stride_pixels * pixel_size;
-
+            expanded_rgba.resize(static_cast<std::size_t>(dim.x) * static_cast<std::size_t>(dim.y) * 4);
             for (int y = 0; y < dim.y; y++) {
-                std::uint8_t *row = bytes + (static_cast<std::size_t>(y) * row_bytes);
                 for (int x = 0; x < dim.x; x++) {
-                    std::swap(row[x * pixel_size], row[x * pixel_size + 2]);
+                    const std::uint8_t *s = src + static_cast<std::size_t>(y) * src_row_bytes
+                        + static_cast<std::size_t>(x) * bytes_pp;
+                    std::uint8_t *d = expanded_rgba.data() + (static_cast<std::size_t>(y) * dim.x + x) * 4;
+                    if (bmp->bpp == 8) {
+                        // Gray / alpha mask: replicate so maskValue.r is coverage.
+                        d[0] = d[1] = d[2] = d[3] = s[0];
+                    } else if (bmp->bpp == 16) {
+                        // RGB565, R in the high bits.
+                        const std::uint16_t p = static_cast<std::uint16_t>(s[0] | (s[1] << 8));
+                        const std::uint8_t r5 = (p >> 11) & 0x1F, g6 = (p >> 5) & 0x3F, b5 = p & 0x1F;
+                        d[0] = (r5 << 3) | (r5 >> 2);
+                        d[1] = (g6 << 2) | (g6 >> 4);
+                        d[2] = (b5 << 3) | (b5 >> 2);
+                        d[3] = 255;
+                    } else {
+                        // 24/32bpp color16m/u/a is stored B,G,R,(A) in memory.
+                        d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = 255;
+                        if (bmp->bpp == 32) {
+                            d[3] = s[3];
+                        }
+                    }
                 }
             }
-        }
-
-        // 12bpp is Symbian XRGB4444; uploaded as GL RGBA4444 the channels all
-        // land one slot off (X->R, R->G, G->B, B->A), which is exactly the
-        // "white turns cyan / red turns green" artifact. Desktop fixes it with
-        // a {G,B,A,one} texture swizzle; WebGL2 can't, so rotate the nibbles
-        // CPU-side instead and force alpha opaque (matching swizzle's "one").
-        if (data && (bmp->bpp == 12)) {
-            std::uint16_t *pixels = reinterpret_cast<std::uint16_t *>(const_cast<void *>(data));
-            const std::size_t stride_pixels = pixels_per_line ? pixels_per_line : static_cast<std::size_t>(dim.x);
-
-            for (int y = 0; y < dim.y; y++) {
-                std::uint16_t *row = pixels + (static_cast<std::size_t>(y) * stride_pixels);
-                for (int x = 0; x < dim.x; x++) {
-                    row[x] = static_cast<std::uint16_t>((row[x] << 4) | 0xF);
-                }
-            }
-        }
+            bmp->tex->update_data(this, 0, eka2l1::vec3(offset.x, offset.y, 0), eka2l1::vec3(dim.x, dim.y, 0), 0,
+                texture_format::rgba, texture_data_type::ubyte, expanded_rgba.data(), 0, 4);
+        } else
 #endif
-
         bmp->tex->update_data(this, 0, eka2l1::vec3(offset.x, offset.y, 0), eka2l1::vec3(dim.x, dim.y, 0), pixels_per_line,
             data_format, data_type, data, 0, 4);
 
-#ifndef __EMSCRIPTEN__
-        // WebGL2 removed TEXTURE_SWIZZLE_*; calling it only raises GL errors
-        // there. BGR(A) ordering is handled CPU-side above instead.
         if (bmp->bpp == 12) {
             bmp->tex->set_channel_swizzle({ channel_swizzle::green, channel_swizzle::blue,
                 channel_swizzle::alpha, channel_swizzle::one });
         }
 
+#if EKA2L1_PLATFORM(IOS)
+        // On iOS the 8/16/24bpp data above was unpacked to correctly-ordered
+        // RGBA8, so no channel swizzle is needed (and the 24bpp B<->R swizzle
+        // would actively re-corrupt it).
+        if (false) {
+#else
         if (is_stricted()) {
             switch (bmp->bpp) {
             case 8:
@@ -429,6 +361,7 @@ namespace eka2l1::drivers {
             default:
                 break;
             }
+#endif
         } else {
             switch (data_format) {
             case texture_format::r:
@@ -445,7 +378,6 @@ namespace eka2l1::drivers {
                 break;
             }
         }
-#endif
     }
 
     void shared_graphics_driver::update_bitmap(command &cmd) {

@@ -6387,6 +6387,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x6E, mutex_create),
         BRIDGE_REGISTER(0x6F, semaphore_create),
         BRIDGE_REGISTER(0x70, thread_open_by_id),
+        BRIDGE_REGISTER(0x71, process_open_by_id),
         BRIDGE_REGISTER(0x72, thread_kill),
         BRIDGE_REGISTER(0x73, thread_logon),
         BRIDGE_REGISTER(0x74, thread_logon_cancel),

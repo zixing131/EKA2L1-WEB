@@ -54,6 +54,7 @@ namespace eka2l1 {
         feature_id_thai = 1081,
         feature_id_chinese = 1096,
         feature_id_flash_lite_viewer = 1145,
+        feature_id_flash_lite_browser_plugin = 1146,
         feature_id_pen_calibration = 1658,
         feature_id_tactile_feedback = 1718
     };
@@ -73,6 +74,13 @@ namespace eka2l1 {
         // built-in Calculator (and apps with the same pattern) panic with
         // EIKCOCTL 8 when opening their Options menu.
         enable_features.push_back(feature_id_app_menu_show_images);
+
+        // Browser-hosted Flash Lite is a separate platform feature from the
+        // standalone viewer. Report it only when the ROM actually supplies the
+        // Netscape-compatible browser plug-in.
+        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\npflashlite.dll")) {
+            enable_features.push_back(feature_id_flash_lite_browser_plugin);
+        }
 
         // 2. Are we welcoming SVG? Check for OpenVG, cause it should be there if this feature is available
         if (sys->get_io_system()->exist(u"z:\\sys\\bin\\libopenvg.dll")) {
