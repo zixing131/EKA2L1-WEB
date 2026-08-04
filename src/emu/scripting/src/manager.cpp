@@ -552,40 +552,38 @@ namespace eka2l1::manager {
             hle::lib_manager *manager = sys->get_lib_manager();
             if (manager && eager_resolve) {
                 if (codeseg_ptr seg = manager->load(common::utf8_to_ucs2(lib_name))) {
-                    std::vector<kernel::process*> processes = seg->attached_processes();
+                    const bool identity_matches = ((uid3 == 0) || (std::get<2>(seg->get_uids()) == uid3))
+                        && ((seghash == 0) || (seg->get_hash() == seghash));
 
-                    if (process_uid != 0) {
-                        auto find_res = std::find_if(processes.begin(), processes.end(), [process_uid](kernel::process *target) {
-                            return (target->get_uid() == process_uid);
-                        });
-
-                        kernel::process *finally = nullptr;
-                        if (find_res != processes.end()) {
-                            finally = *find_res;
-                        }
-
-                        processes.clear();
-                        processes.push_back(finally);
-                    }
-
-                    for (kernel::process *process: processes) {
-                        address base = seg->get_code_run_addr(process);
-
-                        if (base == 0) {
-                            LOG_ERROR(SCRIPTING, "Can't retrieve code run address of process base {} with UID", process->name(), process_uid);
-                        }
-
-                        if (seg->is_rom()) {
-                            base = 0;
-                        }
-
+                    if (identity_matches && seg->is_rom()) {
+                        // ROM hook addresses are already absolute and do not
+                        // depend on a process attachment. Some system DLLs are
+                        // loaded before scripting starts, so waiting for a new
+                        // codeseg-attached event would leave them unresolved.
                         info.invoke_->category_ = script_function::META_CATEGORY_BREAKPOINT;
-                        info.addr_ += base;
-                        info.flags_ = 0;
-                    }
+                        info.flags_ = breakpoint_info::FLAG_ROM_IMAGE;
+                    } else if (identity_matches) {
+                        std::vector<kernel::process*> processes = seg->attached_processes();
 
-                    if (seg->is_rom() && !(info.flags_ & breakpoint_info::FLAG_BASED_IMAGE)) {
-                        info.flags_ |= breakpoint_info::FLAG_ROM_IMAGE;
+                        if (process_uid != 0) {
+                            processes.erase(std::remove_if(processes.begin(), processes.end(), [process_uid](kernel::process *target) {
+                                return target->get_uid() != process_uid;
+                            }), processes.end());
+                        }
+
+                        for (kernel::process *process: processes) {
+                            address base = seg->get_code_run_addr(process);
+
+                            if (base == 0) {
+                                LOG_ERROR(SCRIPTING, "Can't retrieve code run address of process base {} with UID", process->name(), process_uid);
+                                continue;
+                            }
+
+                            info.invoke_->category_ = script_function::META_CATEGORY_BREAKPOINT;
+                            info.addr_ += base;
+                            info.flags_ = 0;
+                            break;
+                        }
                     }
                 }
             }

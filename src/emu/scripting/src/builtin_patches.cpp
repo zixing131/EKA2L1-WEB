@@ -76,15 +76,23 @@ namespace eka2l1::manager {
         scripting::cpu::set_register(0, 3500);
     }
 
-    // --- RM-409 empty Avkon menu fix ---
-    // This firmware's CEikMenuBar::StartDisplayingMenuBarL indexes Count()-1
-    // without checking for an empty menu-title array. Later Avkon versions end
-    // menu display through the existing cleanup path instead.
-    static void rm409_skip_empty_avkon_menu() {
+    // --- S60v3 empty Avkon menu fix ---
+    // These Avkon builds index Count()-1 without checking for an empty
+    // menu-title array. Later versions end menu display through the existing
+    // cleanup path instead.
+    static void skip_empty_avkon_menu(const std::uint32_t cleanup_address) {
         if (static_cast<std::int32_t>(scripting::cpu::get_register(1)) < 0) {
             scripting::cpu::set_register(7, 0);
-            scripting::cpu::set_register(15, 0x814F5210);
+            scripting::cpu::set_register(15, cleanup_address);
         }
+    }
+
+    static void rm409_skip_empty_avkon_menu() {
+        skip_empty_avkon_menu(0x814F5210);
+    }
+
+    static void rm320_skip_empty_avkon_menu() {
+        skip_empty_avkon_menu(0x82ED3068);
     }
 
     void scripts::register_builtin_patches() {
@@ -142,6 +150,10 @@ namespace eka2l1::manager {
         // from applying to other Avkon builds with the same UID3.
         register_breakpoint("eikcoctl.dll", 0x814F511D, 0, 0x1000489E,
             0x17EDD4DD, rm409_skip_empty_avkon_menu, false);
+
+        // Nokia N95 8GB / RM-320 variant of the same old Avkon behavior.
+        register_breakpoint("eikcoctl.dll", 0x82ED2F3D, 0, 0x1000489E,
+            0xF2CDB190, rm320_skip_empty_avkon_menu);
 
         current_module = nullptr;
 
