@@ -588,6 +588,32 @@ namespace eka2l1 {
             return threads_;
         }
 
+        // True while wipeout() is tearing the whole kernel down. Completion/scheduling
+        // work should be skipped then: the scheduler and threads are being destroyed, so
+        // signalling or rescheduling a thread would touch state that is already gone.
+        bool is_wiping() const {
+            return wiping_;
+        }
+
+        // Whether the given raw thread pointer still refers to a live kernel thread.
+        // A destroyed thread is erased from threads_, so a stale pointer will not match.
+        // Used to guard completions (property subscriptions, audio callbacks, ...) against
+        // a requester thread that has already exited. Must be called on the HLE thread or
+        // otherwise under the kernel lock, since it walks the thread list.
+        bool is_thread_alive(kernel::thread *thr) {
+            if (!thr) {
+                return false;
+            }
+
+            for (const auto &candidate : threads_) {
+                if (candidate.get() == reinterpret_cast<kernel::kernel_obj *>(thr)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         std::vector<kernel_obj_unq_ptr> &get_codeseg_list() {
             return codesegs_;
         }

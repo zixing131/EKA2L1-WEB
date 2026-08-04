@@ -191,7 +191,11 @@ namespace eka2l1 {
 
                 if (msg) {
                     if ((msg->msg_status == ipc_message_status::accepted) || (msg->msg_status == ipc_message_status::delivered)) {
-                        if (msg->own_thr && (msg->own_thr->current_state() != kernel::thread_state::stop)) {
+                        // During kernel wipeout the owning threads and the scheduler are being
+                        // torn down, so signal_request() would dewait a thread whose scheduler
+                        // state is already gone (native crash in thread_scheduler::dewait). The
+                        // requests need not be completed then; only the normal-close path does.
+                        if (!kern->is_wiping() && msg->own_thr && (msg->own_thr->current_state() != kernel::thread_state::stop)) {
                             epoc::request_status *final_sts = msg->request_sts.get(msg->own_thr->owning_process());
                             if (final_sts) {
                                 msg->msg_status = ipc_message_status::completed;

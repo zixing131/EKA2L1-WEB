@@ -441,11 +441,16 @@ namespace eka2l1 {
         std::size_t avail_dest_size = common::align(size_when_compressed, 4);
         void *data = nullptr;
 
-        if (is_large_bitmap(static_cast<std::uint32_t>(avail_dest_size))) {
-            data = large_chunk_allocator->allocate(avail_dest_size);
-        } else {
-            data = shared_chunk_allocator->allocate(avail_dest_size);
-            *err_code = fbs_load_data_err_small_bitmap;
+        {
+            // Shared with worker-thread bitmap creation; see create_bitmap().
+            const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
+
+            if (is_large_bitmap(static_cast<std::uint32_t>(avail_dest_size))) {
+                data = large_chunk_allocator->allocate(avail_dest_size);
+            } else {
+                data = shared_chunk_allocator->allocate(avail_dest_size);
+                *err_code = fbs_load_data_err_small_bitmap;
+            }
         }
 
         if (data == nullptr) {
@@ -752,6 +757,11 @@ namespace eka2l1 {
     }
 
     fbsbitmap *fbs_server::create_bitmap(fbs_bitmap_data_info &info, const bool alloc_data, const bool support_current_display_mode_flag, const bool support_dirty) {
+        // Registry loading (applist server) calls this from a worker thread pool, so guard
+        // the whole routine: it both lazily initializes the server and mutates the shared
+        // chunk allocators, none of which are otherwise thread-safe.
+        const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
+
         if (!shared_chunk || !large_chunk) {
             initialize_server();
         }
@@ -832,6 +842,9 @@ namespace eka2l1 {
         if (!bmp->bitmap_ || bmp->count > 0) {
             return false;
         }
+
+        // See create_bitmap(): the chunk allocators are shared with worker threads.
+        const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
 
         bool no_failure = true;
 

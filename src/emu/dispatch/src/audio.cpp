@@ -367,6 +367,30 @@ namespace eka2l1::dispatch {
         return epoc::error_none;
     }
 
+    // The audio/DSP driver fires buffer-ready notifications on its own render thread,
+    // which can race with the guest thread that armed the request being torn down (app
+    // exit, player/stream death). notify_info::complete() dereferences notify_info::requester,
+    // so completing a notification whose requester thread has already been destroyed is a
+    // use-after-free (observed crashing in notify_info::complete on the CoreAudio render
+    // thread). Validate the requester against the kernel's live thread list under the kernel
+    // lock and drop the stale notification instead of dereferencing a dangling pointer.
+    static void complete_audio_notify_if_alive(kernel_system *kern, epoc::notify_info &info) {
+        if (kern == nullptr) {
+            return;
+        }
+
+        kern->lock();
+
+        if (!info.empty() && kern->is_thread_alive(info.requester)) {
+            info.complete(epoc::error_none);
+        } else {
+            // Requester is gone; drop the stale notification without signalling it.
+            info.sts = 0;
+        }
+
+        kern->unlock();
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_notify_any_done, eka2l1::ptr<void> handle, eka2l1::ptr<epoc::request_status> sts) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
@@ -385,13 +409,11 @@ namespace eka2l1::dispatch {
         info.requester = sys->get_kernel_system()->crr_thread();
         info.sts = sts;
 
-        if (!eplayer->impl_->notify_any_done([eplayer](std::uint8_t *data) {
-                epoc::notify_info *info = reinterpret_cast<epoc::notify_info *>(data);
-                kernel_system *kern = info->requester->get_kernel_object_owner();
+        kernel_system *kern = sys->get_kernel_system();
 
-                kern->lock();
-                info->complete(epoc::error_none);
-                kern->unlock();
+        if (!eplayer->impl_->notify_any_done([eplayer, kern](std::uint8_t *data) {
+                epoc::notify_info *info = reinterpret_cast<epoc::notify_info *>(data);
+                complete_audio_notify_if_alive(kern, *info);
 
                 eplayer->impl_->clear_notify_done();
             },
@@ -630,20 +652,14 @@ namespace eka2l1::dispatch {
 
         dsp_epoc_stream *stream_org_new = reinterpret_cast<dsp_epoc_stream *>(stream_new.get());
 
+        kernel_system *kern = sys->get_kernel_system();
+
         stream_org_new->ll_stream_->register_callback(
-            drivers::dsp_stream_notification_more_buffer, [](void *userdata) {
+            drivers::dsp_stream_notification_more_buffer, [kern](void *userdata) {
                 dsp_epoc_stream *epoc_stream = reinterpret_cast<dsp_epoc_stream *>(userdata);
                 const std::lock_guard<std::mutex> guard(epoc_stream->lock_);
 
-                epoc::notify_info &info = epoc_stream->copied_info_;
-
-                if (!info.empty()) {
-                    kernel_system *kern = info.requester->get_kernel_object_owner();
-
-                    kern->lock();
-                    info.complete(epoc::error_none);
-                    kern->unlock();
-                }
+                complete_audio_notify_if_alive(kern, epoc_stream->copied_info_);
             },
             stream_new.get());
 

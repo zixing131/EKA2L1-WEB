@@ -40,6 +40,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -360,6 +361,13 @@ namespace eka2l1 {
         std::unique_ptr<epoc::chunk_allocator> shared_chunk_allocator;
         std::unique_ptr<epoc::chunk_allocator> large_chunk_allocator;
 
+        // The applist server loads registries (including their icon bitmaps) on a worker
+        // thread pool, so create_bitmap()/free_bitmap() and the general/large data
+        // allocators can be entered concurrently with the main HLE thread. The two chunk
+        // allocators are plain host allocators with no internal locking, so guard every
+        // mutation of them with this recursive mutex to avoid heap corruption.
+        std::recursive_mutex allocator_lock_;
+
         std::unique_ptr<compress_queue> compressor;
         std::unique_ptr<std::thread> compressor_thread;
 
@@ -539,6 +547,7 @@ namespace eka2l1 {
         */
         template <typename T, typename... Args>
         T *allocate_general_data(Args... construct_args) {
+            const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
             return shared_chunk_allocator->allocate_struct<T>(construct_args...);
         }
 
