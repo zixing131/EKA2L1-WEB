@@ -298,6 +298,7 @@ namespace eka2l1 {
             , trap_stack(0)
             , cached_detach(false)
             , sleep_level(0)
+            , stray_absorbed_count(0)
             , metadata(nullptr)
             , backup_state(thread_state::stop)
             , flags(0)
@@ -556,141 +557,6 @@ namespace eka2l1 {
             return !kern->should_panic_be_blocked(this, common::ucs2_to_utf8(category), code);
         }
 
-        void thread::dump_panic_context() {
-            kernel::process *pr = owning_process();
-            arm::core *core = kern->get_cpu();
-
-            std::uint32_t pc = 0, lr = 0, sp = 0;
-            if ((kern->crr_thread() == this) && core) {
-                pc = core->get_pc();
-                lr = core->get_lr();
-                sp = core->get_sp();
-            } else {
-                pc = ctx.cpu_registers[15];
-                lr = ctx.cpu_registers[14];
-                sp = ctx.cpu_registers[13];
-            }
-
-            auto resolve = [&](const std::uint32_t addr) -> std::string {
-                if (pr) {
-                    for (auto &seg_obj : kern->get_codeseg_list()) {
-                        codeseg *seg = reinterpret_cast<codeseg *>(seg_obj.get());
-                        if (!seg) {
-                            continue;
-                        }
-                        const address beg = seg->get_code_run_addr(pr);
-                        if (beg && (addr >= beg) && (addr < beg + seg->get_text_size())) {
-                            return fmt::format("{}+0x{:X}", seg->name(), addr - beg);
-                        }
-                    }
-                }
-                return "?";
-            };
-
-            LOG_WARN(KERNEL, "Panic context: pc=0x{:08X} ({}) lr=0x{:08X} ({}) sp=0x{:08X}",
-                pc, resolve(pc), lr, resolve(lr), sp);
-
-            // Code bytes around a return address, for offline disassembly of
-            // stripped ROM binaries when chasing guest panics.
-            constexpr std::uint32_t CODE_BACK = 48;
-            constexpr std::uint32_t CODE_LEN = 96;
-            auto code_hex = [&](const std::uint32_t addr) -> std::string {
-                if (!pr) {
-                    return "";
-                }
-                const std::uint32_t start = (addr & ~1u) - CODE_BACK;
-                std::string hex;
-                hex.reserve(CODE_LEN * 2);
-                for (std::uint32_t i = 0; i < CODE_LEN; i++) {
-                    std::uint8_t *b = reinterpret_cast<std::uint8_t *>(
-                        pr->get_ptr_on_addr_space(start + i));
-                    if (!b) {
-                        hex += "??";
-                    } else {
-                        hex += fmt::format("{:02x}", *b);
-                    }
-                }
-                return fmt::format(" code[0x{:08X}..]={}", start, hex);
-            };
-
-            // Dump GP registers + identify live objects: for any register pointing
-            // to a heap object whose first word is a vtable in a known codeseg,
-            // print "DLL+off". Names the C++ class involved in a guest panic, which
-            // pure return-address backtraces can't (e.g. which control owns a bad
-            // array). Cross-reference the vtable offset against the ROM disassembly.
-            {
-                arm::core *c = ((kern->crr_thread() == this) && core) ? core : nullptr;
-                auto reg = [&](int i) -> std::uint32_t { return c ? c->get_reg(i) : ctx.cpu_registers[i]; };
-                std::string regs;
-                for (int i = 0; i <= 12; i++) {
-                    regs += fmt::format("r{}=0x{:08X} ", i, reg(i));
-                }
-                LOG_WARN(KERNEL, "Panic regs: {}", regs);
-
-                if (pr) {
-                    auto vtable_of = [&](std::uint32_t obj) -> std::string {
-                        if (obj < 0x400000) return "";
-                        std::uint32_t *vp = reinterpret_cast<std::uint32_t *>(pr->get_ptr_on_addr_space(obj));
-                        if (!vp) return "";
-                        const std::string w = resolve(*vp);
-                        return (w == "?") ? "" : fmt::format("vtable={} (vt@0x{:08X})", w, *vp);
-                    };
-                    for (int i = 0; i <= 12; i++) {
-                        const std::string v = vtable_of(reg(i));
-                        if (!v.empty()) {
-                            LOG_WARN(KERNEL, "  obj r{}=0x{:08X} {}", i, reg(i), v);
-                        }
-                    }
-                }
-            }
-
-            // Heuristic backtrace: scan the stack for words that land inside a
-            // codeseg's text section — noisy but enough to see the call chain.
-            if (pr) {
-                int printed = 0;
-                for (std::uint32_t off = 0; (off < 512) && (printed < 16); off += 4) {
-                    std::uint32_t *word = reinterpret_cast<std::uint32_t *>(
-                        pr->get_ptr_on_addr_space(sp + off));
-                    if (!word) {
-                        continue;
-                    }
-                    const std::string where = resolve(*word);
-                    if (where != "?") {
-                        LOG_WARN(KERNEL, "  stack[sp+0x{:03X}] = 0x{:08X} ({}){}", off, *word, where,
-                            (printed < 8) ? code_hex(*word) : "");
-                        printed++;
-                    }
-                }
-
-                // Scan the stack for heap object pointers whose first word is a
-                // vtable in a known codeseg (callee-saved 'this' pointers spilled by
-                // prologues). Reports each object's class (vtable DLL+off) - surfaces
-                // the objects involved in a panic that a return-address backtrace
-                // alone can't name. Cross-reference the vtable offset with the ROM.
-                int objs = 0;
-                std::uint32_t last_obj = 0;
-                for (std::uint32_t off = 0; (off < 512) && (objs < 20); off += 4) {
-                    std::uint32_t *word = reinterpret_cast<std::uint32_t *>(
-                        pr->get_ptr_on_addr_space(sp + off));
-                    if (!word || (*word < 0x400000) || (*word == last_obj)) {
-                        continue;
-                    }
-                    std::uint32_t *vp = reinterpret_cast<std::uint32_t *>(pr->get_ptr_on_addr_space(*word));
-                    if (!vp) {
-                        continue;
-                    }
-                    const std::string vw = resolve(*vp);
-                    if (vw == "?") {
-                        continue;
-                    }
-                    last_obj = *word;
-                    LOG_WARN(KERNEL, "  obj@stack[sp+0x{:03X}] this=0x{:08X} vtable={} (vt@0x{:08X})",
-                        off, *word, vw, *vp);
-                    objs++;
-                }
-            }
-        }
-
         bool thread::kill(const entity_exit_type the_exit_type, const std::u16string &category,
             const std::int32_t reason) {
             if (state == kernel::thread_state::stop) {
@@ -704,14 +570,8 @@ namespace eka2l1 {
 
             switch (the_exit_type) {
             case kernel::entity_exit_type::panic:
-                // WARN, not TRACE: a guest panic is the single most important
-                // signal when "the app just froze" — on the web build only
-                // warn+ reaches the console, and a silently dying app looks
-                // exactly like a hang.
-                LOG_WARN(KERNEL, "Thread {} panicked with category: {} and exit code: {} {}", obj_name, exit_category_u8, reason,
+                LOG_TRACE(KERNEL, "Thread {} panicked with category: {} and exit code: {} {}", obj_name, exit_category_u8, reason,
                     exit_description ? (std::string("(") + *exit_description + ")") : "");
-
-                dump_panic_context();
 
                 // Decide HLE actions to take on this thread.
                 if (!take_on_panic(category, reason)) {
@@ -810,6 +670,18 @@ namespace eka2l1 {
         void thread::wait_for_any_request() {
             kernel::process *owner = owning_process();
 
+            // The wait-stub identification below reads this thread's saved
+            // context, which is only refreshed when the scheduler switches the
+            // thread out. When the wait is serviced without blocking (a signal
+            // is already queued — common under the JIT, where completions land
+            // before the guest reaches WaitForAnyRequest), the snapshot still
+            // points at an older SVC site and the stray-absorb check misfires.
+            // Refresh from the live core so the check sees the SVC actually
+            // executing.
+            if (kern->crr_thread() == this) {
+                kern->get_cpu()->save_context(ctx);
+            }
+
             do {
                 const int before_count = request_sema->count();
                 utils::active_scheduler *act_sched_pre = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
@@ -818,6 +690,24 @@ namespace eka2l1 {
 
                 if ((before_count <= 0) && has_ready_request_pre && stub_pre.direct_wait_for_any_request) {
                     break;
+                }
+
+                // Counterpart of the shortcut above for User::WaitForRequest(TRequestStatus&).
+                // Its euser wrapper is a do-while: it always consumes one signal per turn, so a
+                // target that is already completed must still have its signal sitting in the
+                // semaphore. Reaching here with an empty semaphore means the signal was taken by
+                // the stray filter below, and blocking would strand this thread for good (the
+                // completion has already happened, nothing will signal again). Give the wait back
+                // and pay it out of what the filter took, so no signal is ever invented.
+                if ((before_count <= 0) && stub_pre.wait_for_request_wrapper && (stray_absorbed_refund_ > 0)) {
+                    epoc::request_status *wait_target = eka2l1::ptr<epoc::request_status>(ctx.cpu_registers[0])
+                                                            .get(owner);
+
+                    if (wait_target && (wait_target->status != epoc::request_status::pending_status)
+                        && (kern->is_eka1() || !(wait_target->flags & epoc::request_status::pending))) {
+                        stray_absorbed_refund_--;
+                        break;
+                    }
                 }
 
                 request_sema->wait(0);
@@ -829,8 +719,13 @@ namespace eka2l1 {
                 utils::active_scheduler *act_sched = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
                 const bool has_ready_request = act_sched && act_sched->has_ready_request(owner);
                 // Only absorb stale signals from User::WaitForAnyRequest's direct
-                // stub, not from User::WaitForRequest wrappers or arbitrary waits.
-                const wait_request_stub_info stub = identify_wait_request_stub(mem, owner, ctx, false);
+                // stubs, not from User::WaitForRequest wrappers or arbitrary waits.
+                // The fast-exec stub is allowed here because the wrapper form is
+                // told apart inside identify_wait_request_stub (a wrapper carries
+                // its target request status in r0): the active scheduler waits
+                // through the fast stub too, and a stray delivered there must be
+                // absorbed the same way or the guest panics E32USER-CBase 46.
+                const wait_request_stub_info stub = identify_wait_request_stub(mem, owner, ctx, true);
 
                 if (!act_sched || has_ready_request) {
                     break;
@@ -838,6 +733,19 @@ namespace eka2l1 {
 
                 if (!stub.direct_wait_for_any_request) {
                     break;
+                }
+
+                // A signal was consumed at a direct WaitForAnyRequest with no
+                // ready active object: that is a stray some HLE path over-
+                // signalled (see docs/stray-signal-accounting-followup.md).
+                // Count every absorption but only log periodically — a single
+                // animated splash can produce hundreds.
+                stray_absorbed_count++;
+                stray_absorbed_refund_++;
+
+                if ((stray_absorbed_count == 1) || (stray_absorbed_count % 100 == 0)) {
+                    LOG_INFO(KERNEL, "Absorbed stray request signal #{} on thread {} (pc=0x{:X})",
+                        stray_absorbed_count, name(), ctx.get_pc());
                 }
             } while (true);
         }

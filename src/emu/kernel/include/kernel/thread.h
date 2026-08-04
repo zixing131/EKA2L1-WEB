@@ -221,6 +221,16 @@ namespace eka2l1 {
 
             int sleep_level;
 
+            // Stray request-semaphore signals absorbed in wait_for_any_request.
+            // A non-zero count means some HLE path over-signalled this thread —
+            // see docs/stray-signal-accounting-followup.md.
+            std::uint32_t stray_absorbed_count;
+
+            // Absorbed signals not yet handed back. The filter can only guess, and a wrong guess
+            // eats a real completion; this is the budget wait_for_any_request may repay when it
+            // catches a thread about to block on an already-completed request status.
+            std::uint32_t stray_absorbed_refund_ = 0;
+
             entity_exit_type exit_type;
             std::u16string exit_category;
 
@@ -363,10 +373,6 @@ namespace eka2l1 {
             void notify_sleep(const int errcode);
 
             bool stop();
-            // Logs PC/LR (module-resolved) and a heuristic stack backtrace of
-            // this thread; called when it panics so deaths are diagnosable.
-            void dump_panic_context();
-
             bool kill(const entity_exit_type exit_type, const std::u16string &category,
                 const std::int32_t reason);
 
