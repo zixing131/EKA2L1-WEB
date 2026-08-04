@@ -409,6 +409,15 @@ namespace eka2l1 {
                         std::vector<std::uint8_t> buf;
                         buf.resize(repofile->size());
 
+                        if (buf.empty()) {
+                            // A persist that was truncated (host killed mid-flush) reads back
+                            // empty. Skip it and let the ROM/TXT default be picked up instead.
+                            LOG_ERROR(SERVICE_CENREP, "Found empty repo persist, skipping: {}", common::ucs2_to_utf8(repo_path));
+                            repofile->close();
+
+                            continue;
+                        }
+
                         repofile->read_file(&buf[0], 1, static_cast<std::uint32_t>(buf.size()));
                         repofile->close();
 

@@ -100,15 +100,22 @@ namespace eka2l1::epoc {
 
     window_server_client::~window_server_client() {
         window_server &serv = get_ws();
-        bool canceling = false;
+
+        // Destroying our objects unlinks windows from the screen tree and frees their
+        // stored draw commands. The animation scheduler walks that very tree on the
+        // timing thread, guarded only by screen_mutex, so tearing down without it lets
+        // the walker read a window that is halfway through its own destructor.
+        //
+        // On emulator wipeout the timing thread may already be on its way out, so the
+        // scheduled redraws are cancelled first and the screens are only taken when
+        // this client is the one that performed the cancel.
+        bool lock_screens = true;
 
         if (serv.get_kernel_system()->wipeout_in_progress()) {
-            if (serv.anim_sched.cancel_all()) {
-                canceling = true;
-            }
+            lock_screens = serv.anim_sched.cancel_all();
         }
 
-        if (canceling) {
+        if (lock_screens) {
             epoc::screen *scr = serv.screens;
             while (scr) {
                 scr->screen_mutex.lock();
@@ -118,7 +125,7 @@ namespace eka2l1::epoc {
 
         objects.clear();
 
-        if (canceling) {
+        if (lock_screens) {
             epoc::screen *scr = serv.screens;
             while (scr) {
                 scr->screen_mutex.unlock();
@@ -240,7 +247,23 @@ namespace eka2l1::epoc {
             return false;
         }
 
+        // Freeing a window unlinks it from the screen tree the animation scheduler
+        // walks on the timing thread. Hold the redraw lock so the walker never sees
+        // a half-destroyed window. See the client destructor for the same reason.
+        epoc::screen *scr = get_ws().screens;
+        while (scr) {
+            scr->screen_mutex.lock();
+            scr = scr->next;
+        }
+
         objects[idx - 1].reset();
+
+        scr = get_ws().screens;
+        while (scr) {
+            scr->screen_mutex.unlock();
+            scr = scr->next;
+        }
+
         return true;
     }
 
