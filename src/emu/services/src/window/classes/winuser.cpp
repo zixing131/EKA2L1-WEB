@@ -1177,7 +1177,14 @@ namespace eka2l1::epoc {
             }
         }
 
-        content_changed(true);
+        // Only actual drawing counts as new content. A clipping opcode on its own
+        // leaves the window exactly as it was, and treating it as a change makes
+        // end_redraw ask for a full server recomposite: that clears the screen
+        // bitmap and replays a store which, without any drawing command, cannot
+        // put the pixels back.
+        if (gdi_store_command_draws_pixels(command.opcode_)) {
+            content_changed(true);
+        }
 
         gdi_store_command_segment *current_segment = redraw_segments_.get_current_segment();
         current_segment->add_command(command);
