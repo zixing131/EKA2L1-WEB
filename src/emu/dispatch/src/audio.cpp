@@ -78,6 +78,14 @@ namespace eka2l1::dispatch {
     dsp_epoc_stream::~dsp_epoc_stream() {
         if (ll_stream_) {
             ll_stream_->stop();
+            // stop() above is only a virtual stop; the backend keeps pulling the
+            // data callback, which re-enters our more-buffer lambda and locks
+            // lock_. Destroy the stream here, while lock_ and copied_info_ are
+            // still alive — the backend destructor stops the hardware stream and
+            // waits out any callback in flight. Default member destruction order
+            // would tear the mutex down first (render thread then throws off a
+            // destroyed mutex and aborts in std::terminate).
+            ll_stream_.reset();
         }
     }
 
@@ -101,6 +109,16 @@ namespace eka2l1::dispatch {
     }
 
     dsp_epoc_player::~dsp_epoc_player() {
+        // Same shape as ~dsp_epoc_stream: the driver's notify-done lambda
+        // dereferences this object (eplayer->impl_->...) from the render
+        // thread, and unique_ptr nulls impl_ before running the deleter, so
+        // default member destruction leaves a window where the callback reads
+        // a null impl_. Stop the hardware stream (waits out any callback in
+        // flight) and destroy the player while the rest of us is still alive.
+        if (impl_) {
+            impl_->stop();
+            impl_.reset();
+        }
     }
 
     void dsp_epoc_player::volume(const std::uint32_t volume) {

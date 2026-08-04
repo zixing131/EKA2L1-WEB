@@ -81,16 +81,20 @@ namespace eka2l1::drivers {
     }
     
     player_tsf::~player_tsf() {
+        // Stop the hardware stream first: it blocks until the render callback
+        // in flight returns, and that callback renders through synth_ /
+        // begin_msg_. Freeing them first leaves the callback chewing on freed
+        // memory (host heap corruption on the CoreAudio/cubeb render thread).
+        if (output_) {
+            output_->stop();
+        }
+
         if (synth_) {
             tsf_close(synth_);
         }
 
         if (begin_msg_) {
             tml_free(begin_msg_);
-        }
-
-        if (output_) {
-            output_->stop();
         }
 
         if (driver_) {
