@@ -3186,18 +3186,17 @@ namespace eka2l1::epoc {
 
         kernel::process *process_to_operate = thr_to_operate->owning_process();
 
-        if (is_write) {
-            if (len > static_cast<std::int32_t>(buf->get_length())) {
-                return epoc::error_overflow;
-            }
-        } else {
-            if (len > static_cast<std::int32_t>(buf->get_max_length(process_to_operate))) {
-                return epoc::error_underflow;
-            }
+        // The byte count comes from the separate length argument, not from the descriptor: callers
+        // hand over a plain buffer (a TPtr8 built with the two-argument constructor still has a
+        // zero length) and let the command header say how much of it to transfer. So both
+        // directions are bounded by the descriptor's capacity, which get_max_length() reports as
+        // the length for the constant descriptor types that have no separate maximum.
+        if (len > static_cast<std::int32_t>(buf->get_max_length(crr))) {
+            return is_write ? epoc::error_overflow : epoc::error_underflow;
         }
 
         std::uint8_t *buf_ptr = reinterpret_cast<std::uint8_t *>(buf->get_pointer_raw(crr));
-        
+
         if (len == 4) {
             if (is_write) {
                 std::uint32_t data = *reinterpret_cast<std::uint32_t*>(buf_ptr);
@@ -3213,22 +3212,25 @@ namespace eka2l1::epoc {
 
                 std::uint32_t final_result_data = result.value();
                 std::memcpy(buf_ptr, &final_result_data, 4);
+
+                return epoc::error_none;
             }
 
-            return epoc::error_none;
-        }
-
-        std::uint8_t *dest_of_operate = reinterpret_cast<std::uint8_t *>(process_to_operate->get_ptr_on_addr_space(addr));
-
-        if (!dest_of_operate) {
-            LOG_WARN(KERNEL, "Destination to operate is null, return success still.");
-            return epoc::error_none;
-        }
-
-        if (is_write) {
-            std::memcpy(dest_of_operate, buf_ptr, len);
+            // Fall through to the instruction cache flush below: a four byte write is exactly the
+            // size of an ARM instruction, and patching one is the whole point of this command.
         } else {
-            std::memcpy(buf_ptr, dest_of_operate, len);
+            std::uint8_t *dest_of_operate = reinterpret_cast<std::uint8_t *>(process_to_operate->get_ptr_on_addr_space(addr));
+
+            if (!dest_of_operate) {
+                LOG_WARN(KERNEL, "Destination to operate is null, return success still.");
+                return epoc::error_none;
+            }
+
+            if (is_write) {
+                std::memcpy(dest_of_operate, buf_ptr, len);
+            } else {
+                std::memcpy(buf_ptr, dest_of_operate, len);
+            }
         }
 
         // Check if we should recompile
