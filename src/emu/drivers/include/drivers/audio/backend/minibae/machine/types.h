@@ -37,17 +37,17 @@
 #include <pthread.h>
 #if EKA2L1_PLATFORM(MACOS)
 #define X_PLATFORM X_MACINTOSH
+#elif EKA2L1_PLATFORM(ANDROID)
+// ANDROID is intentionally not EKA2L1_PLATFORM(UNIX) (see platform.h), so
+// it must be matched on its own rather than nested under the UNIX branch.
+#define X_PLATFORM X_ANDROID
 #elif EKA2L1_PLATFORM(WASM)
 #define X_PLATFORM X_LINUX
 #elif EKA2L1_PLATFORM(OHOS)
 // HarmonyOS / OpenHarmony is Linux-like for miniBAE's purposes.
 #define X_PLATFORM X_LINUX
 #elif EKA2L1_PLATFORM(UNIX)
-#if EKA2L1_PLATFORM(ANDROID)
-#define X_PLATFORM X_ANDROID
-#else
 #define X_PLATFORM X_LINUX
-#endif
 #endif
 #endif
 
