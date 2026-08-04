@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <tuple>
 
 namespace eka2l1 {
@@ -113,6 +114,7 @@ namespace eka2l1 {
 
         config::state *conf_;
         config::app_settings *settings_;
+        std::string cache_root_;
 
         explicit system_create_components();
     };
