@@ -24,22 +24,13 @@
 #include <package/manager.h>
 #include <system/devices.h>
 
-#include <kernel/process.h>
-
 #include <common/fileutils.h>
 #include <common/android/jniutils.h>
-#include <common/crypt.h>
-#include <common/cvt.h>
 #include <common/language.h>
 #include <common/path.h>
-
-#include <algorithm>
-#include <cstring>
 #include <common/pystr.h>
 #include <common/fileutils.h>
 #include <loader/mif.h>
-#include <loader/svgb.h>
-#include <loader/nvg.h>
 #include <services/fbs/fbs.h>
 #include <system/installation/firmware.h>
 #include <system/installation/rpkg.h>
@@ -122,113 +113,6 @@ namespace eka2l1::android {
         return newBitmap;
     }
 
-    // Symbian-era SVGs (SVG Tiny / 2000-03 DTD) routinely omit the xmlns
-    // declarations. lunasvg parses strictly enough that a missing default
-    // namespace renders nothing, and a missing xlink prefix (used by embedded
-    // <image> bitmaps, e.g. PyS60 / 7Days app icons) fails outright - the icon
-    // shows up blank. Read the converted SVG back, patch the declarations in, and
-    // load from the fixed string. Mirrors the WASM frontend fix in
-    // web/src/main.cpp (wasm_get_app_icon).
-    static std::unique_ptr<lunasvg::Document> load_svg_doc_with_ns_fix(const std::string &path) {
-        eka2l1::common::ro_std_file_stream svg_in(path, true);
-        if (!svg_in.valid() || (svg_in.size() == 0)) {
-            return nullptr;
-        }
-
-        std::string svg_text(static_cast<std::size_t>(svg_in.size()), '\0');
-        svg_in.read(svg_text.data(), svg_text.size());
-
-        const std::size_t tag_pos = svg_text.find("<svg");
-        if (tag_pos != std::string::npos) {
-            const std::size_t tag_end = svg_text.find('>', tag_pos);
-            const std::string head = svg_text.substr(
-                tag_pos, (tag_end == std::string::npos) ? std::string::npos : (tag_end - tag_pos));
-
-            std::string inject;
-            if (head.find("xmlns=") == std::string::npos) {
-                inject += " xmlns=\"http://www.w3.org/2000/svg\"";
-            }
-            if ((svg_text.find("xlink:") != std::string::npos)
-                && (head.find("xmlns:xlink=") == std::string::npos)) {
-                inject += " xmlns:xlink=\"http://www.w3.org/1999/xlink\"";
-            }
-            if (!inject.empty()) {
-                svg_text.insert(tag_pos + 4, inject);
-            }
-        }
-
-        return lunasvg::Document::loadFromData(svg_text);
-    }
-
-    // lunasvg 2.3.8 has no <image> element, so SVG icons that are merely a wrapper
-    // around an embedded raster bitmap (a data: URI base64 payload - common for
-    // PyS60 / 7Days style icons) render completely blank. Detect that case and
-    // decode the bitmap ourselves with stb_image, returning premultiplied RGBA
-    // ready to memcpy into an ARGB_8888 Android bitmap. The browser-backed WASM
-    // frontend renders <image> natively, which is why those icons only break here.
-    static bool decode_embedded_svg_image(const std::string &svg_path,
-        std::vector<std::uint8_t> &out_rgba, int &out_w, int &out_h) {
-        eka2l1::common::ro_std_file_stream in(svg_path, true);
-        if (!in.valid() || (in.size() == 0)) {
-            return false;
-        }
-
-        std::string svg(static_cast<std::size_t>(in.size()), '\0');
-        in.read(svg.data(), svg.size());
-
-        const std::size_t img_tag = svg.find("<image");
-        if (img_tag == std::string::npos) {
-            return false;
-        }
-        std::size_t b64 = svg.find("base64,", img_tag);
-        if (b64 == std::string::npos) {
-            return false;
-        }
-        b64 += 7; // strlen("base64,")
-        const std::size_t b64_end = svg.find_first_of("\"'", b64);
-        if (b64_end == std::string::npos) {
-            return false;
-        }
-
-        std::string encoded = svg.substr(b64, b64_end - b64);
-        encoded.erase(std::remove_if(encoded.begin(), encoded.end(),
-                          [](char c) { return (c == '\n') || (c == '\r') || (c == ' ') || (c == '\t'); }),
-            encoded.end());
-        if ((encoded.size() < 4) || (encoded.size() % 4 != 0)) {
-            return false;
-        }
-
-        const std::size_t decoded_size = eka2l1::crypt::base64_decode(
-            reinterpret_cast<const std::uint8_t *>(encoded.data()), encoded.size(), nullptr, 0);
-        if (decoded_size == 0) {
-            return false;
-        }
-
-        std::vector<std::uint8_t> decoded(decoded_size);
-        eka2l1::crypt::base64_decode(reinterpret_cast<const std::uint8_t *>(encoded.data()),
-            encoded.size(), reinterpret_cast<char *>(decoded.data()), decoded.size());
-
-        int comp = 0;
-        stbi_uc *pixels = stbi_load_from_memory(decoded.data(), static_cast<int>(decoded.size()),
-            &out_w, &out_h, &comp, 4);
-        if (!pixels) {
-            return false;
-        }
-
-        const std::size_t pixel_count = static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h);
-        out_rgba.resize(pixel_count * 4);
-        for (std::size_t i = 0; i < pixel_count; i++) {
-            const std::uint32_t a = pixels[i * 4 + 3];
-            out_rgba[i * 4 + 0] = static_cast<std::uint8_t>(pixels[i * 4 + 0] * a / 255);
-            out_rgba[i * 4 + 1] = static_cast<std::uint8_t>(pixels[i * 4 + 1] * a / 255);
-            out_rgba[i * 4 + 2] = static_cast<std::uint8_t>(pixels[i * 4 + 2] * a / 255);
-            out_rgba[i * 4 + 3] = static_cast<std::uint8_t>(a);
-        }
-
-        stbi_image_free(pixels);
-        return true;
-    }
-
     jobjectArray launcher::get_app_icon(JNIEnv *env, std::uint32_t uid) {
         apa_app_registry *reg = alserv->get_registration(uid);
         if (!reg) {
@@ -257,7 +141,7 @@ namespace eka2l1::android {
 
                 if (eka2l1::common::exists(cached_path)) {
                     if (eka2l1::common::get_last_modifiy_since_ad(eka2l1::common::utf8_to_ucs2(cached_path)) >= mif_last_modified) {
-                        document = load_svg_doc_with_ns_fix(cached_path);
+                        document = lunasvg::Document::loadFromFile(cached_path.c_str());
                     }
                 }
                 
@@ -272,62 +156,23 @@ namespace eka2l1::android {
                             data.resize(dest_size);
                             file_mif_parser.read_mif_entry(0, data.data(), dest_size);
 
-                            eka2l1::common::ro_buf_stream inside_stream(data.data(), data.size());
                             std::unique_ptr<eka2l1::common::wo_std_file_stream> outfile_stream =
                                     std::make_unique<eka2l1::common::wo_std_file_stream>(cached_path, true);
 
-                            eka2l1::loader::mif_icon_header header;
-                            inside_stream.read(&header, sizeof(eka2l1::loader::mif_icon_header));
+                            const bool converted = eka2l1::loader::convert_mif_icon_to_svg(data.data(),
+                                    data.size(), *outfile_stream);
+                            outfile_stream.reset();
 
-                            std::vector<eka2l1::loader::svgb_convert_error_description> errors;
-                            std::vector<eka2l1::loader::nvg_convert_error_description> errors_nvg;
-
-                            if (header.type == eka2l1::loader::mif_icon_type_svg) {
-                                if (!eka2l1::loader::convert_svgb_to_svg(inside_stream, *outfile_stream, errors)) {
-                                    if (errors[0].reason_ == eka2l1::loader::svgb_convert_error_invalid_file) {
-                                        outfile_stream->write(reinterpret_cast<const char *>(data.data()) + sizeof(eka2l1::loader::mif_icon_header), data.size() - sizeof(eka2l1::loader::mif_icon_header));
-                                    }
-                                }
-
-                                outfile_stream.reset();
-                                document = load_svg_doc_with_ns_fix(cached_path);
+                            if (converted) {
+                                document = lunasvg::Document::loadFromFile(cached_path.c_str());
                             } else {
-                                inside_stream = eka2l1::common::ro_buf_stream(data.data() + sizeof(eka2l1::loader::mif_icon_header),
-                                                                              data.size() - sizeof(eka2l1::loader::mif_icon_header));
-
-                                if (eka2l1::loader::convert_nvg_to_svg(inside_stream, *outfile_stream, errors_nvg)) {
-                                    outfile_stream.reset();
-                                    document = load_svg_doc_with_ns_fix(cached_path);
-                                } else  {
-                                    LOG_ERROR(eka2l1::FRONTEND_UI, "Icon for app {} can't be decoded!", header.type, app_name);
-                                    outfile_stream.reset();
-
-                                    eka2l1::common::remove(cached_path);
-                                }
+                                LOG_ERROR(eka2l1::FRONTEND_UI, "Icon for app {} can't be decoded!", app_name);
+                                eka2l1::common::remove(cached_path);
                             }
                         }
                     }
                 }
                 
-                // lunasvg can't render embedded raster <image>; if the converted
-                // SVG is just a base64 bitmap wrapper, decode and blit it directly.
-                {
-                    std::vector<std::uint8_t> embedded_rgba;
-                    int embedded_w = 0;
-                    int embedded_h = 0;
-                    if (decode_embedded_svg_image(cached_path, embedded_rgba, embedded_w, embedded_h)) {
-                        jobject source_bitmap = make_new_bitmap(env, embedded_w, embedded_h);
-                        void *data_to_write = nullptr;
-                        if (AndroidBitmap_lockPixels(env, source_bitmap, &data_to_write) >= 0) {
-                            std::memcpy(data_to_write, embedded_rgba.data(), embedded_rgba.size());
-                            AndroidBitmap_unlockPixels(env, source_bitmap);
-                            env->SetObjectArrayElement(jicons, 0, source_bitmap);
-                            return jicons;
-                        }
-                        env->DeleteLocalRef(source_bitmap);
-                    }
-                }
-
                 if (document) {
                     std::uint32_t width = document->width();
                     std::uint32_t height = document->height();
@@ -446,26 +291,10 @@ namespace eka2l1::android {
 
         kern->lock();
         alserv->launch_app(*reg, cmdline, nullptr, [&](kernel::process *pr) {
-            // The launched Symbian app's process has exited. On Android the emulator
-            // runs one app per process lifecycle, so we tear the whole process down
-            // and let MainActivity relaunch into the app list. Skipping this (an
-            // earlier attempt) left the EmulatorActivity up over a dead emulator =
-            // black screen on a normal exit, so the kill must always happen.
-            //
-            // The exit info is logged first so a guest-side panic (exit_type=2,
-            // e.g. E32USER-CBase) is visible in logcat instead of a silent close.
-            if (pr) {
-                LOG_WARN(eka2l1::FRONTEND_CMDLINE,
-                    "App process exited: name={} uid=0x{:08X} exit_type={} category={} reason={}",
-                    pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
-                    eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
-            } else {
-                LOG_WARN(eka2l1::FRONTEND_CMDLINE, "Launched app exited with null process handle");
-            }
-
             JNIEnv *env = common::jni::environment();
             jclass clazz = common::jni::find_class("com/github/eka2l1/emu/Emulator");
             jmethodID exit_method = env->GetStaticMethodID(clazz, "exitInstance", "()V");
+
             env->CallStaticVoidMethod(clazz, exit_method);
         });
 
