@@ -87,10 +87,52 @@ namespace eka2l1::epoc {
         return nullptr;
     }
 
+    static bool find_rom_entry_containing_addr(const loader::rom_dir &dir, const std::u16string &path_so_far,
+        const std::uint32_t addr, std::u16string &result) {
+        static constexpr std::uint8_t FILE_ATTRIB_DIR = 0x10;
+
+        for (const auto &entry : dir.entries) {
+            if (entry.attrib & FILE_ATTRIB_DIR) {
+                continue;
+            }
+
+            if ((entry.address_lin <= addr) && (addr - entry.address_lin < entry.size)) {
+                result = path_so_far + entry.name;
+                return true;
+            }
+        }
+
+        for (const auto &subdir : dir.subdirs) {
+            if (find_rom_entry_containing_addr(subdir, path_so_far + subdir.name + u"\\", addr, result)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     static std::optional<std::u16string> get_dll_full_path(kernel_system *kern, const std::uint32_t addr) {
         codeseg_ptr ss = get_codeseg_from_addr(kern, kern->crr_process(), addr, true);
         if (ss) {
             return ss->get_full_path();
+        }
+
+        // Statically-linked XIP DLLs run in place from ROM and only get a codeseg when
+        // they appear in an image's DLL reference (attach) chain, so an address inside
+        // e.g. gflm.dll won't resolve above. Fall back to the ROM file tree: XIP entries
+        // record their linear address range, letting us find the image containing the
+        // address (Dll::FileName is commonly used to derive the caller DLL's drive).
+        loader::rom *rom_info = kern->get_rom_info();
+        if (rom_info) {
+            std::u16string prefix(1, drive_to_char16(kern->get_lib_manager()->get_drive_rom()));
+            prefix += u":\\";
+
+            for (const auto &root : rom_info->root.root_dirs) {
+                std::u16string result;
+                if (find_rom_entry_containing_addr(root.dir, prefix, addr, result)) {
+                    return result;
+                }
+            }
         }
 
         return std::nullopt;
