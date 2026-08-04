@@ -351,7 +351,17 @@ namespace eka2l1::dispatch {
                 const eka2l1::vec2 screen_size = mode_info.size;
 
                 const char *data_ptr = reinterpret_cast<const char *>(scr->screen_buffer_ptr());
-                const std::size_t buffer_size = mode_info.size.x * mode_info.size.y * 4;
+                const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(scr->disp_mode);
+                const std::size_t dsa_screen_pitch = scr->screen_buffer_byte_width();
+                const bool padded_dsa_pitch = (scr->active_dsa_count_ > 0)
+                    && (bits_per_pixel == 32);
+                const std::size_t screen_pitch = padded_dsa_pitch
+                    ? dsa_screen_pitch
+                    : mode_info.size.x * sizeof(std::uint32_t);
+                const std::size_t buffer_size = screen_pitch * mode_info.size.y;
+                const std::size_t pixels_per_line = padded_dsa_pitch
+                    ? screen_pitch / sizeof(std::uint32_t)
+                    : 0;
 
                 // Auto-correct games that draw with the transposed stride:
                 // when detected on several consecutive frames, switch to the
@@ -473,7 +483,8 @@ namespace eka2l1::dispatch {
                 drivers::graphics_command_builder builder;
 
                 // Only one rectangle for now!
-                builder.update_bitmap(scr->dsa_texture, data_ptr, buffer_size, { 0, 0 }, screen_size);
+                builder.update_bitmap(scr->dsa_texture, data_ptr, buffer_size, { 0, 0 }, screen_size,
+                    pixels_per_line);
 
                 // NOTE: This is a hack for some apps that dont fill alpha
                 // TODO: Figure out why or better solution (maybe the display mode is not really correct?)

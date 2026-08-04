@@ -162,13 +162,32 @@ namespace eka2l1::epoc {
     void screen::sync_screen_buffer_data(drivers::graphics_driver *driver) {
         std::uint8_t *buffer_ptr = screen_buffer_ptr();
         const config::screen_mode &crrmode = current_mode();
+        const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(disp_mode);
+        const std::uint32_t tight_pitch = epoc::get_byte_width(crrmode.size.x, bits_per_pixel);
+        const std::uint32_t framebuffer_pitch = (bits_per_pixel == 32)
+            ? screen_buffer_byte_width()
+            : tight_pitch;
 
+        if (framebuffer_pitch == tight_pitch) {
+            drivers::read_bitmap(driver, screen_texture, eka2l1::point(0, 0), eka2l1::object_size(crrmode.size),
+                get_bpp_from_display_mode(disp_mode), buffer_ptr);
+
+            if ((crrmode.rotation == 90) || (crrmode.rotation == 180)) {
+                flip_screen_image(buffer_ptr, tight_pitch, crrmode.size.y);
+            }
+            return;
+        }
+
+        std::vector<std::uint8_t> tight_buffer(tight_pitch * crrmode.size.y);
         drivers::read_bitmap(driver, screen_texture, eka2l1::point(0, 0), eka2l1::object_size(crrmode.size),
-            get_bpp_from_display_mode(disp_mode), buffer_ptr);
+            get_bpp_from_display_mode(disp_mode), tight_buffer.data());
 
         if ((crrmode.rotation == 90) || (crrmode.rotation == 180)) {
-            const std::uint32_t current_pitch = epoc::get_byte_width(crrmode.size.x, epoc::get_bpp_from_display_mode(disp_mode));
-            flip_screen_image(buffer_ptr, current_pitch, crrmode.size.y);
+            flip_screen_image(tight_buffer.data(), tight_pitch, crrmode.size.y);
+        }
+
+        for (std::int32_t y = 0; y < crrmode.size.y; y++) {
+            std::memcpy(buffer_ptr + y * framebuffer_pitch, tight_buffer.data() + y * tight_pitch, tight_pitch);
         }
     }
 
@@ -594,6 +613,20 @@ namespace eka2l1::epoc {
 
     std::uint8_t *screen::screen_buffer_ptr() {
         return reinterpret_cast<std::uint8_t *>(screen_buffer_chunk->host_base()) + sizeof(std::uint16_t) * WORD_PALETTE_ENTRIES_COUNT;
+    }
+
+    std::uint32_t screen::screen_buffer_byte_width() const {
+        const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(disp_mode);
+        const std::uint32_t tight_pitch = size().x * sizeof(std::uint32_t);
+
+        // ScreenPlay phones expose their 32-bit display framebuffer with a
+        // 64-byte-aligned pitch. Keep older bitmap-screen architectures on
+        // their word-aligned layout.
+        if (is_screenplay_architecture() && (bits_per_pixel == 32)) {
+            return (tight_pitch + 63) & ~63U;
+        }
+
+        return tight_pitch;
     }
 
     struct window_visible_region_calc_walker: public window_tree_walker {

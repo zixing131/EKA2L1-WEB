@@ -174,6 +174,11 @@ namespace eka2l1::epoc {
         std::uint8_t *screen_buffer_ptr();
 
         /**
+         * \brief Get the number of bytes between rows in the emulated framebuffer.
+         */
+        std::uint32_t screen_buffer_byte_width() const;
+
+        /**
          * \brief Get the size of this screen, in pixels.
          */
         eka2l1::vec2 size() const;
