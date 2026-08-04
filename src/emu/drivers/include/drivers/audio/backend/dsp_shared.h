@@ -53,6 +53,14 @@ namespace eka2l1::drivers {
     protected:
         virtual bool internal_decode_running_out();
 
+        // Stops and releases the backing hardware stream, joining its render
+        // thread so no further data_callback() can fire. MUST be invoked at the
+        // very top of every most-derived destructor: the OS render callback
+        // dispatches virtuals (decode_data(), ...) on this object, and by the
+        // time ~dsp_output_stream_shared() runs the derived vtable has already
+        // been torn down, so an in-flight callback would hit __cxa_pure_virtual.
+        void shutdown_stream();
+
     public:
         explicit dsp_output_stream_shared(drivers::audio_driver *aud);
         ~dsp_output_stream_shared() override;
@@ -88,7 +96,7 @@ namespace eka2l1::drivers {
         drivers::audio_driver *aud_;
 
         common::ring_buffer<std::uint16_t, RING_BUFFER_MAX_SAMPLE_COUNT> ring_buffer_;
-        std::mutex callback_lock_;
+        std::mutex input_state_lock_;
 
         std::queue<input_read_request> read_queue_;
         std::uint32_t read_bytes_; 

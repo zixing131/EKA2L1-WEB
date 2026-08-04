@@ -52,8 +52,8 @@ namespace eka2l1::drivers {
     }
 
     void dsp_stream::reset_stat() {
-        samples_played_ = 0;
-        samples_copied_ = 0;
+        samples_played_.store(0, std::memory_order_relaxed);
+        samples_copied_.store(0, std::memory_order_relaxed);
     }
 
     void dsp_stream::register_callback(dsp_stream_notification_type nof_type, dsp_stream_notification_callback callback,
@@ -154,8 +154,11 @@ namespace eka2l1::drivers {
                             st->pending.fetch_sub(1, std::memory_order_acq_rel);
                             // Runs the MMF completion path (takes the kernel
                             // lock) on this thread, exactly like a real host
-                            // audio thread would.
-                            cb(userdata);
+                            // audio thread would. Retry next tick if delivery
+                            // was deferred (callback returned false).
+                            if (!cb(userdata)) {
+                                st->pending.fetch_add(1, std::memory_order_acq_rel);
+                            }
                         }
                     }
                 }).detach();
@@ -206,8 +209,8 @@ namespace eka2l1::drivers {
 
             bool write(const std::uint8_t *data, const std::uint32_t data_size) override {
                 const std::uint32_t frame_size = channels_ ? (channels_ * static_cast<std::uint32_t>(sizeof(std::uint16_t))) : 1;
-                samples_copied_ += data_size / frame_size;
-                samples_played_ = samples_copied_;
+                samples_copied_.fetch_add(data_size / frame_size, std::memory_order_relaxed);
+                samples_played_.store(samples_copied_.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 pump_->pending.fetch_add(1, std::memory_order_acq_rel);
                 return true;
             }

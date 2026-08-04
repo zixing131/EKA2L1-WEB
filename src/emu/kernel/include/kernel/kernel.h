@@ -860,6 +860,12 @@ namespace eka2l1 {
             kern_lock_.lock();
         }
 
+        // Host callbacks that run on real-time threads must never block on
+        // the emulated kernel. Callers can retry their notification later.
+        bool try_lock() {
+            return kern_lock_.try_lock();
+        }
+
         // Unlock the kernel
         void unlock() {
             kern_lock_.unlock();
