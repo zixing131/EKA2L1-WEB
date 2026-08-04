@@ -126,6 +126,10 @@ if (ANDROID)
         )
 endif()
 
+if (APPLE)
+    target_link_libraries(common PRIVATE "-framework CoreFoundation")
+endif()
+
 set(COMMON_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/include")
 file(MAKE_DIRECTORY "${COMMON_GENERATED_INCLUDE_DIR}/common")
 

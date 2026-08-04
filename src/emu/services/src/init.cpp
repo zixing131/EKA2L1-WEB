@@ -56,6 +56,7 @@
 #include <services/sms/sendas/sendas.h>
 #include <services/socket/server.h>
 #include <services/sysagt/sysagt.h>
+#include <services/timezone/timezone.h>
 #include <services/ui/cap/oom_app.h>
 #include <services/ui/eikappui.h>
 #include <services/ui/icon/icon.h>
@@ -259,6 +260,9 @@ namespace eka2l1 {
 
             CREATE_SERVER(sys, system_agent_server);
             CREATE_SERVER(sys, unipertar_server);
+            if (sys->get_symbian_version_use() >= epocver::epoc95) {
+                CREATE_SERVER(sys, timezone_server);
+            }
 
             if (sys->get_symbian_version_use() <= epocver::eka2) {
                 CREATE_SERVER(sys, redir_server);
