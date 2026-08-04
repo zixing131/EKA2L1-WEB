@@ -221,15 +221,11 @@ namespace eka2l1 {
 
             int sleep_level;
 
-            // Stray request-semaphore signals absorbed in wait_for_any_request.
-            // A non-zero count means some HLE path over-signalled this thread —
-            // see docs/stray-signal-accounting-followup.md.
-            std::uint32_t stray_absorbed_count;
-
-            // Absorbed signals not yet handed back. The filter can only guess, and a wrong guess
-            // eats a real completion; this is the budget wait_for_any_request may repay when it
-            // catches a thread about to block on an already-completed request status.
-            std::uint32_t stray_absorbed_refund_ = 0;
+            // Wakes that look like a stray: a direct User::WaitForAnyRequest served with no ready
+            // active object. Diagnostic only - the signal is handed to the guest. The wait-stub
+            // identification behind it is heuristic, so a non-zero count is a hint that some HLE
+            // path over-signalled this thread, not proof.
+            std::uint32_t stray_signal_count;
 
             entity_exit_type exit_type;
             std::u16string exit_category;

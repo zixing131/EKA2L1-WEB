@@ -298,7 +298,7 @@ namespace eka2l1 {
             , trap_stack(0)
             , cached_detach(false)
             , sleep_level(0)
-            , stray_absorbed_count(0)
+            , stray_signal_count(0)
             , metadata(nullptr)
             , backup_state(thread_state::stop)
             , flags(0)
@@ -675,79 +675,54 @@ namespace eka2l1 {
             // thread out. When the wait is serviced without blocking (a signal
             // is already queued — common under the JIT, where completions land
             // before the guest reaches WaitForAnyRequest), the snapshot still
-            // points at an older SVC site and the stray-absorb check misfires.
+            // points at an older SVC site and the stub identification misfires.
             // Refresh from the live core so the check sees the SVC actually
             // executing.
             if (kern->crr_thread() == this) {
                 kern->get_cpu()->save_context(ctx);
             }
 
-            do {
-                const int before_count = request_sema->count();
-                utils::active_scheduler *act_sched_pre = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
-                const bool has_ready_request_pre = act_sched_pre && act_sched_pre->has_ready_request(owner);
-                const wait_request_stub_info stub_pre = identify_wait_request_stub(mem, owner, ctx, true);
+            const int before_count = request_sema->count();
+            utils::active_scheduler *act_sched_pre = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
+            const wait_request_stub_info stub_pre = identify_wait_request_stub(mem, owner, ctx, true);
 
-                if ((before_count <= 0) && has_ready_request_pre && stub_pre.direct_wait_for_any_request) {
-                    break;
+            // The mirror image of a stray: the active scheduler has a ready active object but the
+            // semaphore is empty, so its signal went missing somewhere. Blocking here would strand
+            // the thread - the completion already happened and nothing will signal again - so hand
+            // the wait straight back and let the guest dispatch what is ready.
+            if ((before_count <= 0) && stub_pre.direct_wait_for_any_request && act_sched_pre
+                && act_sched_pre->has_ready_request(owner)) {
+                return;
+            }
+
+            request_sema->wait(0);
+
+            if (state != thread_state::run) {
+                return;
+            }
+
+            // Diagnostic only - the signal is handed to the guest either way. Waking what looks
+            // like a direct User::WaitForAnyRequest with no ready active object is the shape of a
+            // stray: one signal more in the request semaphore than the guest can account for, and
+            // euser panics E32USER-CBase 46 on it. The emulator used to swallow those; it no
+            // longer does, so a burst here right before such a panic points at an HLE path that
+            // completes a request the guest also completes itself (see
+            // docs/dsa-cancel-double-completion-stray.md for a worked example).
+            //
+            // Not every hit is a bug: telling User::WaitForAnyRequest apart from the
+            // User::WaitForRequest wrapper relies on r0 at a shared exec stub, and the wrapper's
+            // loop can land here while behaving perfectly. Read the counter as a hint, not a verdict.
+            utils::active_scheduler *act_sched = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
+
+            if (act_sched && !act_sched->has_ready_request(owner)
+                && identify_wait_request_stub(mem, owner, ctx, true).direct_wait_for_any_request) {
+                stray_signal_count++;
+
+                if ((stray_signal_count <= 8) || (stray_signal_count % 100 == 0)) {
+                    LOG_WARN(KERNEL, "Possible stray request signal #{} on thread {} (pc=0x{:X}): woken with no ready active object",
+                        stray_signal_count, name(), ctx.get_pc());
                 }
-
-                // Counterpart of the shortcut above for User::WaitForRequest(TRequestStatus&).
-                // Its euser wrapper is a do-while: it always consumes one signal per turn, so a
-                // target that is already completed must still have its signal sitting in the
-                // semaphore. Reaching here with an empty semaphore means the signal was taken by
-                // the stray filter below, and blocking would strand this thread for good (the
-                // completion has already happened, nothing will signal again). Give the wait back
-                // and pay it out of what the filter took, so no signal is ever invented.
-                if ((before_count <= 0) && stub_pre.wait_for_request_wrapper && (stray_absorbed_refund_ > 0)) {
-                    epoc::request_status *wait_target = eka2l1::ptr<epoc::request_status>(ctx.cpu_registers[0])
-                                                            .get(owner);
-
-                    if (wait_target && (wait_target->status != epoc::request_status::pending_status)
-                        && (kern->is_eka1() || !(wait_target->flags & epoc::request_status::pending))) {
-                        stray_absorbed_refund_--;
-                        break;
-                    }
-                }
-
-                request_sema->wait(0);
-
-                if (state != thread_state::run) {
-                    break;
-                }
-
-                utils::active_scheduler *act_sched = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
-                const bool has_ready_request = act_sched && act_sched->has_ready_request(owner);
-                // Only absorb stale signals from User::WaitForAnyRequest's direct
-                // stubs, not from User::WaitForRequest wrappers or arbitrary waits.
-                // The fast-exec stub is allowed here because the wrapper form is
-                // told apart inside identify_wait_request_stub (a wrapper carries
-                // its target request status in r0): the active scheduler waits
-                // through the fast stub too, and a stray delivered there must be
-                // absorbed the same way or the guest panics E32USER-CBase 46.
-                const wait_request_stub_info stub = identify_wait_request_stub(mem, owner, ctx, true);
-
-                if (!act_sched || has_ready_request) {
-                    break;
-                }
-
-                if (!stub.direct_wait_for_any_request) {
-                    break;
-                }
-
-                // A signal was consumed at a direct WaitForAnyRequest with no
-                // ready active object: that is a stray some HLE path over-
-                // signalled (see docs/stray-signal-accounting-followup.md).
-                // Count every absorption but only log periodically — a single
-                // animated splash can produce hundreds.
-                stray_absorbed_count++;
-                stray_absorbed_refund_++;
-
-                if ((stray_absorbed_count == 1) || (stray_absorbed_count % 100 == 0)) {
-                    LOG_INFO(KERNEL, "Absorbed stray request signal #{} on thread {} (pc=0x{:X})",
-                        stray_absorbed_count, name(), ctx.get_pc());
-                }
-            } while (true);
+            }
         }
 
         void thread::signal_request(int count) {
