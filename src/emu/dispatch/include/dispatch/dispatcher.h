@@ -38,6 +38,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <map>
 
@@ -51,6 +52,7 @@ namespace eka2l1 {
 
     namespace kernel {
         class chunk;
+        class process;
     }
 
     namespace hle {
@@ -84,9 +86,22 @@ namespace eka2l1::dispatch {
 
         dsp_medium_type type_;
 
+        // Unique ID of the process that created this medium, so that everything it owns can
+        // be torn down when it dies without running its guest destructors. Stored as an ID
+        // rather than a pointer: the process object may already be gone by then.
+        std::uint64_t owner_process_id_;
+
     public:
         explicit dsp_medium(dsp_manager *manager, dsp_medium_type type);
         virtual ~dsp_medium() {}
+
+        void owner_process_id(const std::uint64_t id) {
+            owner_process_id_ = id;
+        }
+
+        std::uint64_t owner_process_id() const {
+            return owner_process_id_;
+        }
 
         virtual std::uint32_t volume() const {
             return logical_volume_;
@@ -193,6 +208,19 @@ namespace eka2l1::dispatch {
             return mediums_.remove_object(handle);
         }
 
+        /**
+         * \brief   Take every medium a process owns out of the manager, without destroying them.
+         *
+         * \param   process_id  Unique ID of the owning process.
+         * \param   out         Vector the detached mediums are appended to.
+         */
+        void detach_objects_of_process(const std::uint64_t process_id,
+            std::vector<std::unique_ptr<dsp_medium>> &out) {
+            mediums_.detach_objects_if([process_id](const dsp_medium &medium) {
+                return medium.owner_process_id() == process_id;
+            }, out);
+        }
+
         dsp_epoc_audren_sema *audio_renderer_semaphore() {
             return audren_sema_.get();
         }
@@ -276,6 +304,16 @@ namespace eka2l1::dispatch {
 
         bool graphics_string_added_;
 
+        // Mediums whose owner process died, waiting to be destroyed on the emulation thread.
+        // See on_process_exit() for why the destruction can not happen where they are orphaned.
+        std::vector<std::unique_ptr<dsp_medium>> mediums_pending_destroy_;
+        std::mutex mediums_pending_destroy_lock_;
+        std::atomic<bool> has_mediums_pending_destroy_;
+
+        std::size_t process_exit_callback_handle_;
+
+        void on_process_exit(kernel::process *pr);
+
     public:
         window_server *winserv_;
         ntimer *timing_;
@@ -295,6 +333,13 @@ namespace eka2l1::dispatch {
 
         void resolve(eka2l1::system *sys, const std::uint32_t function_ord);
         void update_all_screens(eka2l1::system *sys);
+
+        /**
+         * \brief   Destroy the objects orphaned by processes that exited.
+         *
+         * Must be called from the emulation thread, with no kernel lock held.
+         */
+        void flush_pending_teardown();
 
         dsp_manager &get_dsp_manager() {
             return dsp_manager_;

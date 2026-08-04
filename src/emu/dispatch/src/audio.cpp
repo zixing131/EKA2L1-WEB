@@ -25,6 +25,7 @@
 #include <system/epoc.h>
 
 #include <kernel/kernel.h>
+#include <kernel/process.h>
 #include <utils/err.h>
 #include <utils/reqsts.h>
 
@@ -67,7 +68,8 @@ namespace eka2l1::dispatch {
     dsp_medium::dsp_medium(dsp_manager *manager, const dsp_medium_type type)
         : manager_(manager)
         , logical_volume_(10)
-        , type_(type) {
+        , type_(type)
+        , owner_process_id_(0) {
     }
 
     dsp_epoc_stream::dsp_epoc_stream(std::unique_ptr<drivers::dsp_stream> &stream, dsp_manager *manager)
@@ -141,6 +143,11 @@ namespace eka2l1::dispatch {
 
         dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
         std::unique_ptr<dsp_medium> player_epoc = std::make_unique<dsp_epoc_player>(&manager, init_flags);
+
+        kernel::process *pr = sys->get_kernel_system()->crr_process();
+        if (pr) {
+            player_epoc->owner_process_id(pr->unique_id());
+        }
 
         return manager.add_object(player_epoc);
     }
@@ -671,6 +678,11 @@ namespace eka2l1::dispatch {
         dsp_epoc_stream *stream_org_new = reinterpret_cast<dsp_epoc_stream *>(stream_new.get());
 
         kernel_system *kern = sys->get_kernel_system();
+
+        kernel::process *owner_pr = kern->crr_process();
+        if (owner_pr) {
+            stream_new->owner_process_id(owner_pr->unique_id());
+        }
 
         stream_org_new->ll_stream_->register_callback(
             drivers::dsp_stream_notification_more_buffer, [kern](void *userdata) {

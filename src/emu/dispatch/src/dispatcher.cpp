@@ -26,6 +26,7 @@
 #include <dispatch/register.h>
 #include <dispatch/screen.h>
 #include <kernel/kernel.h>
+#include <kernel/process.h>
 #include <services/window/window.h>
 #include <utils/err.h>
 #include <utils/event.h>
@@ -49,7 +50,9 @@ namespace eka2l1::dispatch {
         , static_data_allocated_(0)
         , winserv_(nullptr)
         , egl_controller_(std::make_unique<egl_controller>(nullptr))
-        , graphics_string_added_(false) {
+        , graphics_string_added_(false)
+        , has_mediums_pending_destroy_(false)
+        , process_exit_callback_handle_(0) {
         trampoline_chunk_ = kern->create<kernel::chunk>(kern->get_memory_system(), nullptr, "DispatcherTrampolines", 0,
             MAX_TRAMPOLINE_CHUNK_SIZE, MAX_TRAMPOLINE_CHUNK_SIZE, prot_read_write_exec, kernel::chunk_type::normal,
             kernel::chunk_access::rom, kernel::chunk_attrib::none);
@@ -68,11 +71,59 @@ namespace eka2l1::dispatch {
         kern_ = kern;
 
         post_transferer_.construct(timing_);
+
+        process_exit_callback_handle_ = kern->register_process_exit_callback([this](kernel::process *pr) {
+            on_process_exit(pr);
+        });
     }
 
     dispatcher::~dispatcher() {
+        if (kern_ && process_exit_callback_handle_) {
+            kern_->unregister_process_exit_callback(process_exit_callback_handle_);
+        }
     }
-    
+
+    void dispatcher::on_process_exit(kernel::process *pr) {
+        if (!pr) {
+            return;
+        }
+
+        // Audio the process left playing must not outlive it: a killed or panicked app never
+        // runs the guest destructor that would have stopped its player. Only orphan the
+        // mediums here though. Destroying one stops the host audio stream, which waits out the
+        // render callback in flight, and that callback takes the kernel lock to complete guest
+        // notifications - while this may itself be running under the kernel lock (a host
+        // requested kill holds it). Destroy them from flush_pending_teardown() instead.
+        std::vector<std::unique_ptr<dsp_medium>> orphans;
+        dsp_manager_.detach_objects_of_process(pr->unique_id(), orphans);
+
+        if (orphans.empty()) {
+            return;
+        }
+
+        const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
+        mediums_pending_destroy_.insert(mediums_pending_destroy_.end(),
+            std::make_move_iterator(orphans.begin()), std::make_move_iterator(orphans.end()));
+
+        has_mediums_pending_destroy_ = true;
+    }
+
+    void dispatcher::flush_pending_teardown() {
+        if (!has_mediums_pending_destroy_.exchange(false)) {
+            return;
+        }
+
+        std::vector<std::unique_ptr<dsp_medium>> to_destroy;
+        {
+            const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
+            to_destroy.swap(mediums_pending_destroy_);
+        }
+
+        // Destroyed outside of the lock: a medium destructor blocks until the audio backend
+        // has drained its render callback.
+        to_destroy.clear();
+    }
+
     void dispatcher::set_graphics_driver(drivers::graphics_driver *driver) {
         if (!graphics_string_added_) {
             // Add static strings
@@ -123,6 +174,13 @@ namespace eka2l1::dispatch {
         video_player_container_.clear();
         cameras_.clear();
         dsp_manager_.shutdown();
+
+        has_mediums_pending_destroy_ = false;
+        {
+            const std::lock_guard<std::mutex> guard(mediums_pending_destroy_lock_);
+            mediums_pending_destroy_.clear();
+        }
+
         egl_controller_ = std::make_unique<egl_controller>(driver);
     }
 

@@ -29,8 +29,6 @@
 #include <common/path.h>
 #include <common/platform.h>
 #include <common/random.h>
-#include <common/time.h>
-#include <common/virtualmem.h>
 
 #include <disasm/disasm.h>
 
@@ -380,7 +378,14 @@ namespace eka2l1 {
 
                 dvcmngr_->clear();
 
-                std::string rom_drive_name = std::string(1, static_cast<char>(drive_to_char16(romdrv)));
+                // Lowercase to match the drive folder name every frontend's
+                // installer actually creates (e.g. "drives/z/", not
+                // "drives/Z/") - on a case-sensitive filesystem the two don't
+                // resolve to the same directory, so an uppercase probe here
+                // would silently find nothing and still persist the cleared
+                // (now empty) device list below.
+                std::string rom_drive_name = common::lowercase_string(
+                    std::string(1, static_cast<char>(drive_to_char16(romdrv))));
 
                 std::string storage_path;
                 common::get_current_directory(storage_path);
@@ -407,7 +412,12 @@ namespace eka2l1 {
                         std::string manu, firm_name, model;
                         loader::determine_rpkg_product_info(full_entry_path, manu, firm_name, model);
 
-                        const std::string rom_directory = eka2l1::add_path(storage_path, eka2l1::add_path("roms", firm_name + "\\"));
+                        // install_rom/install_rpkg save the resident ROM under
+                        // roms/<lowercase firmcode>/ (see firmcode_low in
+                        // rpkg.cpp); match that here or a case-sensitive
+                        // filesystem sees no SYM.ROM and deletes an otherwise
+                        // valid dump below.
+                        const std::string rom_directory = eka2l1::add_path(storage_path, eka2l1::add_path("roms", common::lowercase_string(firm_name) + "\\"));
                         const std::string rom_file = eka2l1::add_path(rom_directory, "SYM.ROM");
                         if (!common::exists(rom_file)) {
                             LOG_ERROR(SYSTEM, "Removing broken device: {} ({})", model, firm_name);
@@ -600,13 +610,6 @@ namespace eka2l1 {
     void system_impl::startup() {
         exit = false;
 
-#ifdef __EMSCRIPTEN__
-        // On WASM the scheduler runs on the main browser thread and cannot block.
-        // cpu_load_save uses idle_event.wait() which deadlocks because the timer thread
-        // cannot fire while the main thread holds mut and waits on idle_event.
-        conf_->cpu_load_save = false;
-#endif
-
         // Initialize all the system that doesn't depend on others first
         timing_ = std::make_unique<ntimer>(DEFAULT_CPU_HZ);
         timing_->set_realtime_level(get_realtime_level_from_string(conf_->rtos_level.c_str()));
@@ -633,19 +636,26 @@ namespace eka2l1 {
         , exit(false) {
 #if EKA2L1_ARCH(ARM)
         cpu_type = arm_emulator_type::r12l1;
-#elif EKA2L1_PLATFORM(WASM)
+#elif EKA2L1_PLATFORM(IOS)
+        // iOS defaults to dyncom. Dynarmic is not robust enough to be the
+        // default (Calculator 0x10005902 still SIGSEGVs inside
+        // Dynarmic::A32::Jit::Impl::Run() — the known A32 issue) and the JIT
+        // win is in sustained execution, not one-shot launch. Builds that
+        // carry dynarmic (EKA2L1_IOS_DYNARMIC: simulator, or sideload device
+        // builds) let the user opt in from the settings screen;
+        // the opt-in is the dedicated ios_use_jit flag — NOT cpu_backend,
+        // whose "dynarmic" desktop default may already be persisted in
+        // config.yml — and is honored only when the process actually has JIT
+        // permission (host_can_jit() runtime probe), else stay on dyncom.
         cpu_type = arm_emulator_type::dyncom;
-#elif EKA2L1_PLATFORM(OHOS)
-        // HarmonyOS allows JIT in a developer/debug build but a store-distributed
-        // (signed) app is denied executable memory - dynarmic's oaknut emitter then
-        // crashes writing the first JIT prelude. Probe at runtime: use the dynarmic
-        // JIT when the host actually grants executable pages, otherwise fall back to
-        // the dyncom interpreter so store builds still run (slower, but no crash).
-        // Note: aarch64 evaluates EKA2L1_ARCH(ARM) as false (that macro is 32-bit
-        // __arm__ only), so OHOS arm64 lands here rather than the r12l1 branch.
-        cpu_type = common::is_executable_memory_available()
-            ? arm_emulator_type::dynarmic
-            : arm_emulator_type::dyncom;
+#if EKA2L1_IOS_DYNARMIC
+        if (conf_->ios_use_jit && arm::host_can_jit()) {
+            cpu_type = arm_emulator_type::dynarmic;
+        }
+        LOG_INFO(SYSTEM, "iOS CPU backend: {} (JIT opt-in: {}, JIT permission: {})",
+            (cpu_type == arm_emulator_type::dynarmic) ? "dynarmic" : "dyncom",
+            conf_->ios_use_jit, arm::host_can_jit());
+#endif
 #else
         cpu_type = /*arm::string_to_arm_emulator_type(conf_->cpu_backend);*/ arm_emulator_type::dynarmic;
 #endif
@@ -719,8 +729,10 @@ namespace eka2l1 {
             return 1;
         }
 
-        if (!mem_) {
-            return 1;
+        if (dispatcher_) {
+            // Objects orphaned by a dead process are destroyed here: this thread holds no
+            // kernel lock, so a teardown that waits on an audio render callback can't deadlock.
+            dispatcher_->flush_pending_teardown();
         }
 
         bool should_step = false;
@@ -758,10 +770,6 @@ namespace eka2l1 {
 
         if (to_run != nullptr) {
             if (!should_step) {
-                // On WASM the dyncom interpreter has its own wall-clock
-                // watchdog (~8ms) that returns control mid-timeslice, so the
-                // full timeslice can be requested here without freezing the
-                // browser main thread.
                 cpu->run(to_run->get_remaining_screenticks());
             } else {
                 cpu->step();
@@ -1057,7 +1065,6 @@ namespace eka2l1 {
             } else {
                 return ngage_game_card_no_game_data_folder;
             }
-            return ngage_game_card_no_game_data_folder;
         }
 
         std::string specific_app, specific_app_2;
@@ -1121,11 +1128,16 @@ namespace eka2l1 {
 
         std::uint32_t copied_count = 0;
 
-        common::copy_folder(folder_path, drive_e_path_root, common::is_platform_case_sensitive() ? common::FOLDER_COPY_FLAG_LOWERCASE_NAME : 0, 
+        const bool copied = common::copy_folder(
+            folder_path, drive_e_path_root,
+            common::is_platform_case_sensitive() ? common::FOLDER_COPY_FLAG_LOWERCASE_NAME : 0,
             [&](const std::size_t copied, const std::size_t total) {
                 if (progress_cb)
                     progress_cb(copied * 100 / total, total_percentage);
             });
+        if (!copied) {
+            return ngage_game_card_general_error;
+        }
 
         // Remove the app registeration file of the original
         if (!specific_app_2.empty()) {
