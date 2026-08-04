@@ -9,8 +9,8 @@ to be faster.
 Newer S60/Belle BitGDI clients request the premultiplied-alpha
 `EColor16MAP` mode and the screen `MSurfaceId` interface. The C++ source now
 implements both without depending on Symbian partner-only headers. The
-checked-in general DLL carries the same ABI behavior; `surface_stub.S` keeps
-the position-independent implementation used to update the legacy binary
-without changing its exported ordinal table. Rebuild that binary patch with
-`scripts/build_scdv_belle_patch.sh`; the complete investigation and validation
-procedure is documented in `docs/ios-asphalt6-x7.md`.
+checked-in general DLL is a full GCCE build from the Nokia Symbian Belle SDK;
+its frozen DEF preserves the 31-entry export ABI used by ROM patch maps.
+`surface_stub.S` and `scripts/build_scdv_belle_patch.sh` retain the earlier
+ABI-preserving binary-patch path for historical and diagnostic use. Complete
+build notes and validation are in `docs/ios-asphalt6-x7.md`.
