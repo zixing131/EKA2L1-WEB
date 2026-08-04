@@ -290,8 +290,11 @@ namespace eka2l1::epoc {
         eka2l1::vec2 screen_size_scaled = current_mode().size * display_scale_factor;
 
         if (!screen_texture) {
-            // Create new one!
+            // Create new one! Its content is undefined until something draws over it, and a
+            // fullscreen app that leaves part of the screen alone (the control pane area, for
+            // instance) would present that leftover memory as garbage. Ask for a clearing redraw.
             screen_texture = drivers::create_bitmap(driver, screen_size_scaled, 32);
+            flags_ |= FLAG_SERVER_REDRAW_PENDING;
         } else {
             builder.bind_bitmap(screen_texture);
             builder.resize_bitmap(screen_texture, screen_size_scaled);
