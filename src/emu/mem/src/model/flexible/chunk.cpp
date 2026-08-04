@@ -44,6 +44,16 @@ namespace eka2l1::mem::flexible {
                 mmu->cpu_->imb_range(fixed_mapping_->base_, max_size_);
             }
         }
+
+        // A shared chunk's fixed mapping is registered in the memory object's
+        // mapping list by do_create() (attach_mapping) but, unlike per-process
+        // mappings, is never detached. Members destruct in reverse declaration
+        // order, so fixed_mapping_ dies before mem_obj_; without this detach,
+        // ~memory_object -> decommit() would walk the already-freed mapping and
+        // dereference its dangling owner_. Remove it while it is still alive.
+        if (fixed_mapping_ && mem_obj_) {
+            mem_obj_->detach_mapping(fixed_mapping_.get());
+        }
     }
 
     int flexible_mem_model_chunk::do_create(const mem_model_chunk_creation_info &create_info) {

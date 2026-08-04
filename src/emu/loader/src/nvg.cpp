@@ -325,19 +325,25 @@ namespace eka2l1::loader {
             { VG_LCCWARC_TO, 'A' },
             { VG_SCCWARC_TO, 'A' },
             { VG_LCWARC_TO, 'A' },
-            { VG_SCCWARC_TO, 'A' }
+            { VG_SCWARC_TO, 'A' }
         };
 
         T values[6];
 
         for (std::uint8_t segment_type: segment_types) {
-            if (segment_type == VG_CLOSE_PATH) {
+            // Bit 0 is the absolute/relative flag (VG_ABSOLUTE=0, VG_RELATIVE=1);
+            // the command itself lives in the remaining bits. Strip the flag
+            // before matching the command so relative segments (odd values) are
+            // dispatched to the same handler as their absolute counterparts.
+            const std::uint8_t base_type = segment_type & ~1;
+
+            if (base_type == VG_CLOSE_PATH) {
                 break;
             }
 
-            auto correspond_find_res = CORRESPOND_SVG_CMD_CHAR.find(static_cast<vg_path_segment_type>(segment_type & ~1));
+            auto correspond_find_res = CORRESPOND_SVG_CMD_CHAR.find(static_cast<vg_path_segment_type>(base_type));
             if (correspond_find_res == CORRESPOND_SVG_CMD_CHAR.end()) {
-                errors.emplace_back(NVG_UNKNOWN_PATH_SEGMENT_TYPE, in.tell(), segment_type & ~1);
+                errors.emplace_back(NVG_UNKNOWN_PATH_SEGMENT_TYPE, in.tell(), base_type);
                 continue;
             }
 
@@ -347,7 +353,7 @@ namespace eka2l1::loader {
                 result_char_res = static_cast<char>(std::tolower(result_char_res));
             }
 
-            switch (segment_type) {
+            switch (base_type) {
             case VG_HLINE_TO:
             case VG_VLINE_TO: {
                 T to_pos = 0;
@@ -377,8 +383,8 @@ namespace eka2l1::loader {
             case VG_SCWARC_TO:
             case VG_LCCWARC_TO:
             case VG_LCWARC_TO: {
-                const bool is_counterclock_wise = (segment_type == VG_SCCWARC_TO) || (segment_type == VG_LCCWARC_TO);
-                const bool is_small = (segment_type == VG_SCWARC_TO) || (segment_type == VG_SCCWARC_TO);
+                const bool is_counterclock_wise = (base_type == VG_SCCWARC_TO) || (base_type == VG_LCCWARC_TO);
+                const bool is_small = (base_type == VG_SCWARC_TO) || (base_type == VG_SCCWARC_TO);
 
                 if (in.read(values, ELEM_T_SIZE * 5) != ELEM_T_SIZE * 5) {
                     errors.emplace_back(NVG_READ_COMMAND_DATA_FAILED, in.tell());
