@@ -116,15 +116,11 @@ namespace eka2l1::kernel {
 
                 run_core->flush_tlb();
 
-                // Push the new address space so the core's ASID-tagged
-                // instruction cache keeps per-process translations apart and
-                // survives this switch (dyncom; no-op on other backends). Paired
-                // with flush_tlb above, which only drops the data TLB now.
-                run_core->set_asid(static_cast<std::uint32_t>(mm_process->address_space_id()));
+                // NOTE: This is not needed now
+                //run_core->set_asid(mm_process->address_space_id());
             }
 
             run_core->load_context(crr_thread->ctx);
-            //LOG_TRACE(KERNEL, "Switched to {}", crr_thread->name());
         } else {
             // No current thread is eligible to run. Let the core that this scheduler currently handle sleeps.
             crr_thread = nullptr;
@@ -187,6 +183,19 @@ namespace eka2l1::kernel {
                 // Use our old outdated friend, it seems only one thread exists
                 next_thread = old_friend;
             }
+        }
+
+        // A ready thread can briefly outlive its process memory model during
+        // multi-step teardown. Drop stale entries so switch_context receives a
+        // runnable thread with a valid address space.
+        while (next_thread) {
+            kernel::process *owner = next_thread->owning_process();
+            if (owner && owner->get_mem_model()) {
+                break;
+            }
+
+            dequeue_thread_from_ready(next_thread);
+            next_thread = next_ready_thread();
         }
 
         switch_context(crr_thread, next_thread);
@@ -284,6 +293,7 @@ namespace eka2l1::kernel {
 
             thr->state = thread_state::wait;
             dequeue_thread_from_ready(thr);
+            kern->prepare_reschedule();
         }
 
         // Schedule the thread to be waken up
