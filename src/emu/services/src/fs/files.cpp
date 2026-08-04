@@ -35,6 +35,11 @@
 #include <services/fs/sec.h>
 
 namespace eka2l1 {
+    static std::u16string canonical_file_attrib_path(std::u16string path) {
+        return eka2l1::transform_separators<char16_t>(
+            std::move(path), true, eka2l1::get_separator_16);
+    }
+
     bool file_attrib::claim_exclusive(const kernel::uid pr_uid) {
         if (owner == pr_uid) {
             flags |= static_cast<std::uint32_t>(fs_file_attrib_flag::exclusive);
@@ -86,7 +91,7 @@ namespace eka2l1 {
     void fs_node::deref() {
         if (vfs_node->type == io_component_type::file) {        
             file *vfs_file = reinterpret_cast<file *>(vfs_node.get());
-            const std::u16string filename = vfs_file->file_name();
+            const std::u16string filename = canonical_file_attrib_path(vfs_file->file_name());
 
             auto ite = serv->attribs.find(filename);
             if (ite != serv->attribs.end()) {
@@ -412,6 +417,7 @@ namespace eka2l1 {
         }
 
         file *vfs_file = reinterpret_cast<file *>(node->vfs_node.get());
+        const std::u16string old_path = vfs_file->file_name();
         auto new_path = ctx->get_argument_value<std::u16string>(0);
 
         if (!new_path) {
@@ -425,7 +431,7 @@ namespace eka2l1 {
             return;
         }
 
-        bool res = ctx->sys->get_io_system()->rename(vfs_file->file_name(), new_path_abs);
+        bool res = ctx->sys->get_io_system()->rename(old_path, new_path_abs);
 
         if (!res) {
             ctx->complete(epoc::error_general);
@@ -442,6 +448,18 @@ namespace eka2l1 {
         new_vfs_file->seek(last_pos, file_seek_mode::beg);
 
         node->vfs_node = std::move(new_vfs_file);
+
+        auto &attribs = server<fs_server>()->attribs;
+        auto attrib_node = attribs.extract(canonical_file_attrib_path(old_path));
+        if (!attrib_node.empty()) {
+            attrib_node.key() = canonical_file_attrib_path(new_path_abs);
+            auto insert_result = attribs.insert(std::move(attrib_node));
+            if (!insert_result.inserted) {
+                LOG_ERROR(SERVICE_EFSRV,
+                    "File sharing state already exists after renaming {} to {}",
+                    common::ucs2_to_utf8(old_path), common::ucs2_to_utf8(new_path_abs));
+            }
+        }
 
         ctx->complete(epoc::error_none);
     }
@@ -635,7 +653,9 @@ namespace eka2l1 {
         ctx->write_data_to_descriptor_argument<int>(3, handle);
 
         // Arg2 take the temp path
-        ctx->write_arg(2, full_path);
+        const utf16_str guest_path = eka2l1::transform_separators<char16_t>(
+            full_path, true, eka2l1::get_separator_16);
+        ctx->write_arg(2, guest_path);
         ctx->complete(epoc::error_none);
     }
 
@@ -656,7 +676,8 @@ namespace eka2l1 {
 
         file *f = reinterpret_cast<file *>(node->vfs_node.get());
 
-        auto &node_attrib = server<fs_server>()->attribs[f->file_name()];
+        auto &node_attrib = server<fs_server>()->attribs[
+            canonical_file_attrib_path(f->file_name())];
         node_attrib.increment_use(node->process);
 
         ctx->write_data_to_descriptor_argument<epoc::handle>(3, dup_handle);
@@ -910,7 +931,8 @@ namespace eka2l1 {
 
         // Check the attribute first
         fs_node *new_node = server<fs_server>()->make_new<fs_node>();
-        auto &node_attrib = server<fs_server>()->attribs[name];
+        auto &node_attrib = server<fs_server>()->attribs[
+            canonical_file_attrib_path(name)];
 
         if (node_attrib.is_exlusive()) {
             // Check if we can open it

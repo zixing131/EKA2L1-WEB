@@ -1025,6 +1025,10 @@ namespace eka2l1::epoc {
                 invalidate(new_bounding_rect);
             } else {
                 redraw_region.clip(new_bounding_rect);
+
+                if (redraw_region.rects_.empty()) {
+                    client->remove_redraws(this);
+                }
             }
 
             if (scr->is_screenplay_architecture() || (!scr->scr_config.blt_offscreen && scr->scr_config.flicker_free)) {
