@@ -126,7 +126,12 @@ if (ANDROID)
         )
 endif()
 
-target_include_directories(common PUBLIC include)
+set(COMMON_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/include")
+file(MAKE_DIRECTORY "${COMMON_GENERATED_INCLUDE_DIR}/common")
+
+target_include_directories(common PUBLIC
+        "${COMMON_GENERATED_INCLUDE_DIR}"
+        include)
 target_link_libraries(common PUBLIC fmt miniz spdlog)
 if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
@@ -159,7 +164,7 @@ execute_process(
 )
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/configure.h.in
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/common/configure.h)
+        ${COMMON_GENERATED_INCLUDE_DIR}/common/configure.h)
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/version.h.in
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/common/version.h)
+        ${COMMON_GENERATED_INCLUDE_DIR}/common/version.h)
