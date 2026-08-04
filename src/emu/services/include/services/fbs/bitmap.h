@@ -46,6 +46,18 @@ namespace eka2l1::epoc {
 
     static const std::size_t SUPPORTED_REV2_UID_COUNT = sizeof(SUPPORTED_REV2_UIDS) / sizeof(std::uint32_t);
 
+    // Which NVG extended bitmaps we swap for plain rasterised pixels so guest-side
+    // BitGDI can read them (see fbs_server::rasterize_nvg_bitmap). Restricted to the
+    // icon-sized alpha masks that Avkon post-processes itself — the large colour
+    // artwork the window server draws directly is better left as vectors, both to
+    // avoid inflating the shared heap and because it renders correctly as is.
+    static constexpr int NVG_RASTERIZE_MAX_SIDE = 128;
+
+    static inline bool is_nvg_bitmap_rasterizable(const eka2l1::vec2 &size, const display_mode dpm) {
+        return (size.x > 0) && (size.y > 0) && (size.x <= NVG_RASTERIZE_MAX_SIDE)
+            && (size.y <= NVG_RASTERIZE_MAX_SIDE) && is_display_mode_mono(dpm);
+    }
+
     enum bitmap_file_compression {
         bitmap_file_no_compression = 0,
         bitmap_file_byte_rle_compression = 1,

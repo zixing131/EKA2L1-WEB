@@ -338,7 +338,11 @@ namespace eka2l1::loader {
             const std::uint8_t base_type = segment_type & ~1;
 
             if (base_type == VG_CLOSE_PATH) {
-                break;
+                // Close the current subpath and keep going: a single VGPath can
+                // hold several closed contours (glyph outlines, holes...), and
+                // bailing out here dropped every segment behind the first one.
+                direction += "Z ";
+                continue;
             }
 
             auto correspond_find_res = CORRESPOND_SVG_CMD_CHAR.find(static_cast<vg_path_segment_type>(base_type));
@@ -454,12 +458,17 @@ namespace eka2l1::loader {
 
         std::string direction;
 
+        // Path coordinates are OpenVG S15.16/S11.4 fixed-point, i.e. *signed*.
+        // Reading them unsigned turns every negative value (relative segments
+        // moving left/up, or absolute coordinates left of the origin) into a
+        // huge positive one — e.g. -22 in S15.16 comes out as 65514 — which
+        // blows up the path bounds and wrecks the rendered icon.
         if (state.path_datatype_ == NVG_PATH_THIRTYTWO_BIT_DECODING) {
             if ((in.tell() % 4) != 0) {
                 in.seek(4 - (in.tell() % 4), common::seek_where::cur);
             }
 
-            if (!nvg_generate_direction<std::uint32_t>(in, direction, errors, segment_types, 1.0f / 65536.0f)) {
+            if (!nvg_generate_direction<std::int32_t>(in, direction, errors, segment_types, 1.0f / 65536.0f)) {
                 return false;
             }
         } else {
@@ -473,7 +482,7 @@ namespace eka2l1::loader {
                 scale = 1.0f / 16.0f;
             }
             
-            if (!nvg_generate_direction<std::uint16_t>(in, direction, errors, segment_types, scale)) {
+            if (!nvg_generate_direction<std::int16_t>(in, direction, errors, segment_types, scale)) {
                 return false;
             }
         }
