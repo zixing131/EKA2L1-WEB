@@ -40,5 +40,5 @@ cmake --build "$BUILD_DIR" --target eka2l1_wasm -j"$JOBS"
 
 echo
 echo "Release build complete -> $BUILD_DIR/bin"
-echo "Integrity sealed (gen_integrity.py); serve from an authorized domain"
-echo "(*.zixing.fun / *.iniche.cn) — localhost is rejected in Release."
+echo "Local serve: python3 src/emu/web/serve.py 8080 $BUILD_DIR/bin"
+echo "(Domain whitelist / integrity gating were removed; localhost works.)"

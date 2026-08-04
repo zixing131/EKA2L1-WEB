@@ -114,11 +114,12 @@ info "工作目录: $ANDROID_PROJECT"
 chmod +x gradlew
 
 # ── 组装 Gradle 参数 ─────────────────────────────────────────────────────────
-# android.injected.build.abi 强制 Gradle 只针对 arm64-v8a 调用 CMake/NDK，
-# 跳过 armeabi-v7a，大幅减少构建时间和产物体积。
+# 用 -PtargetAbi 限定 ABI（见 app/build.gradle abiFilters）。不要用
+# android.injected.build.abi：那是 Studio/IDE 注入安装用的，AGP 会给 APK
+# 打 android:testOnly="true"，普通 adb install 会失败。
 GRADLE_ARGS=(
     assembleRelease
-    "-Pandroid.injected.build.abi=arm64-v8a"
+    "-PtargetAbi=arm64-v8a"
     "--no-daemon"
     "-Dorg.gradle.workers.max=$JOBS"
 )
