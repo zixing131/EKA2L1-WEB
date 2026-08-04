@@ -953,7 +953,7 @@ namespace eka2l1::hle {
 
             eka2l1::ro_file_stream image_data_stream(f.get());
 
-            if (f->is_in_rom()) {
+            if (f->is_in_rom() && !loader::is_e32img(reinterpret_cast<common::ro_stream *>(&image_data_stream))) {
                 auto romimg = loader::parse_romimg(reinterpret_cast<common::ro_stream *>(&image_data_stream), mem_, kern_->get_epoc_version(), is_driver_lib);
                 if (!romimg) {
                     return nullptr;
@@ -973,6 +973,26 @@ namespace eka2l1::hle {
         };
 
         std::u16string lib_path = name;
+
+        // A Symbian absolute path can be rooted without naming a drive (for
+        // example, "\\sys\\bin\\foo.dll"). Resolve that form against each
+        // mounted drive instead of treating it as a complete VFS path.
+        if (eka2l1::has_root_dir(lib_path) && eka2l1::root_name(lib_path, true).empty()) {
+            for (drive_number drv = drive_a; drv <= drive_z; drv = static_cast<drive_number>(static_cast<int>(drv) + 1)) {
+                std::u16string candidate(1, drive_to_char16(drv));
+                candidate += u':';
+                candidate += lib_path;
+
+                if (io_->exist(candidate)) {
+                    if (codeseg_ptr result = load_depend_on_drive(candidate, is_driver_lib)) {
+                        result->set_full_path(candidate);
+                        return result;
+                    }
+                }
+            }
+
+            return nullptr;
+        }
 
         // Create a new codeseg, we should try search these files
         // Absolute yet ?

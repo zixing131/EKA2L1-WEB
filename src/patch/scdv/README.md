@@ -5,3 +5,12 @@ and replace them with calls to emulator.
 
 Because the implementation on Symbian OSS is licensed under EPL, this project reimplements all stuffs, hoping
 to be faster.
+
+Newer S60/Belle BitGDI clients request the premultiplied-alpha
+`EColor16MAP` mode and the screen `MSurfaceId` interface. The C++ source now
+implements both without depending on Symbian partner-only headers. The
+checked-in general DLL carries the same ABI behavior; `surface_stub.S` keeps
+the position-independent implementation used to update the legacy binary
+without changing its exported ordinal table. Rebuild that binary patch with
+`scripts/build_scdv_belle_patch.sh`; the complete investigation and validation
+procedure is documented in `docs/ios-asphalt6-x7.md`.

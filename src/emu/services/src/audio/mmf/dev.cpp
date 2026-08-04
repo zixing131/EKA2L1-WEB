@@ -1152,6 +1152,10 @@ namespace eka2l1 {
                 play_data(ctx);
                 break;
 
+            case epoc::mmf_dev_newarch_stop:
+                stop(ctx);
+                break;
+
             case epoc::mmf_dev_newarch_btbf_data:
                 get_buffer(ctx);
                 break;
@@ -1160,8 +1164,19 @@ namespace eka2l1 {
                 samples_played(ctx);
                 break;
 
+            case epoc::mmf_dev_newarch_set_priority_settings:
+                set_priority_settings(ctx);
+                break;
+
             case epoc::mmf_dev_newarch_close:
                 close(ctx);
+                break;
+
+            case epoc::mmf_dev_newarch_set_client_thread_info:
+                // The native A3F server uses this to associate its separate audio
+                // process with the client. EKA2L1 renders audio in-process, so no
+                // process bookkeeping is needed, but the synchronous IPC must finish.
+                ctx->complete(epoc::error_none);
                 break;
 
             default:

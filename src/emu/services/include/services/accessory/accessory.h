@@ -38,12 +38,14 @@ namespace eka2l1 {
 
     public:
         explicit accessory_subsession(accessory_server *svr);
+        virtual ~accessory_subsession() = default;
         virtual bool fetch(service::ipc_context *ctx) = 0;
     };
 
     struct accessory_single_connection_subsession : public accessory_subsession {
     protected:
         epoc::notify_info accessory_connected_nof_;
+        epoc::notify_info connection_status_nof_;
 
     public:
         explicit accessory_single_connection_subsession(accessory_server *svr);

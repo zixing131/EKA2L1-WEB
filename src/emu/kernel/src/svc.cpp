@@ -5714,6 +5714,77 @@ namespace eka2l1::epoc {
         return chn->do_request(request_nof_info, func, args[0], args[1], false);
     }
 
+    struct logical_channel_create_info {
+        epoc::version version;
+        std::int32_t unit;
+        eka2l1::ptr<epoc::desc8> physical_device;
+        eka2l1::ptr<epoc::desc8> info;
+    };
+
+    BRIDGE_FUNC(std::int32_t, logical_channel_create, eka2l1::ptr<epoc::desc8> device_name_des,
+        eka2l1::ptr<logical_channel_create_info> create_info_ptr, std::int32_t owner) {
+        kernel::process *process = kern->crr_process();
+        epoc::desc8 *device_name = device_name_des.get(process);
+        logical_channel_create_info *create_info = create_info_ptr.get(process);
+
+        if (!device_name || !create_info) {
+            return epoc::error_argument;
+        }
+
+        const std::string name = common::lowercase_string(device_name->to_std_string(process));
+        ldd::factory *factory = kern->get_by_name<ldd::factory>(name);
+
+        if (!factory) {
+            const auto factory_func = kern->suitable_ldd_instantiate_func(name.c_str());
+            if (!factory_func) {
+                LOG_TRACE(KERNEL, "Logical device {} is not emulated", name);
+                return epoc::error_not_found;
+            }
+
+            ldd::factory_instance factory_instance = factory_func(kern->get_system());
+            factory = kern->add_object(factory_instance);
+            if (!factory) {
+                return epoc::error_no_memory;
+            }
+
+            factory->install();
+        }
+
+        std::unique_ptr<ldd::channel> channel = factory->make_channel(create_info->version);
+        if (!channel) {
+            return epoc::error_not_supported;
+        }
+
+        ldd::channel *added_channel = kern->add_object(channel);
+        if (!added_channel) {
+            return epoc::error_no_memory;
+        }
+
+        added_channel->set_owner(process);
+        return kern->open_handle_with_thread(kern->crr_thread(), added_channel,
+            owner == epoc::owner_process ? kernel::owner_type::process : kernel::owner_type::thread);
+    }
+
+    BRIDGE_FUNC(std::int32_t, logical_device_load) {
+        return epoc::error_not_supported;
+    }
+
+    BRIDGE_FUNC(std::int32_t, logical_device_free, eka2l1::ptr<epoc::desc8> device_name_des, std::int32_t) {
+        kernel::process *process = kern->crr_process();
+        epoc::desc8 *device_name = device_name_des.get(process);
+        if (!device_name) {
+            return epoc::error_argument;
+        }
+
+        const std::string name = common::lowercase_string(device_name->to_std_string(process));
+        ldd::factory *factory = kern->get_by_name<ldd::factory>(name);
+        if (!factory) {
+            return epoc::error_not_found;
+        }
+
+        return factory->decrease_access_count();
+    }
+
     BRIDGE_FUNC(std::int32_t, logical_channel_do_control_eka1, const int func, eka2l1::ptr<void> arg1,
         eka2l1::ptr<void> arg2, const kernel::handle h) {
         return logical_channel_do_control(kern, h, func, arg1, arg2);
@@ -5965,8 +6036,14 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x78, thread_rename),
         BRIDGE_REGISTER(0x7B, process_logon),
         BRIDGE_REGISTER(0x7C, process_logon_cancel),
-        BRIDGE_REGISTER(0x7F, server_create),
+        BRIDGE_REGISTER(0x7D, thread_process),
+        BRIDGE_REGISTER(0x7E, server_create),
+        BRIDGE_REGISTER(0x7F, server_create), // ServerCreateWithOptions
         BRIDGE_REGISTER(0x80, session_create),
+        BRIDGE_REGISTER(0x81, session_create_from_handle),
+        BRIDGE_REGISTER(0x82, logical_device_load),
+        BRIDGE_REGISTER(0x83, logical_device_free),
+        BRIDGE_REGISTER(0x84, logical_channel_create),
         BRIDGE_REGISTER(0x85, timer_create),
         BRIDGE_REGISTER(0x86, timer_after), // Actually TimerHighRes
         BRIDGE_REGISTER(0x87, after), // Actually AfterHighRes

@@ -83,6 +83,34 @@ namespace eka2l1 {
                 LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for Accessory single connection subsession 0x{:X}", ctx->msg->function);
                 break;
             }
+        } else {
+            switch (ctx->msg->function) {
+            case epoc::acc::opcode_modern_get_accessory_connection_status:
+            case epoc::acc::opcode_modern_get_accessory_connection_status_async:
+                get_accessory_connection_status(ctx);
+                break;
+
+            case epoc::acc::opcode_modern_close_accessory_connection_subsession:
+                ctx->complete(epoc::error_none);
+                return true;
+
+            case epoc::acc::opcode_modern_notify_accessory_connection_status_changed:
+                connection_status_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+                break;
+
+            case epoc::acc::opcode_modern_cancel_get_accessory_connection_status:
+                ctx->complete(epoc::error_none);
+                break;
+
+            case epoc::acc::opcode_modern_cancel_notify_accessory_connection_status_changed:
+                connection_status_nof_.complete(epoc::error_cancel);
+                ctx->complete(epoc::error_none);
+                break;
+
+            default:
+                LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for Accessory connection subsession 0x{:X}", ctx->msg->function);
+                break;
+            }
         }
 
         return false;
@@ -107,6 +135,16 @@ namespace eka2l1 {
         if (kern->get_epoc_version() <= epocver::epoc93fp2) {
             switch (ctx->msg->function) {
             case epoc::acc::opcode_s60v3_create_accessory_connection_subsession:
+                create_accessory_single_connection_subsession(ctx);
+                return;
+
+            default:
+                break;
+            }
+        } else {
+            switch (ctx->msg->function) {
+            case epoc::acc::opcode_modern_create_accessory_connection_subsession:
+            case epoc::acc::opcode_modern_create_accessory_single_connection_subsession:
                 create_accessory_single_connection_subsession(ctx);
                 return;
 

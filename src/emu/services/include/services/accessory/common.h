@@ -34,6 +34,17 @@ namespace eka2l1::epoc::acc {
         opcode_s60v3_cancel_notify_new_accessory_connected = 12
     };
 
+    enum opcode_modern {
+        opcode_modern_get_accessory_connection_status_async = 7,
+        opcode_modern_cancel_get_accessory_connection_status = 8,
+        opcode_modern_create_accessory_single_connection_subsession = 9,
+        opcode_modern_create_accessory_connection_subsession = 23,
+        opcode_modern_close_accessory_connection_subsession = 24,
+        opcode_modern_get_accessory_connection_status = 25,
+        opcode_modern_notify_accessory_connection_status_changed = 26,
+        opcode_modern_cancel_notify_accessory_connection_status_changed = 27
+    };
+
 #pragma pack(push, 1)
     struct generic_id_header {
         std::uint32_t acc_device_type_;
