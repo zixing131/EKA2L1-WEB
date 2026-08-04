@@ -316,12 +316,19 @@ namespace eka2l1::dispatch {
         std::mutex players_notify_deferred_lock_;
         std::atomic<bool> has_players_notify_deferred_;
 
+        // Streams whose buffer-ready notification the audio render thread could not complete
+        // because the kernel lock was taken. See defer_stream_buffer_notify().
+        std::vector<std::uint32_t> streams_notify_deferred_;
+        std::mutex streams_notify_deferred_lock_;
+        std::atomic<bool> has_streams_notify_deferred_;
+
         std::size_t process_exit_callback_handle_;
 
         void on_process_exit(kernel::process *pr);
 
         // Deliver the handed-over notifications. The kernel lock must already be held.
         void complete_deferred_player_notifies_locked();
+        void complete_deferred_stream_notifies_locked();
 
     public:
         window_server *winserv_;
@@ -363,6 +370,17 @@ namespace eka2l1::dispatch {
          * lock right away.
          */
         void defer_player_notify(const std::uint32_t player_handle);
+
+        /**
+         * \brief   Hand a DSP stream's buffer-ready notification over to the emulation thread.
+         *
+         * Same constraint as defer_player_notify(): the render thread can not block on the
+         * kernel lock. Dropping the notification instead and retrying on the next render
+         * callback is what starves a streaming guest - the retry only comes one hardware
+         * buffer later, and under the dispatch traffic of a busy title the lock is taken often
+         * enough that several retries in a row miss, which drains the ring buffer.
+         */
+        void defer_stream_buffer_notify(const std::uint32_t stream_handle);
 
         dsp_manager &get_dsp_manager() {
             return dsp_manager_;

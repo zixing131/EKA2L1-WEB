@@ -55,6 +55,7 @@ namespace eka2l1::dispatch {
         , graphics_string_added_(false)
         , has_mediums_pending_destroy_(false)
         , has_players_notify_deferred_(false)
+        , has_streams_notify_deferred_(false)
         , process_exit_callback_handle_(0) {
         trampoline_chunk_ = kern->create<kernel::chunk>(kern->get_memory_system(), nullptr, "DispatcherTrampolines", 0,
             MAX_TRAMPOLINE_CHUNK_SIZE, MAX_TRAMPOLINE_CHUNK_SIZE, prot_read_write_exec, kernel::chunk_type::normal,
@@ -122,6 +123,17 @@ namespace eka2l1::dispatch {
         has_players_notify_deferred_ = true;
     }
 
+    void dispatcher::defer_stream_buffer_notify(const std::uint32_t stream_handle) {
+        const std::lock_guard<std::mutex> guard(streams_notify_deferred_lock_);
+
+        if (std::find(streams_notify_deferred_.begin(), streams_notify_deferred_.end(), stream_handle)
+            == streams_notify_deferred_.end()) {
+            streams_notify_deferred_.push_back(stream_handle);
+        }
+
+        has_streams_notify_deferred_ = true;
+    }
+
     void dispatcher::flush_pending_teardown() {
         if (has_mediums_pending_destroy_.exchange(false)) {
             std::vector<std::unique_ptr<dsp_medium>> to_destroy;
@@ -135,9 +147,11 @@ namespace eka2l1::dispatch {
             to_destroy.clear();
         }
 
-        if (has_players_notify_deferred_.load(std::memory_order_relaxed)) {
+        if (has_players_notify_deferred_.load(std::memory_order_relaxed)
+            || has_streams_notify_deferred_.load(std::memory_order_relaxed)) {
             kern_->lock();
             complete_deferred_player_notifies_locked();
+            complete_deferred_stream_notifies_locked();
 
             kern_->unlock();
         }
@@ -187,6 +201,41 @@ namespace eka2l1::dispatch {
         }
     }
 
+    void dispatcher::complete_deferred_stream_notifies_locked() {
+        // Relaxed load first: this runs on every dispatch call, and the deferral only happens
+        // when the render thread lost the race for the kernel lock.
+        if (!has_streams_notify_deferred_.load(std::memory_order_relaxed)
+            || !has_streams_notify_deferred_.exchange(false)) {
+            return;
+        }
+
+        std::vector<std::uint32_t> to_complete;
+        {
+            const std::lock_guard<std::mutex> guard(streams_notify_deferred_lock_);
+            to_complete.swap(streams_notify_deferred_);
+        }
+
+        for (const std::uint32_t handle : to_complete) {
+            // The stream may have been destroyed (or its request cancelled) while the
+            // notification was waiting here; both leave nothing to complete.
+            dsp_epoc_stream *stream = dsp_manager_.get_object<dsp_epoc_stream>(handle);
+
+            if (!stream) {
+                continue;
+            }
+
+            const std::lock_guard<std::mutex> guard(stream->lock_);
+
+            // The requester thread may be gone (app exit, stream teardown): completing against
+            // a destroyed thread dereferences a dangling pointer.
+            if (!stream->copied_info_.empty() && kern_->is_thread_alive(stream->copied_info_.requester)) {
+                stream->copied_info_.complete(epoc::error_none);
+            } else {
+                stream->copied_info_.sts = 0;
+            }
+        }
+    }
+
     void dispatcher::set_graphics_driver(drivers::graphics_driver *driver) {
         if (!graphics_string_added_) {
             // Add static strings
@@ -219,6 +268,7 @@ namespace eka2l1::dispatch {
         // cancels or re-arms its request in this very call sees the completion first, exactly as
         // it would have if the render thread had taken the lock itself.
         complete_deferred_player_notifies_locked();
+        complete_deferred_stream_notifies_locked();
 
         auto dispatch_find_result = dispatch::dispatch_funcs.find(function_ord);
 
@@ -255,6 +305,12 @@ namespace eka2l1::dispatch {
         {
             const std::lock_guard<std::mutex> guard(players_notify_deferred_lock_);
             players_notify_deferred_.clear();
+        }
+
+        has_streams_notify_deferred_ = false;
+        {
+            const std::lock_guard<std::mutex> guard(streams_notify_deferred_lock_);
+            streams_notify_deferred_.clear();
         }
 
         egl_controller_ = std::make_unique<egl_controller>(driver);

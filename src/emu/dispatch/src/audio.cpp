@@ -638,11 +638,23 @@ namespace eka2l1::dispatch {
             stream_new->owner_process_id(owner_pr->unique_id());
         }
 
+        // Registered after the stream is in the manager so the callback can name it by handle.
+        // Nothing can fire it in between: the stream has not been started yet.
+        const std::uint32_t stream_handle = manager.add_object(stream_new);
+
         stream_org_new->ll_stream_->register_callback(
-            drivers::dsp_stream_notification_more_buffer, [kern](void *userdata) {
+            drivers::dsp_stream_notification_more_buffer, [kern, dispatcher, stream_handle](void *userdata) {
                 dsp_epoc_stream *epoc_stream = reinterpret_cast<dsp_epoc_stream *>(userdata);
+
+                // The buffer-ready callback runs on the audio backend's render thread, which must
+                // never block on the kernel lock (see eaudio_player_notify_any_done for the
+                // deadlock this avoids). Hand the notification to the emulation thread instead of
+                // dropping it: the driver would only retry one hardware buffer later, and a title
+                // that streams small buffers - Asphalt 2 writes 32ms at a time - runs its ring
+                // buffer dry after a couple of missed turns, which is heard as stuttering audio.
                 if (!kern->try_lock()) {
-                    return false;
+                    dispatcher->defer_stream_buffer_notify(stream_handle);
+                    return true;
                 }
 
                 {
@@ -653,9 +665,9 @@ namespace eka2l1::dispatch {
                 kern->unlock();
                 return true;
             },
-            stream_new.get());
+            stream_org_new);
 
-        return manager.add_object(stream_new);
+        return stream_handle;
     }
 
     // DSP streams
