@@ -760,17 +760,21 @@ namespace eka2l1 {
 
     // Symbian keeps an NVG icon as an *extended* bitmap: the shared data holds an
     // akn_icon_header plus the compressed vector commands, and BitGDI asks the ROM's
-    // CFbsRasterizer plugin to turn that into pixels whenever a client blits it.
-    // The emulator has no such plugin, so a guest that draws an extended bitmap on
-    // its own (Avkon dims a disabled icon by blitting its mask into a plain
-    // EGray256 bitmap, for instance) copies the raw NVG bytes as if they were
-    // pixels and ends up with noise.
+    // CFbsRasterizer plugin to turn that into pixels whenever a client reads it,
+    // rasterising into the bitmap's conceptual size and display mode. The emulator
+    // has no such plugin, so a guest that draws an extended bitmap on its own — an
+    // app painting a skin frame into its own bitmap through CFbsBitGc, or Avkon
+    // dimming an icon by blitting its mask into a plain EGray256 one — copies the
+    // raw NVG bytes as if they were pixels and ends up with noise.
     //
-    // Rasterise the icon into the shared data ourselves and demote the bitmap to a
-    // plain one, so every reader — guest BitGDI and our own window server bitmap
-    // cache alike — sees real pixels. This runs when a *second* client picks the
-    // bitmap up (duplicate), by which point the creator has finished writing the
-    // vector data.
+    // Stand in for the rasterizer: render the icon into the shared data and demote
+    // the bitmap to a plain one, so every reader — guest BitGDI and our own window
+    // server bitmap cache alike — sees real pixels. Overwriting the vector data is
+    // safe because extended bitmaps are immutable by contract (CreateExtendedBitmap
+    // documents modification as undefined behaviour), so nothing re-reads it; a
+    // different size means a different extended bitmap. This runs when a *second*
+    // client picks the bitmap up (duplicate), by which point the creator has
+    // finished the Mem::Copy of the vector data that follows creation.
     bool fbs_server::rasterize_nvg_bitmap(fbsbitmap *bmp) {
         if (!bmp || !bmp->bitmap_ || (bmp->bitmap_->uid_ != epoc::NVG_BITMAP_UID_REV2)) {
             return false;
@@ -850,6 +854,11 @@ namespace eka2l1 {
         const epoc::display_mode dpm = bws->settings_.current_display_mode();
         const int bpp = epoc::get_bpp_from_display_mode(dpm);
         const int byte_width = bws->byte_width_;
+
+        // Scanlines are word aligned, so an odd width leaves padding pixels the loop
+        // below never touches. Clear the whole raster region first: leftover vector
+        // bytes there show up as a stray column of noise once BitGDI blits the bitmap.
+        std::memset(data, 0, raster_bytes);
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {

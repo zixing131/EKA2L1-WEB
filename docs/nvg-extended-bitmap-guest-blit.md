@@ -67,10 +67,12 @@ Two details matter:
   8bpp data as if it were RGBA — the whole screen turns to noise. That mistake is
   easy to make and looks nothing like a UID problem.
 
-Scope is deliberately narrow: only mono (mask) bitmaps up to 128×128 are
-converted. Widening it to every NVG bitmap gains nothing — the large colour
-artwork is drawn by the window server, which decodes it correctly already — and
-it costs shared-heap space and introduced banding in Calculator's history pane.
+Scope was initially narrowed to mono (mask) bitmaps up to 128×128, on the
+assumption that colour artwork is only ever drawn by the window server. That was
+wrong — an app painting a skin frame into its own bitmap needs the colour plane
+too — and the restriction was lifted in [Skin frames drawn by an
+app](./nvg-skin-frames-colour-plane-and-padding.md), which also explains why the
+banding it was blamed for is the faithful result.
 
 ## Not fixed
 

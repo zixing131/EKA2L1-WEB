@@ -47,15 +47,34 @@ namespace eka2l1::epoc {
     static const std::size_t SUPPORTED_REV2_UID_COUNT = sizeof(SUPPORTED_REV2_UIDS) / sizeof(std::uint32_t);
 
     // Which NVG extended bitmaps we swap for plain rasterised pixels so guest-side
-    // BitGDI can read them (see fbs_server::rasterize_nvg_bitmap). Restricted to the
-    // icon-sized alpha masks that Avkon post-processes itself — the large colour
-    // artwork the window server draws directly is better left as vectors, both to
-    // avoid inflating the shared heap and because it renders correctly as is.
-    static constexpr int NVG_RASTERIZE_MAX_SIDE = 128;
+    // BitGDI can read them (see fbs_server::rasterize_nvg_bitmap).
+    //
+    // On a device the pixels come from the licensee's CFbsRasterizer plugin, which
+    // BitGDI consults for *any* extended bitmap it has to read, rasterising into the
+    // bitmap's own TBitmapDesc::iSizeInPixels and iDispMode. There is no notion there
+    // of some extended bitmaps being readable and others not, so the only conditions
+    // we impose are our own rasteriser's limits.
+    static constexpr std::size_t NVG_RASTERIZE_MAX_BYTES = 4 * 1024 * 1024;
 
     static inline bool is_nvg_bitmap_rasterizable(const eka2l1::vec2 &size, const display_mode dpm) {
-        return (size.x > 0) && (size.y > 0) && (size.x <= NVG_RASTERIZE_MAX_SIDE)
-            && (size.y <= NVG_RASTERIZE_MAX_SIDE) && is_display_mode_mono(dpm);
+        if ((size.x <= 0) || (size.y <= 0)) {
+            return false;
+        }
+
+        const int bpp = get_bpp_from_display_mode(dpm);
+
+        // Whole-byte pixels only: rasterize_nvg_bitmap stores one pixel at a time and
+        // has no packing for the sub-byte modes.
+        if ((bpp != 8) && (bpp != 16) && (bpp != 24) && (bpp != 32)) {
+            return false;
+        }
+
+        // Unlike a real rasterizer, which keeps its pixels in a cache of its own, we
+        // expand the bitmap in place and so have to reserve room for the raster form
+        // up front (see fbscli::create_bitmap). Cap that reservation: a skin graphic
+        // is screen sized at most, while the conceptual size Symbian itself allows an
+        // extended bitmap runs up to KMaxTInt / 4 per side.
+        return (get_byte_width(size.x, bpp) * static_cast<std::size_t>(size.y)) <= NVG_RASTERIZE_MAX_BYTES;
     }
 
     enum bitmap_file_compression {
