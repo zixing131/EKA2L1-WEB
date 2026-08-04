@@ -514,7 +514,14 @@ namespace eka2l1 {
             kern->lock();
 
             if (sleep_nof_sts) {
-                (sleep_nof_sts.get(owning_process()))->set(errcode, kern->is_eka1());
+                // The wakeup event can still be in-flight (already popped from the
+                // timing queue and running outside the timing lock) when the sleeping
+                // thread is torn down. By then the guest request status page may be
+                // unmapped, so translation returns null. Guard it like notify_info::complete.
+                epoc::request_status *sts_real = sleep_nof_sts.get(owning_process());
+                if (sts_real) {
+                    sts_real->set(errcode, kern->is_eka1());
+                }
                 sleep_nof_sts = 0;
 
                 signal_request();
