@@ -26,10 +26,23 @@
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <utils/err.h>
+#include <utils/reqsts.h>
 
 namespace eka2l1 {
     namespace kernel {
         void timer_callback(uint64_t user, int ns_late);
+
+        // A timer event can become due while the guest is mid-way through issuing
+        // the request: it has written the request status (pending) but has not yet
+        // run SetActive() on the owning active object. Completing it then strands
+        // the active scheduler with a request it cannot see as ready, which it
+        // reports as the stray-signal panic E32USER-CBase 46. When that happens we
+        // reschedule the completion a short moment later so the still-running guest
+        // can finish issuing; the count is bounded so a bare TRequestStatus (waited
+        // on with User::WaitForRequest, which never sets the active flag) still
+        // completes after a negligible delay.
+        static constexpr std::int64_t TIMER_ACTIVATE_DEFER_US = 100;
+        static constexpr int TIMER_ACTIVATE_DEFER_LIMIT = 8;
 
         timer::timer(kernel_system *kern, ntimer *timing, std::string name,
             kernel::access_type access)
@@ -55,6 +68,7 @@ namespace eka2l1 {
             }
 
             outstanding = true;
+            activate_defer_count_ = 0;
 
             info.done_nof = epoc::notify_info(sts, requester);
             info.own_timer = this;
@@ -102,6 +116,39 @@ namespace eka2l1 {
             return request_finish();
         }
 
+        bool timer::fire_or_defer() {
+            if (!outstanding) {
+                return false;
+            }
+
+            // EKA1 does not carry the active/pending request-status flags, so the
+            // race below cannot be detected; complete immediately as before.
+            kernel::thread *requester = info.done_nof.requester;
+            if (requester && !kern->is_eka1() && (activate_defer_count_ < TIMER_ACTIVATE_DEFER_LIMIT)) {
+                epoc::request_status *sts = info.done_nof.sts.get(requester->owning_process());
+
+                // Only defer while the requester is still running (not parked on
+                // its request semaphore): the race is the guest issuing the request
+                // and about to call SetActive. A thread blocked in WaitForRequest on
+                // a bare TRequestStatus (which never goes active) has a negative
+                // count, so it completes immediately with no added latency.
+                if (sts && (sts->flags & epoc::request_status::pending)
+                    && !(sts->flags & epoc::request_status::active)
+                    && (requester->request_count() >= 0)) {
+                    // Request issued but not yet made active: let the guest run on
+                    // and reschedule this completion a touch later.
+                    activate_defer_count_++;
+                    timing->schedule_event(TIMER_ACTIVATE_DEFER_US, callback_type,
+                        reinterpret_cast<std::uint64_t>(&info));
+                    return false;
+                }
+            }
+
+            activate_defer_count_ = 0;
+            outstanding = false;
+            return true;
+        }
+
         void timer_callback(uint64_t user, int ns_late) {
             signal_info *info = reinterpret_cast<signal_info *>(user);
 
@@ -112,7 +159,7 @@ namespace eka2l1 {
             kernel_system *kern = info->own_timer->get_kernel_object_owner();
             kern->lock();
 
-            if (!info->own_timer->request_finish()) {
+            if (!info->own_timer->fire_or_defer()) {
                 kern->unlock();
                 return;
             }

@@ -46,6 +46,7 @@ namespace eka2l1 {
 
             signal_info info;
             bool outstanding;
+            int activate_defer_count_ = 0;
 
         public:
             timer(kernel_system *kern, ntimer *timing, std::string name,
@@ -60,6 +61,12 @@ namespace eka2l1 {
 
             bool request_finish();
             bool cancel_request();
+
+            // Called from the timer callback: decide whether to complete the
+            // request now or briefly defer it (rescheduling the event) because the
+            // guest has issued the request but has not yet run SetActive on it.
+            // Returns true if the caller should complete the request.
+            bool fire_or_defer();
         };
     }
 }
