@@ -178,6 +178,7 @@ namespace eka2l1 {
         , last_buffer_(0)
         , buffer_chunk_(nullptr)
         , last_buffer_handle_(0)
+        , record_chunk_published_(false)
         , stream_state_(epoc::mmf_state_idle)
         , desired_state_(epoc::mmf_state_idle)
         , stream_(nullptr)
@@ -822,6 +823,7 @@ namespace eka2l1 {
                 kernel::chunk_access::kernel_mapping, kernel::chunk_attrib::none);
 
             buffer_chunk_->increase_access_count();
+            record_chunk_published_ = false;
 
             return true;
         }
@@ -889,14 +891,70 @@ namespace eka2l1 {
     }
 
     void mmf_dev_server_session::do_submit_buffer_data_receive() {
-        if (buffer_info_.empty()) {
+        if (evt_msg_queue_) {
+            // A3F: the client has no outstanding request to hang the buffer on. It only
+            // learns about a filled buffer from the BufferToBeEmptied event and then
+            // fetches its description with BufferToBeEmptiedData, so the chunk has to
+            // exist before recording starts.
+            prepare_audio_buffer_chunk();
+        } else {
+            if (buffer_info_.empty()) {
+                return;
+            }
+
+            // Stored in the last buffer handle value
+            do_set_buffer_buf_and_get_return_value();
+        }
+
+        recording_stream()->read(reinterpret_cast<std::uint8_t*>(buffer_chunk_->host_base()),
+            common::align(conf_.buffer_size_, MMF_BUFFER_SIZE_ALIGN, 1));
+    }
+
+    void mmf_dev_server_session::get_recorded_buffer(service::ipc_context *ctx) {
+        const std::lock_guard<std::mutex> guard(dev_access_lock_);
+
+        if (!buffer_chunk_) {
+            ctx->complete(epoc::error_bad_handle);
             return;
         }
 
-        // Stored in the last buffer handle value
-        do_set_buffer_buf_and_get_return_value();
-        recording_stream()->read(reinterpret_cast<std::uint8_t*>(buffer_chunk_->host_base()),
+        epoc::mmf_dev_hw_buf_v2 *buf = reinterpret_cast<epoc::mmf_dev_hw_buf_v2 *>(
+            ctx->get_descriptor_argument_ptr(2));
+
+        if (!buf) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        const std::int32_t recorded_size = static_cast<std::int32_t>(
             common::align(conf_.buffer_size_, MMF_BUFFER_SIZE_ALIGN, 1));
+
+        buf->buffer_size_ = recorded_size;
+        buf->request_size_ = recorded_size;
+        buf->last_buffer_ = 0;
+
+        // Completing with the chunk handle makes the client map the recording chunk. It
+        // keeps that mapping until the chunk is recreated, so ask for a remap only once.
+        kernel::handle result = 0;
+
+        if (!record_chunk_published_) {
+            kernel_system *kern = server<mmf_dev_server>()->get_kernel_object_owner();
+            result = kern->open_handle_with_thread(ctx->msg->own_thr, buffer_chunk_,
+                kernel::owner_type::thread);
+
+            if (result == kernel::INVALID_HANDLE) {
+                buf->chunk_op_ = epoc::mmf_dev_chunk_op_none;
+                ctx->complete(epoc::error_general);
+                return;
+            }
+
+            buf->chunk_op_ = epoc::mmf_dev_chunk_op_open;
+            record_chunk_published_ = true;
+        } else {
+            buf->chunk_op_ = epoc::mmf_dev_chunk_op_none;
+        }
+
+        ctx->complete(static_cast<int>(result));
     }
 
     void mmf_dev_server_session::get_buffer(service::ipc_context *ctx) {
@@ -1173,6 +1231,10 @@ namespace eka2l1 {
 
             case epoc::mmf_dev_newarch_btbf_data:
                 get_buffer(ctx);
+                break;
+
+            case epoc::mmf_dev_newarch_btbe_data:
+                get_recorded_buffer(ctx);
                 break;
 
             case epoc::mmf_dev_newarch_samples_played:
