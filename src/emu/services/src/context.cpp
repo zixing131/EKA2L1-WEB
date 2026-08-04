@@ -25,6 +25,7 @@
 
 #include <services/context.h>
 #include <utils/des.h>
+#include <utils/err.h>
 #include <utils/sec.h>
 
 #include <config/config.h>
