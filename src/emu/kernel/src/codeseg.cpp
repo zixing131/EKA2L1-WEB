@@ -349,7 +349,13 @@ namespace eka2l1::kernel {
 
                         const address addr = dependency.dep_->lookup(new_foe, ord);
                         if (!addr) {
-                            LOG_ERROR(KERNEL, "Invalid ordinal {}, requested from {}", ord, dependency.dep_->name());
+                            // The import is left pointing at address zero, so the first call
+                            // through it runs off into unmapped memory. Name the importer and
+                            // where the veneer lives: that is what makes such a fault, which
+                            // surfaces far away as a wild PC, traceable back to here.
+                            LOG_ERROR(KERNEL, "Invalid ordinal {} (of {}), requested from {} by {}, patched at code+0x{:X}",
+                                ord, dependency.dep_->get_export_table_raw().size(), dependency.dep_->name(),
+                                name(), offset_to_apply);
                         }
 
                         *reinterpret_cast<std::uint32_t *>(&code_base_ptr[offset_to_apply]) = addr + adj;

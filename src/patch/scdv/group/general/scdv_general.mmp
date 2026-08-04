@@ -17,6 +17,7 @@ SYSTEMINCLUDE   \epoc32\include \epoc32\include\platform ..\..\..\priv\inc
 
 SOURCEPATH	  ..\..\src
 
+SOURCE        aeabi.cpp
 SOURCE        panic.cpp
 SOURCE		  scdv.cpp
 SOURCE        drawdvcbuf.cpp
