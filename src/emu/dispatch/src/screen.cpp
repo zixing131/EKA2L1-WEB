@@ -353,13 +353,14 @@ namespace eka2l1::dispatch {
                 const char *data_ptr = reinterpret_cast<const char *>(scr->screen_buffer_ptr());
                 const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(scr->disp_mode);
                 const std::size_t dsa_screen_pitch = scr->screen_buffer_byte_width();
-                const bool padded_dsa_pitch = (scr->active_dsa_count_ > 0)
-                    && (bits_per_pixel == 32);
-                const std::size_t screen_pitch = padded_dsa_pitch
+                const std::size_t tight_screen_pitch = mode_info.size.x * sizeof(std::uint32_t);
+                const bool use_screenplay_pitch = scr->is_screenplay_architecture()
+                    && (scr->active_dsa_count_ > 0) && (bits_per_pixel == 32);
+                const std::size_t screen_pitch = use_screenplay_pitch
                     ? dsa_screen_pitch
-                    : mode_info.size.x * sizeof(std::uint32_t);
+                    : tight_screen_pitch;
                 const std::size_t buffer_size = screen_pitch * mode_info.size.y;
-                const std::size_t pixels_per_line = padded_dsa_pitch
+                const std::size_t pixels_per_line = (screen_pitch != tight_screen_pitch)
                     ? screen_pitch / sizeof(std::uint32_t)
                     : 0;
 
