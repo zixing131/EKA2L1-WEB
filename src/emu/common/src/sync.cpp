@@ -72,7 +72,11 @@ namespace eka2l1::common {
 
     public:
         explicit event_impl() {
-            evt_ = CreateEvent(NULL, TRUE, FALSE, NULL);
+            // Match the condition-variable implementation below: one signal
+            // releases one waiter and is consumed atomically by that wait.
+            // A manual-reset event required callers to reset after wait,
+            // leaving a window where a concurrent set could be erased.
+            evt_ = CreateEvent(NULL, FALSE, FALSE, NULL);
             timer_ = NULL;
 
             if (!evt_) {
@@ -139,12 +143,10 @@ namespace eka2l1::common {
             case WAIT_OBJECT_0:
                 // Cancel the pending timer
                 CancelWaitableTimer(timer_);
-                ResetEvent(evt_);
 
                 return true;
 
             case WAIT_OBJECT_0 + 1:
-                ResetEvent(evt_);
                 return false;
 
             default:

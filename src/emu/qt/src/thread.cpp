@@ -317,7 +317,6 @@ namespace eka2l1::desktop {
 
             if (state.should_emu_pause && !state.should_emu_quit) {
                 state.pause_event.wait();
-                state.pause_event.reset();
             }
         }
 
