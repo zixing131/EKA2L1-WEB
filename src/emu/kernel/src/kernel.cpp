@@ -138,6 +138,18 @@ namespace eka2l1 {
         OBJECT_CONTAINER_CLEANUP(props_);
 
         for (std::size_t i = 0; i < msgs_.size(); i++) {
+            if (msgs_[i]) {
+                // Sessions and servers are already freed above; a message
+                // leaked with a non-zero ref count must not run its unref
+                // side effects against them (session_msg_link/set_slot_free),
+                // nor against an owner thread that a stale completion may
+                // have caused to be destroyed early. Neutralize it so
+                // ~ipc_msg tears it down without touching those pointers.
+                msgs_[i]->own_thr = nullptr;
+                msgs_[i]->msg_session = nullptr;
+                msgs_[i]->ref_count = 0;
+            }
+
             msgs_[i].reset();
         }
 
@@ -1014,6 +1026,17 @@ namespace eka2l1 {
     }
 
     void kernel_system::free_msg(ipc_msg_ptr msg) {
+        // A message still referenced is owned by an in-flight exchange (e.g. a
+        // server that has yet to complete it, while the client thread dies with
+        // its sync message pending). Forcing the slot free would let create_msg
+        // recycle it, and the late completion would then unref the new owner:
+        // its thread loses an access count it still needs, gets destroyed while
+        // other messages point at it, and the kernel teardown crashes on the
+        // dangling own_thr. Let the final unref release the message instead.
+        if (msg->ref_count > 0) {
+            return;
+        }
+
         msg->type = ipc_message_type_wild;
         msg->ref_count = 0;
     }

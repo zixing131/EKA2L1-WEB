@@ -947,6 +947,7 @@ namespace eka2l1::epoc {
 
         ipc_arg_type arg_type = msg->args.get_arg_type(param);
         if (!(static_cast<std::uint32_t>(arg_type) & static_cast<std::uint32_t>(ipc_arg_type::flag_des))) {
+            msg->unref();
             return epoc::error_argument;
         }
 
@@ -954,6 +955,7 @@ namespace eka2l1::epoc {
         std::uint8_t *param_ptr_host = param_ptr.get(msg->own_thr->owning_process());
 
         if (!param_ptr_host || !info_host) {
+            msg->unref();
             return epoc::error_argument;
         }
 
@@ -982,6 +984,7 @@ namespace eka2l1::epoc {
 
         ipc_arg_type arg_type = msg->args.get_arg_type(param);
         if (!(static_cast<std::uint32_t>(arg_type) & static_cast<std::uint32_t>(ipc_arg_type::flag_des))) {
+            msg->unref();
             return epoc::error_argument;
         }
 
@@ -989,6 +992,7 @@ namespace eka2l1::epoc {
         std::uint8_t *param_ptr_host = param_ptr.get(msg->own_thr->owning_process());
 
         if (!param_ptr_host || !info_host) {
+            msg->unref();
             return epoc::error_argument;
         }
 
@@ -996,6 +1000,7 @@ namespace eka2l1::epoc {
         epoc::desc8 *des_des = des_des_ptr.get(crr_process);
 
         if (!des_des) {
+            msg->unref();
             return epoc::error_argument;
         }
 
@@ -1006,6 +1011,7 @@ namespace eka2l1::epoc {
 
         const std::int32_t result = do_ipc_manipulation(kern, msg->own_thr, param_ptr_host, info_copy, start_offset);
         if (result < 0) {
+            msg->unref();
             return result;
         }
 
