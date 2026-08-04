@@ -1360,9 +1360,18 @@ namespace eka2l1 {
                 loader::rom *rom_info = kern->get_rom_info();
                 const epoc::display_mode conv_res = epoc::get_display_mode_from_bpp(rom_info->header.eka1_diff1.bits_per_pixel, true);
 
-                if (scr_mode_global != epoc::display_mode::color_last) {
+                if (conv_res != epoc::display_mode::color_last) {
                     scr_mode_global = conv_res;
                     use_in_ini = false;
+
+                    // A 4K-colour panel is driven through a 16-bit framebuffer: two bytes
+                    // per pixel with the top four unused. Reporting EColor4K makes apps
+                    // that map a display mode to a *byte* stride come up with zero bytes
+                    // per pixel, so they allocate nothing and then blit 16bpp over the
+                    // heap (X-Plore on the N-Gage panics with USER 44 that way).
+                    if (scr_mode_global == epoc::display_mode::color4k) {
+                        scr_mode_global = epoc::display_mode::color64k;
+                    }
                 }
             }
 
