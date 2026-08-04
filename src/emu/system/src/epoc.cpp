@@ -999,9 +999,20 @@ namespace eka2l1 {
             }
         }
 
-        const std::string aif_file = eka2l1::add_path(system_apps_folder_path, eka2l1::add_path(specific_app, specific_app + ".aif"));
+        const std::string app_folder = eka2l1::add_path(system_apps_folder_path, specific_app + eka2l1::get_separator());
+        std::string aif_file = eka2l1::add_path(app_folder, specific_app + ".aif");
         if (!common::exists(aif_file)) {
-            return ngage_game_card_no_game_registeration_info;
+            // Game-card dumps vary the registration file's extension casing
+            // (e.g. Call of Duty ships "6R48.AIF"). exists() only papers over
+            // that on a case-insensitive filesystem, so on case-sensitive
+            // storage (physical iOS device, Android, Linux) resolve the real
+            // name before declaring the registration missing.
+            const std::string real_aif_name = common::find_case_sensitive_file_name(
+                app_folder, specific_app + ".aif", common::FILE_REGULAR);
+            if (real_aif_name.empty()) {
+                return ngage_game_card_no_game_registeration_info;
+            }
+            aif_file = eka2l1::add_path(app_folder, real_aif_name);
         }
 
         common::ro_std_file_stream aif_file_stream(aif_file, true);

@@ -29,6 +29,7 @@
 
 #include <common/armemitter.h>
 #include <common/buffer.h>
+#include <common/common.h>
 #include <common/chunkyseri.h>
 #include <common/configure.h>
 #include <common/cvt.h>
@@ -1466,7 +1467,26 @@ namespace eka2l1 {
     }
 
     std::uint64_t kernel_system::universal_time() {
-        return base_time_ + timing_->microseconds();
+        const std::uint64_t raw = base_time_ + timing_->microseconds();
+
+        // On EKA1 the kernel only refreshes the system clock from the 64Hz tick
+        // ISR, so User::UTCTime()/TTime::HomeTime() advance in whole tick
+        // periods (15.625ms). Games written for that granularity assume two
+        // reads within a tick return the same value. EKA2L1 otherwise sources a
+        // continuous microsecond clock, which lets sub-millisecond deltas slip
+        // through such code: e.g. N-Gage Call of Duty computes
+        // frames*100000/(elapsedUs/1000) during view startup, guards only on
+        // elapsedUs != 0, and divides by zero when 0 < elapsedUs < 1000 -- an
+        // unhandled EExcGeneral (KERN-EXEC 3). Quantizing to the tick period
+        // matches real EKA1 hardware and keeps the delta at either 0 or one full
+        // tick. EKA2 (Symbian 9 / ^3 / Belle) backs the clock with the fast
+        // counter and is genuinely fine-grained, so it is left untouched.
+        if (is_eka1()) {
+            const std::uint64_t tick_us = common::microsecs_per_sec / epoc::TICK_TIMER_HZ;
+            return raw / tick_us * tick_us;
+        }
+
+        return raw;
     }
 
     std::uint64_t kernel_system::home_time() {
