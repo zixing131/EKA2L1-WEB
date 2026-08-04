@@ -67,6 +67,10 @@ namespace eka2l1 {
             // guest has issued the request but has not yet run SetActive on it.
             // Returns true if the caller should complete the request.
             bool fire_or_defer();
+
+            // Complete the outstanding request if fire_or_defer allows it.
+            // Must be called with the kernel lock held.
+            void fire();
         };
     }
 }
