@@ -34,7 +34,7 @@ namespace eka2l1::loader {
         common::ini_file platform_ini;
 
         if (platform_ini.load(platform_ini_path.c_str()) != 0) {
-            LOG_ERROR(SYSTEM, "Unable to load platform.txt in Z:\\Resources\\Versions.");
+            LOG_TRACE(SYSTEM, "No platform.txt under resource/versions (normal for some FP2 dumps such as 5320)");
             return false;
         }
 
@@ -215,6 +215,7 @@ namespace eka2l1::loader {
             }
         }
 
+        LOG_INFO(SYSTEM, "Resolved Symbian version for extracted ROM: {}", epocver_to_string(target_ver));
         return target_ver;
     }
 
@@ -225,7 +226,7 @@ namespace eka2l1::loader {
         common::ini_file product_ini;
 
         if (product_ini.load(product_ini_path.c_str(), false) != 0) {
-            LOG_ERROR(SYSTEM, "Failed to load the file.");
+            LOG_TRACE(SYSTEM, "No product.txt under resource/versions — falling back to sw.txt/model.txt");
             return false;
         }
 

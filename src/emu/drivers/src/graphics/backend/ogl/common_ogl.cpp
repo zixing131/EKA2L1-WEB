@@ -183,6 +183,9 @@ namespace eka2l1::drivers {
         case addressing_option::repeat:
             return GL_REPEAT;
 
+        case addressing_option::mirrored_repeat:
+            return GL_MIRRORED_REPEAT;
+
         default:
             break;
         }

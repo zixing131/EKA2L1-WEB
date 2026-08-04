@@ -32,9 +32,13 @@ namespace eka2l1::epoc {
             int mode_number;
 
             eka2l1::vec2 size;
+            /// From wsini SCR_TWIP_WIDTH/HEIGHT when present; (0,0) = derive from pixels.
+            eka2l1::vec2 size_twips{ 0, 0 };
             int rotation;
 
             std::string style;
+            /// From S60_SCR_SOFTKEY_LOCATION*; empty = Avkon default (bottom).
+            std::string softkey_loc;
         };
 
         struct hardware_state {

@@ -270,6 +270,28 @@
         // First composed frame -> reveal the canvas.
         var t0 = performance.now();
         var poll = setInterval(function () {
+            var exited = EKA2L1.lastAppExit && EKA2L1.lastAppExit();
+            if (exited) {
+                clearInterval(poll);
+                var cat = exited.category || '?';
+                var reason = exited.reason;
+                var hint = '';
+                if (cat === 'AVKON' && reason === 61) {
+                    hint = EKA2L1.t('overlay.appExitedLayoutHint');
+                    if (exited.layoutDiag) {
+                        hint += ' [' + exited.layoutDiag + ']';
+                    }
+                }
+                overlayError(
+                    EKA2L1.t('overlay.appExitedTitle'),
+                    EKA2L1.t('overlay.appExitedText', {
+                        category: cat,
+                        reason: reason,
+                        hint: hint
+                    })
+                );
+                return;
+            }
             if (EKA2L1.redrawCount() > 0) {
                 clearInterval(poll);
                 started = true;

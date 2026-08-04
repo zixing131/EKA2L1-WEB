@@ -708,34 +708,80 @@ namespace eka2l1 {
 
             std::u16string mapped = eka2l1::add_path(map_path, vert_path_no_root);
 
-            // On case-sensitive hosts guest paths map to all-lowercase physical
-            // names, but files written from outside the emulator (web uploads
-            // keep the picked file's original name) may carry upper-case
-            // letters - the lowercase mapping then misses and the file becomes
-            // invisible to the guest despite existing on the host. Rescue: when
-            // the mapped path doesn't exist, match the final component case-
-            // insensitively in its parent directory. ROM drives are staged by
-            // our own installer (always lowercase), so skip them - this also
-            // keeps the existence probe off the hot boot path.
-            if (!common::is_system_case_insensitive() && (drv.media_type != drive_media::rom)) {
-                std::string mapped_utf8 = common::ucs2_to_utf8(mapped);
+            // On case-sensitive hosts the guest path is lowercased before the
+            // physical lookup. That misses mixed-case files that still exist on
+            // disk: web uploads keep the picked name, and some ROM trees keep
+            // Nokia's original casing (e.g. 5320 RPKG path Z:\System\data\Wsini.ini).
+            // When the lowercased path is absent, walk each component and match
+            // case-insensitively. Cost only hits the miss path.
+            if (!common::is_system_case_insensitive()) {
+                const std::string mapped_utf8 = common::ucs2_to_utf8(mapped);
 
                 if (!common::exists(mapped_utf8)) {
-                    const std::string parent_utf8 = eka2l1::file_directory(mapped_utf8);
-                    const std::string want = common::lowercase_string(eka2l1::filename(mapped_utf8));
+                    const std::string base_utf8 = common::ucs2_to_utf8(map_path);
+                    std::string resolved = base_utf8;
 
-                    if (!want.empty() && !parent_utf8.empty() && common::exists(parent_utf8)) {
-                        auto rescue_iterator = common::make_directory_iterator(parent_utf8, "*");
+                    if (!resolved.empty() && !eka2l1::is_separator(resolved.back())) {
+                        resolved += eka2l1::get_separator();
+                    }
 
-                        if (rescue_iterator && rescue_iterator->is_valid()) {
-                            common::dir_entry rescue_entry;
+                    if (common::exists(resolved)) {
+                        const std::string relative = common::ucs2_to_utf8(vert_path_no_root);
+                        std::size_t i = 0;
+                        bool ok = true;
 
-                            while (rescue_iterator->next_entry(rescue_entry) == 0) {
-                                if (common::lowercase_string(rescue_entry.name) == want) {
-                                    mapped = common::utf8_to_ucs2(eka2l1::add_path(parent_utf8, rescue_entry.name));
+                        while (i < relative.size()) {
+                            while (i < relative.size() && eka2l1::is_separator(relative[i])) {
+                                ++i;
+                            }
+
+                            if (i >= relative.size()) {
+                                break;
+                            }
+
+                            std::size_t j = i;
+                            while (j < relative.size() && !eka2l1::is_separator(relative[j])) {
+                                ++j;
+                            }
+
+                            const std::string component = relative.substr(i, j - i);
+                            const std::string direct = resolved + component;
+
+                            if (common::exists(direct)) {
+                                resolved = direct;
+                            } else {
+                                auto it = common::make_directory_iterator(resolved, "*");
+                                if (!it || !it->is_valid()) {
+                                    ok = false;
+                                    break;
+                                }
+
+                                common::dir_entry entry;
+                                bool matched = false;
+
+                                while (it->next_entry(entry) == 0) {
+                                    if (common::compare_ignore_case(entry.name.c_str(), component.c_str()) == 0) {
+                                        resolved += entry.name;
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+
+                                if (!matched) {
+                                    ok = false;
                                     break;
                                 }
                             }
+
+                            if (j < relative.size()) {
+                                resolved += eka2l1::get_separator();
+                            }
+
+                            i = j;
+                        }
+
+                        if (ok) {
+                            mapped = common::utf8_to_ucs2(resolved);
                         }
                     }
                 }

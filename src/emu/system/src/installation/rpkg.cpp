@@ -394,11 +394,15 @@ namespace eka2l1::loader {
         out_ = std::make_unique<common::wo_std_file_stream>(real_path, true);
 
         if (!out_->valid()) {
-            // install_rpkg() breaks out of the extraction loop here and still
-            // finalizes; mirror that by discarding everything that follows.
-            LOG_INFO(SYSTEM, "Skipping with real path: {}, dir: {}", real_path, dir);
+            // Skip this entry only. install_rpkg() breaks the whole loop on the
+            // first failure and still finalizes a partial tree; mirroring that
+            // with discard_rest_ is worse on WASM — one path that cannot be
+            // created (long name, transient FS error) would drop every later
+            // file, including the QVGA layout pack 10281fc6.dll that sits
+            // before wsini in the 5320 RPKG. Consume this entry's payload with
+            // a null out_ and keep extracting.
+            LOG_WARN(SYSTEM, "Skipping extract (cannot create): {} (dir {})", real_path, dir);
             out_.reset();
-            discard_rest_ = true;
         }
     }
 
@@ -418,10 +422,10 @@ namespace eka2l1::loader {
 
                 if (out_) {
                     if (out_->write(data, static_cast<std::uint64_t>(take)) != take) {
-                        LOG_ERROR(SYSTEM, "Write failure while extracting {}", common::ucs2_to_utf8(entry_.path));
+                        LOG_ERROR(SYSTEM, "Write failure while extracting {} — skipping remainder of this file",
+                            common::ucs2_to_utf8(entry_.path));
                         out_.reset();
-                        discard_rest_ = true;
-                        return true;
+                        // Keep parsing subsequent entries; do not discard_rest_.
                     }
                 }
 

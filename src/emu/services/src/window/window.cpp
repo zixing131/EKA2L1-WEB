@@ -43,6 +43,7 @@
 #include <common/cvt.h>
 #include <common/ini.h>
 #include <common/log.h>
+#include <common/pystr.h>
 #include <common/rgb.h>
 #include <common/time.h>
 
@@ -1496,6 +1497,8 @@ namespace eka2l1 {
 
                     scr_mode.size.x = is_s80_device ? ASSUMED_SCREEN_SIZE_S80.x : ASSUMED_SCREEN_SIZE.x;
                     one_mode_only = true;
+                    LOG_WARN(SERVICE_WINDOW, "wsini has no SCR_WIDTH1 — falling back to assumed {}x{} (styles will be empty; Avkon AVKON 61 likely). Check Z:\\system\\data\\wsini.ini / Wsini.ini is readable.",
+                        scr_mode.size.x, is_s80_device ? ASSUMED_SCREEN_SIZE_S80.y : ASSUMED_SCREEN_SIZE.y);
                 }
 
                 if (mode_height) {
@@ -1523,6 +1526,19 @@ namespace eka2l1 {
                     scr_mode.rotation = 0;
                 }
 
+                std::string screen_mode_twip_w_key = "SCR_TWIP_WIDTH";
+                screen_mode_twip_w_key += current_mode_str;
+                std::string screen_mode_twip_h_key = "SCR_TWIP_HEIGHT";
+                screen_mode_twip_h_key += current_mode_str;
+
+                common::ini_node_ptr mode_twip_w = screen_node->get_as<common::ini_section>()->find(screen_mode_twip_w_key.c_str());
+                common::ini_node_ptr mode_twip_h = screen_node->get_as<common::ini_section>()->find(screen_mode_twip_h_key.c_str());
+
+                if (mode_twip_w && mode_twip_h) {
+                    mode_twip_w->get_as<common::ini_pair>()->get(reinterpret_cast<std::uint32_t *>(&scr_mode.size_twips.x), 1, 0);
+                    mode_twip_h->get_as<common::ini_pair>()->get(reinterpret_cast<std::uint32_t *>(&scr_mode.size_twips.y), 1, 0);
+                }
+
                 std::string screen_style_s60_key = "S60_SCR_STYLE_NAME";
                 screen_style_s60_key += current_mode_str;
 
@@ -1533,9 +1549,32 @@ namespace eka2l1 {
                     styles.resize(1);
 
                     style_node->get_as<common::ini_pair>()->get(styles);
-                    scr_mode.style = styles[0];
+                    // 5320 wsini has "QVGA1 " (trailing space) on landscape modes —
+                    // include it in the style hash and Avkon cannot find QVGA1.
+                    scr_mode.style = common::pystr(styles[0]).strip().std_str();
                 } else {
                     scr_mode.style = "";
+                }
+
+                std::string softkey_key = "S60_SCR_SOFTKEY_LOCATION";
+                softkey_key += current_mode_str;
+                common::ini_node_ptr softkey_node = screen_node->get_as<common::ini_section>()->find(softkey_key.c_str());
+
+                if (softkey_node) {
+                    std::vector<std::string> locs;
+                    locs.resize(1);
+                    softkey_node->get_as<common::ini_pair>()->get(locs);
+                    scr_mode.softkey_loc = common::lowercase_string(common::pystr(locs[0]).strip().std_str());
+                }
+
+                if (scr_mode.style.empty() && !one_mode_only) {
+                    LOG_WARN(SERVICE_WINDOW, "wsini screen mode {} ({}x{}) has no S60_SCR_STYLE_NAME — Avkon may panic AVKON 61",
+                        scr_mode.mode_number, scr_mode.size.x, scr_mode.size.y);
+                } else if (!scr_mode.style.empty()) {
+                    LOG_INFO(SERVICE_WINDOW, "wsini screen mode {} style=\"{}\" size={}x{} twips={}x{} softkey={}",
+                        scr_mode.mode_number, scr_mode.style, scr_mode.size.x, scr_mode.size.y,
+                        scr_mode.size_twips.x, scr_mode.size_twips.y,
+                        scr_mode.softkey_loc.empty() ? "bottom" : scr_mode.softkey_loc);
                 }
 
                 scr.modes.push_back(scr_mode);

@@ -240,6 +240,7 @@
         'err.fpsxCorrupt': 'FPSX 损坏',
         'err.unknownIndexed': '错误 {idx}',
         'err.romNotFound': '未找到 ROM 文件',
+        'err.noDeviceOrRom': '未安装设备（或未提供 ROM 路径）',
         'err.deviceActivationFailed': '设备激活失败',
         'err.genericCode': '错误码 {code}',
 
@@ -268,6 +269,9 @@
         'overlay.launchingHintSecs': 'Symbian 系统引导中（{secs}s），首次启动较慢',
         'overlay.launchFailedTitle': '启动失败',
         'overlay.launchFailedText': '应用未能启动（代码 {code}），可能已被卸载。',
+        'overlay.appExitedTitle': '应用已退出',
+        'overlay.appExitedText': '进程异常退出：{category} {reason}。{hint}',
+        'overlay.appExitedLayoutHint': 'AVKON 61 = LayoutMissing。请删除 5320 后重新安装 ROM（已修安装器中途丢文件的问题），硬刷新后再试。若仍失败，把括号里的 layoutDiag 发我。',
         'overlay.launchTimeoutTitle': '启动超时',
         'overlay.launchTimeoutText': '应用 2 分钟内没有输出画面，详见控制台日志。',
         'overlay.bootFailedTitle': '模拟器加载失败',

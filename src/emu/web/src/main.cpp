@@ -41,6 +41,7 @@
 #include <emscripten/html5.h>
 #include <malloc.h>
 #include <set>
+#include <string>
 #include <unistd.h>
 
 // EKA2L1 headers
@@ -89,9 +90,16 @@
 #include <services/window/screen.h>
 #include <services/window/keys.h>
 #include <services/window/classes/wingroup.h>
+#include <services/window/classes/config.h>
 #include <services/init.h>
 
 #include "protection.h"
+
+#ifdef __EMSCRIPTEN__
+#include <atomic>
+extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
+extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
+#endif
 
 // ============================================================================
 // Global State
@@ -134,6 +142,15 @@ namespace eka2l1::web {
         drivers::handle watermark_tex = 0;
         int watermark_w = 0;
         int watermark_h = 0;
+
+        // Filled by the launch_app exit callback so the player page can stop
+        // waiting for a first frame after a guest panic/kill.
+        std::atomic<bool> launched_app_exited{ false };
+        int last_app_exit_type = 0;
+        int last_app_exit_reason = 0;
+        std::string last_app_exit_category;
+        std::string last_app_exit_name;
+        std::uint32_t last_app_exit_uid = 0;
     };
 
     static wasm_state g_state;
@@ -564,7 +581,7 @@ static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
 // Runtime-tunable via wasm_set_cpu_budget() so it can be swept live; clamped to
 // a sane range there. Must stay under the ~16.6ms RAF interval so present/audio
 // still run each frame.
-static double g_frame_cpu_budget_ms = 14.0;
+static double g_frame_cpu_budget_ms = 15.5;
 
 // Frame gate (ms) between executed main-loop ticks. 15.5 = 60fps. Low-power
 // mode raises it to ~32.3 (30fps): every skipped tick costs near-zero host
@@ -1152,11 +1169,20 @@ static void main_loop() {
         if (s_probe_raf_frames > 0) {
             const double avg_cpu_ms = s_probe_cpu_ms_acc / s_probe_raf_frames;
             LOG_WARN(FRONTEND_CMDLINE,
-                "[perf] fps={} raf_frames={} avg_guest_cpu={:.1f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.0f}ms",
+                "[perf] fps={} raf_frames={} avg_guest_cpu={:.1f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.0f}ms jit={} compiled={} rejected={} jit_instrs={} ({:.0f}%)",
                 g_state.current_fps, s_probe_raf_frames, avg_cpu_ms,
                 s_probe_budget_frames, s_probe_early_frames,
                 (s_probe_raf_frames ? (s_probe_slices_acc / s_probe_raf_frames) : 0),
-                (boot_phase ? 16.0 : g_frame_cpu_budget_ms));
+                (boot_phase ? 16.0 : g_frame_cpu_budget_ms),
+                eka2l1::arm::dyncom_jit::enabled_default ? 1 : 0,
+                eka2l1::arm::dyncom_jit::stat_compiled,
+                eka2l1::arm::dyncom_jit::stat_rejected,
+                static_cast<unsigned long long>(eka2l1::arm::dyncom_jit::stat_jit_instrs),
+                [&]() {
+                    const std::uint64_t total = eka2l1_wasm_guest_instrs_total.load();
+                    const std::uint64_t jit = eka2l1::arm::dyncom_jit::stat_jit_instrs;
+                    return total ? (100.0 * static_cast<double>(jit) / static_cast<double>(total)) : 0.0;
+                }());
         }
         s_probe_cpu_ms_acc = 0.0;
         s_probe_raf_frames = 0;
@@ -1365,7 +1391,15 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
 
     const bool want_install = (rom_path[0] != '\0');
 
-    if (want_install || (dvcmngr->total() == 0)) {
+    if (!want_install && (dvcmngr->total() == 0)) {
+        // Common after "delete device" while localStorage still claims a device
+        // exists: run/index call initDevice('', '') and used to fall into the
+        // install branch with an empty path ("ROM file not found: ").
+        LOG_ERROR(FRONTEND_CMDLINE, "No device registered and no ROM path provided — install a ROM first");
+        return -3;
+    }
+
+    if (want_install) {
         // Validate ROM file exists and is readable.
         {
             common::ro_std_file_stream check_stream(std::string(rom_path), true);
@@ -2027,13 +2061,28 @@ int wasm_launch_app(int uid) {
 
     bool ok = false;
     try {
+        g_state.launched_app_exited.store(false, std::memory_order_release);
+        g_state.last_app_exit_type = 0;
+        g_state.last_app_exit_reason = 0;
+        g_state.last_app_exit_category.clear();
+        g_state.last_app_exit_name.clear();
+        g_state.last_app_exit_uid = 0;
+
         kern->lock();
         ok = alserv->launch_app(*reg, cmdline, nullptr,
             [](kernel::process *pr) {
                 if (!pr) {
                     LOG_ERROR(FRONTEND_CMDLINE, "Launched app exited with null process handle");
+                    g_state.launched_app_exited.store(true, std::memory_order_release);
                     return;
                 }
+
+                g_state.last_app_exit_type = static_cast<int>(pr->get_exit_type());
+                g_state.last_app_exit_reason = pr->get_exit_reason();
+                g_state.last_app_exit_category = eka2l1::common::ucs2_to_utf8(pr->get_exit_category());
+                g_state.last_app_exit_name = pr->name();
+                g_state.last_app_exit_uid = pr->get_uid();
+                g_state.launched_app_exited.store(true, std::memory_order_release);
 
                 // WARN so it survives the web build's warn-level filter: a
                 // dying app with no visible message reads as a "hang".
@@ -2137,6 +2186,77 @@ double wasm_get_redraw_count() {
 }
 
 /**
+ * JSON describing the most recent launched-app exit, or "{}" if still alive.
+ * The player page polls this so a guest panic surfaces as a launch error
+ * instead of sitting on the loading overlay forever (fps=0 looks like a hang).
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_last_app_exit() {
+    static std::string s_json;
+    if (!g_state.launched_app_exited.load(std::memory_order_acquire)) {
+        s_json = "{}";
+        return s_json.c_str();
+    }
+
+    auto esc = [](const std::string &in) {
+        std::string out;
+        out.reserve(in.size());
+        for (char c : in) {
+            if (c == '\\' || c == '"') {
+                out.push_back('\\');
+            }
+            if (static_cast<unsigned char>(c) < 0x20) {
+                continue;
+            }
+            out.push_back(c);
+        }
+        return out;
+    };
+
+    s_json = "{\"exited\":true,\"type\":" + std::to_string(g_state.last_app_exit_type)
+        + ",\"reason\":" + std::to_string(g_state.last_app_exit_reason)
+        + ",\"uid\":" + std::to_string(g_state.last_app_exit_uid)
+        + ",\"category\":\"" + esc(g_state.last_app_exit_category) + "\""
+        + ",\"name\":\"" + esc(g_state.last_app_exit_name) + "\"";
+
+    // Extra diagnostics for AVKON 61 (LayoutMissing): what styles HLE handed
+    // to Avkon, and whether the QVGA layout pack / wsini are visible on Z:.
+    if (g_state.last_app_exit_category == "AVKON" && g_state.last_app_exit_reason == 61
+        && g_state.symsys && g_state.winserv) {
+        std::string diag;
+        epoc::config::screen *scr = g_state.winserv->get_current_focus_screen_config();
+        diag += "epoc=";
+        diag += epocver_to_string(g_state.symsys->get_symbian_version_use());
+        if (scr) {
+            diag += " modes=" + std::to_string(scr->modes.size());
+            for (const auto &m : scr->modes) {
+                diag += " [#" + std::to_string(m.mode_number) + " " + std::to_string(m.size.x)
+                    + "x" + std::to_string(m.size.y) + " style=\"" + m.style + "\"]";
+            }
+        } else {
+            diag += " modes=?";
+        }
+
+        auto probe = [&](const char16_t *path) {
+            auto io = g_state.symsys->get_io_system();
+            if (!io) {
+                return std::string("?");
+            }
+            auto f = io->open_file(path, READ_MODE | BIN_MODE);
+            return f ? std::string("ok") : std::string("MISSING");
+        };
+        diag += " wsini=" + probe(u"Z:\\system\\data\\wsini.ini");
+        diag += " layoutPack=" + probe(u"Z:\\sys\\bin\\10281fc6.dll");
+        diag += " aknlayout2=" + probe(u"Z:\\sys\\bin\\aknlayout2.dll");
+        LOG_WARN(FRONTEND_CMDLINE, "AVKON 61 layout diag: {}", diag);
+        s_json += ",\"layoutDiag\":\"" + esc(diag) + "\"";
+    }
+
+    s_json += "}";
+    return s_json.c_str();
+}
+
+/**
  * Rotate the presented screen (0/90/180/270 degrees clockwise). Landscape
  * games run sideways on the emulated portrait device; this turns the picture
  * without touching the guest. The window server's pointer transform already
@@ -2209,10 +2329,6 @@ static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {
     }
 }
 
-// dyncom progress counters (defined in the CPU module, WASM builds only).
-extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
-extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
-
 // Debug probe (defined in kernel/svc.cpp): when enabled, every guest Leave /
 // thread kill / process kill / unimplemented SVC logs a guest backtrace at
 // WARN level. For chasing apps that die silently during init.
@@ -2225,9 +2341,9 @@ void wasm_set_leave_probe(int enabled) {
 }
 
 /**
- * Enable/disable the dyncom hot-block wasm JIT. Call before the device is
- * activated (the flag is latched when the CPU core is created); used by the
- * frontend's ?jit=0 escape hatch.
+ * Enable/disable the dyncom hot-block wasm JIT. Safe to call at any time;
+ * the interpreter reads enabled_default on every dispatch. Used by the
+ * frontend's ?jit=0 / ?jit=1 escape hatch.
  */
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_jit(int enabled) {
@@ -2235,11 +2351,12 @@ void wasm_set_jit(int enabled) {
     std::printf("[jit] dyncom wasm JIT default %s\n", enabled ? "ON" : "OFF");
 }
 
-// Bisect aid: compile at most `limit` blocks (?jitlimit=N).
+// Cap how many blocks get compiled (?jitlimit=N). Default is a modest
+// hard cap so an unbounded compile storm cannot freeze the tab.
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_jit_limit(int limit) {
-    eka2l1::arm::dyncom_jit::compile_limit = limit;
-    std::printf("[jit] compile limit = %d\n", limit);
+    eka2l1::arm::dyncom_jit::compile_limit = (limit > 0) ? limit : 0;
+    std::printf("[jit] compile limit = %d\n", eka2l1::arm::dyncom_jit::compile_limit);
 }
 
 /**

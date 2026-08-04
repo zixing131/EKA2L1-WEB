@@ -240,6 +240,7 @@
         'err.fpsxCorrupt': 'FPSX is corrupt',
         'err.unknownIndexed': 'Error {idx}',
         'err.romNotFound': 'ROM file not found',
+        'err.noDeviceOrRom': 'No device installed (or ROM path missing)',
         'err.deviceActivationFailed': 'Failed to activate the device',
         'err.genericCode': 'Error code {code}',
 
@@ -268,6 +269,9 @@
         'overlay.launchingHintSecs': 'Symbian OS is booting ({secs}s); the first launch is slower',
         'overlay.launchFailedTitle': 'Launch failed',
         'overlay.launchFailedText': 'The app failed to launch (code {code}); it may have been uninstalled.',
+        'overlay.appExitedTitle': 'App exited',
+        'overlay.appExitedText': 'Process exited: {category} {reason}. {hint}',
+        'overlay.appExitedLayoutHint': 'AVKON 61 = LayoutMissing. Delete the 5320 device, reinstall the ROM (installer no longer drops later files after one failure), hard-reload, retry. If it still fails, send me the layoutDiag in brackets.',
         'overlay.launchTimeoutTitle': 'Launch timed out',
         'overlay.launchTimeoutText': 'The app produced no frame within 2 minutes; check the console log for details.',
         'overlay.bootFailedTitle': 'Emulator failed to load',

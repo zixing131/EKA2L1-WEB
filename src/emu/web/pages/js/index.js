@@ -937,6 +937,10 @@
                 setDeviceStatusText(EKA2L1.t('device.status.installed'));
                 refreshApps();
             } else {
+                // Stale eka2l1_has_device after delete/corrupt IDBFS used to
+                // force a boot and hit "ROM file not found: " with empty path.
+                try { localStorage.removeItem(HAS_DEVICE_KEY); } catch (e) {}
+                hasDevice = false;
                 setStatus('yellow', EKA2L1.t('status.noDevice'));
                 setDeviceStatusText(EKA2L1.t('device.status.notInstalled'));
                 document.getElementById('onboardCard').style.display = '';

@@ -123,6 +123,30 @@
 
             onProgress(8, EKA2L1.t('progress.loadingWasm'));
 
+            // Apply ?jit= / ?jitlimit= before any guest CPU work. JIT is on by
+            // default; ?jit=0 forces the interpreter. Apply before callMain so
+            // the flag is set before the first guest quantum.
+            function applyJitQueryParams(mod) {
+                try {
+                    var q = new URLSearchParams(location.search);
+                    if (q.get('jit') === '1') {
+                        mod.ccall('wasm_set_jit', null, ['number'], [1]);
+                    } else if (q.get('jit') === '0') {
+                        mod.ccall('wasm_set_jit', null, ['number'], [0]);
+                    }
+                    if (q.get('dsa565')) {
+                        mod.ccall('wasm_set_dsa565', null, ['number'],
+                            [parseInt(q.get('dsa565'), 10) || 0]);
+                    }
+                    if (q.get('jitlimit')) {
+                        mod.ccall('wasm_set_jit_limit', null, ['number'],
+                            [parseInt(q.get('jitlimit'), 10) || 0]);
+                    }
+                } catch (e) {
+                    console.warn('[EKA2L1] jit query apply failed:', e);
+                }
+            }
+
             var totalDeps = 0;
             createEKA2L1Module({
                 canvas: opts.canvas,
@@ -135,7 +159,11 @@
                     var v = (typeof window !== 'undefined' && window.EKA2L1_BUILD_ID) || '';
                     return prefix + path + (v ? ('?v=' + v) : '');
                 },
-                print: function (t) { console.log('[EKA2L1]', t); },
+                print: function (t) {
+                    // Drop high-volume dyncom JIT chatter that freezes DevTools.
+                    if (typeof t === 'string' && t.indexOf('[jit] block #') === 0) return;
+                    console.log('[EKA2L1]', t);
+                },
                 printErr: function (t) { console.error('[EKA2L1]', t); },
                 monitorRunDependencies: function (left) {
                     totalDeps = Math.max(totalDeps, left);
@@ -145,6 +173,7 @@
                 }
             }).then(function (mod) {
                 EKA2L1.module = mod;
+                applyJitQueryParams(mod);
                 patchIDBFS(mod);
 
                 try { mod.FS.mkdir('/eka2l1'); } catch (e) { /* exists */ }
@@ -155,6 +184,8 @@
                     if (err) console.warn('[EKA2L1] initial restore error (OK on first run):', err);
 
                     onProgress(82, EKA2L1.t('progress.startingCore'));
+                    // Re-apply after sync in case anything reset defaults.
+                    applyJitQueryParams(mod);
                     // main() registers the RAF loop then throws "unwind" by
                     // design (simulate_infinite_loop); treat that as success.
                     try {
@@ -166,22 +197,7 @@
                         }
                     }
 
-                    // Escape hatches: ?jit=0 turns the dyncom wasm JIT off,
-                    // ?jitlimit=N caps how many blocks get compiled (bisect).
-                    try {
-                        var q = new URLSearchParams(location.search);
-                        if (q.get('jit') === '0') {
-                            mod.ccall('wasm_set_jit', null, ['number'], [0]);
-                        }
-                        if (q.get('dsa565')) {
-                            mod.ccall('wasm_set_dsa565', null, ['number'],
-                                [parseInt(q.get('dsa565'), 10) || 0]);
-                        }
-                        if (q.get('jitlimit')) {
-                            mod.ccall('wasm_set_jit_limit', null, ['number'],
-                                [parseInt(q.get('jitlimit'), 10) || 0]);
-                        }
-                    } catch (e) {}
+                    applyJitQueryParams(mod);
 
                     EKA2L1.ready = true;
                     onProgress(92, EKA2L1.t('progress.coreStarted'));
@@ -579,6 +595,7 @@
             EKA2L1.setCpuBudget(16);
         } else {
             EKA2L1.setMaxFps(60);
+            EKA2L1.setCpuBudget(15.5);
         }
 
         var filter = localStorage.getItem('eka2l1_filter') || 'auto';
@@ -595,6 +612,19 @@
 
     EKA2L1.redrawCount = function () {
         return ccall('wasm_get_redraw_count', 'number');
+    };
+
+    /**
+     * Most recent launched-app exit info, or null if the app is still alive.
+     * {exited, type, reason, uid, category, name}
+     */
+    EKA2L1.lastAppExit = function () {
+        try {
+            var info = JSON.parse(ccall('wasm_last_app_exit', 'string') || '{}');
+            return info && info.exited ? info : null;
+        } catch (e) {
+            return null;
+        }
     };
 
     /**
@@ -744,7 +774,7 @@
             var idx = -(result + 1000);
             return installErrKeys[idx] ? EKA2L1.t(installErrKeys[idx]) : EKA2L1.t('err.unknownIndexed', { idx: idx });
         }
-        if (result === -3) return EKA2L1.t('err.romNotFound');
+        if (result === -3) return EKA2L1.t('err.noDeviceOrRom');
         if (result === -4) return EKA2L1.t('err.deviceActivationFailed');
         if (result === -5) return EKA2L1.t('err.romCopyFailed');
         return EKA2L1.t('err.genericCode', { code: result });

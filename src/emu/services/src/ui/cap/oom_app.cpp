@@ -204,9 +204,14 @@ namespace eka2l1 {
         result.append(reinterpret_cast<char *>(&akn_config), sizeof(akn_layout_config));
 
         for (std::size_t i = 0; i < scr_config->modes.size(); i++) {
-            akn_screen_mode_info mode_info;
+            akn_screen_mode_info mode_info{};
 
-            // TODO: Change this based on user settings
+            // Must stay aligned with scrdvc/HAL: they always report
+            // pixel*get_approximate_pixel_to_twips_mul(). Feeding wsini's real
+            // SCR_TWIP_* here (e.g. 2081x2774 on 5320) while WSERV still says
+            // 2160x2880 makes Avkon fail CDL lookup with AVKON 61 — Android
+            // never had this split because it never read SCR_TWIP into the
+            // layout buffer. Softkey/dmode stay on the historical HLE defaults.
             mode_info.loc = akn_softkey_loc::bottom;
             mode_info.mode_num = scr_config->modes[i].mode_number;
             mode_info.dmode = epoc::display_mode::color16ma;
@@ -214,6 +219,16 @@ namespace eka2l1 {
             mode_info.info.pixel_size = scr_config->modes[i].size;
             mode_info.info.twips_size = mode_info.info.pixel_size * epoc::get_approximate_pixel_to_twips_mul(kern->get_epoc_version());
             mode_info.screen_style_hash = calculate_screen_style_hash(scr_config->modes[i].style);
+
+            if (scr_config->modes[i].style.empty()) {
+                LOG_WARN(SERVICE_UI, "Screen mode {} has empty S60_SCR_STYLE_NAME — Avkon may panic with AVKON 61 (LayoutMissing_AknLayout)",
+                    mode_info.mode_num);
+            } else {
+                LOG_INFO(SERVICE_UI, "Layout config mode {} style=\"{}\" hash=0x{:08X} size={}x{} twips={}x{}",
+                    mode_info.mode_num, scr_config->modes[i].style, mode_info.screen_style_hash,
+                    mode_info.info.pixel_size.x, mode_info.info.pixel_size.y,
+                    mode_info.info.twips_size.x, mode_info.info.twips_size.y);
+            }
 
             result.append(reinterpret_cast<char *>(&mode_info), sizeof(akn_screen_mode_info));
         }

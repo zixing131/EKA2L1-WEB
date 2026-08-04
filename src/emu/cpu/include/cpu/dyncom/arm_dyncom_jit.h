@@ -67,9 +67,6 @@ namespace eka2l1::arm::dyncom_jit {
 
     /// Invoke a compiled block. Returns guest instructions executed; the
     /// block has updated Reg[]/flags and set Reg[15] for the dispatcher.
-    inline int call(std::int32_t table_idx, ARMul_State *cpu) {
-        using jit_fn_t = int (*)(ARMul_State *);
-        return (reinterpret_cast<jit_fn_t>(static_cast<std::uintptr_t>(table_idx)))(cpu);
-    }
+    int call(std::int32_t table_idx, ARMul_State *cpu);
 #endif
 }

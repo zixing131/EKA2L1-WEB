@@ -61,12 +61,18 @@ self.addEventListener('activate', (event) => {
                     .map((k) => caches.delete(k))
             ))
             .then(() => self.clients.claim())
-            // New build: force every open tab to reload so it picks up the
-            // stamped HTML (script tags, i18n includes, etc.) instead of a
-            // stale shell left in Cache Storage by the previous SW generation.
+            // New build: ask every open tab to reload so it picks up the
+            // stamped HTML instead of a stale shell. Do NOT use
+            // Clients.navigate() here — with COOP same-origin it rejects
+            // ("Cannot navigate to URL") and aborts this activate handler,
+            // which leaves the page mid-boot and makes app launch look dead.
             .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
             .then((clients) => Promise.all(
-                clients.map((client) => client.navigate(client.url))
+                clients.map((client) => {
+                    try {
+                        client.postMessage({ type: 'eka2l1-sw-updated', version: CACHE_VERSION });
+                    } catch (_) { /* ignore closed clients */ }
+                })
             ))
     );
 });

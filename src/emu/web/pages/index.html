@@ -340,6 +340,13 @@
 <script>
 // Service Worker 注册（PWA 离线支持 + COOP/COEP 头注入）
 if ('serviceWorker' in navigator) {
+    // SW activate posts this when CACHE_VERSION changes (replaces Clients.navigate,
+    // which rejects under COOP same-origin and breaks boot mid-flight).
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+        if (ev.data && ev.data.type === 'eka2l1-sw-updated') {
+            location.reload();
+        }
+    });
     window.addEventListener('load', function () {
         navigator.serviceWorker.register('./sw.js', { scope: './' })
             .then(function (reg) { reg.update(); })

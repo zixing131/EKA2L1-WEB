@@ -17,12 +17,9 @@ static void *AllocBuffer(ARMul_State *state, std::size_t size) {
 #define glue(x, y) x##y
 #define INTERPRETER_TRANSLATE(s) glue(InterpreterTranslate_, s)
 
-shtop_fp_t GetShifterOp(unsigned int inst);
-unsigned int ClassifyShifterOp(unsigned int inst);
-get_addr_fp_t GetAddressingOp(unsigned int inst);
-get_addr_fp_t GetAddressingOpLoadStoreT(unsigned int inst);
-unsigned int ClassifyAddressingMode(unsigned int inst);
-unsigned int ClassifyAddressingModeLoadStoreT(unsigned int inst);
+unsigned int GetShifterOp(unsigned int inst);
+unsigned int GetAddressingOp(unsigned int inst);
+unsigned int GetAddressingOpLoadStoreT(unsigned int inst);
 
 static ARM_INST_PTR INTERPRETER_TRANSLATE(adc)(ARMul_State *state, unsigned int inst, int index) {
     arm_inst *inst_base = (arm_inst *)AllocBuffer(state, sizeof(arm_inst) + sizeof(adc_inst));
@@ -37,8 +34,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(adc)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -58,8 +54,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(add)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -79,8 +74,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(and)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -119,8 +113,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(bic)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -224,8 +217,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cmn)(ARMul_State *state, unsigned int 
     inst_cream->I = BIT(inst, 25);
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     return inst_base;
 }
@@ -240,8 +232,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cmp)(ARMul_State *state, unsigned int 
     inst_cream->I = BIT(inst, 25);
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     return inst_base;
 }
@@ -275,8 +266,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cpy)(ARMul_State *state, unsigned int 
     inst_cream->S = BIT(inst, 20);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15) {
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -296,8 +286,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(eor)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -321,8 +310,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldm)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     if (BIT(inst, 15)) {
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -352,8 +340,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldr)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     if (BITS(inst, 12, 15) == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -370,8 +357,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrcond)(ARMul_State *state, unsigned 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     if (BITS(inst, 12, 15) == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -417,8 +403,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrb)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -431,8 +416,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrbt)(ARMul_State *state, unsigned in
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOpLoadStoreT(inst);
-    inst_cream->addr_mode = ClassifyAddressingModeLoadStoreT(inst);
+    inst_cream->addr_mode = GetAddressingOpLoadStoreT(inst);
 
     return inst_base;
 }
@@ -445,8 +429,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrd)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -482,8 +465,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrh)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -496,8 +478,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrsb)(ARMul_State *state, unsigned in
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -510,8 +491,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrsh)(ARMul_State *state, unsigned in
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -524,8 +504,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(ldrt)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOpLoadStoreT(inst);
-    inst_cream->addr_mode = ClassifyAddressingModeLoadStoreT(inst);
+    inst_cream->addr_mode = GetAddressingOpLoadStoreT(inst);
 
     if (BITS(inst, 12, 15) == 15) {
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -594,8 +573,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(mov)(ARMul_State *state, unsigned int 
     inst_cream->S = BIT(inst, 20);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15) {
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -677,8 +655,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(mvn)(ARMul_State *state, unsigned int 
     inst_cream->S = BIT(inst, 20);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15) {
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -698,8 +675,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(orr)(ARMul_State *state, unsigned int 
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -836,8 +812,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(rfe)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::INDIRECT_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -855,8 +830,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(rsb)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -876,8 +850,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(rsc)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -929,8 +902,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(sbc)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -1213,8 +1185,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(srs)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -1267,8 +1238,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(stm)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
     return inst_base;
 }
 static ARM_INST_PTR INTERPRETER_TRANSLATE(sxtb)(ARMul_State *state, unsigned int inst, int index) {
@@ -1294,8 +1264,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(str)(ARMul_State *state, unsigned int 
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -1337,8 +1306,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(strb)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -1351,8 +1319,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(strbt)(ARMul_State *state, unsigned in
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOpLoadStoreT(inst);
-    inst_cream->addr_mode = ClassifyAddressingModeLoadStoreT(inst);
+    inst_cream->addr_mode = GetAddressingOpLoadStoreT(inst);
 
     return inst_base;
 }
@@ -1365,8 +1332,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(strd)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -1402,8 +1368,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(strh)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOp(inst);
-    inst_cream->addr_mode = ClassifyAddressingMode(inst);
+    inst_cream->addr_mode = GetAddressingOp(inst);
 
     return inst_base;
 }
@@ -1416,8 +1381,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(strt)(ARMul_State *state, unsigned int
     inst_base->br = TransExtData::NON_BRANCH;
 
     inst_cream->inst = inst;
-    inst_cream->get_addr = GetAddressingOpLoadStoreT(inst);
-    inst_cream->addr_mode = ClassifyAddressingModeLoadStoreT(inst);
+    inst_cream->addr_mode = GetAddressingOpLoadStoreT(inst);
 
     return inst_base;
 }
@@ -1434,8 +1398,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(sub)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     if (inst_cream->Rd == 15)
         inst_base->br = TransExtData::INDIRECT_BRANCH;
@@ -1543,8 +1506,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(teq)(ARMul_State *state, unsigned int 
     inst_cream->I = BIT(inst, 25);
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     return inst_base;
 }
@@ -1561,8 +1523,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(tst)(ARMul_State *state, unsigned int 
     inst_cream->Rn = BITS(inst, 16, 19);
     inst_cream->Rd = BITS(inst, 12, 15);
     inst_cream->shifter_operand = BITS(inst, 0, 11);
-    inst_cream->shtop_func = GetShifterOp(inst);
-    inst_cream->shtop_idx = ClassifyShifterOp(inst);
+    inst_cream->shtop_idx = GetShifterOp(inst);
 
     return inst_base;
 }
@@ -2054,7 +2015,6 @@ const transop_fp_t arm_instruction_trans[] = {
 
 const std::size_t arm_instruction_trans_len = sizeof(arm_instruction_trans) / sizeof(transop_fp_t);
 
-#ifdef __EMSCRIPTEN__
 // ---- wasm JIT support ------------------------------------------------------
 //
 // The web JIT compiles from the translated arm_inst stream and therefore has
@@ -2123,4 +2083,3 @@ namespace eka2l1::arm::dyncom_jit {
         trans_index_of(INTERPRETER_TRANSLATE(bl_2_thumb)),
     };
 }
-#endif

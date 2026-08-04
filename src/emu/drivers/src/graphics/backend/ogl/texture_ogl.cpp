@@ -214,8 +214,19 @@ namespace eka2l1::drivers {
     }
 
     void ogl_texture::set_addressing_mode(const addressing_direction dir, const addressing_option op) {
+        // WebGL2: TEXTURE_WRAP_R is only legal on 3D / 2D_ARRAY targets.
+        if (dir == addressing_direction::r && dimensions < 3) {
+            return;
+        }
+
+        const GLenum pname = to_tex_parameter_enum(dir);
+        const GLint wrap = to_tex_wrapping_enum(op);
+        if (pname == 0 || wrap == 0) {
+            return;
+        }
+
         bind(nullptr, 0);
-        glTexParameteri(to_gl_tex_dim(dimensions), to_tex_parameter_enum(dir), to_tex_wrapping_enum(op));
+        glTexParameteri(to_gl_tex_dim(dimensions), pname, wrap);
         unbind(nullptr);
     }
 
@@ -254,6 +265,14 @@ namespace eka2l1::drivers {
     }
 
     void ogl_texture::set_channel_swizzle(channel_swizzles swizz) {
+#ifdef __EMSCRIPTEN__
+        // WebGL 2.0 deliberately omits TEXTURE_SWIZZLE_*; calling these
+        // pnames raises INVALID_ENUM ("invalid parameter name") and floods
+        // the console during games / window-server blits. Callers that need
+        // channel remapping on web must do it CPU-side or in shaders.
+        (void)swizz;
+        return;
+#else
         GLint swizz_gl[4];
 
         for (int i = 0; i < 4; i++) {
@@ -268,6 +287,7 @@ namespace eka2l1::drivers {
         glTexParameteri(bind_point, GL_TEXTURE_SWIZZLE_B, swizz_gl[2]);
         glTexParameteri(bind_point, GL_TEXTURE_SWIZZLE_A, swizz_gl[3]);
         unbind(nullptr);
+#endif
     }
 
     static GLenum get_binding_enum_dim(const int dim) {

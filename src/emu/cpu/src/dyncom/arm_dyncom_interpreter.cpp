@@ -7,25 +7,17 @@
 #include <algorithm>
 #include <cinttypes>
 #include <common/log.h>
+#include <common/time.h>
 #include <common/types.h>
 #include <cpu/dyncom/arm_dyncom_dec.h>
 #include <cpu/dyncom/arm_dyncom_interpreter.h>
 #include <cpu/dyncom/arm_dyncom_run.h>
 #include <cpu/dyncom/arm_dyncom_thumb.h>
 #include <cpu/dyncom/arm_dyncom_trans.h>
-
-#ifdef __EMSCRIPTEN__
-#include <atomic>
-#include <common/time.h>
-#include <cpu/dyncom/arm_dyncom_jit.h>
-// WASM diagnostic: how many new basic blocks get translated.
-std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
-#endif
 #include <cpu/dyncom/armstate.h>
 #include <cpu/dyncom/armsupp.h>
 #include <cpu/dyncom/vfp/vfp.h>
 #include <cstdio>
-#include <cstdlib>
 
 #include <cpu/arm_interface.h>
 
@@ -39,10 +31,12 @@ std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
 #define ROTATE_RIGHT_32(n, i) ROTATE_RIGHT(n, i, 32)
 #define ROTATE_LEFT_32(n, i) ROTATE_LEFT(n, i, 32)
 
-// Reference predicate for one (cond, NZCV) combination; only used at compile
-// time to build the branchless lookup table below.
-static constexpr bool CondPassedRef(unsigned int cond, bool n_flag, bool z_flag, bool c_flag,
-    bool v_flag) {
+static bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
+    const bool n_flag = cpu->NFlag != 0;
+    const bool z_flag = cpu->ZFlag != 0;
+    const bool c_flag = cpu->CFlag != 0;
+    const bool v_flag = cpu->VFlag != 0;
+
     switch (cond) {
     case ConditionCode::EQ:
         return z_flag;
@@ -80,925 +74,17 @@ static constexpr bool CondPassedRef(unsigned int cond, bool n_flag, bool z_flag,
     return false;
 }
 
-// Bit f of kCondPassedTable[cond] answers CondPassedRef for the flag nibble
-// f = N<<3 | Z<<2 | C<<1 | V, turning the per-instruction predicate into one
-// load + shift that the compiler can inline at every handler site.
-static constexpr std::uint16_t BuildCondMask(unsigned int cond) {
-    std::uint16_t mask = 0;
-    for (unsigned int f = 0; f < 16; ++f) {
-        if (CondPassedRef(cond, (f >> 3) & 1, (f >> 2) & 1, (f >> 1) & 1, f & 1))
-            mask = static_cast<std::uint16_t>(mask | (1u << f));
-    }
-    return mask;
-}
-
-static constexpr std::uint16_t kCondPassedTable[16] = {
-    BuildCondMask(0), BuildCondMask(1), BuildCondMask(2), BuildCondMask(3),
-    BuildCondMask(4), BuildCondMask(5), BuildCondMask(6), BuildCondMask(7),
-    BuildCondMask(8), BuildCondMask(9), BuildCondMask(10), BuildCondMask(11),
-    BuildCondMask(12), BuildCondMask(13), BuildCondMask(14), BuildCondMask(15)
-};
-
-#if defined(_MSC_VER)
-#define DYNCOM_FORCE_INLINE __forceinline
+// Register-list size for LDM/STM. The bit-at-a-time loop this replaces ran on
+// every executed LDM/STM (function prologue/epilogue traffic).
+static inline int CountSetBits16(unsigned int v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcount(v);
 #else
-#define DYNCOM_FORCE_INLINE inline __attribute__((always_inline))
+    // SWAR popcount; MSVC's __popcnt would need a runtime CPUID check.
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    return static_cast<int>((((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24);
 #endif
-
-static DYNCOM_FORCE_INLINE bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
-    const unsigned int flags = ((cpu->NFlag != 0) << 3) | ((cpu->ZFlag != 0) << 2)
-        | ((cpu->CFlag != 0) << 1) | (cpu->VFlag != 0);
-    return (kCondPassedTable[cond & 15] >> flags) & 1;
-}
-
-// ---------------------------------------------------------------------------
-// Optional guest-execution profiler (-DEKA2L1_DYNCOM_PROFILE). Counts, per
-// executed instruction, the opcode and the (previous,current) consecutive pair
-// within a basic block, plus the per-block instruction-count distribution, and
-// periodically logs the hottest opcodes / pairs. Used to pick which instruction
-// patterns are worth fusing into super-ops. Zero overhead when not defined.
-// ---------------------------------------------------------------------------
-#ifdef EKA2L1_DYNCOM_PROFILE
-#include <algorithm>
-#include <vector>
-namespace {
-    constexpr int PROF_NUM_OPS = 202; // == arm_instruction_trans_len
-    const char *kProfOpNames[PROF_NUM_OPS] = {
-        "VMLA","VMLS","VNMLA","VNMLS","VNMUL","VMUL","VADD","VSUB","VDIV","VMOVI","VMOVR","VABS","VNEG","VSQRT","VCMP",
-        "VCMP2","VCVTBDS","VCVTBFF","VCVTBFI","VMOVBRS","VMSR","VMOVBRC","VMRS","VMOVBCR","VMOVBRRSS","VMOVBRRD","VSTR",
-        "VPUSH","VSTM","VPOP","VLDR","VLDM","SRS","RFE","BKPT","BLX","CPS","PLD","SETEND","CLREX","REV16","USAD8","SXTB",
-        "UXTB","SXTH","SXTB16","UXTH","UXTB16","CPY","UXTAB","SSUB8","SHSUB8","SSUBADDX","STREX","STREXB","SWP","SWPB",
-        "SSUB16","SSAT16","SHSUBADDX","QSUBADDX","SHADDSUBX","SHADD8","SHADD16","SEL","SADDSUBX","SADD8","SADD16","SHSUB16",
-        "UMAAL","UXTAB16","USUBADDX","USUB8","USUB16","USAT16","USADA8","UQSUBADDX","UQSUB8","UQSUB16","UQADDSUBX","UQADD8",
-        "UQADD16","SXTAB","UHSUBADDX","UHSUB8","UHSUB16","UHADDSUBX","UHADD8","UHADD16","UADDSUBX","UADD8","UADD16","SXTAH",
-        "SXTAB16","QADD8","BXJ","CLZ","UXTAH","BX","REV","BLX2","REVSH","QADD","QADD16","QADDSUBX","LDREX","QDADD","QDSUB",
-        "QSUB","LDREXB","QSUB8","QSUB16","SMUAD","SMMUL","SMUSD","SMLSD","SMLSLD","SMMLA","SMMLS","SMLALD","SMLAD","SMLAW",
-        "SMULW","PKHTB","PKHBT","SMUL","SMLALXY","SMLA","MCRR","MRRC","CMP","TST","TEQ","CMN","SMULL","UMULL","UMLAL",
-        "SMLAL","MUL","MLA","SSAT","USAT","MRS","MSR","AND","BIC","LDM","EOR","ADD","RSB","RSC","SBC","ADC","SUB","ORR",
-        "MVN","MOV","STM","LDM2","LDRSH","STM2","LDM3","LDRSB","STRD","LDRH","STRH","LDRD","STRT","STRBT","LDRBT","LDRT",
-        "MRC","MCR","MSR2","MSR3","MSR4","MSR5","MSR6","LDRB","STRB","LDR","LDRCOND","STR","CDP","STC","LDC","LDREXD",
-        "STREXD","LDREXH","STREXH","NOP","YIELD","WFE","WFI","SEV","SWI","BBL","B_2_THUMB","B_COND_THUMB","BL_1_THUMB",
-        "BL_2_THUMB","BLX_1_THUMB"
-    };
-    inline const char *prof_op_name(int idx) {
-        return (idx >= 0 && idx < PROF_NUM_OPS) ? kProfOpNames[idx] : "?";
-    }
-    struct dyncom_profiler {
-        std::uint64_t op_count[PROF_NUM_OPS] = {};
-        std::vector<std::uint64_t> pair_count;
-        std::uint64_t block_len[64] = {};
-        std::uint64_t total_insts = 0;
-        std::uint64_t total_blocks = 0;
-        std::uint64_t next_dump = 50000000ull;
-        // Sparse guest-PC histogram (64-byte buckets, sampled every 64th
-        // instruction) to attribute hot loops to guest code regions. The code
-        // bytes are snapshotted on first touch, while the bucket's page is
-        // guaranteed mapped in the current process (reading them at dump time
-        // from an unrelated process faults the guest).
-        struct pc_bucket {
-            std::uint64_t count = 0;
-            std::uint32_t code[16] = {};
-        };
-        std::unordered_map<std::uint32_t, pc_bucket> pc_hist;
-        std::uint64_t pc_samples = 0;
-        dyncom_profiler()
-            : pair_count(static_cast<std::size_t>(PROF_NUM_OPS) * PROF_NUM_OPS, 0) {}
-    };
-    dyncom_profiler g_dyncom_profiler;
-
-    void dyncom_profile_dump(ARMul_State *cpu) {
-        dyncom_profiler &p = g_dyncom_profiler;
-        if (p.total_insts == 0)
-            return;
-        // Write to a plain file in the cwd (Documents/data on iOS) so the output
-        // bypasses the per-category log filter (CPU.DynCom is silenced there).
-        std::FILE *f = std::fopen("dyncom_profile.txt", "w");
-        if (!f)
-            return;
-        std::fprintf(f, "=== dyncom profile: %llu insts, %llu blocks, %.2f insts/block ===\n",
-            (unsigned long long)p.total_insts, (unsigned long long)p.total_blocks,
-            p.total_blocks ? (double)p.total_insts / p.total_blocks : 0.0);
-        std::vector<int> ops(PROF_NUM_OPS);
-        for (int i = 0; i < PROF_NUM_OPS; i++) ops[i] = i;
-        std::sort(ops.begin(), ops.end(), [&](int a, int b) { return p.op_count[a] > p.op_count[b]; });
-        for (int i = 0; i < 25 && p.op_count[ops[i]]; i++)
-            std::fprintf(f, "  op   %-12s %13llu (%.1f%%)\n", prof_op_name(ops[i]), (unsigned long long)p.op_count[ops[i]],
-                100.0 * (double)p.op_count[ops[i]] / p.total_insts);
-        std::vector<std::size_t> pairs;
-        for (std::size_t i = 0; i < p.pair_count.size(); i++)
-            if (p.pair_count[i]) pairs.push_back(i);
-        std::sort(pairs.begin(), pairs.end(), [&](std::size_t a, std::size_t b) { return p.pair_count[a] > p.pair_count[b]; });
-        for (std::size_t i = 0; i < 40 && i < pairs.size(); i++) {
-            const int a = static_cast<int>(pairs[i] / PROF_NUM_OPS);
-            const int b = static_cast<int>(pairs[i] % PROF_NUM_OPS);
-            std::fprintf(f, "  pair %-10s -> %-10s %13llu (%.1f%%)\n", prof_op_name(a), prof_op_name(b),
-                (unsigned long long)p.pair_count[pairs[i]], 100.0 * (double)p.pair_count[pairs[i]] / p.total_insts);
-        }
-        for (int i = 0; i < 16; i++)
-            if (p.block_len[i])
-                std::fprintf(f, "  blocklen %2d : %13llu\n", i, (unsigned long long)p.block_len[i]);
-        if (p.pc_samples) {
-            std::vector<std::pair<std::uint32_t, const dyncom_profiler::pc_bucket *>> hot;
-            hot.reserve(p.pc_hist.size());
-            for (const auto &kv : p.pc_hist)
-                hot.emplace_back(kv.first, &kv.second);
-            std::sort(hot.begin(), hot.end(),
-                [](const auto &a, const auto &b) { return a.second->count > b.second->count; });
-            std::fprintf(f, "  pc-hist: %llu samples, %zu buckets (64B)\n",
-                (unsigned long long)p.pc_samples, p.pc_hist.size());
-            for (std::size_t i = 0; i < 48 && i < hot.size(); i++)
-                std::fprintf(f, "  pc %08X %13llu (%.2f%%)\n", hot[i].first,
-                    (unsigned long long)hot[i].second->count,
-                    100.0 * (double)hot[i].second->count / p.pc_samples);
-            for (std::size_t i = 0; i < 10 && i < hot.size(); i++) {
-                std::fprintf(f, "  code %08X:", hot[i].first);
-                for (int w = 0; w < 16; w++)
-                    std::fprintf(f, " %08X", hot[i].second->code[w]);
-                std::fprintf(f, "\n");
-            }
-        }
-        std::fclose(f);
-    }
-}
-#define PROF_STEP(cpu, the_idx)                                                              \
-    do {                                                                                     \
-        dyncom_profiler &pp_ = g_dyncom_profiler;                                            \
-        const int idx_ = (the_idx);                                                          \
-        if (idx_ >= PROF_NUM_OPS)                                                             \
-            break; /* synthetic ops (loop accel) have no table slot */                        \
-        pp_.op_count[idx_]++;                                                                 \
-        pp_.total_insts++;                                                                    \
-        if ((pp_.total_insts & 63) == 0) {                                                    \
-            const std::uint32_t pcb_ = (cpu)->Reg[15] & ~63u;                                 \
-            auto &bkt_ = pp_.pc_hist[pcb_];                                                   \
-            if (bkt_.count++ == 0)                                                            \
-                for (int w_ = 0; w_ < 16; w_++)                                               \
-                    bkt_.code[w_] = (cpu)->ReadMemory32(pcb_ + w_ * 4);                       \
-            pp_.pc_samples++;                                                                 \
-        }                                                                                     \
-        if ((cpu)->prof_prev >= 0)                                                            \
-            pp_.pair_count[static_cast<std::size_t>((cpu)->prof_prev) * PROF_NUM_OPS + idx_]++; \
-        (cpu)->prof_prev = idx_;                                                              \
-        if ((cpu)->prof_block_len < 63)                                                       \
-            (cpu)->prof_block_len++;                                                          \
-        if (pp_.total_insts >= pp_.next_dump) {                                               \
-            dyncom_profile_dump(cpu);                                                         \
-            pp_.next_dump += 50000000ull;                                                    \
-        }                                                                                     \
-    } while (0)
-#define PROF_BLOCK_ENTER(cpu)                                                                \
-    do {                                                                                     \
-        dyncom_profiler &pp_ = g_dyncom_profiler;                                            \
-        pp_.total_blocks++;                                                                   \
-        pp_.block_len[(cpu)->prof_block_len & 63]++;                                          \
-        (cpu)->prof_block_len = 0;                                                            \
-        (cpu)->prof_prev = -1;                                                                \
-    } while (0)
-#else
-#define PROF_STEP(cpu, the_idx) ((void)0)
-#define PROF_BLOCK_ENTER(cpu) ((void)0)
-#endif
-
-// ---------------------------------------------------------------------------
-// Translation-time bulk-loop acceleration.
-//
-// Guest-side pixel-conversion / copy / fill loops (e.g. an RGB565->32bpp
-// convert measured at 14% of Brothers in Arms gameplay) interpret a handful
-// of instructions per element. When a translated Thumb block is a
-// single-block do-while loop of the canonical shape
-//
-//     do { v = load(src); store(dst, f(v)); src += s; dst += d; }
-//     while (--counter != 0);
-//
-// a symbolic one-iteration simulation proves the shape and a synthetic
-// instruction prepended to the block then executes up to counter-1
-// iterations natively through the dyncom TLB. The LAST iteration is always
-// left to the interpreter, so flags, scratch registers and the loop exit
-// come out of real interpretation; the bulk step only advances the
-// induction registers (base pointers + counter), whose per-iteration deltas
-// the matcher proved constant. Any TLB miss simply stops the bulk step and
-// hands the remainder back to the interpreter, so faults and IPC unmapping
-// keep their interpreted behaviour. Disable with EKA2L1_NO_LOOP_ACCEL=1.
-// ---------------------------------------------------------------------------
-
-// Dispatch index of the synthetic bulk-loop instruction. The label table ends
-// with DISPATCH/INIT_INST_LENGTH/END at 202..204 (kept for the switch
-// fallback); 205 is the first free slot and is only ever produced by the
-// emitter below, never by the decoder.
-static constexpr unsigned int LOOP_ACCEL_IDX = 205;
-
-enum accel_chain_op : std::uint8_t {
-    ACC_SHL,
-    ACC_SHR,
-    ACC_SAR,
-    ACC_AND,
-    ACC_ORR,
-    ACC_EOR,
-    ACC_ADD,
-    ACC_SUB,
-    ACC_SXTB,
-    ACC_SXTH,
-};
-
-enum accel_val_kind : std::uint8_t {
-    ACC_VAL_CONST, // constant
-    ACC_VAL_CHAIN, // ops applied to the iteration's loaded value
-    ACC_VAL_REG, // invariant register + offset
-};
-
-struct accel_store {
-    std::int32_t off; // relative to the dst base register's iteration value
-    std::uint8_t width; // 1/2/4 bytes
-    std::uint8_t kind; // accel_val_kind
-    std::uint8_t reg; // ACC_VAL_REG: the invariant register
-    std::uint8_t nops; // ACC_VAL_CHAIN: number of chain ops
-    std::uint32_t cval; // ACC_VAL_CONST value / ACC_VAL_REG offset
-    struct {
-        std::uint8_t op;
-        std::uint32_t imm;
-    } ops[8];
-};
-
-struct loop_accel_inst {
-    std::uint8_t has_load;
-    std::uint8_t load_width; // 1/2/4
-    std::uint8_t load_signed;
-    std::uint8_t src_reg;
-    std::int32_t src_off;
-    std::int32_t src_step; // > 0
-
-    std::uint8_t dst_reg;
-    std::int32_t dst_min_off;
-    std::int32_t dst_step; // >= span, > 0
-    std::uint8_t span; // dense bytes written per iteration
-    std::uint8_t store_count;
-    accel_store stores[4];
-
-    std::uint8_t ind_count;
-    struct {
-        std::uint8_t reg;
-        std::int32_t delta;
-    } ind[8];
-
-    std::uint8_t counter_reg;
-    std::uint16_t body_len; // guest instructions per iteration (incl. branch)
-};
-
-namespace {
-    // Symbolic value for the one-iteration abstract interpretation.
-    struct accel_sym {
-        enum kind_t : std::uint8_t { S_CONST,
-            S_AFFINE, // INIT(reg) + c
-            S_CHAIN, // chain ops over the loaded value
-            S_TOP } kind;
-        std::uint8_t reg; // S_AFFINE base
-        std::uint8_t nops;
-        std::uint32_t c; // S_CONST value / S_AFFINE offset
-        struct {
-            std::uint8_t op;
-            std::uint32_t imm;
-        } ops[8];
-
-        static accel_sym make_const(std::uint32_t v) {
-            accel_sym s{};
-            s.kind = S_CONST;
-            s.c = v;
-            return s;
-        }
-        static accel_sym make_affine(std::uint8_t r, std::uint32_t off) {
-            accel_sym s{};
-            s.kind = S_AFFINE;
-            s.reg = r;
-            s.c = off;
-            return s;
-        }
-        static accel_sym make_top() {
-            accel_sym s{};
-            s.kind = S_TOP;
-            return s;
-        }
-        bool push_op(std::uint8_t op, std::uint32_t imm) {
-            if (nops >= 8)
-                return false;
-            ops[nops].op = op;
-            ops[nops].imm = imm;
-            nops++;
-            return true;
-        }
-    };
-
-    inline std::uint32_t accel_apply_op(std::uint32_t v, std::uint8_t op, std::uint32_t imm) {
-        switch (op) {
-        case ACC_SHL:
-            return (imm >= 32) ? 0 : (v << imm);
-        case ACC_SHR:
-            return (imm >= 32) ? 0 : (v >> imm);
-        case ACC_SAR:
-            return static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> ((imm >= 32) ? 31 : imm));
-        case ACC_AND:
-            return v & imm;
-        case ACC_ORR:
-            return v | imm;
-        case ACC_EOR:
-            return v ^ imm;
-        case ACC_ADD:
-            return v + imm;
-        case ACC_SUB:
-            return v - imm;
-        case ACC_SXTB:
-            return static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(v)));
-        case ACC_SXTH:
-            return static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(v)));
-        }
-        return v;
-    }
-}
-
-static bool loop_accel_disabled() {
-    static const bool disabled = (std::getenv("EKA2L1_NO_LOOP_ACCEL") != nullptr);
-    return disabled;
-}
-
-// Symbolically simulate one iteration of the candidate Thumb loop at
-// [pc_start .. terminal Bcc]. Returns true and fills `out` when the body is a
-// provably uniform single-load copy/convert/fill loop.
-static bool analyze_thumb_bulk_loop(ARMul_State *cpu, std::uint32_t pc_start, loop_accel_inst &out) {
-    if (loop_accel_disabled())
-        return false;
-
-    constexpr int MAX_BODY = 24;
-
-    accel_sym sym[8];
-    for (int i = 0; i < 8; i++)
-        sym[i] = accel_sym::make_affine(static_cast<std::uint8_t>(i), 0);
-
-    enum { ACC_NONE,
-        ACC_READ,
-        ACC_WRITE };
-    std::uint8_t first_access[8] = {};
-
-    enum { FLAG_OTHER,
-        FLAG_CMP0,
-        FLAG_SUB1 };
-    int last_flag = FLAG_OTHER;
-    int flag_reg = -1;
-
-    bool have_load = false;
-    bool store_seen = false; // bulk exec is load-then-stores: reject other orders
-    std::uint8_t load_width = 0, load_signed = 0, src_reg = 0;
-    std::int32_t src_off = 0;
-
-    int store_count = 0;
-    struct {
-        std::uint8_t base;
-        std::int32_t off;
-        std::uint8_t width;
-        accel_sym val;
-    } raw_stores[4];
-
-    // Reading a register: record read-before-write and return its symbol.
-    auto rd_sym = [&](int r) -> accel_sym & {
-        if (first_access[r] == ACC_NONE)
-            first_access[r] = ACC_READ;
-        return sym[r];
-    };
-    auto wr_sym = [&](int r, const accel_sym &v) {
-        if (first_access[r] == ACC_NONE)
-            first_access[r] = ACC_WRITE;
-        sym[r] = v;
-    };
-
-    // rd = rn OP imm-const.
-    auto apply_const = [&](const accel_sym &a, std::uint8_t op, std::uint32_t imm) -> accel_sym {
-        accel_sym r = a;
-        switch (a.kind) {
-        case accel_sym::S_CONST:
-            r.c = accel_apply_op(a.c, op, imm);
-            return r;
-        case accel_sym::S_AFFINE:
-            if (op == ACC_ADD) {
-                r.c = a.c + imm;
-                return r;
-            }
-            if (op == ACC_SUB) {
-                r.c = a.c - imm;
-                return r;
-            }
-            return accel_sym::make_top();
-        case accel_sym::S_CHAIN:
-            if (!r.push_op(op, imm))
-                return accel_sym::make_top();
-            return r;
-        default:
-            return accel_sym::make_top();
-        }
-    };
-
-    std::uint32_t pc = pc_start;
-    int count = 0;
-    bool matched_branch = false;
-
-    while (count < MAX_BODY) {
-        const std::uint32_t word = cpu->ReadCode(pc & 0xFFFFFFFC);
-        const std::uint16_t hw = (pc & 2) ? static_cast<std::uint16_t>(word >> 16)
-                                          : static_cast<std::uint16_t>(word & 0xFFFF);
-        count++;
-
-        if ((hw & 0xF000) == 0xD000) {
-            // Bcc / SWI. Terminal only, must be BNE back to pc_start.
-            const std::uint32_t cond = (hw >> 8) & 0xF;
-            if (cond >= 0xE)
-                return false; // undefined / SWI
-            const std::int32_t soff = static_cast<std::int32_t>(static_cast<std::int8_t>(hw & 0xFF)) * 2;
-            const std::uint32_t target = pc + 4 + soff;
-            if (cond != 0x1 /*NE*/ || target != pc_start)
-                return false;
-            matched_branch = true;
-            break;
-        }
-
-        switch (hw >> 13) {
-        case 0: { // 000: shift imm / add-sub reg-imm3
-            if (((hw >> 11) & 3) != 3) {
-                const int opk = (hw >> 11) & 3; // LSL/LSR/ASR
-                const int rm = (hw >> 3) & 7, rd = hw & 7;
-                std::uint32_t imm = (hw >> 6) & 31;
-                std::uint8_t op = (opk == 0) ? ACC_SHL : (opk == 1) ? ACC_SHR
-                                                                    : ACC_SAR;
-                if (opk != 0 && imm == 0)
-                    imm = 32; // LSR/ASR #32 encodings
-                wr_sym(rd, apply_const(rd_sym(rm), op, imm));
-                last_flag = FLAG_OTHER;
-            } else {
-                const int rd = hw & 7, rn = (hw >> 3) & 7;
-                const bool sub = (hw >> 9) & 1;
-                const bool immf = (hw >> 10) & 1;
-                const int rm_or_imm = (hw >> 6) & 7;
-                accel_sym res;
-                const accel_sym a = rd_sym(rn);
-                if (immf) {
-                    res = apply_const(a, sub ? ACC_SUB : ACC_ADD, static_cast<std::uint32_t>(rm_or_imm));
-                    if (sub && rm_or_imm == 1 && rd == rn) {
-                        last_flag = FLAG_SUB1;
-                        flag_reg = rd;
-                    } else {
-                        last_flag = FLAG_OTHER;
-                    }
-                } else {
-                    const accel_sym b = rd_sym(rm_or_imm);
-                    if (b.kind == accel_sym::S_CONST)
-                        res = apply_const(a, sub ? ACC_SUB : ACC_ADD, b.c);
-                    else if (!sub && a.kind == accel_sym::S_CONST)
-                        res = apply_const(b, ACC_ADD, a.c);
-                    else
-                        res = accel_sym::make_top();
-                    last_flag = FLAG_OTHER;
-                }
-                wr_sym(rd, res);
-            }
-            break;
-        }
-        case 1: { // 001: MOV/CMP/ADD/SUB imm8
-            const int opk = (hw >> 11) & 3;
-            const int rd = (hw >> 8) & 7;
-            const std::uint32_t imm = hw & 0xFF;
-            switch (opk) {
-            case 0: // MOV
-                wr_sym(rd, accel_sym::make_const(imm));
-                last_flag = FLAG_OTHER;
-                break;
-            case 1: { // CMP
-                const accel_sym &a = rd_sym(rd);
-                if (imm == 0 && a.kind == accel_sym::S_AFFINE && a.reg == rd) {
-                    last_flag = FLAG_CMP0;
-                    flag_reg = rd;
-                } else {
-                    last_flag = FLAG_OTHER;
-                }
-                break;
-            }
-            case 2: // ADD
-                wr_sym(rd, apply_const(rd_sym(rd), ACC_ADD, imm));
-                last_flag = FLAG_OTHER;
-                break;
-            case 3: // SUB
-                wr_sym(rd, apply_const(rd_sym(rd), ACC_SUB, imm));
-                if (imm == 1) {
-                    last_flag = FLAG_SUB1;
-                    flag_reg = rd;
-                } else {
-                    last_flag = FLAG_OTHER;
-                }
-                break;
-            }
-            break;
-        }
-        case 2: { // 010: ALU reg / hi-reg / PC-literal / reg-offset mem
-            if ((hw & 0xFC00) == 0x4000) { // format 4 ALU
-                const int aop = (hw >> 6) & 0xF;
-                const int rm = (hw >> 3) & 7, rd = hw & 7;
-                switch (aop) {
-                case 0x0: // AND
-                case 0x1: // EOR
-                case 0xC: { // ORR
-                    const accel_sym b = rd_sym(rm);
-                    const accel_sym a = rd_sym(rd);
-                    const std::uint8_t op = (aop == 0x0) ? ACC_AND : (aop == 0x1) ? ACC_EOR
-                                                                                  : ACC_ORR;
-                    if (b.kind == accel_sym::S_CONST)
-                        wr_sym(rd, apply_const(a, op, b.c));
-                    else if (a.kind == accel_sym::S_CONST)
-                        wr_sym(rd, apply_const(b, op, a.c));
-                    else
-                        wr_sym(rd, accel_sym::make_top());
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                case 0x2: // LSL reg
-                case 0x3: // LSR reg
-                case 0x4: { // ASR reg
-                    const accel_sym b = rd_sym(rm);
-                    const accel_sym a = rd_sym(rd);
-                    const std::uint8_t op = (aop == 0x2) ? ACC_SHL : (aop == 0x3) ? ACC_SHR
-                                                                                  : ACC_SAR;
-                    if (b.kind == accel_sym::S_CONST && (b.c & 0xFF) < 32)
-                        wr_sym(rd, apply_const(a, op, b.c & 0xFF));
-                    else
-                        wr_sym(rd, accel_sym::make_top());
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                case 0x8: // TST
-                case 0xA: // CMP reg
-                case 0xB: // CMN
-                    rd_sym(rm);
-                    rd_sym(rd);
-                    last_flag = FLAG_OTHER;
-                    break;
-                case 0x9: { // NEG (RSB #0)
-                    const accel_sym b = rd_sym(rm);
-                    if (b.kind == accel_sym::S_CONST)
-                        wr_sym(rd, accel_sym::make_const(0u - b.c));
-                    else
-                        wr_sym(rd, accel_sym::make_top());
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                case 0xD: { // MUL
-                    const accel_sym b = rd_sym(rm);
-                    const accel_sym a = rd_sym(rd);
-                    if (a.kind == accel_sym::S_CONST && b.kind == accel_sym::S_CONST)
-                        wr_sym(rd, accel_sym::make_const(a.c * b.c));
-                    else
-                        wr_sym(rd, accel_sym::make_top());
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                case 0xE: { // BIC
-                    const accel_sym b = rd_sym(rm);
-                    const accel_sym a = rd_sym(rd);
-                    if (b.kind == accel_sym::S_CONST)
-                        wr_sym(rd, apply_const(a, ACC_AND, ~b.c));
-                    else
-                        wr_sym(rd, accel_sym::make_top());
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                case 0xF: { // MVN
-                    const accel_sym b = rd_sym(rm);
-                    if (b.kind == accel_sym::S_CONST)
-                        wr_sym(rd, accel_sym::make_const(~b.c));
-                    else
-                        wr_sym(rd, apply_const(b, ACC_EOR, 0xFFFFFFFFu));
-                    last_flag = FLAG_OTHER;
-                    break;
-                }
-                default:
-                    return false; // ADC/SBC/ROR read or thread flags
-                }
-            } else if ((hw & 0xF800) == 0x4800) {
-                return false; // LDR literal: loop-invariant unknown, v1 rejects
-            } else if ((hw & 0xFC00) == 0x4400) {
-                return false; // hi-reg ops / BX
-            } else { // 0101: reg-offset load/store
-                const int opk = (hw >> 9) & 7;
-                const int rm = (hw >> 6) & 7, rn = (hw >> 3) & 7, rd = hw & 7;
-                const accel_sym bsym = rd_sym(rn);
-                const accel_sym osym = rd_sym(rm);
-                accel_sym addr;
-                if (bsym.kind == accel_sym::S_AFFINE && osym.kind == accel_sym::S_CONST)
-                    addr = apply_const(bsym, ACC_ADD, osym.c);
-                else if (osym.kind == accel_sym::S_AFFINE && bsym.kind == accel_sym::S_CONST)
-                    addr = apply_const(osym, ACC_ADD, bsym.c);
-                else
-                    return false;
-                // opk: 0 STR,1 STRH,2 STRB,3 LDRSB,4 LDR,5 LDRH,6 LDRB,7 LDRSH
-                static const std::uint8_t widths[8] = { 4, 2, 1, 1, 4, 2, 1, 2 };
-                const bool is_load = opk >= 3;
-                const std::uint8_t w = widths[opk];
-                if (is_load) {
-                    if (have_load || store_seen)
-                        return false;
-                    have_load = true;
-                    load_width = w;
-                    load_signed = (opk == 3 || opk == 7);
-                    src_reg = addr.reg;
-                    src_off = static_cast<std::int32_t>(addr.c);
-                    accel_sym lv{};
-                    lv.kind = accel_sym::S_CHAIN;
-                    if (load_signed && !lv.push_op(w == 1 ? ACC_SXTB : ACC_SXTH, 0))
-                        return false;
-                    wr_sym(rd, lv);
-                } else {
-                    if (store_count >= 4)
-                        return false;
-                    const accel_sym v = rd_sym(rd);
-                    if (v.kind == accel_sym::S_TOP)
-                        return false;
-                    raw_stores[store_count].base = addr.reg;
-                    raw_stores[store_count].off = static_cast<std::int32_t>(addr.c);
-                    raw_stores[store_count].width = w;
-                    raw_stores[store_count].val = v;
-                    store_count++;
-                    store_seen = true;
-                }
-                // Memory ops leave the flags untouched: keep last_flag as-is.
-            }
-            break;
-        }
-        case 3: // 011: LDR/STR/LDRB/STRB imm5
-        case 4: { // 100: LDRH/STRH imm5 / SP-relative
-            std::uint8_t w;
-            bool is_load;
-            std::uint32_t imm_off;
-            const int rn = (hw >> 3) & 7, rd = hw & 7;
-            if ((hw >> 13) == 3) {
-                const bool byte = (hw >> 12) & 1;
-                is_load = (hw >> 11) & 1;
-                w = byte ? 1 : 4;
-                imm_off = ((hw >> 6) & 31) * (byte ? 1u : 4u);
-            } else {
-                if ((hw >> 12) & 1)
-                    return false; // 1001x: SP-relative
-                is_load = (hw >> 11) & 1;
-                w = 2;
-                imm_off = ((hw >> 6) & 31) * 2u;
-            }
-            const accel_sym bsym = rd_sym(rn);
-            if (bsym.kind != accel_sym::S_AFFINE)
-                return false;
-            const std::int32_t off = static_cast<std::int32_t>(bsym.c + imm_off);
-            if (is_load) {
-                if (have_load || store_seen)
-                    return false;
-                have_load = true;
-                load_width = w;
-                load_signed = 0;
-                src_reg = bsym.reg;
-                src_off = off;
-                accel_sym lv{};
-                lv.kind = accel_sym::S_CHAIN;
-                wr_sym(rd, lv);
-            } else {
-                if (store_count >= 4)
-                    return false;
-                const accel_sym v = rd_sym(rd);
-                if (v.kind == accel_sym::S_TOP)
-                    return false;
-                raw_stores[store_count].base = bsym.reg;
-                raw_stores[store_count].off = off;
-                raw_stores[store_count].width = w;
-                raw_stores[store_count].val = v;
-                store_count++;
-                store_seen = true;
-            }
-            break;
-        }
-        default:
-            return false; // SP-ops, misc, LDM/STM, unconditional B, BL, ...
-        }
-
-        pc += 2;
-    }
-
-    if (!matched_branch || store_count == 0)
-        return false;
-
-    // Loop condition: flags at the branch must come from CMP rc,#0 or
-    // SUBS rc,#1 with rc ending the body at INIT(rc)-1.
-    if ((last_flag != FLAG_CMP0 && last_flag != FLAG_SUB1) || flag_reg < 0)
-        return false;
-    const int rc = flag_reg;
-    if (sym[rc].kind != accel_sym::S_AFFINE || sym[rc].reg != rc || sym[rc].c != 0xFFFFFFFFu)
-        return false;
-
-    // Uniformity: every register read before written must end the body as
-    // INIT(self) + constant delta.
-    std::int32_t deltas[8];
-    for (int r = 0; r < 8; r++) {
-        deltas[r] = 0;
-        if (first_access[r] == ACC_READ) {
-            if (sym[r].kind != accel_sym::S_AFFINE || sym[r].reg != r)
-                return false;
-            deltas[r] = static_cast<std::int32_t>(sym[r].c);
-        }
-    }
-
-    // Stores: single dst base with positive step, dense byte tiling.
-    const std::uint8_t q = raw_stores[0].base;
-    std::int32_t min_off = raw_stores[0].off;
-    for (int i = 0; i < store_count; i++) {
-        if (raw_stores[i].base != q)
-            return false;
-        min_off = std::min(min_off, raw_stores[i].off);
-    }
-    if (first_access[q] != ACC_READ)
-        return false;
-    const std::int32_t dst_step = deltas[q];
-    std::uint32_t covered = 0;
-    std::uint32_t span_bytes = 0;
-    for (int i = 0; i < store_count; i++) {
-        const std::uint32_t rel = static_cast<std::uint32_t>(raw_stores[i].off - min_off);
-        if (rel + raw_stores[i].width > 32)
-            return false;
-        const std::uint32_t mask = ((raw_stores[i].width == 4) ? 0xFu : (raw_stores[i].width == 2) ? 0x3u
-                                                                                                   : 0x1u)
-            << rel;
-        if (covered & mask)
-            return false; // overlapping bytes: order-dependent, reject
-        covered |= mask;
-        span_bytes = std::max(span_bytes, rel + raw_stores[i].width);
-    }
-    if (covered != ((span_bytes >= 32) ? 0xFFFFFFFFu : ((1u << span_bytes) - 1)))
-        return false; // gaps in the written span
-    if (span_bytes > 8)
-        return false;
-    if (dst_step < static_cast<std::int32_t>(span_bytes))
-        return false; // must advance past what it wrote (also rejects step<=0)
-
-    // Load: positive stride.
-    if (have_load) {
-        if (first_access[src_reg] != ACC_READ)
-            return false;
-        if (deltas[src_reg] <= 0)
-            return false;
-    }
-
-    // Store values: only const / chain-of-load / invariant-register.
-    for (int i = 0; i < store_count; i++) {
-        const accel_sym &v = raw_stores[i].val;
-        if (v.kind == accel_sym::S_CHAIN && !have_load)
-            return false;
-        if (v.kind == accel_sym::S_AFFINE && deltas[v.reg] != 0)
-            return false;
-    }
-
-    // Build the descriptor.
-    out = loop_accel_inst{};
-    out.has_load = have_load ? 1 : 0;
-    out.load_width = load_width;
-    out.load_signed = load_signed;
-    out.src_reg = src_reg;
-    out.src_off = src_off;
-    out.src_step = have_load ? deltas[src_reg] : 0;
-    out.dst_reg = q;
-    out.dst_min_off = min_off;
-    out.dst_step = dst_step;
-    out.span = static_cast<std::uint8_t>(span_bytes);
-    out.store_count = static_cast<std::uint8_t>(store_count);
-    for (int i = 0; i < store_count; i++) {
-        accel_store &s = out.stores[i];
-        s.off = raw_stores[i].off;
-        s.width = raw_stores[i].width;
-        const accel_sym &v = raw_stores[i].val;
-        if (v.kind == accel_sym::S_CONST) {
-            s.kind = ACC_VAL_CONST;
-            s.cval = v.c;
-        } else if (v.kind == accel_sym::S_AFFINE) {
-            s.kind = ACC_VAL_REG;
-            s.reg = v.reg;
-            s.cval = v.c;
-        } else {
-            s.kind = ACC_VAL_CHAIN;
-            s.nops = v.nops;
-            for (int k = 0; k < v.nops; k++) {
-                s.ops[k].op = v.ops[k].op;
-                s.ops[k].imm = v.ops[k].imm;
-            }
-        }
-    }
-    out.ind_count = 0;
-    for (int r = 0; r < 8; r++) {
-        if (first_access[r] == ACC_READ && deltas[r] != 0) {
-            if (out.ind_count >= 8)
-                return false;
-            out.ind[out.ind_count].reg = static_cast<std::uint8_t>(r);
-            out.ind[out.ind_count].delta = deltas[r];
-            out.ind_count++;
-        }
-    }
-    out.counter_reg = static_cast<std::uint8_t>(rc);
-    out.body_len = static_cast<std::uint16_t>(count);
-    return true;
-}
-
-// Execute up to `want` full iterations natively through the dyncom TLB.
-// Returns the number of iterations actually performed; the caller advances
-// the induction registers by that count. Stops early at any TLB miss so the
-// interpreter (and its slow path / fault behaviour) takes over exactly where
-// the bulk run left off.
-static std::uint32_t run_accel_bulk(ARMul_State *cpu, const loop_accel_inst *d, std::uint32_t want) {
-    eka2l1::arm::r12l1::tlb *tlb = cpu->mem_cache_;
-    const std::uint32_t page_size = static_cast<std::uint32_t>(tlb->page_mask) + 1;
-
-    std::uint32_t src = d->has_load ? (cpu->Reg[d->src_reg] + d->src_off) : 0;
-    std::uint32_t dst = cpu->Reg[d->dst_reg] + d->dst_min_off;
-
-    // Pre-resolve invariant register store values.
-    std::uint32_t reg_vals[4];
-    for (int i = 0; i < d->store_count; i++)
-        reg_vals[i] = (d->stores[i].kind == ACC_VAL_REG)
-            ? (cpu->Reg[d->stores[i].reg] + d->stores[i].cval)
-            : d->stores[i].cval;
-
-    std::uint32_t done = 0;
-    while (done < want) {
-        std::uint8_t *hs = nullptr;
-        std::uint32_t it = want - done;
-
-        if (d->has_load) {
-            hs = tlb->lookup(src);
-            if (!hs)
-                break;
-            const std::uint32_t room = page_size - (src & static_cast<std::uint32_t>(tlb->page_mask));
-            if (room < d->load_width)
-                break;
-            it = std::min<std::uint32_t>(it, (room - d->load_width) / static_cast<std::uint32_t>(d->src_step) + 1);
-        }
-
-        std::uint8_t *hd = tlb->lookup(dst);
-        if (!hd)
-            break;
-        const std::uint32_t room_d = page_size - (dst & static_cast<std::uint32_t>(tlb->page_mask));
-        if (room_d < d->span)
-            break;
-        it = std::min<std::uint32_t>(it, (room_d - d->span) / static_cast<std::uint32_t>(d->dst_step) + 1);
-        if (!it)
-            break;
-
-        for (std::uint32_t i = 0; i < it; i++) {
-            std::uint32_t lv = 0;
-            if (d->has_load) {
-                switch (d->load_width) {
-                case 1:
-                    lv = *hs;
-                    break;
-                case 2: {
-                    std::uint16_t t;
-                    __builtin_memcpy(&t, hs, 2);
-                    lv = t;
-                    break;
-                }
-                default: {
-                    __builtin_memcpy(&lv, hs, 4);
-                    break;
-                }
-                }
-                hs += d->src_step;
-            }
-            for (int s = 0; s < d->store_count; s++) {
-                const accel_store &st = d->stores[s];
-                std::uint32_t v;
-                if (st.kind == ACC_VAL_CHAIN) {
-                    v = lv;
-                    for (int k = 0; k < st.nops; k++)
-                        v = accel_apply_op(v, st.ops[k].op, st.ops[k].imm);
-                } else {
-                    v = reg_vals[s];
-                }
-                std::uint8_t *p = hd + (st.off - d->dst_min_off);
-                switch (st.width) {
-                case 1:
-                    *p = static_cast<std::uint8_t>(v);
-                    break;
-                case 2: {
-                    const std::uint16_t t = static_cast<std::uint16_t>(v);
-                    __builtin_memcpy(p, &t, 2);
-                    break;
-                }
-                default:
-                    __builtin_memcpy(p, &v, 4);
-                    break;
-                }
-            }
-            hd += d->dst_step;
-        }
-
-        src += it * static_cast<std::uint32_t>(d->src_step);
-        dst += it * static_cast<std::uint32_t>(d->dst_step);
-        done += it;
-    }
-    return done;
 }
 
 static unsigned int DPO(Immediate)(ARMul_State *cpu, unsigned int sht_oper) {
@@ -1180,65 +266,6 @@ static void LnSWoUB(ImmediateOffset)(ARMul_State *cpu, unsigned int inst, unsign
 
     virt_addr = addr;
 }
-
-// Fast path for the dominant single load/store addressing form: immediate
-// offset, no write-back (`[Rn, #+/-imm12]`). The generic path calls
-// inst_cream->get_addr through a function pointer -- a polymorphic indirect
-// branch at the shared handler site. This inlines the trivial base +/- imm12
-// computation for that common form and only falls back to the pointer for the
-// rarer modes; the pointer compare is one well-predicted branch.
-#define LS_GET_ADDR(addr_out)                                                        \
-    do {                                                                             \
-        if (inst_cream->get_addr == LnSWoUBImmediateOffset) {                        \
-            const unsigned int ls_inst_ = inst_cream->inst;                          \
-            const std::uint32_t ls_base_ =                                           \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 16, 19));                    \
-            (addr_out) = BIT(ls_inst_, 23) ? (ls_base_ + BITS(ls_inst_, 0, 11))      \
-                                           : (ls_base_ - BITS(ls_inst_, 0, 11));     \
-        } else if (inst_cream->get_addr == LnSWoUBRegisterOffset) {                  \
-            const unsigned int ls_inst_ = inst_cream->inst;                          \
-            const std::uint32_t ls_base_ =                                           \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 16, 19));                    \
-            const std::uint32_t ls_off_ =                                            \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 0, 3));                      \
-            (addr_out) = BIT(ls_inst_, 23) ? (ls_base_ + ls_off_)                    \
-                                           : (ls_base_ - ls_off_);                   \
-        } else if (inst_cream->get_addr) {                                           \
-            inst_cream->get_addr(cpu, inst_cream->inst, (addr_out));                 \
-        } else {                                                                     \
-            undef_inst = inst_cream->inst;                                           \
-            goto UNDEFINED_ADDRESSING_MODE;                                          \
-        }                                                                            \
-    } while (0)
-
-// LS_GET_ADDR for the miscellaneous (halfword/doubleword) load/store family,
-// whose dominant addressing forms are the split-immediate and register
-// offsets computed by MLnSImmediateOffset / MLnSRegisterOffset.
-#define MLS_GET_ADDR(addr_out)                                                       \
-    do {                                                                             \
-        if (inst_cream->get_addr == MLnSImmediateOffset) {                           \
-            const unsigned int ls_inst_ = inst_cream->inst;                          \
-            const std::uint32_t ls_base_ =                                           \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 16, 19));                    \
-            const std::uint32_t ls_off_ =                                            \
-                (BITS(ls_inst_, 8, 11) << 4) | BITS(ls_inst_, 0, 3);                 \
-            (addr_out) = BIT(ls_inst_, 23) ? (ls_base_ + ls_off_)                    \
-                                           : (ls_base_ - ls_off_);                   \
-        } else if (inst_cream->get_addr == MLnSRegisterOffset) {                     \
-            const unsigned int ls_inst_ = inst_cream->inst;                          \
-            const std::uint32_t ls_base_ =                                           \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 16, 19));                    \
-            const std::uint32_t ls_off_ =                                            \
-                CHECK_READ_REG15_WA(cpu, BITS(ls_inst_, 0, 3));                      \
-            (addr_out) = BIT(ls_inst_, 23) ? (ls_base_ + ls_off_)                    \
-                                           : (ls_base_ - ls_off_);                   \
-        } else if (inst_cream->get_addr) {                                           \
-            inst_cream->get_addr(cpu, inst_cream->inst, (addr_out));                 \
-        } else {                                                                     \
-            undef_inst = inst_cream->inst;                                           \
-            goto UNDEFINED_ADDRESSING_MODE;                                          \
-        }                                                                            \
-    } while (0)
 
 static void LnSWoUB(RegisterOffset)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
@@ -1528,19 +555,6 @@ static void MLnS(RegisterPostIndexed)(ARMul_State *cpu, unsigned int inst,
     }
 }
 
-// Register count of an LDM/STM register list, replacing the former 1..16
-// iteration shift loop executed on every block transfer.
-static inline int CountSetBits16(unsigned int v) {
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_popcount(v);
-#else
-    v = v - ((v >> 1) & 0x5555);
-    v = (v & 0x3333) + ((v >> 2) & 0x3333);
-    v = (v + (v >> 4)) & 0x0F0F;
-    return static_cast<int>((v + (v >> 8)) & 0x1F);
-#endif
-}
-
 static void LdnStM(DecrementBefore)(ARMul_State *cpu, unsigned int inst, unsigned int &virt_addr) {
     unsigned int Rn = BITS(inst, 16, 19);
     const int count = CountSetBits16(BITS(inst, 0, 15));
@@ -1633,8 +647,7 @@ static void LnSWoUB(ScaledRegisterOffset)(ARMul_State *cpu, unsigned int inst,
     virt_addr = addr;
 }
 
-
-unsigned int ClassifyShifterOp(unsigned int inst) {
+unsigned int GetShifterOp(unsigned int inst) {
     if (BIT(inst, 25)) {
         return SHTOP_IMMEDIATE;
     } else if (BITS(inst, 4, 11) == 0) {
@@ -1659,32 +672,44 @@ unsigned int ClassifyShifterOp(unsigned int inst) {
     return SHTOP_INVALID;
 }
 
-shtop_fp_t GetShifterOp(unsigned int inst) {
-    if (BIT(inst, 25)) {
-        return DPO(Immediate);
-    } else if (BITS(inst, 4, 11) == 0) {
-        return DPO(Register);
-    } else if (BITS(inst, 4, 6) == 0) {
-        return DPO(LogicalShiftLeftByImmediate);
-    } else if (BITS(inst, 4, 7) == 1) {
-        return DPO(LogicalShiftLeftByRegister);
-    } else if (BITS(inst, 4, 6) == 2) {
-        return DPO(LogicalShiftRightByImmediate);
-    } else if (BITS(inst, 4, 7) == 3) {
-        return DPO(LogicalShiftRightByRegister);
-    } else if (BITS(inst, 4, 6) == 4) {
-        return DPO(ArithmeticShiftRightByImmediate);
-    } else if (BITS(inst, 4, 7) == 5) {
-        return DPO(ArithmeticShiftRightByRegister);
-    } else if (BITS(inst, 4, 6) == 6) {
-        return DPO(RotateRightByImmediate);
-    } else if (BITS(inst, 4, 7) == 7) {
-        return DPO(RotateRightByRegister);
+// Replaces the old per-instruction indirect call through a stored function
+// pointer: a dense switch lets the compiler inline every (tiny) evaluator
+// body and turn the dispatch into a jump table.
+//
+// Kept out of line on purpose: inlining the full switch into every ALU
+// handler would bloat InterpreterMainLoop. The two dominant cases get a
+// separate always-inline fast path below (ShtOpEval/GetAddrEval) instead —
+// profiling showed these helpers at ~10% self time each from sheer call
+// frequency.
+static unsigned int EvalShifterOperand(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
+    switch (idx) {
+    case SHTOP_IMMEDIATE:
+        return DPO(Immediate)(cpu, sht_oper);
+    case SHTOP_REGISTER:
+        return DPO(Register)(cpu, sht_oper);
+    case SHTOP_LSL_IMM:
+        return DPO(LogicalShiftLeftByImmediate)(cpu, sht_oper);
+    case SHTOP_LSL_REG:
+        return DPO(LogicalShiftLeftByRegister)(cpu, sht_oper);
+    case SHTOP_LSR_IMM:
+        return DPO(LogicalShiftRightByImmediate)(cpu, sht_oper);
+    case SHTOP_LSR_REG:
+        return DPO(LogicalShiftRightByRegister)(cpu, sht_oper);
+    case SHTOP_ASR_IMM:
+        return DPO(ArithmeticShiftRightByImmediate)(cpu, sht_oper);
+    case SHTOP_ASR_REG:
+        return DPO(ArithmeticShiftRightByRegister)(cpu, sht_oper);
+    case SHTOP_ROR_IMM:
+        return DPO(RotateRightByImmediate)(cpu, sht_oper);
+    case SHTOP_ROR_REG:
+        return DPO(RotateRightByRegister)(cpu, sht_oper);
+    default:
+        LOG_ERROR(eka2l1::CPU_DYNCOM, "Invalid shifter operand index {}", idx);
+        return 0;
     }
-    return nullptr;
 }
 
-unsigned int ClassifyAddressingMode(unsigned int inst) {
+unsigned int GetAddressingOp(unsigned int inst) {
     if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 0) {
         return ADDRMODE_LNSW_IMM_OFFSET;
     } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
@@ -1727,7 +752,8 @@ unsigned int ClassifyAddressingMode(unsigned int inst) {
     return ADDRMODE_INVALID;
 }
 
-unsigned int ClassifyAddressingModeLoadStoreT(unsigned int inst) {
+// Specialized for LDRT, LDRBT, STRT, and STRBT, which have specific addressing mode requirements
+unsigned int GetAddressingOpLoadStoreT(unsigned int inst) {
     if (BITS(inst, 25, 27) == 2) {
         return ADDRMODE_LNSW_IMM_POST;
     } else if (BITS(inst, 25, 27) == 3) {
@@ -1741,62 +767,116 @@ unsigned int ClassifyAddressingModeLoadStoreT(unsigned int inst) {
     return ADDRMODE_INVALID;
 }
 
-get_addr_fp_t GetAddressingOp(unsigned int inst) {
-    if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 0) {
-        return LnSWoUB(ImmediateOffset);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterOffset);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterOffset);
-    } else if (BITS(inst, 24, 27) == 5 && BIT(inst, 21) == 1) {
-        return LnSWoUB(ImmediatePreIndexed);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 7 && BIT(inst, 21) == 1 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 4 && BIT(inst, 21) == 0) {
-        return LnSWoUB(ImmediatePostIndexed);
-    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BITS(inst, 4, 11) == 0) {
-        return LnSWoUB(RegisterPostIndexed);
-    } else if (BITS(inst, 24, 27) == 6 && BIT(inst, 21) == 0 && BIT(inst, 4) == 0) {
-        return LnSWoUB(ScaledRegisterPostIndexed);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediateOffset);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterOffset);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 3 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediatePreIndexed);
-    } else if (BITS(inst, 24, 27) == 1 && BITS(inst, 21, 22) == 1 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterPreIndexed);
-    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 2 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(ImmediatePostIndexed);
-    } else if (BITS(inst, 24, 27) == 0 && BITS(inst, 21, 22) == 0 && BIT(inst, 7) == 1 && BIT(inst, 4) == 1) {
-        return MLnS(RegisterPostIndexed);
-    } else if (BITS(inst, 23, 27) == 0x11) {
-        return LdnStM(IncrementAfter);
-    } else if (BITS(inst, 23, 27) == 0x13) {
-        return LdnStM(IncrementBefore);
-    } else if (BITS(inst, 23, 27) == 0x10) {
-        return LdnStM(DecrementAfter);
-    } else if (BITS(inst, 23, 27) == 0x12) {
-        return LdnStM(DecrementBefore);
+// Same devirtualization as EvalShifterOperand, for the load/store address
+// generators.
+static void EvalGetAddr(ARMul_State *cpu, unsigned int idx, unsigned int inst, unsigned int &virt_addr) {
+    switch (idx) {
+    case ADDRMODE_LNSW_IMM_OFFSET:
+        LnSWoUB(ImmediateOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_OFFSET:
+        LnSWoUB(RegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_OFFSET:
+        LnSWoUB(ScaledRegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_IMM_PRE:
+        LnSWoUB(ImmediatePreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_PRE:
+        LnSWoUB(RegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_PRE:
+        LnSWoUB(ScaledRegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_IMM_POST:
+        LnSWoUB(ImmediatePostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_REG_POST:
+        LnSWoUB(RegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LNSW_SCALED_REG_POST:
+        LnSWoUB(ScaledRegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_OFFSET:
+        MLnS(ImmediateOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_OFFSET:
+        MLnS(RegisterOffset)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_PRE:
+        MLnS(ImmediatePreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_PRE:
+        MLnS(RegisterPreIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_IMM_POST:
+        MLnS(ImmediatePostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_MLNS_REG_POST:
+        MLnS(RegisterPostIndexed)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_INC_AFTER:
+        LdnStM(IncrementAfter)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_INC_BEFORE:
+        LdnStM(IncrementBefore)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_DEC_AFTER:
+        LdnStM(DecrementAfter)(cpu, inst, virt_addr);
+        return;
+    case ADDRMODE_LDNSTM_DEC_BEFORE:
+        LdnStM(DecrementBefore)(cpu, inst, virt_addr);
+        return;
+    default:
+        // GetAddressingOp() returned ADDRMODE_INVALID for an undefined /
+        // unpredictable encoding (e.g. post-indexed STRD with write-back).
+        // Raising undefined_inst kills the guest thread instead of letting
+        // the handler run with virt_addr=0 (or, in yeatse's function-pointer
+        // interpreter, calling through a null get_addr).
+        LOG_ERROR(eka2l1::CPU_DYNCOM, "Undefined load/store addressing mode (instruction 0x{:08X}) at 0x{:08X}",
+            inst, cpu->Reg[15]);
+        cpu->RaiseException(eka2l1::arm::exception_type_undefined_inst, cpu->Reg[15]);
+        cpu->NumInstrsToExecute = 0;
+        virt_addr = 0;
+        return;
     }
-    return nullptr;
 }
 
-// Specialized for LDRT, LDRBT, STRT, and STRBT, which have specific addressing mode requirements
-get_addr_fp_t GetAddressingOpLoadStoreT(unsigned int inst) {
-    if (BITS(inst, 25, 27) == 2) {
-        return LnSWoUB(ImmediatePostIndexed);
-    } else if (BITS(inst, 25, 27) == 3) {
-        return LnSWoUB(ScaledRegisterPostIndexed);
+// Call-site wrappers: the single dominant case of each evaluator is inlined
+// into the instruction handlers (immediate-offset addressing for loads/
+// stores, rotated-immediate operand2 for ALU ops — by far the most frequent
+// encodings in compiled Symbian code), everything else takes the out-of-line
+// switch. This removes one call per executed memory/ALU instruction on the
+// hot path without duplicating the full evaluators 20+ times.
+#ifdef _MSC_VER
+#define DYNCOM_FORCE_INLINE __forceinline
+#else
+#define DYNCOM_FORCE_INLINE __attribute__((always_inline)) inline
+#endif
+
+DYNCOM_FORCE_INLINE static unsigned int ShtOpEval(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
+    if (idx == SHTOP_IMMEDIATE) {
+        unsigned int immed_8 = BITS(sht_oper, 0, 7);
+        unsigned int rotate_imm = BITS(sht_oper, 8, 11);
+        unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
+        if (rotate_imm == 0)
+            cpu->shifter_carry_out = cpu->CFlag;
+        else
+            cpu->shifter_carry_out = BIT(shifter_operand, 31);
+        return shifter_operand;
     }
-    // Reaching this would indicate the thumb version
-    // of this instruction, however the 3DS CPU doesn't
-    // support this variant (the 3DS CPU is only ARMv6K,
-    // while this variant is added in ARMv6T2).
-    // So it's sufficient for citra to not implement this.
-    return nullptr;
+    return EvalShifterOperand(cpu, idx, sht_oper);
+}
+
+DYNCOM_FORCE_INLINE static void GetAddrEval(ARMul_State *cpu, unsigned int idx, unsigned int inst, unsigned int &virt_addr) {
+    if (idx == ADDRMODE_LNSW_IMM_OFFSET) {
+        unsigned int Rn = BITS(inst, 16, 19);
+        unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
+        virt_addr = U_BIT ? (rn + OFFSET_12) : (rn - OFFSET_12);
+        return;
+    }
+    EvalGetAddr(cpu, idx, inst, virt_addr);
 }
 
 enum { FETCH_SUCCESS,
@@ -1885,6 +965,32 @@ static unsigned int InterpreterTranslateInstruction(ARMul_State *cpu, const std:
     return inst_size;
 }
 
+// Bound the per-cpu translation cache. Without this the unordered_map grows
+// unbounded as guest code walks new PCs, and every insertion eventually
+// triggers an expensive rehash that — under WASM — pinned the browser tab at
+// 100% CPU (profile showed __emplace_unique_key_args dominating samples).
+static constexpr std::size_t INSTRUCTION_CACHE_FLUSH_THRESHOLD = 256 * 1024;
+
+#ifdef __EMSCRIPTEN__
+#include <atomic>
+// WASM diagnostic: how many new basic blocks get translated. A guest making
+// progress keeps reaching new code; a guest stuck in a loop translates none.
+std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
+#endif
+
+// Translations now survive context switches, so trans_cache_buf can fill up
+// from accumulation alone. One block is at most a page of Thumb instructions
+// (~96KB of cream); flush well before the hard end of the buffer since the
+// capacity assert in AllocBuffer is compiled out in release builds.
+static constexpr std::size_t TRANS_CACHE_FLUSH_MARGIN = 1024 * 1024;
+
+static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
+    if ((cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD)
+        || (cpu->trans_cache_buf_top >= TRANS_CACHE_SIZE - TRANS_CACHE_FLUSH_MARGIN)) {
+        cpu->invalidate_translation_cache();
+    }
+}
+
 static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     // Decode instruction, get index
     // Allocate memory and init InsCream
@@ -1893,27 +999,11 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     ARM_INST_PTR inst_base = nullptr;
     TransExtData ret = TransExtData::NON_BRANCH;
     int size = 0; // instruction size of basic block
+    maybe_flush_instruction_cache(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
     std::uint32_t pc_start = cpu->Reg[15];
-
-    // Bulk-loop acceleration pre-pass: if this Thumb block is a canonical
-    // copy/convert/fill do-while loop, prepend a synthetic instruction that
-    // batches iterations natively (see loop_accel_inst above). The block body
-    // itself is still translated normally right after it.
-    if (cpu->TFlag) {
-        loop_accel_inst accel_desc;
-        if (analyze_thumb_bulk_loop(cpu, pc_start, accel_desc)) {
-            const std::size_t alloc_size = sizeof(arm_inst) + sizeof(loop_accel_inst);
-            arm_inst *accel_base = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[cpu->trans_cache_buf_top]);
-            cpu->trans_cache_buf_top += ((alloc_size + 7) >> 3) << 3;
-            accel_base->idx = LOOP_ACCEL_IDX;
-            accel_base->cond = ConditionCode::AL;
-            accel_base->br = TransExtData::NON_BRANCH;
-            *reinterpret_cast<loop_accel_inst *>(accel_base->component) = accel_desc;
-        }
-    }
 
     while (ret == TransExtData::NON_BRANCH) {
         unsigned int inst_size = InterpreterTranslateInstruction(cpu, phys_addr, inst_base);
@@ -1929,12 +1019,17 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     };
 
     cpu->instruction_cache[cpu->make_instruction_cache_key(pc_start)] = bb_start;
+    cpu->mark_code_page(pc_start);
+#ifdef __EMSCRIPTEN__
+    eka2l1_wasm_guest_blocks_translated++;
+#endif
 
     return KEEP_GOING;
 }
 
 static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     ARM_INST_PTR inst_base = nullptr;
+    maybe_flush_instruction_cache(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
@@ -1947,6 +1042,7 @@ static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, s
     }
 
     cpu->instruction_cache[cpu->make_instruction_cache_key(pc_start)] = bb_start;
+    cpu->mark_code_page(pc_start);
 
     return KEEP_GOING;
 }
@@ -1980,6 +1076,20 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #undef RM
 #undef RS
 
+#ifdef __EMSCRIPTEN__
+    // The web build runs dyncom on the browser main thread. Some guest startup
+    // paths can stay inside this interpreter long enough to freeze the page
+    // before the outer emulator loop gets a chance to yield.
+    static constexpr std::uint64_t WASM_DYNCOM_RUN_BUDGET_US = 8000;
+    const std::uint64_t wasm_dyncom_deadline_us = eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
+        + WASM_DYNCOM_RUN_BUDGET_US;
+    bool wasm_dyncom_deadline_hit = false;
+    // Instructions executed by JIT-compiled blocks since the last wall-clock
+    // check (the interpreter's own check keys off num_instrs alignment, which
+    // jit blocks jump right past).
+    std::uint32_t jit_yield_acc = 0;
+#endif
+
 #define CRn inst_cream->crn
 #define OPCODE_1 inst_cream->opcode_1
 #define OPCODE_2 inst_cream->opcode_2
@@ -1993,59 +1103,7 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define RDLO cpu->Reg[inst_cream->RdLo]
 #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
 #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
-// Like LS_GET_ADDR, but for the data-processing shifter operand: inline the
-// dominant forms at the call site behind well-predicted pointer compares,
-// instead of the polymorphic indirect shtop_func() call. Immediate (`#imm` ->
-// rotate of imm8), plain register (`Rm`, no shift -- the dominant form in
-// Thumb-translated code) and the immediate LSL/ASR/LSR shifts are handled
-// inline; register-specified shifts and rotates fall back. A
-// statement-expression keeps it usable wherever the old macro was an
-// expression.
-#define SHIFTER_OPERAND ({                                                          \
-    const shtop_fp_t f_ = inst_cream->shtop_func;                                   \
-    const unsigned int so_ = inst_cream->shifter_operand;                           \
-    unsigned int v_;                                                                \
-    if (f_ == DataProcessingOperandsImmediate) {                                    \
-        v_ = ROTATE_RIGHT_32(BITS(so_, 0, 7), BITS(so_, 8, 11) * 2);                \
-        cpu->shifter_carry_out = (BITS(so_, 8, 11) == 0) ? cpu->CFlag : BIT(v_, 31);\
-    } else if (f_ == DataProcessingOperandsRegister) {                              \
-        v_ = CHECK_READ_REG15(cpu, BITS(so_, 0, 3));                                \
-        cpu->shifter_carry_out = cpu->CFlag;                                        \
-    } else if (f_ == DataProcessingOperandsLogicalShiftLeftByImmediate) {           \
-        const unsigned int rm_ = CHECK_READ_REG15(cpu, BITS(so_, 0, 3));            \
-        const unsigned int imm_ = BITS(so_, 7, 11);                                 \
-        if (imm_ == 0) {                                                            \
-            v_ = rm_;                                                               \
-            cpu->shifter_carry_out = cpu->CFlag;                                    \
-        } else {                                                                    \
-            v_ = rm_ << imm_;                                                       \
-            cpu->shifter_carry_out = BIT(rm_, 32 - imm_);                           \
-        }                                                                           \
-    } else if (f_ == DataProcessingOperandsArithmeticShiftRightByImmediate) {       \
-        const unsigned int rm_ = CHECK_READ_REG15(cpu, BITS(so_, 0, 3));            \
-        const unsigned int imm_ = BITS(so_, 7, 11);                                 \
-        if (imm_ == 0) {                                                            \
-            v_ = BIT(rm_, 31) ? 0xFFFFFFFF : 0;                                     \
-            cpu->shifter_carry_out = BIT(rm_, 31);                                  \
-        } else {                                                                    \
-            v_ = static_cast<unsigned int>(static_cast<int>(rm_) >> imm_);          \
-            cpu->shifter_carry_out = BIT(rm_, imm_ - 1);                            \
-        }                                                                           \
-    } else if (f_ == DataProcessingOperandsLogicalShiftRightByImmediate) {          \
-        const unsigned int rm_ = CHECK_READ_REG15(cpu, BITS(so_, 0, 3));            \
-        const unsigned int imm_ = BITS(so_, 7, 11);                                 \
-        if (imm_ == 0) {                                                            \
-            v_ = 0;                                                                 \
-            cpu->shifter_carry_out = BIT(rm_, 31);                                  \
-        } else {                                                                    \
-            v_ = rm_ >> imm_;                                                       \
-            cpu->shifter_carry_out = BIT(rm_, imm_ - 1);                            \
-        }                                                                           \
-    } else {                                                                        \
-        v_ = f_(cpu, so_);                                                          \
-    }                                                                               \
-    v_;                                                                             \
-})
+#define SHIFTER_OPERAND ShtOpEval(cpu, inst_cream->shtop_idx, inst_cream->shifter_operand)
 
 #define FETCH_INST                                 \
     if (inst_base->br != TransExtData::NON_BRANCH) \
@@ -2057,13 +1115,13 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 
 // GCC and Clang have a C++ extension to support a lookup table of labels. Otherwise, fallback to a
 // clunky switch statement.
-#if defined __GNUC__ || defined __clang__
-
 #ifdef __EMSCRIPTEN__
-// Each clock read crosses the wasm->JS boundary; check every 8192 instructions.
+// Each clock read crosses the wasm->JS boundary (system_clock -> Date.now), so
+// keep the cadence wide: every 8192 instructions bounds the deadline overshoot
+// to well under a millisecond while costing 8x less than the old 1024 stride.
 #define WASM_DYNCOM_YIELD_CHECK                                                \
-    if (((num_instrs & 8191u) == 0) &&                                         \
-        (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()    \
+    if (((num_instrs & 0x1FFF) == 0)                                            \
+        && (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()  \
             >= wasm_dyncom_deadline_us)) {                                      \
         wasm_dyncom_deadline_hit = true;                                        \
         goto END;                                                               \
@@ -2072,34 +1130,19 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define WASM_DYNCOM_YIELD_CHECK
 #endif
 
+#if defined __GNUC__ || defined __clang__
 #define GOTO_NEXT_INST                         \
-    PROF_STEP(cpu, inst_base->idx);            \
-    WASM_DYNCOM_YIELD_CHECK;                   \
     if (num_instrs >= cpu->NumInstrsToExecute) \
         goto END;                              \
     num_instrs++;                              \
+    WASM_DYNCOM_YIELD_CHECK;                   \
     goto *InstLabel[inst_base->idx]
 #else
-
-#ifdef __EMSCRIPTEN__
-// Each clock read crosses the wasm->JS boundary; check every 8192 instructions.
-#define WASM_DYNCOM_YIELD_CHECK                                                \
-    if (((num_instrs & 8191u) == 0) &&                                         \
-        (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()    \
-            >= wasm_dyncom_deadline_us)) {                                      \
-        wasm_dyncom_deadline_hit = true;                                        \
-        goto END;                                                               \
-    }
-#else
-#define WASM_DYNCOM_YIELD_CHECK
-#endif
-
 #define GOTO_NEXT_INST                         \
-    PROF_STEP(cpu, inst_base->idx);            \
-    WASM_DYNCOM_YIELD_CHECK;                   \
     if (num_instrs >= cpu->NumInstrsToExecute) \
         goto END;                              \
     num_instrs++;                              \
+    WASM_DYNCOM_YIELD_CHECK;                   \
     switch (inst_base->idx) {                  \
     case 0:                                    \
         goto VMLA_INST;                        \
@@ -2511,8 +1554,6 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
         goto INIT_INST_LENGTH;                 \
     case 204:                                  \
         goto END;                              \
-    case 205:                                  \
-        goto LOOP_ACCEL_INST;                  \
     }
 #endif
 
@@ -2739,28 +1780,15 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
         &&BLX_1_THUMB,
         &&DISPATCH,
         &&INIT_INST_LENGTH,
-        &&END,
-        &&LOOP_ACCEL_INST };
+        &&END };
 #endif
     arm_inst *inst_base;
     unsigned int addr;
-    unsigned int undef_inst = 0;
-
-#ifdef __EMSCRIPTEN__
-    // The web build runs dyncom on the browser main thread. Cap wall-clock time
-    // per run so the outer emulator loop can yield to the browser.
-    static constexpr std::uint64_t WASM_DYNCOM_RUN_BUDGET_US = 8000;
-    const std::uint64_t wasm_dyncom_deadline_us = eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
-        + WASM_DYNCOM_RUN_BUDGET_US;
-    bool wasm_dyncom_deadline_hit = false;
-    std::uint32_t jit_yield_acc = 0;
-#endif
 
     std::size_t ptr;
 
     LOAD_NZCVT;
 DISPATCH : {
-    PROF_BLOCK_ENTER(cpu);
     if (!cpu->NirqSig) {
         if (!(cpu->Cpsr & 0x80)) {
             goto END;
@@ -2772,115 +1800,91 @@ DISPATCH : {
     else
         cpu->Reg[15] &= 0xfffffffc;
 
-    // Find the cached instruction cream, otherwise translate it...
-    const std::uint64_t block_key = cpu->make_instruction_cache_key(cpu->Reg[15]);
-    ARMul_State::block_l1_entry &l1 = cpu->block_l1_cache[ARMul_State::block_l1_index(block_key)];
-    if (l1.key == block_key) {
-        // Fast path: hot blocks skip the unordered_map entirely.
-        ptr = l1.ptr;
-    } else {
-        auto itr = cpu->instruction_cache.find(block_key);
-        if (itr != cpu->instruction_cache.end()) {
-            ptr = itr->second;
-        } else {
-            // The translation buffer is a bump allocator that is no longer reset
-            // on every context switch (blocks are kept across processes via the
-            // asid tag). Flush everything if a fresh block could run past the
-            // buffer end. TRANS_CACHE_FLUSH_RESERVE comfortably exceeds the
-            // largest possible single basic block (capped at one page).
-            constexpr std::size_t TRANS_CACHE_FLUSH_RESERVE = 2 * 1024 * 1024;
-            if (cpu->trans_cache_buf_top + TRANS_CACHE_FLUSH_RESERVE > TRANS_CACHE_SIZE) {
-                cpu->instruction_cache.clear();
-                cpu->trans_cache_buf_top = 0;
-                cpu->flush_block_l1_cache();
+    // Consume off-thread invalidation requests (timer-thread unmaps of code
+    // pages) here, between blocks, where dropping the buffer is safe.
+    if (cpu->icache_invalidate_pending.load(std::memory_order_relaxed)) {
+        if (cpu->icache_invalidate_pending.exchange(false, std::memory_order_acq_rel)) {
+            cpu->invalidate_translation_cache();
 #ifdef __EMSCRIPTEN__
-                cpu->clear_jit_blocks();
+            cpu->clear_jit_blocks();
 #endif
-            }
+        }
+    }
 
-            if (cpu->NumInstrsToExecute != 1) {
-                if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+    // Find the cached instruction cream, otherwise translate it...
+    {
+        const std::uint32_t dispatch_pc = cpu->Reg[15];
+        const std::uint32_t dispatch_asid = cpu->instruction_cache_asid;
+        ARMul_State::block_lookup_entry &bl_entry = cpu->block_lookup_ref(dispatch_pc);
+
+        if ((bl_entry.pc == dispatch_pc) && (bl_entry.asid == dispatch_asid)
+            && (bl_entry.generation == cpu->block_lookup_generation)) {
+            ptr = bl_entry.ptr;
+        } else {
+            const std::uint64_t cache_key = cpu->make_instruction_cache_key(dispatch_pc);
+            auto itr = cpu->instruction_cache.find(cache_key);
+            if (itr != cpu->instruction_cache.end()) {
+                ptr = itr->second;
+            } else if (cpu->NumInstrsToExecute != 1) {
+                if (InterpreterTranslateBlock(cpu, ptr, dispatch_pc) == FETCH_EXCEPTION)
                     goto END;
             } else {
-                if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+                if (InterpreterTranslateSingle(cpu, ptr, dispatch_pc) == FETCH_EXCEPTION)
                     goto END;
             }
+
+            bl_entry.pc = dispatch_pc;
+            bl_entry.asid = dispatch_asid;
+            bl_entry.generation = cpu->block_lookup_generation;
+            bl_entry.ptr = ptr;
+            bl_entry.jit_count = 0;
+            bl_entry.jit_idx = 0;
 #ifdef __EMSCRIPTEN__
-            eka2l1_wasm_guest_blocks_translated++;
+            if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
+                auto jit_it = cpu->jit_block_map.find(cache_key);
+                if (jit_it != cpu->jit_block_map.end()) {
+                    bl_entry.jit_idx = jit_it->second;
+                }
+            }
 #endif
         }
 
-        // Re-index: a flush above may have moved the slot; refill from the live
-        // key so the next visit hits. (l1 reference is still valid -- the cache
-        // is a fixed array -- but recompute defensively after a possible flush.)
-        ARMul_State::block_l1_entry &slot = cpu->block_l1_cache[ARMul_State::block_l1_index(block_key)];
-        slot.key = block_key;
-        slot.ptr = ptr;
+#ifdef __EMSCRIPTEN__
+        if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
+            if (bl_entry.jit_idx > 0) {
+                cpu->jit_chain_depth = 0; // defensive: chain calls keep it balanced
+                const int executed = eka2l1::arm::dyncom_jit::call(bl_entry.jit_idx, cpu);
+                if (executed > 0) {
+                    eka2l1::arm::dyncom_jit::stat_jit_instrs += static_cast<std::uint32_t>(executed);
+                    num_instrs += static_cast<std::uint32_t>(executed);
+                    if (num_instrs >= cpu->NumInstrsToExecute)
+                        goto END;
+                    jit_yield_acc += static_cast<std::uint32_t>(executed);
+                    if (jit_yield_acc >= 0x2000) {
+                        jit_yield_acc = 0;
+                        if (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
+                            >= wasm_dyncom_deadline_us) {
+                            wasm_dyncom_deadline_hit = true;
+                            goto END;
+                        }
+                    }
+                    goto DISPATCH;
+                }
+                // executed == 0: the block bailed on its first instruction
+                // (e.g. TLB miss). Fall through to the interpreter for this
+                // run so the slow path can make progress.
+            } else if (bl_entry.jit_idx == 0) {
+                if (++bl_entry.jit_count >= 32) {
+                    const std::int32_t verdict = eka2l1::arm::dyncom_jit::try_compile(cpu, dispatch_pc, ptr);
+                    bl_entry.jit_idx = verdict;
+                    cpu->jit_block_map[cpu->make_instruction_cache_key(dispatch_pc)] = verdict;
+                }
+            }
+        }
+#endif
     }
 
     inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr];
-
-#ifdef __EMSCRIPTEN__
-    if (eka2l1::arm::dyncom_jit::enabled_default != 0) {
-        const std::uint32_t dispatch_pc = cpu->Reg[15];
-        const std::uint64_t cache_key = cpu->make_instruction_cache_key(dispatch_pc);
-        auto jit_it = cpu->jit_block_map.find(cache_key);
-        std::int32_t jit_idx = (jit_it != cpu->jit_block_map.end()) ? jit_it->second : 0;
-        if (jit_idx == 0) {
-            // Try compile once; negative verdicts stick.
-            const std::int32_t verdict = eka2l1::arm::dyncom_jit::try_compile(cpu, dispatch_pc, ptr);
-            cpu->jit_block_map[cache_key] = verdict;
-            jit_idx = verdict;
-        }
-        if (jit_idx > 0) {
-            cpu->jit_chain_depth = 0;
-            const int executed = eka2l1::arm::dyncom_jit::call(jit_idx, cpu);
-            if (executed > 0) {
-                num_instrs += static_cast<std::uint32_t>(executed);
-                jit_yield_acc += static_cast<std::uint32_t>(executed);
-                if (jit_yield_acc >= 8192u) {
-                    jit_yield_acc = 0;
-                    if (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch()
-                            >= wasm_dyncom_deadline_us) {
-                        wasm_dyncom_deadline_hit = true;
-                        goto END;
-                    }
-                }
-                if (num_instrs >= cpu->NumInstrsToExecute)
-                    goto END;
-                goto DISPATCH;
-            }
-        }
-    }
-#endif
-
-    GOTO_NEXT_INST;
-}
-LOOP_ACCEL_INST : {
-    loop_accel_inst *const inst_cream = (loop_accel_inst *)inst_base->component;
-    const std::uint32_t iter_left = cpu->Reg[inst_cream->counter_reg];
-    if (iter_left > 1) {
-        // Bulk at most iter_left-1 iterations: the last one always runs
-        // interpreted so flags, scratch registers and the loop exit come from
-        // real interpretation. Cap by the remaining quantum so blocking /
-        // reschedule behaviour keeps its granularity.
-        const std::uint64_t quantum_rem = (cpu->NumInstrsToExecute > num_instrs)
-            ? (cpu->NumInstrsToExecute - num_instrs)
-            : 0;
-        const std::uint64_t cap = quantum_rem / inst_cream->body_len + 1;
-        const std::uint32_t want = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(cap, iter_left - 1));
-        if (want) {
-            const std::uint32_t done = run_accel_bulk(cpu, inst_cream, want);
-            if (done) {
-                for (int i = 0; i < inst_cream->ind_count; i++)
-                    cpu->Reg[inst_cream->ind[i].reg] += static_cast<std::uint32_t>(inst_cream->ind[i].delta) * done;
-                num_instrs += static_cast<std::uint64_t>(done) * inst_cream->body_len;
-            }
-        }
-    }
-    INC_PC(sizeof(loop_accel_inst));
-    FETCH_INST;
     GOTO_NEXT_INST;
 }
 ADC_INST : {
@@ -2923,11 +1927,8 @@ ADD_INST : {
         std::uint32_t rn_val = 0;
 
         // The ADR thumb instruction got disguised, under ADD. However unlike the other,
-        // it uses aligned PC. So have to check -- but the distinction only matters when
-        // Rn is the PC, so ordinary registers skip the per-execution code re-read.
-        if (inst_cream->Rn != 15) {
-            rn_val = cpu->Reg[inst_cream->Rn];
-        } else if (cpu->TFlag) {
+        // it uses aligned PC. So have to check
+        if (cpu->TFlag) {
             std::uint32_t inst = cpu->ReadCode(cpu->Reg[15] & 0xFFFFFFFC);
             inst = GetThumbInstruction(inst, cpu->Reg[15]);
 
@@ -3051,17 +2052,9 @@ BKPT_INST : {
         LOG_DEBUG(eka2l1::CPU_DYNCOM, "Breakpoint instruction hit. Immediate: {:#010X}", inst_cream->imm);
 
         // Call the handler
-        SAVE_NZCVT;
         cpu->RaiseException(eka2l1::arm::exception_type_breakpoint, cpu->Reg[15]);
 
         LOAD_NZCVT;
-
-        // A debugger or scripting hook may stop the core so it can restore and
-        // single-step the displaced instruction. In that case the breakpoint
-        // itself must not advance PC first.
-        if (cpu->NumInstrsToExecute == 0) {
-            goto END;
-        }
 
         if (cpu->Reg[15] != pc) {
             goto DISPATCH;
@@ -3291,40 +2284,40 @@ LDC_INST : {
 LDM_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
-        // The register list maps to contiguous, ascending addresses -- resolve the
-        // host page once and reuse it for the whole run (see block_cursor).
-        ARMul_State::block_cursor ldm_cur;
+        // Per-instruction block cursor: the register list walks one contiguous
+        // run, so resolve the host page once instead of per word.
+        ARMul_State::mem_block_cursor mcur;
 
         unsigned int inst = inst_cream->inst;
         if (BIT(inst, 22) && !BIT(inst, 15)) {
             for (int i = 0; i < 13; i++) {
                 if (BIT(inst, i)) {
-                    cpu->Reg[i] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg[i] = cpu->ReadMemory32Block(mcur, addr);
                     addr += 4;
                 }
             }
             if (BIT(inst, 13)) {
                 if (cpu->Mode == USER32MODE)
-                    cpu->Reg[13] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg[13] = cpu->ReadMemory32Block(mcur, addr);
                 else
-                    cpu->Reg_usr[0] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg_usr[0] = cpu->ReadMemory32Block(mcur, addr);
 
                 addr += 4;
             }
             if (BIT(inst, 14)) {
                 if (cpu->Mode == USER32MODE)
-                    cpu->Reg[14] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg[14] = cpu->ReadMemory32Block(mcur, addr);
                 else
-                    cpu->Reg_usr[1] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg_usr[1] = cpu->ReadMemory32Block(mcur, addr);
 
                 addr += 4;
             }
         } else if (!BIT(inst, 22)) {
             for (int i = 0; i < 16; i++) {
                 if (BIT(inst, i)) {
-                    unsigned int ret = cpu->ReadMemory32Block(addr, ldm_cur);
+                    unsigned int ret = cpu->ReadMemory32Block(mcur, addr);
 
                     // For armv5t, should enter thumb when bits[0] is non-zero.
                     if (i == 15) {
@@ -3339,7 +2332,7 @@ LDM_INST : {
         } else if (BIT(inst, 22) && BIT(inst, 15)) {
             for (int i = 0; i < 15; i++) {
                 if (BIT(inst, i)) {
-                    cpu->Reg[i] = cpu->ReadMemory32Block(addr, ldm_cur);
+                    cpu->Reg[i] = cpu->ReadMemory32Block(mcur, addr);
                     addr += 4;
                 }
             }
@@ -3350,7 +2343,7 @@ LDM_INST : {
                 LOAD_NZCVT;
             }
 
-            cpu->Reg[15] = cpu->ReadMemory32Block(addr, ldm_cur);
+            cpu->Reg[15] = cpu->ReadMemory32Block(mcur, addr);
         }
 
         if (BIT(inst, 15)) {
@@ -3382,7 +2375,7 @@ SXTH_INST : {
 }
 LDR_INST : {
     ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-    LS_GET_ADDR(addr);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
     unsigned int value = cpu->ReadMemory32(addr);
     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -3403,7 +2396,7 @@ LDR_INST : {
 LDRCOND_INST : {
     if (CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory32(addr);
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -3446,7 +2439,7 @@ UXTAH_INST : {
 LDRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
     }
@@ -3458,7 +2451,7 @@ LDRB_INST : {
 LDRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -3479,7 +2472,7 @@ LDRD_INST : {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
         // addr[2] == 0)
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
         // wouldn't do this as a single read.
@@ -3550,7 +2543,7 @@ LDREXD_INST : {
 LDRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
     }
@@ -3562,7 +2555,7 @@ LDRH_INST : {
 LDRSB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->ReadMemory8(addr);
         if (BIT(value, 7)) {
             value |= 0xffffff00;
@@ -3577,7 +2570,7 @@ LDRSB_INST : {
 LDRSH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->ReadMemory16(addr);
         if (BIT(value, 15)) {
@@ -3593,7 +2586,7 @@ LDRSH_INST : {
 LDRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -4067,7 +3060,7 @@ RFE_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    inst_cream->get_addr(cpu, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->Cpsr = cpu->ReadMemory32(address);
     cpu->Reg[15] = cpu->ReadMemory32(address + 4);
@@ -4728,7 +3721,7 @@ SRS_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    inst_cream->get_addr(cpu, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
 
     cpu->WriteMemory32(address + 0, cpu->Reg[14]);
     cpu->WriteMemory32(address + 4, cpu->Spsr_copy);
@@ -4807,44 +3800,45 @@ STM_INST : {
         unsigned int Rn = BITS(inst, 16, 19);
         unsigned int old_RN = cpu->Reg[Rn];
 
-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
-        // Contiguous, ascending stores -- resolve the host page once (see block_cursor).
-        ARMul_State::block_cursor stm_cur;
+        // Per-instruction block cursor: the register list walks one contiguous
+        // run, so resolve the host page once instead of per word.
+        ARMul_State::mem_block_cursor mcur;
 
         if (BIT(inst_cream->inst, 22) == 1) {
             for (int i = 0; i < 13; i++) {
                 if (BIT(inst_cream->inst, i)) {
-                    cpu->WriteMemory32Block(addr, cpu->Reg[i], stm_cur);
+                    cpu->WriteMemory32Block(mcur, addr, cpu->Reg[i]);
                     addr += 4;
                 }
             }
             if (BIT(inst_cream->inst, 13)) {
                 if (cpu->Mode == USER32MODE)
-                    cpu->WriteMemory32Block(addr, cpu->Reg[13], stm_cur);
+                    cpu->WriteMemory32Block(mcur, addr, cpu->Reg[13]);
                 else
-                    cpu->WriteMemory32Block(addr, cpu->Reg_usr[0], stm_cur);
+                    cpu->WriteMemory32Block(mcur, addr, cpu->Reg_usr[0]);
 
                 addr += 4;
             }
             if (BIT(inst_cream->inst, 14)) {
                 if (cpu->Mode == USER32MODE)
-                    cpu->WriteMemory32Block(addr, cpu->Reg[14], stm_cur);
+                    cpu->WriteMemory32Block(mcur, addr, cpu->Reg[14]);
                 else
-                    cpu->WriteMemory32Block(addr, cpu->Reg_usr[1], stm_cur);
+                    cpu->WriteMemory32Block(mcur, addr, cpu->Reg_usr[1]);
 
                 addr += 4;
             }
             if (BIT(inst_cream->inst, 15)) {
-                cpu->WriteMemory32Block(addr, cpu->Reg[15] + 8, stm_cur);
+                cpu->WriteMemory32Block(mcur, addr, cpu->Reg[15] + 8);
             }
         } else {
             for (unsigned int i = 0; i < 15; i++) {
                 if (BIT(inst_cream->inst, i)) {
                     if (i == Rn)
-                        cpu->WriteMemory32Block(addr, old_RN, stm_cur);
+                        cpu->WriteMemory32Block(mcur, addr, old_RN);
                     else
-                        cpu->WriteMemory32Block(addr, cpu->Reg[i], stm_cur);
+                        cpu->WriteMemory32Block(mcur, addr, cpu->Reg[i]);
 
                     addr += 4;
                 }
@@ -4852,7 +3846,7 @@ STM_INST : {
 
             // Check PC reg
             if (BIT(inst_cream->inst, 15)) {
-                cpu->WriteMemory32Block(addr, cpu->Reg[15] + 8, stm_cur);
+                cpu->WriteMemory32Block(mcur, addr, cpu->Reg[15] + 8);
             }
         }
     }
@@ -4881,7 +3875,7 @@ SXTB_INST : {
 STR_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int reg = BITS(inst_cream->inst, 12, 15);
         unsigned int value = cpu->Reg[reg];
@@ -4921,7 +3915,7 @@ UXTAB_INST : {
 STRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
         cpu->WriteMemory8(addr, value);
     }
@@ -4933,7 +3927,7 @@ STRB_INST : {
 STRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
@@ -4950,7 +3944,7 @@ STRBT_INST : {
 STRD_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
         // so STRD wouldn't store these as a single write.
@@ -5022,7 +4016,7 @@ STREXH_INST : {
 STRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        MLS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
         cpu->WriteMemory16(addr, value);
@@ -5035,7 +4029,7 @@ STRH_INST : {
 STRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        LS_GET_ADDR(addr);
+        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t rt_index = BITS(inst_cream->inst, 12, 15);
@@ -5802,24 +4796,12 @@ YIELD_INST : {
 #include <cpu/dyncom/vfp/vfpinstr.h>
 #undef VFP_INTERPRETER_IMPL
 
-UNDEFINED_ADDRESSING_MODE : {
-    // GetAddressingOp() has no entry for this encoding, so the translator stored
-    // a null addressing function. That means the guest is running an undefined
-    // or unpredictable load/store form (data executed as code, for instance).
-    // Report it as an undefined instruction: calling through the null pointer
-    // would take the host process down instead of the offending guest thread.
-    LOG_ERROR(eka2l1::CPU_DYNCOM, "Undefined load/store addressing mode (instruction 0x{:08X}) at 0x{:08X}",
-        undef_inst, cpu->Reg[15]);
 
-    SAVE_NZCVT;
-    cpu->RaiseException(eka2l1::arm::exception_type_undefined_inst, cpu->Reg[15]);
-    cpu->NumInstrsToExecute = 0;
-
-    return num_instrs;
-}
 END : {
 #ifdef __EMSCRIPTEN__
     if (wasm_dyncom_deadline_hit) {
+        // WARN so it survives the WASM warn-level filter; rate-limit so we
+        // don't flood the console if the watchdog fires every slice.
         static std::uint64_t s_yield_count = 0;
         static std::uint64_t s_next_log = 1;
         if (++s_yield_count >= s_next_log) {
@@ -5829,7 +4811,6 @@ END : {
         }
     }
 #endif
-
     SAVE_NZCVT;
     cpu->NumInstrsToExecute = 0;
     return num_instrs;

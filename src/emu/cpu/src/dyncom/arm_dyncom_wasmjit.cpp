@@ -24,12 +24,14 @@
 #include <cpu/dyncom/arm_dyncom_jit.h>
 
 #include <common/log.h>
+#include <cpu/dyncom/arm_dyncom_thumb.h>
 #include <cpu/dyncom/arm_dyncom_trans.h>
 #include <cpu/dyncom/armstate.h>
 
 #include <emscripten/em_js.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -50,10 +52,19 @@ EM_JS(int, dyncom_wasmjit_install, (const unsigned char *bytes, int len, int reu
             __indirect_function_table: wasmTable
         } });
         var idx = (reuse_idx >= 0) ? reuse_idx : wasmTable.grow(1);
+        // Table index 0 is reserved by jit_block_map encoding (>0 = compiled).
+        if (idx === 0 && reuse_idx < 0) {
+            idx = wasmTable.grow(1);
+        }
+        if (idx <= 0) return -1;
         wasmTable.set(idx, inst.exports.f);
         return idx;
     } catch (e) {
-        console.warn('[dyncom-jit] compile failed:', e);
+        if (!Module._ekaJitFailLogged) Module._ekaJitFailLogged = 0;
+        if (Module._ekaJitFailLogged < 8) {
+            Module._ekaJitFailLogged++;
+            console.warn('[dyncom-jit] compile failed:', e);
+        }
         return -1;
     }
 });
@@ -61,7 +72,10 @@ EM_JS(int, dyncom_wasmjit_install, (const unsigned char *bytes, int len, int reu
 namespace eka2l1::arm::dyncom_jit {
 
     int enabled_default = 1;
-    int compile_limit = 0x7FFFFFFF; // bisect aid: stop compiling after N blocks
+    // Soft ceiling only as a last-resort OOM brake. Cream flushes no longer
+    // drop compiled modules, so this rarely binds; keep it high so hot game
+    // code is not left on the interpreter.
+    int compile_limit = 0x7FFFFFFF;
     std::uint32_t stat_compiled = 0;
     std::uint32_t stat_rejected = 0;
     std::uint64_t stat_jit_instrs = 0;
@@ -267,7 +281,8 @@ namespace eka2l1::arm::dyncom_jit {
     namespace {
 
         constexpr unsigned JIT_MAX_INSTS = 200;
-        constexpr unsigned JIT_MIN_PREFIX = 4;
+        // 2-instruction prefixes still pay off for tight Thumb loops.
+        constexpr unsigned JIT_MIN_PREFIX = 2;
         constexpr std::uint32_t JIT_LOOP_INSTR_CAP = 4096;
         constexpr std::uint32_t JIT_CHAIN_DEPTH_CAP = 8;
 
@@ -648,9 +663,8 @@ namespace eka2l1::arm::dyncom_jit {
         };
 
         bool block_compiler::emit_alu(const inst_class &cls, arm_inst *base) {
-            // All ALU creams share the leading layout {I, S, [Rn, Rd,]
-            // shifter_operand, shtop_idx}; use the widest and pick fields per
-            // kind.
+            // All ALU creams share {I, S, [Rn, Rd,] shifter_operand, shtop_idx};
+            // use typed member access (not a shared offsetof layout).
             unsigned S = 0, Rn = 0, Rd = 0;
             std::uint32_t sht = 0, shtop = 0;
 
@@ -717,11 +731,25 @@ namespace eka2l1::arm::dyncom_jit {
 
             const bool has_rn = !(cls.alu == alu_kind::MOV || cls.alu == alu_kind::MVN);
             if (has_rn) {
-                emit_reg_read_dp(Rn);
-                if (Rn == 15) {
-                    // emit_reg_read_dp already applied (+2*size) with the DP
-                    // rule; the handlers use plain Reg[15] + 2*size which is
-                    // identical here because block PCs are aligned.
+                // ADD with Rn=PC mirrors ADD_INST: ARM always uses the
+                // word-aligned PC rule; Thumb ADR (opcode 10100b) does too,
+                // while other Thumb ADD PC forms keep the DP (+4) rule.
+                // Using DP for ADR when PC is halfword-aligned skews the
+                // literal base by 2 and breaks CDL/layout table lookups.
+                if (cls.alu == alu_kind::ADD && Rn == 15) {
+                    bool use_wa = (inst_size_ != 2);
+                    if (inst_size_ == 2) {
+                        const std::uint32_t word = cpu_->ReadCode(pc_ & ~3u);
+                        const std::uint32_t tinst = GetThumbInstruction(word, pc_);
+                        use_wa = (((tinst & 0xF800) >> 11) == 20);
+                    }
+                    if (use_wa) {
+                        emit_reg_read_wa(15);
+                    } else {
+                        emit_reg_read_dp(15);
+                    }
+                } else {
+                    emit_reg_read_dp(Rn);
                 }
                 w_.local_set(L_T0);
             }
@@ -1424,6 +1452,8 @@ namespace eka2l1::arm::dyncom_jit {
                 s.u8(0x02); // memory import
                 s.u8(0x03); // limits: min+max, shared
                 s.uleb(0);
+                // import.max must be >= the main module's maximum (1GiB =
+                // 16384 pages). Keep headroom for future MAXIMUM_MEMORY bumps.
                 s.uleb(65536);
                 s.uleb(3); s.b.insert(s.b.end(), { 'e', 'n', 'v' });
                 s.uleb(sizeof(TBL_NAME) - 1);
@@ -1483,27 +1513,14 @@ namespace eka2l1::arm::dyncom_jit {
             }
 
             stat_compiled++;
-            if (stat_compiled <= 64 || (stat_compiled & 1023) == 1) {
-                char idxs[160];
-                int w = 0;
-                for (unsigned k = 0; k < idx_trace_len_ && w < 140; k++) {
-                    w += std::snprintf(idxs + w, sizeof(idxs) - w, "%u,", idx_trace_[k]);
-                }
-                std::printf("[jit] block #%u pc=0x%08X insts=%u thumb=%d idx=[%s]\n",
-                    stat_compiled, pc_start_, count_, (inst_size_ == 2) ? 1 : 0, idxs);
-            }
-            // Bisect aid: dump the last allowed module so it can be replayed
-            // offline (node) against a reference implementation.
+            // Stay quiet by default: per-block printf through the JS console
+            // saturates DevTools and stalls the page during boot. Enable with
+            // ?jitlimit=N together with a debug build if bisecting.
+            (void)idx_trace_;
+            (void)idx_trace_len_;
             if (static_cast<int>(stat_compiled) == compile_limit) {
-                std::printf("[jit] offsets Reg=%u N=%u Z=%u C=%u V=%u TF=%u\n",
-                    (unsigned)offsetof(ARMul_State, Reg), (unsigned)offsetof(ARMul_State, NFlag),
-                    (unsigned)offsetof(ARMul_State, ZFlag), (unsigned)offsetof(ARMul_State, CFlag),
-                    (unsigned)offsetof(ARMul_State, VFlag), (unsigned)offsetof(ARMul_State, TFlag));
-                std::printf("[jit] module #%u hex=", stat_compiled);
-                for (std::uint8_t byte : m.b) {
-                    std::printf("%02x", byte);
-                }
-                std::printf("\n");
+                std::printf("[jit] compile cap reached (%d); further blocks stay interpreted\n",
+                    compile_limit);
             }
             return idx;
         }
@@ -1519,6 +1536,17 @@ namespace eka2l1::arm::dyncom_jit {
         }
         block_compiler c(cpu, pc);
         return c.compile(trans_ptr);
+    }
+
+    int call(std::int32_t table_idx, ARMul_State *cpu) {
+        if (table_idx <= 0) {
+            return 0;
+        }
+        // Emscripten function pointers ARE table indices: a direct C call
+        // emits one call_indirect. Do NOT route through EM_JS — crossing into
+        // JS on every hot block kills 15→12-class FPS regressions.
+        using jit_fn_t = int (*)(ARMul_State *);
+        return (reinterpret_cast<jit_fn_t>(static_cast<std::uintptr_t>(table_idx)))(cpu);
     }
 }
 
