@@ -221,12 +221,6 @@ namespace eka2l1 {
 
             int sleep_level;
 
-            // Wakes that look like a stray: a direct User::WaitForAnyRequest served with no ready
-            // active object. Diagnostic only - the signal is handed to the guest. The wait-stub
-            // identification behind it is heuristic, so a non-zero count is a hint that some HLE
-            // path over-signalled this thread, not proof.
-            std::uint32_t stray_signal_count;
-
             entity_exit_type exit_type;
             std::u16string exit_category;
 

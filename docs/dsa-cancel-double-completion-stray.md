@@ -79,19 +79,18 @@ Ordinals are stable across Symbian releases, so a Belle SDK `.dso` resolves an S
 - `dsa::abort()` (server-initiated: screen mode change, another DSA taking over, window gone)
   and the destructor pass `true` — there the client has a genuinely outstanding request.
 
-`thread::wait_for_any_request()`'s stray-signal absorber is removed in the same change. It
-no longer swallows anything; it only counts and logs (`Possible stray request signal #N on
-thread ...`, at warn level so the default iOS log filter shows it). The
-`stray_absorbed_refund_` budget it needed to undo its own wrong guesses goes with it — the
-budget can only ever hold what the absorber took.
-
-The counter is a hint, not a verdict: telling `User::WaitForAnyRequest` apart from the
-`User::WaitForRequest` wrapper relies on r0 at a shared exec stub, and the wrapper's loop can
-land on that branch while behaving perfectly. N-Gage Tetris, for instance, logs ~10 of these
-per session and plays fine.
+`thread::wait_for_any_request()`'s stray-signal absorber goes away with it, along with the
+`stray_absorbed_refund_` budget that existed only to undo the absorber's own wrong guesses.
+No diagnostic counter is left behind either: whether a wait is a direct
+`User::WaitForAnyRequest` or an iteration of the `User::WaitForRequest` wrapper is decided
+from r0 at a shared exec stub, so any "stray" tally built on it fires on perfectly healthy
+guests (N-Gage Tetris produced ~10 per session while playing fine) and would send the next
+investigation down a false trail.
 
 The mirror-image shortcut — a direct `WaitForAnyRequest` that finds an empty semaphore but a
 ready active object returns without consuming, because the signal went missing — is kept.
+With the absorber gone, `wait_for_any_request()` is straight-line code again: identify the
+stub, take that one shortcut, wait.
 
 ## Why the 5320 ROM never needed any of this
 

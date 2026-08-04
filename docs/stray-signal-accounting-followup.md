@@ -2,9 +2,11 @@
 
 > 状态：🟢 **根因已找到并修复（2026-08-03）**，见
 > [`dsa-cancel-double-completion-stray.md`](./dsa-cancel-double-completion-stray.md)。
-> **吸收机制已下线**：`thread::wait_for_any_request()` 不再吞信号，只计数 + `LOG_WARN`
-> 诊断（配套的 `stray_absorbed_refund_` 补偿预算一并删除）。Snakes / FBattle / Calculator /
-> Angry Birds / N-Gage Tetris 实测均正常。
+> **吸收机制已完全下线**：`thread::wait_for_any_request()` 不再吞信号，配套的
+> `stray_absorbed_refund_` 补偿预算一并删除；也没有留计数器/诊断日志——判别 direct
+> `WaitForAnyRequest` 与 `WaitForRequest` wrapper 靠的是共享 exec stub 上的 r0，据此统计
+> 出来的 "stray" 在健康 title 上照样会报（N-Gage Tetris 一局 ~10 次），留着只会误导排查。
+> Snakes / FBattle / Calculator / Angry Birds / N-Gage Tetris 实测均正常。
 >
 > **一句话结论**：多出来的那一个信号是 **DSA 取消被完成了两次**——`RDirectScreenAccess::
 > Cancel()` 是客户端自完成的请求（ws32 的 `CDirectScreenAccess::DoCancel()` 紧接着调
