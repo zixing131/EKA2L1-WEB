@@ -29,6 +29,8 @@
 #include <common/types.h>
 #include <common/platform.h>
 
+#include <cwctype>
+
 #include <config/config.h>
 #include <vfs/vfs.h>
 
@@ -424,10 +426,21 @@ namespace eka2l1 {
                 const loader::sis_file_des *file_des = reinterpret_cast<loader::sis_file_des *>(ctrl->install_block.files.fields[i].get());
                 std::u16string file_path = file_des->target.unicode_string;
 
-                if (file_path[0] == '!') {
+                if (!file_path.empty() && (file_path[0] == '!')) {
                     file_path[0] = drive_to_char16(drive);
-                } else {
-                    parent.drives |= 1 << (char16_to_drive(file_path[0]) - drive_a);
+                } else if (!file_path.empty()) {
+                    // Some packages carry entries whose target does not start
+                    // with a drive letter (e.g. empty targets on FILENULL/
+                    // FILETEXT records); feeding those to char16_to_drive
+                    // asserts on debug builds and corrupts the drive mask on
+                    // release ones, so only accept real drive letters.
+                    const char16_t drive_char = std::towlower(file_path[0]);
+                    if ((drive_char >= u'a') && (drive_char <= u'z')) {
+                        parent.drives |= 1 << (char16_to_drive(file_path[0]) - drive_a);
+                    } else {
+                        LOG_WARN(PACKAGE, "File target does not start with a drive letter, ignoring for drive mask: {}",
+                            common::ucs2_to_utf8(file_path));
+                    }
                 }
 
                 // If we are really going to install this
