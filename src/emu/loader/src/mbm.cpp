@@ -112,6 +112,16 @@ namespace eka2l1::loader {
             }
         } else {
             for (const std::size_t i : index_to_loads) {
+                // A client may request a bitmap index that doesn't exist in this MBM
+                // (e.g. BIA3D.mbm only has 2 bitmaps but the game asks for index 2).
+                // Skip gracefully instead of indexing the headers out of bounds; the
+                // caller validates the result with is_header_loaded() and reports
+                // not-found. Without this guard the OOB access is silent UB on most
+                // platforms but aborts under the hardened libc++ used on iOS.
+                if (i >= trailer.sbm_offsets.size()) {
+                    continue;
+                }
+
                 if (!do_load_header(i))
                     return false;
 
