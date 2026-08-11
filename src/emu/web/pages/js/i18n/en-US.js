@@ -132,6 +132,7 @@
 
         // ---- Action sheets -------------------------------------------
         'sheet.installSis': 'Install SIS package (.sis / .sisx)',
+        'sheet.installJar': 'Install Java ME app (MIDP 2.0 .jar)',
         'sheet.installDevice': 'Install device firmware (ROM + RPKG)',
         'sheet.installDevice.title': 'Install device firmware',
         'sheet.installDevice.desc': 'Choose a ROM file (.rom). S60 3rd Edition / Symbian^3 devices (N73, N95, 5800, N8, etc.) also need a matching RPKG file; older (EKA1) devices only need the ROM.',
@@ -175,6 +176,7 @@
         'error.installFailed': 'Install failed: {reason}',
         'error.deviceInstallFailed': 'Device firmware installation failed:\n{msg}',
         'error.sisInstallFailed': 'SIS installation failed:\n{msg}',
+        'error.jarInstallFailed': 'Java ME installation failed:\n{msg}',
         'error.installFailedCode': 'Install failed (code {code})',
         'error.quotaInsufficient': 'Not enough browser storage: need about {need}MB (including write headroom), only {free}MB free of a {quota}MB quota.\nPlease delete some installed apps or devices and try again',
         'error.quotaInsufficientSuffixLow': '; the quota is unusually small, this looks like private/incognito browsing.',

@@ -47,6 +47,7 @@ target_link_libraries(eka2l1_wasm PRIVATE
     epocloader
     epocio
     epocldd
+    j2me
     gdbstub
     bridge
     miniz

@@ -36,6 +36,9 @@ namespace eka2l1 {
 
     enum feature_id : epoc::uid {
         feature_id_opengl_es_3d_api = 10,
+        // KFeatureIdMIDP20: gates the whole S60v3 Java runtime. SystemAMSCore
+        // checks this on startup and Leave(KErrNotSupported)s when absent.
+        feature_id_java_midp20 = 12,
         feature_id_svgt = 77,
         feature_id_side_volume_key = 207,
         feature_id_pen = 410,
@@ -74,6 +77,12 @@ namespace eka2l1 {
         // built-in Calculator (and apps with the same pattern) panic with
         // EIKCOCTL 8 when opening their Options menu.
         enable_features.push_back(feature_id_app_menu_show_images);
+
+        // Java MIDP 2.0: only claim support when the ROM ships the MIDP2
+        // runtime, otherwise the Java AMS stack would boot into nothing.
+        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\midp2runtimev2.dll")) {
+            enable_features.push_back(feature_id_java_midp20);
+        }
 
         // Browser-hosted Flash Lite is a separate platform feature from the
         // standalone viewer. Report it only when the ROM actually supplies the

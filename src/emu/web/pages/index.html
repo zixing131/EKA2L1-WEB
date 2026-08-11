@@ -293,6 +293,12 @@
             </svg>
             <span data-i18n="sheet.installSis">安装 SIS 程序包（.sis / .sisx）</span>
         </button>
+        <button class="sheet-item" onclick="closeSheets();pickJar()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 2h8v5a4 4 0 0 1-8 0V2z"/><path d="M6 13h12"/><path d="M8 17h8"/><path d="M10 21h4"/>
+            </svg>
+            <span data-i18n="sheet.installJar">安装 Java ME 程序（MIDP 2.0 .jar）</span>
+        </button>
         <button class="sheet-item" onclick="closeSheets();openDeviceSheet()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/>
@@ -321,10 +327,11 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- No `accept` filter: .rom/.rpkg/.sis(x) are not registered iOS file types,
+<!-- No `accept` filter: .rom/.rpkg/.sis(x)/.jar are not registered iOS file types,
      so iOS Files greys them out and the user cannot pick them at all. An
-     unfiltered picker lets every platform select the ROM/RPKG/SIS. -->
+     unfiltered picker lets every platform select the ROM/RPKG/SIS/JAR. -->
 <input type="file" id="sisInput" style="display:none">
+<input type="file" id="jarInput" style="display:none">
 <input type="file" id="romInput" style="display:none">
 <input type="file" id="rpkgInput" style="display:none">
 <input type="file" id="fileUpInput" style="display:none" multiple>

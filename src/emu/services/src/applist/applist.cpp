@@ -32,6 +32,7 @@
 #include <common/types.h>
 
 #include <common/common.h>
+#include <common/crypt.h>
 #include <kernel/kernel.h>
 #include <loader/rsc.h>
 #include <system/epoc.h>
@@ -41,11 +42,17 @@
 #include <vfs/vfs.h>
 
 #include <functional>
+#include <cstring>
 #include <utils/err.h>
 
 #include <config/config.h>
 
 namespace eka2l1 {
+    static constexpr epoc::uid JAVA_MIDLET_APPLICATION_TYPE_UID = 0x10210E26;
+    static constexpr epoc::uid JAVA_MIDLET_LEGACY_TYPE_ID = 0xB031C52A;
+    static constexpr epoc::uid PREFIXED_NON_NATIVE_REGISTRATION_UID = 0x1027289D;
+    static constexpr char16_t NON_NATIVE_RESOURCE_DIRECTORY[] = u"\\Private\\10003a3f\\import\\apps\\NonNative\\Resource\\";
+
     static const std::array<std::u16string, 9> RECOG_MIME_TYPES = {
         u"image/png",
         u"image/jpeg",
@@ -247,8 +254,20 @@ namespace eka2l1 {
         reg.rsc_path = nearest_path;
         reg.last_rsc_modified = last_modified;
 
-        auto read_rsc_from_file = [](symfile &f, const int id, const bool confirm_sig, std::uint32_t *uid3) -> std::vector<std::uint8_t> {
-            eka2l1::ro_file_stream std_rsc_raw(f.get());
+        auto read_rsc_from_file = [](symfile &f, const int id, const bool confirm_sig,
+                                     std::uint32_t *uid1, std::uint32_t *uid2,
+                                     std::uint32_t *uid3, const std::size_t file_offset) -> std::vector<std::uint8_t> {
+            if (!f || (file_offset >= f->size())) {
+                return {};
+            }
+
+            std::vector<std::uint8_t> file_data(static_cast<std::size_t>(f->size()) - file_offset);
+            f->seek(file_offset, file_seek_mode::beg);
+            if (f->read_file(file_data.data(), 1, static_cast<std::uint32_t>(file_data.size())) != file_data.size()) {
+                return {};
+            }
+
+            common::ro_buf_stream std_rsc_raw(file_data.data(), file_data.size());
             if (!std_rsc_raw.valid()) {
                 return {};
             }
@@ -259,15 +278,35 @@ namespace eka2l1 {
                 std_rsc.confirm_signature();
             }
 
-            if (uid3) {
-                *uid3 = std_rsc.get_uid(3);
-            }
+            if (uid1) *uid1 = std_rsc.get_uid(1);
+            if (uid2) *uid2 = std_rsc.get_uid(2);
+            if (uid3) *uid3 = std_rsc.get_uid(3);
 
             return std_rsc.read(id);
         };
 
         // Open the file
-        auto dat = read_rsc_from_file(f, 1, false, &reg.mandatory_info.uid);
+        std::uint32_t outer_uid1 = 0;
+        std::uint32_t outer_uid2 = 0;
+        std::uint32_t checked_uids[4] = {};
+        f->seek(0, file_seek_mode::beg);
+        const bool has_checked_uid = f->read_file(checked_uids, 1, sizeof(checked_uids)) == sizeof(checked_uids);
+        const bool is_prefixed_non_native = has_checked_uid
+            && (checked_uids[0] == PREFIXED_NON_NATIVE_REGISTRATION_UID)
+            && (crypt::calculate_checked_uid_checksum(checked_uids) == checked_uids[3]);
+        const std::size_t registration_file_offset = is_prefixed_non_native ? sizeof(checked_uids) : 0;
+
+        auto dat = read_rsc_from_file(f, 1, false,
+            is_prefixed_non_native ? nullptr : &outer_uid1,
+            is_prefixed_non_native ? nullptr : &outer_uid2,
+            is_prefixed_non_native ? nullptr : &reg.mandatory_info.uid,
+            registration_file_offset);
+
+        if (is_prefixed_non_native) {
+            outer_uid1 = checked_uids[0];
+            outer_uid2 = checked_uids[1];
+            reg.mandatory_info.uid = checked_uids[2];
+        }
 
         if (dat.empty()) {
             return false;
@@ -279,6 +318,14 @@ namespace eka2l1 {
 
         if (!result) {
             return false;
+        }
+
+        if ((outer_uid1 == PREFIXED_NON_NATIVE_REGISTRATION_UID)
+            || (reg.caps.flags & apa_capability::non_native)) {
+            reg.caps.flags |= apa_capability::non_native;
+            reg.non_native_application_type = outer_uid2;
+            reg.non_native_opaque_data = read_rsc_from_file(f, 2, false, nullptr, nullptr, nullptr,
+                registration_file_offset);
         }
 
         // Getting our localised resource info
@@ -304,14 +351,22 @@ namespace eka2l1 {
             ideal_lang, land_drive);
 
         if (localised_path.empty()) {
+            const std::lock_guard<std::mutex> guard(list_access_mut_);
+            regs.push_back(std::move(reg));
             return true;
         }
 
         f = io->open_file(localised_path, READ_MODE | BIN_MODE);
 
-        dat = read_rsc_from_file(f, reg.localised_info_rsc_id, true, nullptr);
+        dat = read_rsc_from_file(f, reg.localised_info_rsc_id, true, nullptr, nullptr, nullptr, 0);
 
-        common::ro_buf_stream localised_app_info_resource_stream(&dat[0], dat.size());
+        if (dat.empty()) {
+            const std::lock_guard<std::mutex> guard(list_access_mut_);
+            regs.push_back(std::move(reg));
+            return true;
+        }
+
+        common::ro_buf_stream localised_app_info_resource_stream(dat.data(), dat.size());
 
         // Read localised info
         // Ignore result
@@ -458,11 +513,13 @@ namespace eka2l1 {
     void applist_server::rescan_registries_on_drive_newarch(eka2l1::io_system *io, const drive_number drv,
         std::vector<std::u16string> &register_file_paths) {
         const std::u16string import_rsc_path = std::u16string(1, drive_to_char16(drv)) + u":\\Private\\10003a3f\\import\\apps\\" + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
+        const std::u16string non_native_rsc_path = std::u16string(1, drive_to_char16(drv)) + NON_NATIVE_RESOURCE_DIRECTORY + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
         const std::u16string rom_rscs_path = std::u16string(1, drive_to_char16(drv)) + u":\\Private\\10003a3f\\apps\\" + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
 
         // Supposedly to only scan in ROM, but it's not really that strict on the emulator ;)
         rescan_registries_on_drive_newarch_with_path(io, drv, rom_rscs_path, register_file_paths);
         rescan_registries_on_drive_newarch_with_path(io, drv, import_rsc_path, register_file_paths);
+        rescan_registries_on_drive_newarch_with_path(io, drv, non_native_rsc_path, register_file_paths);
     }
 
     void applist_server::rescan_registries_on_drive_newarch_with_path(eka2l1::io_system *io, const drive_number drv, const std::u16string &path,
@@ -859,7 +916,23 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::get_native_executable_name_if_non_native(service::ipc_context &ctx) {
+    std::u16string applist_server::native_executable_for_non_native_type(const epoc::uid type) const {
+        const auto registered = non_native_app_types_.find(type);
+        if (registered != non_native_app_types_.end()) {
+            return registered->second;
+        }
+
+        // Java 1.x on S60 3rd Edition normally registers this during boot.
+        // Keep the ROM-compatible fallback because AppArc's real type table is
+        // persistent, while EKA2L1 currently reconstructs the server at boot.
+        if ((type == JAVA_MIDLET_APPLICATION_TYPE_UID) || (type == JAVA_MIDLET_LEGACY_TYPE_ID)) {
+            return u"StubMIDP2RecogExe.exe";
+        }
+
+        return {};
+    }
+
+    void applist_session::get_native_executable_name_if_non_native(service::ipc_context &ctx) {
         std::optional<std::u16string> path = ctx.get_argument_value<std::u16string>(1);
 
         if (!path.has_value()) {
@@ -869,21 +942,54 @@ namespace eka2l1 {
 
         if ((path->find(MAPPED_EXECUTABLE_HEAD_STRING) == 0) && (path->find(UNIQUE_MAPPED_EXTENSION_STRING) != std::u16string::npos)) {
             ctx.write_arg(0, kernel::BRIDAGED_EXECUTABLE_NAME);
-            ctx.complete(epoc::error_none);
+            pending_opaque_data_.clear();
+            ctx.complete(0);
 
             return;
         }
 
-        hle::lib_manager *lmngr = kern->get_lib_manager();
+        applist_server *serv = server<applist_server>();
+        auto &registries = serv->regs;
+        const auto found = std::find_if(registries.begin(), registries.end(), [&path](apa_app_registry &reg) {
+            return common::compare_ignore_case(reg.mandatory_info.app_path.to_std_string(nullptr), *path) == 0;
+        });
 
-        if (!lmngr->load(path.value())) {
-            LOG_TRACE(SERVICE_APPLIST, "The file requested is non-native! Stubbed");
+        if ((found != registries.end()) && (found->caps.flags & apa_capability::non_native)) {
+            const std::u16string launcher = serv->native_executable_for_non_native_type(found->non_native_application_type);
+            if (launcher.empty()) {
+                LOG_ERROR(SERVICE_APPLIST, "No native launcher registered for non-native application type 0x{:08X}",
+                    found->non_native_application_type);
+                ctx.complete(epoc::error_not_found);
+                return;
+            }
+
+            ctx.write_arg(0, launcher);
+            pending_opaque_data_ = found->non_native_opaque_data;
+            ctx.complete(static_cast<int>(pending_opaque_data_.size()));
+            return;
         }
 
         ctx.set_descriptor_argument_length(0, 0);
-
-        LOG_TRACE(SERVICE_APPLIST, "No opaque data is written (stubbed).");
+        pending_opaque_data_.clear();
         ctx.complete(0);
+    }
+
+    void applist_session::get_opaque_data(service::ipc_context &ctx) {
+        if (pending_opaque_data_.empty()) {
+            ctx.set_descriptor_argument_length(0, 0);
+            ctx.complete(epoc::error_none);
+            return;
+        }
+
+        if (ctx.get_argument_max_data_size(0) < pending_opaque_data_.size()) {
+            ctx.complete(epoc::error_overflow);
+            return;
+        }
+
+        ctx.write_data_to_descriptor_argument(0, pending_opaque_data_.data(),
+            static_cast<std::uint32_t>(pending_opaque_data_.size()));
+        pending_opaque_data_.clear();
+        ctx.complete(epoc::error_none);
     }
 
     void applist_server::app_info_provided_by_reg_file(service::ipc_context &ctx) {
@@ -1126,7 +1232,7 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::get_app_executable_name_given_app_uid(service::ipc_context &ctx) {
+    void applist_session::get_app_executable_name_given_app_uid(service::ipc_context &ctx) {
         std::optional<epoc::uid> app_uid = ctx.get_argument_value<epoc::uid>(2);
 
         if (!app_uid.has_value()) {
@@ -1134,27 +1240,260 @@ namespace eka2l1 {
             return;
         }
 
-        auto executable_map_result = uids_app_to_executable.find(app_uid.value());
-        if (executable_map_result != uids_app_to_executable.end()) {
+        applist_server *serv = server<applist_server>();
+        auto executable_map_result = serv->uids_app_to_executable.find(app_uid.value());
+        if (executable_map_result != serv->uids_app_to_executable.end()) {
             ctx.write_arg(0, kernel::BRIDAGED_EXECUTABLE_NAME);
             ctx.write_arg(1, executable_map_result->second);
-
-            // Return value is opaque data length. Nothing like that at the moment
+            pending_opaque_data_.clear();
             ctx.complete(0);
             
             return;
         }
 
-        apa_app_registry *reg = get_registration(app_uid.value());
+        apa_app_registry *reg = serv->get_registration(app_uid.value());
 
         if (!reg) {
             ctx.complete(epoc::error_not_found);
             return;
         }
 
-        // Return value is opaque data length. Nothing like that at the moment
-        ctx.write_arg(0, reg->mandatory_info.app_path.to_std_string(nullptr));
+        const std::u16string logical_path = reg->mandatory_info.app_path.to_std_string(nullptr);
+        if (reg->caps.flags & apa_capability::non_native) {
+            const std::u16string launcher = serv->native_executable_for_non_native_type(reg->non_native_application_type);
+            if (launcher.empty()) {
+                ctx.complete(epoc::error_not_found);
+                return;
+            }
+
+            ctx.write_arg(0, launcher);
+            ctx.write_arg(1, logical_path);
+            pending_opaque_data_ = reg->non_native_opaque_data;
+            ctx.complete(static_cast<int>(pending_opaque_data_.size()));
+            return;
+        }
+
+        ctx.write_arg(0, logical_path);
+        pending_opaque_data_.clear();
         ctx.complete(0);
+    }
+
+    void applist_server::register_non_native_app_type(service::ipc_context &ctx) {
+        const std::optional<epoc::uid> type = ctx.get_argument_value<epoc::uid>(0);
+        const std::optional<std::u16string> executable = ctx.get_argument_value<std::u16string>(1);
+        if (!type || !*type || !executable || executable->empty()) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        if (non_native_app_types_.find(*type) != non_native_app_types_.end()) {
+            ctx.complete(epoc::error_already_exists);
+            return;
+        }
+
+        non_native_app_types_.emplace(*type, *executable);
+        LOG_INFO(SERVICE_APPLIST, "Registered non-native application type 0x{:08X} -> {}",
+            *type, common::ucs2_to_utf8(*executable));
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::deregister_non_native_app_type(service::ipc_context &ctx) {
+        const std::optional<epoc::uid> type = ctx.get_argument_value<epoc::uid>(0);
+        if (!type || !*type) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        const auto found = non_native_app_types_.find(*type);
+        if (found == non_native_app_types_.end()) {
+            ctx.complete(epoc::error_not_found);
+            return;
+        }
+
+        non_native_app_types_.erase(found);
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::prepare_non_native_app_updates(service::ipc_context &ctx) {
+        if (non_native_update_prepared_) {
+            ctx.complete(epoc::error_in_use);
+            return;
+        }
+
+        non_native_update_prepared_ = true;
+        pending_non_native_updates_.clear();
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::register_non_native_app(service::ipc_context &ctx) {
+        if (!non_native_update_prepared_) {
+            ctx.complete(epoc::error_not_ready);
+            return;
+        }
+
+        const std::uint8_t *raw = ctx.get_descriptor_argument_ptr(0);
+        const std::size_t raw_size = ctx.get_argument_data_size(0);
+        static constexpr std::size_t NON_NATIVE_INFO_SIZE = sizeof(std::uint32_t) * 2;
+        static constexpr std::size_t CHECKED_UID_SIZE = sizeof(std::uint32_t) * 4;
+
+        if (!raw || (raw_size <= NON_NATIVE_INFO_SIZE + CHECKED_UID_SIZE)) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        std::uint32_t application_type = 0;
+        std::int32_t drive = 0;
+        std::uint32_t inner_checked_uids[4] = {};
+        std::memcpy(&application_type, raw, sizeof(application_type));
+        std::memcpy(&drive, raw + sizeof(application_type), sizeof(drive));
+        std::memcpy(inner_checked_uids, raw + NON_NATIVE_INFO_SIZE, sizeof(inner_checked_uids));
+
+        if (!application_type || !inner_checked_uids[2]
+            || (drive < drive_a) || (drive >= drive_count)
+            || (crypt::calculate_checked_uid_checksum(inner_checked_uids) != inner_checked_uids[3])) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        pending_non_native_update update;
+        update.kind_ = pending_non_native_update::kind::register_app;
+        update.application_uid_ = inner_checked_uids[2];
+        update.application_type_ = application_type;
+        update.drive_ = static_cast<drive_number>(drive);
+
+        const std::uint32_t outer_uids[3] = {
+            PREFIXED_NON_NATIVE_REGISTRATION_UID,
+            application_type,
+            update.application_uid_
+        };
+        const std::uint32_t outer_checksum = crypt::calculate_checked_uid_checksum(outer_uids);
+
+        update.registration_resource_.resize(CHECKED_UID_SIZE + raw_size - NON_NATIVE_INFO_SIZE);
+        std::memcpy(update.registration_resource_.data(), outer_uids, sizeof(outer_uids));
+        std::memcpy(update.registration_resource_.data() + sizeof(outer_uids), &outer_checksum, sizeof(outer_checksum));
+        std::memcpy(update.registration_resource_.data() + CHECKED_UID_SIZE,
+            raw + NON_NATIVE_INFO_SIZE, raw_size - NON_NATIVE_INFO_SIZE);
+
+        const std::uint8_t *localisable = ctx.get_descriptor_argument_ptr(1);
+        const std::size_t localisable_size = ctx.get_argument_data_size(1);
+        if (localisable && localisable_size && (localisable_size != static_cast<std::size_t>(-1))) {
+            update.localisable_resource_.assign(localisable, localisable + localisable_size);
+        }
+
+        pending_non_native_updates_.push_back(std::move(update));
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::deregister_non_native_app(service::ipc_context &ctx) {
+        if (!non_native_update_prepared_) {
+            ctx.complete(epoc::error_not_ready);
+            return;
+        }
+
+        const std::optional<epoc::uid> app_uid = ctx.get_argument_value<epoc::uid>(0);
+        if (!app_uid || !*app_uid) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        apa_app_registry *reg = get_registration(*app_uid);
+        if (!reg || !(reg->caps.flags & apa_capability::non_native)) {
+            ctx.complete(epoc::error_not_found);
+            return;
+        }
+
+        pending_non_native_update update;
+        update.kind_ = pending_non_native_update::kind::deregister_app;
+        update.application_uid_ = *app_uid;
+        update.application_type_ = reg->non_native_application_type;
+        update.drive_ = reg->land_drive;
+        pending_non_native_updates_.push_back(std::move(update));
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::commit_non_native_app_updates(service::ipc_context &ctx) {
+        if (!non_native_update_prepared_) {
+            ctx.complete(epoc::error_not_ready);
+            return;
+        }
+
+        io_system *io = sys->get_io_system();
+        bool succeeded = true;
+        for (const pending_non_native_update &update : pending_non_native_updates_) {
+            const std::u16string base = std::u16string(1, drive_to_char16(update.drive_)) + u":" + NON_NATIVE_RESOURCE_DIRECTORY;
+            const std::u16string uid_name = common::utf8_to_ucs2(fmt::format("{:08x}", update.application_uid_));
+            const std::u16string registration_path = base + uid_name + u"_reg.rsc";
+            const std::u16string localisable_path = base + uid_name + u"_loc.rsc";
+
+            if (update.kind_ == pending_non_native_update::kind::deregister_app) {
+                io->delete_entry(registration_path);
+                io->delete_entry(localisable_path);
+                continue;
+            }
+
+            if (!io->create_directories(base)) {
+                succeeded = false;
+                break;
+            }
+
+            symfile registration_file = io->open_file(registration_path, WRITE_MODE | BIN_MODE);
+            if (!registration_file
+                || (registration_file->write_file(update.registration_resource_.data(), 1,
+                    static_cast<std::uint32_t>(update.registration_resource_.size())) != update.registration_resource_.size())) {
+                succeeded = false;
+                break;
+            }
+            registration_file->close();
+
+            if (!update.localisable_resource_.empty()) {
+                symfile localisable_file = io->open_file(localisable_path, WRITE_MODE | BIN_MODE);
+                if (!localisable_file
+                    || (localisable_file->write_file(update.localisable_resource_.data(), 1,
+                        static_cast<std::uint32_t>(update.localisable_resource_.size())) != update.localisable_resource_.size())) {
+                    succeeded = false;
+                    break;
+                }
+                localisable_file->close();
+            }
+        }
+
+        pending_non_native_updates_.clear();
+        non_native_update_prepared_ = false;
+
+        if (!succeeded) {
+            ctx.complete(epoc::error_general);
+            return;
+        }
+
+        rescan_registries(io);
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::rollback_non_native_app_updates(service::ipc_context &ctx) {
+        pending_non_native_updates_.clear();
+        non_native_update_prepared_ = false;
+        ctx.complete(epoc::error_none);
+    }
+
+    void applist_server::get_app_type(service::ipc_context &ctx) {
+        const std::optional<epoc::uid> app_uid = ctx.get_argument_value<epoc::uid>(0);
+        if (!app_uid) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
+
+        apa_app_registry *reg = get_registration(*app_uid);
+        if (!reg) {
+            ctx.complete(epoc::error_not_found);
+            return;
+        }
+
+        epoc::uid type = reg->non_native_application_type;
+        if (type == JAVA_MIDLET_LEGACY_TYPE_ID) {
+            type = JAVA_MIDLET_APPLICATION_TYPE_UID;
+        }
+        ctx.write_data_to_descriptor_argument<epoc::uid>(1, type);
+        ctx.complete(epoc::error_none);
     }
 
     applist_session::applist_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_ver)
@@ -1310,7 +1649,11 @@ namespace eka2l1 {
                 break;
 
             case applist_request_get_executable_name_if_non_native:
-                server<applist_server>()->get_native_executable_name_if_non_native(*ctx);
+                get_native_executable_name_if_non_native(*ctx);
+                break;
+
+            case applist_request_get_opaque_data:
+                get_opaque_data(*ctx);
                 break;
 
             case applist_request_app_info_provide_by_reg_file:
@@ -1346,7 +1689,7 @@ namespace eka2l1 {
                 break;
 
             case applist_request_get_executable_name_given_app_uid:
-                server<applist_server>()->get_app_executable_name_given_app_uid(*ctx);
+                get_app_executable_name_given_app_uid(*ctx);
                 break;
 
             case applist_request_get_data_types_phase1:
@@ -1363,6 +1706,38 @@ namespace eka2l1 {
 
             case applist_request_get_next_app:
                 get_next_app(*ctx);
+                break;
+
+            case applist_request_register_non_native_app_type:
+                server<applist_server>()->register_non_native_app_type(*ctx);
+                break;
+
+            case applist_request_deregister_non_native_app_type:
+                server<applist_server>()->deregister_non_native_app_type(*ctx);
+                break;
+
+            case applist_request_prepare_non_native_app_updates:
+                server<applist_server>()->prepare_non_native_app_updates(*ctx);
+                break;
+
+            case applist_request_register_non_native_app:
+                server<applist_server>()->register_non_native_app(*ctx);
+                break;
+
+            case applist_request_deregister_non_native_app:
+                server<applist_server>()->deregister_non_native_app(*ctx);
+                break;
+
+            case applist_request_commit_non_native_application:
+                server<applist_server>()->commit_non_native_app_updates(*ctx);
+                break;
+
+            case applist_request_rollback_non_native_application:
+                server<applist_server>()->rollback_non_native_app_updates(*ctx);
+                break;
+
+            case applist_request_get_app_type:
+                server<applist_server>()->get_app_type(*ctx);
                 break;
 
             default:
@@ -1424,7 +1799,10 @@ namespace eka2l1 {
             return false;
         }
 
-        if (legacy_level() < APA_LEGACY_LEVEL_MORDEN) {
+        if ((legacy_level() >= APA_LEGACY_LEVEL_MORDEN) && !cmd.empty()) {
+            pr->set_arg_slot(ENVIRONMENT_SLOT_MAIN,
+                reinterpret_cast<std::uint8_t *>(const_cast<char16_t *>(cmd.data())),
+                cmd.size() * sizeof(char16_t));
         }
 
         if (thread_id)
@@ -1521,6 +1899,19 @@ namespace eka2l1 {
 
         std::u16string executable_to_run;
         registry.get_launch_parameter(executable_to_run, parameter);
+
+        if (registry.caps.flags & apa_capability::non_native) {
+            executable_to_run = native_executable_for_non_native_type(registry.non_native_application_type);
+            if (executable_to_run.empty()) {
+                LOG_ERROR(SERVICE_APPLIST, "Unable to launch non-native app 0x{:08X}: no runtime for type 0x{:08X}",
+                    registry.mandatory_info.uid, registry.non_native_application_type);
+                return false;
+            }
+
+            parameter.opaque_data_.assign(
+                reinterpret_cast<const char *>(registry.non_native_opaque_data.data()),
+                registry.non_native_opaque_data.size());
+        }
 
         std::u16string apacmddat = parameter.to_string(legacy_level() < APA_LEGACY_LEVEL_MORDEN);
         return launch_app(executable_to_run, apacmddat, thread_id, nullptr, registry.mandatory_info.uid, app_exit_callback);

@@ -559,6 +559,74 @@
             });
     });
 
+    // ---- Java ME / MIDP 2.0 install -----------------------------------------
+
+    window.pickJar = function () {
+        if (!coreReady) {
+            if (!hasDevice) { EKA2L1.toast(EKA2L1.t('toast.installRomFirst')); openDeviceSheet(); return; }
+            EKA2L1.toast(EKA2L1.t('toast.coreBooting'));
+            return;
+        }
+        if (!deviceReady) { EKA2L1.toast(EKA2L1.t('toast.installRomFirst')); openDeviceSheet(); return; }
+        document.getElementById('jarInput').click();
+    };
+
+    function waitForMidletInstaller() {
+        var deadline = Date.now() + 180000;
+        return new Promise(function (resolve, reject) {
+            function poll() {
+                var state = EKA2L1.midletInstallStatus();
+                if (state === 2) { resolve(); return; }
+                if (state === 0) { reject(new Error('MIDP installer stopped before completion')); return; }
+                if (state < 0) { reject(new Error('MIDP installer failed (' + state + ')')); return; }
+                if (Date.now() >= deadline) { reject(new Error('MIDP installer timed out')); return; }
+                setTimeout(poll, 250);
+            }
+            setTimeout(poll, 250);
+        });
+    }
+
+    document.getElementById('jarInput').addEventListener('change', function () {
+        var file = this.files[0];
+        this.value = '';
+        if (!file) return;
+
+        setStatus('yellow', EKA2L1.t('status.installingNamed', { name: file.name }));
+        var target = '/eka2l1/temp/' + file.name;
+
+        EKA2L1.writeFileToVFS(file, target)
+            .then(function () {
+                return new Promise(function (resolve) { setTimeout(resolve, 60); });
+            })
+            .then(function () {
+                // The library view normally pauses guest execution to save CPU.
+                // The ROM MIDP installer is itself a guest process, so it must
+                // be allowed to run until its logon callback completes.
+                EKA2L1.setPaused(false);
+                var result = EKA2L1.installMidlet(target);
+                try { EKA2L1.module.FS.unlink(target); } catch (e) {}
+                if (result !== 0) throw new Error(EKA2L1.t('error.installFailedCode', { code: result }));
+                return waitForMidletInstaller();
+            })
+            .then(function () {
+                EKA2L1.setPaused(true);
+                refreshApps();
+                return EKA2L1.save();
+            })
+            .then(function () {
+                setStatus('green', EKA2L1.t('status.ready'));
+                EKA2L1.toast(EKA2L1.t('toast.installedNamed', { name: file.name }));
+            })
+            .catch(function (err) {
+                EKA2L1.setPaused(true);
+                try { EKA2L1.module.FS.unlink(target); } catch (e) {}
+                console.error('[EKA2L1] Java ME install failed:', err);
+                setStatus('red', EKA2L1.t('status.installFailed'));
+                showError(EKA2L1.t('error.jarInstallFailed', { msg: err.message || err }));
+                EKA2L1.toast(err.message || EKA2L1.t('toast.installFailedSeeAbove'), 4000);
+            });
+    });
+
     // ---- device list (multi-ROM) ---------------------------------------------
 
     window.renderDeviceList = function () {

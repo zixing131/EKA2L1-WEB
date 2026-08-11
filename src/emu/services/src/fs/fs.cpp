@@ -185,6 +185,50 @@ namespace eka2l1 {
         }
     }
 
+    void fs_server::notify_change(const std::u16string &path, const fs_server_client::notify_type type) {
+        bool has_waiter = false;
+        for (auto &[uid, session] : sessions) {
+            (void)uid;
+            if (!reinterpret_cast<fs_server_client *>(session.get())->notify_entries.empty()) {
+                has_waiter = true;
+                break;
+            }
+        }
+        if (has_waiter) {
+            LOG_WARN(SERVICE_EFSRV, "[notify-probe] mutation path={} type={}",
+                common::ucs2_to_utf8(path), static_cast<std::uint32_t>(type));
+        }
+        for (auto &[uid, session] : sessions) {
+            (void)uid;
+            reinterpret_cast<fs_server_client *>(session.get())->notify(path, type);
+        }
+    }
+
+    void fs_server_client::notify(const utf16_str &changed_entry, const notify_type changed_type) {
+        const std::string changed_path = common::ucs2_to_utf8(
+            common::lowercase_ucs2_string(changed_entry));
+
+        for (auto it = notify_entries.begin(); it != notify_entries.end();) {
+            const bool type_matches = (it->type == notify_type::all)
+                || (changed_type == notify_type::all)
+                || ((static_cast<std::uint32_t>(it->type)
+                        & static_cast<std::uint32_t>(changed_type)) != 0);
+            const bool path_matches = std::regex_search(changed_path, it->match_pattern);
+
+            LOG_WARN(SERVICE_EFSRV, "[notify-probe] candidate path={} type_match={} path_match={}",
+                common::ucs2_to_utf8(changed_entry), type_matches, path_matches);
+
+            if (type_matches && path_matches) {
+                LOG_TRACE(SERVICE_EFSRV, "Completing change notification for {}",
+                    common::ucs2_to_utf8(changed_entry));
+                it->info.complete(epoc::error_none);
+                it = notify_entries.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     void fs_server_client::fetch(service::ipc_context *ctx) {
         const epocver version = server<fs_server>()->sys->get_symbian_version_use();
 
@@ -376,6 +420,8 @@ namespace eka2l1 {
         }
 
         // A new app list may be created
+        server<fs_server>()->notify_change(target, notify_type::all);
+        server<fs_server>()->notify_change(dest, notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -417,6 +463,8 @@ namespace eka2l1 {
         }
 
         // A new app list may be created
+        server<fs_server>()->notify_change(target, notify_type::all);
+        server<fs_server>()->notify_change(dest, notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -443,6 +491,7 @@ namespace eka2l1 {
             return;
         }
 
+        server<fs_server>()->notify_change(path, notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -673,7 +722,17 @@ namespace eka2l1 {
         }
 
         notify_entry entry;
-        entry.match_pattern = common::wildcard_to_regex_string(common::ucs2_to_utf8(*wildcard_match));
+        const std::u16string lowered_match = common::lowercase_ucs2_string(*wildcard_match);
+        // Symbian's path parser treats "..." as a recursive directory
+        // wildcard.  The silent MIDP installer uses "?:\\..." to wait for
+        // changes on any drive; the generic '*'/'?' converter intentionally
+        // does not know about that filesystem-specific token.
+        if (lowered_match == u"?:\\...") {
+            entry.match_pattern = ".*";
+        } else {
+            entry.match_pattern = common::wildcard_to_regex_string(
+                common::ucs2_to_utf8(lowered_match));
+        }
         entry.type = static_cast<notify_type>(*ctx->get_argument_value<std::int32_t>(0));
         entry.info = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
 
@@ -690,7 +749,8 @@ namespace eka2l1 {
 
         notify_entries.push_back(entry);
 
-        LOG_TRACE(SERVICE_EFSRV, "Notify requested with wildcard: {}", common::ucs2_to_utf8(*wildcard_match));
+        LOG_WARN(SERVICE_EFSRV, "[notify-probe] Notify requested with wildcard: {} type={}",
+            common::ucs2_to_utf8(*wildcard_match), static_cast<std::uint32_t>(entry.type));
     }
 
     void fs_server_client::notify_change_cancel(service::ipc_context *ctx) {
@@ -772,6 +832,7 @@ namespace eka2l1 {
             return;
         }
 
+        server<fs_server>()->notify_change(dir.value(), notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -783,9 +844,11 @@ namespace eka2l1 {
             return;
         }
 
+        dir.value() = get_full_symbian_path(ss_path, dir.value());
         io_system *io = ctx->sys->get_io_system();
         io->delete_entry(dir.value());
 
+        server<fs_server>()->notify_change(dir.value(), notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -875,6 +938,7 @@ namespace eka2l1 {
             return;
         }
 
+        server<fs_server>()->notify_change(fname, notify_type::all);
         ctx->complete(epoc::error_none);
     }
 

@@ -420,6 +420,17 @@ namespace eka2l1::kernel {
             return;
         }
 
+        // Java installation on S60 is a multi-process pipeline. Surface the
+        // otherwise invisible exit of any MIDP/installer stage in Web builds,
+        // where Kernel trace logs are intentionally filtered out.
+        const std::string lower_name = common::lowercase_string(raw_name());
+        if ((lower_name.find("midp") != std::string::npos)
+            || (lower_name.find("install") != std::string::npos)
+            || (lower_name.find("java") != std::string::npos)) {
+            LOG_WARN(KERNEL, "Java install process exit: process={} type={} reason={} category={}",
+                name(), static_cast<int>(ext), reason, common::ucs2_to_utf8(category));
+        }
+
         exit_type = ext;
         exit_reason = reason;
         exit_category = category;

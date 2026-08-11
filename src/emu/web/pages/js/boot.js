@@ -502,6 +502,14 @@
         return ccall('wasm_install_package', 'number', ['string'], [vfsPath]);
     };
 
+    EKA2L1.installMidlet = function (vfsPath) {
+        return ccall('wasm_install_midlet', 'number', ['string'], [vfsPath]);
+    };
+
+    EKA2L1.midletInstallStatus = function () {
+        return ccall('wasm_midlet_install_status', 'number');
+    };
+
     EKA2L1.appList = function () {
         try {
             return JSON.parse(ccall('wasm_get_app_list', 'string')) || [];

@@ -167,6 +167,8 @@ namespace eka2l1 {
                 return epoc::error_permission_denied;
             }
 
+            msg->debug_server_name = svr ? svr->name() : std::string();
+            msg->debug_session_name = name();
             msg->msg_session = (headless_) ? nullptr : this;
             msg->session_ptr_lle = cookie_address;
 

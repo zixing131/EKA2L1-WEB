@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 namespace eka2l1 {
     namespace kernel {
@@ -108,6 +109,12 @@ namespace eka2l1 {
         int function;
         ipc_arg args;
         service::session *msg_session;
+        // Keep the destination identity even after a native (guest) session
+        // becomes headless or is torn down. This is diagnostic-only and lets
+        // the Web hang dump identify accepted IPC that would otherwise show
+        // up as server='?'.
+        std::string debug_server_name;
+        std::string debug_session_name;
         int session_ptr_lle; // This should be null because the server check for it
 
         eka2l1::ptr<epoc::request_status> request_sts;

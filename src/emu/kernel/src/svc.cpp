@@ -2423,6 +2423,27 @@ namespace eka2l1::epoc {
         return static_cast<std::int32_t>(thr->get_priority());
     }
 
+    BRIDGE_FUNC(std::int32_t, thread_process_priority, kernel::handle h) {
+        thread_ptr thr = kern->get<kernel::thread>(h);
+        if (!thr || !thr->owning_process()) {
+            return epoc::error_bad_handle;
+        }
+
+        return static_cast<std::int32_t>(thr->owning_process()->get_priority());
+    }
+
+    BRIDGE_FUNC(std::int32_t, thread_set_process_priority, kernel::handle h,
+        std::int32_t process_priority) {
+        thread_ptr thr = kern->get<kernel::thread>(h);
+        if (!thr || !thr->owning_process()) {
+            return epoc::error_bad_handle;
+        }
+
+        thr->owning_process()->set_priority(
+            static_cast<eka2l1::kernel::process_priority>(process_priority));
+        return epoc::error_none;
+    }
+
     BRIDGE_FUNC(void, thread_resume, kernel::handle h) {
         thread_ptr thr = kern->get<kernel::thread>(h);
 
@@ -6156,7 +6177,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xE0, leave_start),
         BRIDGE_REGISTER(0xE1, leave_end),
         BRIDGE_REGISTER(0xE3, get_module_name_from_address),
-        BRIDGE_REGISTER(0xE3, get_locale_dll_name),
+        BRIDGE_REGISTER(0xE4, get_locale_dll_name),
         BRIDGE_REGISTER(0xE6, session_security_info),
         BRIDGE_REGISTER(0xE9, btrace_out),
         BRIDGE_REGISTER(0xF6, thread_user_exiting),
@@ -6225,6 +6246,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x29, thread_suspend),
         BRIDGE_REGISTER(0x2A, thread_priority),
         BRIDGE_REGISTER(0x2B, thread_set_priority),
+        BRIDGE_REGISTER(0x2C, thread_process_priority),
+        BRIDGE_REGISTER(0x2D, thread_set_process_priority),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),
         BRIDGE_REGISTER(0x31, thread_exit_type),
@@ -6337,6 +6360,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xDF, leave_start),
         BRIDGE_REGISTER(0xE0, leave_end),
         BRIDGE_REGISTER(0xE2, get_module_name_from_address),
+        BRIDGE_REGISTER(0xE3, get_locale_dll_name),
         BRIDGE_REGISTER(0xE5, session_security_info),
         BRIDGE_REGISTER(0xE8, btrace_out)
     };
@@ -6399,6 +6423,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x29, thread_suspend),
         BRIDGE_REGISTER(0x2A, thread_priority),
         BRIDGE_REGISTER(0x2B, thread_set_priority),
+        BRIDGE_REGISTER(0x2C, thread_process_priority),
+        BRIDGE_REGISTER(0x2D, thread_set_process_priority),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),
         BRIDGE_REGISTER(0x31, thread_exit_type),
@@ -6516,6 +6542,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xDE, leave_start),
         BRIDGE_REGISTER(0xDF, leave_end),
         BRIDGE_REGISTER(0xE1, get_module_name_from_address),
+        BRIDGE_REGISTER(0xE2, get_locale_dll_name),
         BRIDGE_REGISTER(0xE4, session_security_info),
         BRIDGE_REGISTER(0xE7, btrace_out)
     };

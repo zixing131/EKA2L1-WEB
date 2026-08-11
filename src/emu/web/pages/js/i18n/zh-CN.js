@@ -132,6 +132,7 @@
 
         // ---- 操作面板（Action Sheet） -------------------------------------------
         'sheet.installSis': '安装 SIS 程序包（.sis / .sisx）',
+        'sheet.installJar': '安装 Java ME 程序（MIDP 2.0 .jar）',
         'sheet.installDevice': '安装设备固件（ROM + RPKG）',
         'sheet.installDevice.title': '安装设备固件',
         'sheet.installDevice.desc': '选择 ROM 文件（.rom）。S60 第三版 / Symbian^3 机型（N73、N95、5800、N8 等）还需要对应的 RPKG 文件；老机型（EKA1）只需 ROM。',
@@ -175,6 +176,7 @@
         'error.installFailed': '安装失败：{reason}',
         'error.deviceInstallFailed': '设备固件安装失败：\n{msg}',
         'error.sisInstallFailed': 'SIS 安装失败：\n{msg}',
+        'error.jarInstallFailed': 'Java ME 安装失败：\n{msg}',
         'error.installFailedCode': '安装失败（代码 {code}）',
         'error.quotaInsufficient': '浏览器存储空间不足：需要约 {need}MB（含写入余量），仅剩 {free}MB / 配额 {quota}MB。\n请删除一些已安装的应用或设备后重试',
         'error.quotaInsufficientSuffixLow': '；当前配额过小，疑似无痕/隐私浏览模式。',

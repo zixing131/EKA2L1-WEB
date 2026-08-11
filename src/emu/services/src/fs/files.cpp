@@ -289,6 +289,7 @@ namespace eka2l1 {
             f->seek(size, file_seek_mode::beg);
         }
 
+        server<fs_server>()->notify_change(f->file_name(), notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -485,6 +486,8 @@ namespace eka2l1 {
             }
         }
 
+        server<fs_server>()->notify_change(old_path, notify_type::all);
+        server<fs_server>()->notify_change(new_path_abs, notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -546,6 +549,12 @@ namespace eka2l1 {
 
         //LOG_TRACE(SERVICE_EFSRV, "File {} wroted with size: {}, at {}", common::ucs2_to_utf8(vfs_file->file_name()), wrote_size, write_pos);
 
+        if (wrote_size != static_cast<std::size_t>(write_len)) {
+            ctx->complete(epoc::error_general);
+            return;
+        }
+
+        server<fs_server>()->notify_change(vfs_file->file_name(), notify_type::all);
         ctx->complete(epoc::error_none);
     }
 
@@ -915,6 +924,9 @@ namespace eka2l1 {
         LOG_TRACE(SERVICE_EFSRV, "Handle opened: {}", handle);
 
         ctx->write_data_to_descriptor_argument<int>(3, handle);
+        if (!is_it_avail || overwrite) {
+            server<fs_server>()->notify_change(*name_res, notify_type::all);
+        }
         ctx->complete(epoc::error_none);
     }
 

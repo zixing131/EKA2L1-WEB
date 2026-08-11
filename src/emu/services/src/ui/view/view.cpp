@@ -444,6 +444,17 @@ namespace eka2l1 {
             break;
         }
 
+        case view_opcode_set_cross_check_uid: {
+            // S60v3's native Installer enables view-switch source checking
+            // while it owns the foreground. The check only hardens routing of
+            // subsequent view events; acknowledging it is sufficient for the
+            // HLE view server and, critically, avoids leaving the synchronous
+            // client IPC pending forever.
+            LOG_TRACE(SERVICE_UI, "SetCrossCheckUid acknowledged");
+            ctx->complete(epoc::error_none);
+            break;
+        }
+
         case view_opcode_request_view_event_cancel:
             request_view_event_cancel(ctx);
             break;

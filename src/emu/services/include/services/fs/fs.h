@@ -334,6 +334,12 @@ namespace eka2l1 {
         explicit fs_server(system *sys);
         ~fs_server() override;
 
+        // RFs change notifications are registered per client session, but a
+        // mutation made by any file-server client must wake every matching
+        // waiter.  Keep the fan-out at server scope rather than notifying only
+        // the session which performed the write.
+        void notify_change(const std::u16string &path, fs_server_client::notify_type type);
+
         service::uid get_owner_secure_uid() const override {
             return 0x100039E3;
         }

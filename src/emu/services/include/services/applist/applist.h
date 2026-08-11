@@ -28,6 +28,7 @@
 
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include <BS_thread_pool.hpp>
@@ -99,6 +100,13 @@ namespace eka2l1 {
         file_ownership_list ownership_list;
 
         drive_number land_drive;
+
+        // Non-native applications (Java ME, widgets, etc.) are represented by
+        // a logical application path in the registration resource. AppArc
+        // launches the native runtime registered for this type and passes the
+        // opaque resource payload to it through CApaCommandLine.
+        epoc::uid non_native_application_type{ 0 };
+        std::vector<std::uint8_t> non_native_opaque_data;
 
         /**
          * @brief Get parameters to launch this app registry.
@@ -189,6 +197,7 @@ namespace eka2l1 {
         std::uint32_t requested_screen_mode_;
 
         app_filter_method filter_method_;
+        std::vector<std::uint8_t> pending_opaque_data_;
 
     public:
         explicit applist_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_ver);
@@ -196,6 +205,9 @@ namespace eka2l1 {
 
         void get_filtered_apps_by_flags(service::ipc_context &ctx);
         void get_next_app(service::ipc_context &ctx);
+        void get_native_executable_name_if_non_native(service::ipc_context &ctx);
+        void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
+        void get_opaque_data(service::ipc_context &ctx);
     };
 
     /*! \brief Applist services
@@ -210,6 +222,23 @@ namespace eka2l1 {
 
         std::vector<apa_app_registry> regs;
         std::unordered_map<epoc::uid, std::u16string> uids_app_to_executable;
+        std::unordered_map<epoc::uid, std::u16string> non_native_app_types_;
+
+        struct pending_non_native_update {
+            enum class kind {
+                register_app,
+                deregister_app
+            } kind_;
+
+            epoc::uid application_uid_;
+            epoc::uid application_type_;
+            drive_number drive_;
+            std::vector<std::uint8_t> registration_resource_;
+            std::vector<std::uint8_t> localisable_resource_;
+        };
+
+        bool non_native_update_prepared_{ false };
+        std::vector<pending_non_native_update> pending_non_native_updates_;
 
         std::uint32_t flags{ 0 };
         std::uint32_t avail_drives_{ 0 };
@@ -299,7 +328,6 @@ namespace eka2l1 {
         void get_app_icon(service::ipc_context &ctx);
 
         void get_app_icon_sizes(service::ipc_context &ctx);
-        void get_native_executable_name_if_non_native(service::ipc_context &ctx);
         void app_info_provided_by_reg_file(service::ipc_context &ctx);
         data_recog_result recognize_data_impl(common::ro_stream &stream, const std::u16string &name);
 
@@ -310,11 +338,21 @@ namespace eka2l1 {
         void get_app_for_document_by_file_handle(service::ipc_context &ctx);
         void get_app_for_document_impl(service::ipc_context &ctx, const std::u16string &path);
         void get_app_for_data_type(service::ipc_context &ctx);
-        void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
         void recognize_data(service::ipc_context &ctx);
         void recognize_data_by_file_handle(service::ipc_context &ctx);
         void get_supported_data_types_phase1(service::ipc_context &ctx);
         void get_supported_data_types_phase2(service::ipc_context &ctx);
+
+        void register_non_native_app_type(service::ipc_context &ctx);
+        void deregister_non_native_app_type(service::ipc_context &ctx);
+        void prepare_non_native_app_updates(service::ipc_context &ctx);
+        void register_non_native_app(service::ipc_context &ctx);
+        void deregister_non_native_app(service::ipc_context &ctx);
+        void commit_non_native_app_updates(service::ipc_context &ctx);
+        void rollback_non_native_app_updates(service::ipc_context &ctx);
+        void get_app_type(service::ipc_context &ctx);
+
+        std::u16string native_executable_for_non_native_type(epoc::uid type) const;
 
         void connect(service::ipc_context &ctx) override;
 

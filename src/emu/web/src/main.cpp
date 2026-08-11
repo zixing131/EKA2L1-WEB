@@ -85,6 +85,10 @@
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
 #include <kernel/thread.h>
+#include <mem/ptr.h>
+
+#include <j2me/applist.h>
+#include <j2me/interface.h>
 
 #include <services/window/window.h>
 #include <services/window/screen.h>
@@ -151,6 +155,9 @@ namespace eka2l1::web {
         std::string last_app_exit_category;
         std::string last_app_exit_name;
         std::uint32_t last_app_exit_uid = 0;
+
+        // 0 = idle, 1 = guest MIDP installer running, 2 = success, < 0 = failed.
+        std::atomic<int> midlet_install_state{ 0 };
     };
 
     static wasm_state g_state;
@@ -1570,6 +1577,179 @@ int wasm_install_package(const char *pkg_path) {
 }
 
 /**
+ * Stage a JAR in the RM-409 Java preinstall directory and run the ROM's own
+ * MIDP2 silent installer. App registration is completed asynchronously by the
+ * guest process; wasm_midlet_install_status() reports when it has exited.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_install_midlet(const char *jar_path) {
+    if (!jar_path) return -1;
+    if (!g_state.symsys) return -2;
+    if (g_state.midlet_install_state.load(std::memory_order_acquire) == 1) return -3;
+
+    g_state.midlet_install_state.store(1, std::memory_order_release);
+    eka2l1::j2me::app_entry entry;
+    const eka2l1::j2me::install_error result = eka2l1::j2me::install(
+        g_state.symsys.get(), jar_path, entry, [](eka2l1::kernel::process *installer) {
+            LOG_INFO(FRONTEND_CMDLINE, "Guest MIDP installer exited: type={}, reason={}, category={}",
+                static_cast<int>(installer->get_exit_type()), installer->get_exit_reason(),
+                eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
+
+            if (g_state.symsys) {
+                eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+                auto *alserv = kern ? reinterpret_cast<eka2l1::applist_server *>(
+                    kern->get_by_name<eka2l1::service::server>(
+                        eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version()))) : nullptr;
+                if (alserv) {
+                    alserv->rescan_registries(g_state.symsys->get_io_system());
+                }
+            }
+
+            const bool success = (installer->get_exit_type() != eka2l1::kernel::entity_exit_type::panic)
+                && (installer->get_exit_reason() == 0);
+            if (!success) {
+                LOG_ERROR(FRONTEND_CMDLINE,
+                    "Guest MIDP installer failed: type={}, reason={}, category={}",
+                    static_cast<int>(installer->get_exit_type()), installer->get_exit_reason(),
+                    eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
+            }
+            g_state.midlet_install_state.store(success ? 2 : -4, std::memory_order_release);
+        });
+
+    if (result != eka2l1::j2me::INSTALL_ERROR_JAR_SUCCESS) {
+        g_state.midlet_install_state.store(0, std::memory_order_release);
+    }
+    return static_cast<int>(result);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_midlet_install_status() {
+    return g_state.midlet_install_state.load(std::memory_order_acquire);
+}
+
+// TEMPORARY bring-up probe storage for the S60v3 Java (J9) runtime.
+static std::string g_java_inventory;
+
+/**
+ * Read-only: enumerate Java-related executables under a few ROM/data dirs and
+ * return them as newline-separated text. Safe to call while paused; never runs
+ * guest code. Used to map the S60v3 Java runtime boot chain.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_java_inventory() {
+    g_java_inventory.clear();
+    if (!g_state.symsys) {
+        g_java_inventory = "no-system";
+        return g_java_inventory.c_str();
+    }
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+
+    auto dump_dir = [&](const std::u16string &dir) {
+        std::unique_ptr<eka2l1::directory> d = io->open_dir(dir + u"*", {}, io_attrib_include_file);
+        if (!d) {
+            g_java_inventory += "[missing] " + eka2l1::common::ucs2_to_utf8(dir) + "\n";
+            return;
+        }
+        while (auto e = d->get_next_entry()) {
+            std::string low = e->name;
+            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+            if ((low.find("java") != std::string::npos) || (low.find("midp") != std::string::npos)
+                || (low.find("midlet") != std::string::npos) || (low.find("jvm") != std::string::npos)
+                || (low.find("ams") != std::string::npos) || (low.find("cldc") != std::string::npos)
+                || (low.find("jsr") != std::string::npos) || (low.find("j9") != std::string::npos)
+                || (low.find("cvm") != std::string::npos)) {
+                g_java_inventory += eka2l1::common::ucs2_to_utf8(dir) + e->name + "\n";
+            }
+        }
+    };
+    dump_dir(u"Z:\\sys\\bin\\");
+    dump_dir(u"Z:\\resource\\java\\");
+    dump_dir(u"Z:\\private\\102033e6\\");
+    return g_java_inventory.c_str();
+}
+
+/**
+ * Read-only: list one guest directory (UTF-8 path like "Z:\\system\\data\\"),
+ * newline-separated, dirs suffixed with '\'. Bring-up debugging helper.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_ls(const char *utf8_dir) {
+    g_java_inventory.clear();
+    if (!g_state.symsys || !utf8_dir) {
+        g_java_inventory = "no-system";
+        return g_java_inventory.c_str();
+    }
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+    const std::u16string dir = eka2l1::common::utf8_to_ucs2(utf8_dir);
+    std::unique_ptr<eka2l1::directory> d = io->open_dir(dir + u"*", {}, io_attrib_include_file | io_attrib_include_dir);
+    if (!d) {
+        g_java_inventory = "[missing]";
+        return g_java_inventory.c_str();
+    }
+    while (auto e = d->get_next_entry()) {
+        g_java_inventory += e->name;
+        if (e->type == eka2l1::io_component_type::dir) {
+            g_java_inventory += "\\";
+        }
+        g_java_inventory += "\n";
+    }
+    if (g_java_inventory.empty()) {
+        g_java_inventory = "[empty]";
+    }
+    return g_java_inventory.c_str();
+}
+
+/**
+ * Toggle full SVC/IPC tracing at runtime (very verbose; bring-up debugging only).
+ * enable=1: log every executive call + every IPC message at trace level.
+ * enable=0: back to warn-level logging.
+ */
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_trace_logging(int enable) {
+    g_state.conf.log_svc = (enable != 0);
+    g_state.conf.log_ipc = (enable != 0);
+    const auto level = enable ? spdlog::level::trace : spdlog::level::warn;
+    spdlog::set_level(level);
+    if (eka2l1::log::filterings) {
+        eka2l1::log::filterings->reset_all(level);
+    }
+    LOG_WARN(FRONTEND_CMDLINE, "[java-probe] trace logging {}", enable ? "ON" : "OFF");
+}
+
+/**
+ * Boot the named guest executable (path is UTF-8) directly and log its exit.
+ * Used to drive the JVM boot chain and capture the first fatal failure.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_probe_boot_exe(const char *utf8_path) {
+    if (!g_state.symsys || !utf8_path) return -1;
+    eka2l1::j2me::prepare_midp2_environment(g_state.symsys.get());
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    const std::u16string path = eka2l1::common::utf8_to_ucs2(utf8_path);
+    if (!g_state.symsys->get_io_system()->exist(path)) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[java-probe] {} not found", utf8_path);
+        return -2;
+    }
+    eka2l1::kernel::process *pr = kern->spawn_new_process(path, u"");
+    if (!pr) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[java-probe] spawn {} failed", utf8_path);
+        return -3;
+    }
+    pr->logon([](eka2l1::kernel::process *p) {
+        LOG_WARN(FRONTEND_CMDLINE, "[java-probe] {} exited type={} reason={} category={}",
+            p->name(), static_cast<int>(p->get_exit_type()), p->get_exit_reason(),
+            eka2l1::common::ucs2_to_utf8(p->get_exit_category()));
+    });
+    if (!pr->run()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[java-probe] run {} failed", utf8_path);
+        return -4;
+    }
+    g_state.paused = false;
+    LOG_INFO(FRONTEND_CMDLINE, "[java-probe] started {}", utf8_path);
+    return 0;
+}
+
+/**
  * JSON list of installed devices (ROMs): [{"index":0,"name":"...","firmware":"...","current":1}]
  */
 EMSCRIPTEN_KEEPALIVE
@@ -2463,6 +2643,60 @@ void wasm_debug_dump() {
             thread_state_to_str(thr->current_state()),
             pc, pc_module.c_str(), pc_offset, lr, sp,
             thr->wait_obj ? thr->wait_obj->name().c_str() : "");
+
+        // RM-409's MIDP2SilentMIDletInstall owns one CActive-derived monitor.
+        // When its scheduler is idle, the saved CPU stack only points into
+        // euser.dll; locate the monitor by its ROM vtable and expose the
+        // CActive status plus the installer's private state/result fields.
+        // This is deliberately bounded to the low user heap range and only
+        // runs for the one diagnostic process.
+        if (pr && (pr->raw_name().find("midp2silentmidletinstall") != std::string::npos)) {
+            static constexpr std::uint32_t monitor_vtable = 0x81D7B6A0;
+            bool monitor_found = false;
+            for (std::uint32_t page = 0x00400000; (page < 0x02000000) && !monitor_found; page += 0x1000) {
+                const std::uint32_t *words = reinterpret_cast<const std::uint32_t *>(pr->get_ptr_on_addr_space(page));
+                if (!words) continue;
+                for (std::uint32_t i = 0; i < 0x1000 / sizeof(std::uint32_t); ++i) {
+                    if (words[i] != monitor_vtable) continue;
+                    const std::uint32_t obj_addr = page + i * sizeof(std::uint32_t);
+                    const std::uint32_t *obj = reinterpret_cast<const std::uint32_t *>(pr->get_ptr_on_addr_space(obj_addr));
+                    if (!obj) continue;
+                    std::printf("[dump] midp-monitor obj=0x%08X status=%d active_flags=0x%08X state=%u result=%d child_handle=0x%08X child_obj=0x%08X\n",
+                        obj_addr, static_cast<std::int32_t>(obj[1]), obj[2], obj[0x7C / 4],
+                        static_cast<std::int32_t>(obj[0x80 / 4]), obj[0x20 / 4], obj[0x24 / 4]);
+                    monitor_found = true;
+                    break;
+                }
+            }
+            if (!monitor_found) {
+                std::printf("[dump] midp-monitor not found\n");
+            }
+        }
+
+        // A blocked Symbian thread normally sits in euser's
+        // User::WaitForRequest. Scan a small, bounded part of its saved stack
+        // for return addresses so the dump still identifies the real client
+        // DLL and call site behind that generic wait frame.
+        if (pr && sp) {
+            const std::uint32_t *stack_words = eka2l1::ptr<std::uint32_t>(sp).get(pr);
+            int printed = 0;
+            if (stack_words) {
+                for (std::uint32_t i = 0; (i < 96) && (printed < 12); ++i) {
+                    const std::uint32_t candidate = stack_words[i] & ~1U;
+                    for (auto &seg_obj : kern->get_codeseg_list()) {
+                        eka2l1::codeseg_ptr seg = reinterpret_cast<eka2l1::codeseg_ptr>(seg_obj.get());
+                        if (!seg) continue;
+                        const eka2l1::address beg = seg->get_code_run_addr(pr);
+                        if (beg && (candidate >= beg) && (candidate < beg + seg->get_text_size())) {
+                            std::printf("[dump]     stack+0x%X = 0x%08X (%s+0x%X)\n",
+                                i * 4, stack_words[i], seg->name().c_str(), candidate - beg);
+                            ++printed;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Window-server focus: a "frozen" app with a healthy event loop usually
@@ -2494,9 +2728,13 @@ void wasm_debug_dump() {
 
         eka2l1::service::server *target = msg->msg_session ? msg->msg_session->get_server() : nullptr;
         const bool queued = !msg->delivered_msg_link.alone();
+        const std::string server_name = target ? target->name()
+            : (msg->debug_server_name.empty() ? "?" : msg->debug_server_name);
+        const std::string session_name = msg->msg_session ? msg->msg_session->name()
+            : (msg->debug_session_name.empty() ? "?" : msg->debug_session_name);
         std::printf("[dump] inflight-ipc server='%s' session='%s' func=0x%X type=%d status=%d queued=%d sender='%s'\n",
-            target ? target->name().c_str() : "?",
-            msg->msg_session ? msg->msg_session->name().c_str() : "?",
+            server_name.c_str(),
+            session_name.c_str(),
             msg->function,
             static_cast<int>(msg->type),
             static_cast<int>(msg->msg_status),
