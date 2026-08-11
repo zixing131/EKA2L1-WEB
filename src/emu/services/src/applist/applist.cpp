@@ -1783,7 +1783,8 @@ namespace eka2l1 {
     static constexpr std::uint8_t ENVIRONMENT_SLOT_MAIN = 1;
 
     bool applist_server::launch_app(const std::u16string &exe_path, const std::u16string &cmd, kernel::uid *thread_id,
-                                    kernel::process *requester, const epoc::uid known_uid, std::function<void(kernel::process*)> app_exit_callback) {
+                                    kernel::process *requester, const epoc::uid known_uid, std::function<void(kernel::process*)> app_exit_callback,
+                                    const bool pass_command_line_in_env_slot) {
         static constexpr std::size_t MINIMAL_LAUNCH_STACK_SIZE = 0x10000;
         static constexpr std::size_t MINIMAL_LAUNCH_STACK_SIZE_S3 = 0x80000;
 
@@ -1799,7 +1800,11 @@ namespace eka2l1 {
             return false;
         }
 
-        if ((legacy_level() >= APA_LEGACY_LEVEL_MORDEN) && !cmd.empty()) {
+        // Only non-native apps need this: their runtime reads the MIDlet's
+        // opaque data out of the command line. Native apps must not get one,
+        // because the serialised CApaCommandLine carries parent_process_id_ = 0
+        // and Avkon then opens process 0 and leaves during startup.
+        if (pass_command_line_in_env_slot && (legacy_level() >= APA_LEGACY_LEVEL_MORDEN) && !cmd.empty()) {
             pr->set_arg_slot(ENVIRONMENT_SLOT_MAIN,
                 reinterpret_cast<std::uint8_t *>(const_cast<char16_t *>(cmd.data())),
                 cmd.size() * sizeof(char16_t));
@@ -1913,8 +1918,11 @@ namespace eka2l1 {
                 registry.non_native_opaque_data.size());
         }
 
+        const bool is_non_native = (registry.caps.flags & apa_capability::non_native) != 0;
         std::u16string apacmddat = parameter.to_string(legacy_level() < APA_LEGACY_LEVEL_MORDEN);
-        return launch_app(executable_to_run, apacmddat, thread_id, nullptr, registry.mandatory_info.uid, app_exit_callback);
+
+        return launch_app(executable_to_run, apacmddat, thread_id, nullptr, registry.mandatory_info.uid,
+            app_exit_callback, is_non_native);
     }
 
     std::optional<apa_app_masked_icon_bitmap> applist_server::get_icon(apa_app_registry &registry, const std::int8_t index) {
