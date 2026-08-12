@@ -312,7 +312,7 @@
                     clearInterval(regPoll);
                     overlayError(EKA2L1.t('overlay.launchFailedTitle'),
                         EKA2L1.t('overlay.reregisterFailed'));
-                } else if (elapsed > 45000) {
+                } else if (elapsed > 90000) {
                     clearInterval(regPoll);
                     overlayError(EKA2L1.t('overlay.launchTimeoutTitle'),
                         EKA2L1.t('overlay.launchTimeoutText'));

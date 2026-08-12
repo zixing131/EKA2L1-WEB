@@ -1063,6 +1063,11 @@ static void main_loop() {
         return;
     }
 
+    // (Previously pulsed LSK/OK here during MIDlet install. That raced with ifeui
+    // and produced Leave -25 without ever confirming. Unsigned consent is now
+    // stubbed out in midp2installerplugin.dll instead — see libmanager.cpp.)
+
+
     // Run several short guest slices per browser frame. A single full guest
     // timeslice can block the browser, but only one tiny slice per RAF makes
     // app startup crawl. Use a wall-clock budget to balance progress/yielding.
@@ -2746,16 +2751,22 @@ int wasm_launch_midlet(int virtual_uid) {
     }
     const std::uint32_t j2me_id = j2me_id_from_virtual_uid(uid32);
 
-    // Get the MIDlet name for matching against AppArc registries.
+    // Get the MIDlet name/title for matching against AppArc registries.
+    // AppArc long_caption is usually the MIDlet-1 display title, while the
+    // host j2me DB stores both MIDlet-Name and that title — match either.
     std::string midlet_name;
+    std::string midlet_title;
     eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
     if (j2me_list) {
         auto entry = j2me_list->get_entry(j2me_id);
-        if (entry.has_value()) midlet_name = entry->name_;
+        if (entry.has_value()) {
+            midlet_name = entry->name_;
+            midlet_title = entry->title_.empty() ? entry->original_title_ : entry->title_;
+        }
     }
 
-    LOG_INFO(FRONTEND_CMDLINE, "Launching J2ME MIDlet id={} uid=0x{:08X} name='{}'",
-        j2me_id, static_cast<std::uint32_t>(virtual_uid), midlet_name);
+    LOG_INFO(FRONTEND_CMDLINE, "Launching J2ME MIDlet id={} uid=0x{:08X} name='{}' title='{}'",
+        j2me_id, static_cast<std::uint32_t>(virtual_uid), midlet_name, midlet_title);
 
     auto reset_exit_state = []() {
         g_state.launched_app_exited.store(false, std::memory_order_release);
@@ -2790,7 +2801,7 @@ int wasm_launch_midlet(int virtual_uid) {
     // Java app, and AppArc invokes StubMIDP2RecogExe.exe with the proper opaque
     // data payload to start the Java runtime.
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
-    if (kern && !midlet_name.empty()) {
+    if (kern && (!midlet_name.empty() || !midlet_title.empty())) {
         auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
             kern->get_by_name<eka2l1::service::server>(
                 eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
@@ -2799,6 +2810,21 @@ int wasm_launch_midlet(int virtual_uid) {
             // These match the file-scope statics in applist.cpp.
             constexpr std::uint32_t JAVA_MIDLET_TYPE_UID = 0x10210E26;
             constexpr std::uint32_t JAVA_MIDLET_LEGACY_TYPE = 0xB031C52A;
+
+            auto names_match = [&](const std::string &reg_name) {
+                if (reg_name.empty()) {
+                    return false;
+                }
+                if (!midlet_name.empty()
+                    && (eka2l1::common::compare_ignore_case(reg_name.c_str(), midlet_name.c_str()) == 0)) {
+                    return true;
+                }
+                if (!midlet_title.empty()
+                    && (eka2l1::common::compare_ignore_case(reg_name.c_str(), midlet_title.c_str()) == 0)) {
+                    return true;
+                }
+                return false;
+            };
 
             eka2l1::apa_app_registry *java_reg = nullptr;
             for (auto &reg : alserv->get_registerations()) {
@@ -2809,7 +2835,7 @@ int wasm_launch_midlet(int virtual_uid) {
                     continue;
                 const std::string reg_name = eka2l1::common::ucs2_to_utf8(
                     reg.mandatory_info.long_caption.to_std_string(nullptr));
-                if (reg_name == midlet_name) {
+                if (names_match(reg_name)) {
                     java_reg = &reg;
                     break;
                 }
@@ -2818,7 +2844,8 @@ int wasm_launch_midlet(int virtual_uid) {
             if (java_reg) {
                 LOG_INFO(FRONTEND_CMDLINE,
                     "MIDlet '{}' found in AppArc (uid=0x{:08X}), launching via AppArc",
-                    midlet_name, java_reg->mandatory_info.uid);
+                    midlet_name.empty() ? midlet_title : midlet_name,
+                    java_reg->mandatory_info.uid);
 
                 reset_exit_state();
                 epoc::apa::command_line cmdline;
@@ -2841,12 +2868,24 @@ int wasm_launch_midlet(int virtual_uid) {
                     g_state.paused = false;
                     return 0;
                 }
-                LOG_WARN(FRONTEND_CMDLINE, "AppArc launch failed for '{}', trying direct launcher", midlet_name);
+                LOG_WARN(FRONTEND_CMDLINE, "AppArc launch failed for '{}', trying direct launcher",
+                    midlet_name.empty() ? midlet_title : midlet_name);
             } else {
                 // The MIDlet was installed in the host j2me app list, but it is
                 // not in AppArc (registration was lost on emulator restart, or
                 // the silent installer never completed). Re-run the silent
                 // installer to restore the registration, then tell JS to retry.
+                //
+                // If a previous attempt left midlet_install_state stuck at 1
+                // (installer hung on NotifyChange after UserCancel), reset so
+                // a fresh reregister can start.
+                const int prev_state = g_state.midlet_install_state.load(std::memory_order_acquire);
+                if (prev_state == 1) {
+                    LOG_WARN(FRONTEND_CMDLINE,
+                        "Previous MIDlet installer still marked in-progress; resetting to allow reregister");
+                    g_state.midlet_install_state.store(0, std::memory_order_release);
+                }
+
                 if (g_state.midlet_install_state.load(std::memory_order_acquire) != 1) {
                     g_state.midlet_install_state.store(1, std::memory_order_release);
 
@@ -2878,14 +2917,14 @@ int wasm_launch_midlet(int virtual_uid) {
                     if (reg_ok) {
                         LOG_INFO(FRONTEND_CMDLINE,
                             "MIDlet '{}' not in AppArc; reregister triggered. Returning -100 for JS retry.",
-                            midlet_name);
+                            midlet_name.empty() ? midlet_title : midlet_name);
                         return -100;
                     }
                     g_state.midlet_install_state.store(0, std::memory_order_release);
                 }
                 LOG_WARN(FRONTEND_CMDLINE,
                     "MIDlet '{}' not in AppArc and reregister could not start. Trying direct launcher.",
-                    midlet_name);
+                    midlet_name.empty() ? midlet_title : midlet_name);
             }
         }
     }

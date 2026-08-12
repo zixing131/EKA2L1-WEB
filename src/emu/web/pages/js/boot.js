@@ -602,6 +602,35 @@
             log('');
             log('=== Preinstall directory ===');
             log(EKA2L1.probeLs('E:\\system\\data\\midp2\\preinstall\\'));
+
+            // 4. AppArc registration + launcher viability (wasm_check_midlet_launch)
+            log('');
+            log('=== AppArc / launcher ===');
+            try {
+                var check = EKA2L1.checkMidletLaunch() || '';
+                var interesting = check.split('\n').filter(function (line) {
+                    return /Java apps in AppArc|LAUNCHER:|\[OK\]|\[MISS\]/i.test(line);
+                });
+                if (interesting.length) {
+                    interesting.forEach(function (line) { log(line); });
+                } else {
+                    log(check || '(empty)');
+                }
+            } catch (e) {
+                log('[ERROR] checkMidletLaunch failed: ' + e);
+            }
+
+            // 5. Host-side j2me list (shows even when AppArc is empty)
+            try {
+                var apps = EKA2L1.appList().filter(function (a) { return a.j2me; });
+                log('');
+                log('=== Host j2me app list (' + apps.length + ') ===');
+                apps.forEach(function (a) {
+                    log('0x' + (a.uid >>> 0).toString(16) + ' ' + (a.name || ''));
+                });
+            } catch (e) {
+                log('[ERROR] appList failed: ' + e);
+            }
         }
 
         var report = lines.join('\n');

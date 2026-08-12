@@ -268,6 +268,39 @@ EKA2L1.diagnoseJ2ME()
 
 ---
 
+## 九、启动失败：静默安装 UI 无人确认（UserCancel）
+
+### 现象
+
+MIDlet 能出现在程序库（宿主 j2me DB 已注册），但点击启动返回 `-2` / 重注册超时。
+`EKA2L1.diagnoseJ2ME()` 常见 `Java apps in AppArc: 0`。
+
+### 根因
+
+5320 的 `midp2silentmidletinstall` 会拉起 SWInst + `ifeui` 确认未签名包。
+库页面 / 无按键环境下确认对话框无人点，SWInst 返回 **`-30471 = KSWInstErrUserCancel`**，
+AppArc 从不 `register_non_native_app`，启动路径（AppArc 非原生）无注册可用；
+ROM 又没有独立的 `midp2midletlauncher.exe`，只能失败。
+
+已有的 `midp2installerplugin.dll` bne→b 兼容补丁只能跳过其中一条 leave-info 路径，
+挡不住 ifeui 交互取消。
+
+### 修复
+
+1. **`midp2installerplugin.dll` consent stub**：把未签名确认 helper 直接改成 `return 0`
+   （不再调用 ifeui），避免头less 下 Leave / UserCancel。
+2. **leave-info 补丁保留**：consent 返回 0 时跳过写入 `{category=902, code=6}`。
+3. **`ifeui.dll` auto-accept**：其它安装路径仍会直接弹 ifeui 确认框；把对话框 Run
+   入口 stub 成立即 `return 1`（当作软键确认），避免无人按键时的 `-30471` / Leave(-25)。
+4. **AppArc 名称匹配**：同时匹配 `MIDlet-Name` 与 `MIDlet-1` 标题（忽略大小写）。
+5. **卡住的安装状态**：若上一轮安装器挂起导致 `midlet_install_state` 一直为 1，启动时重置后再重注册。
+6. 安装 / 重注册等待超时放宽到 90s。
+
+> 曾尝试主循环自动注入 LSK/OK，但会与 ifeui 竞态触发 Leave(-25)，已撤回。
+> 仅 NOP 掉 Run 调用点会让 Create 后的对话框状态不完整并挂起，已改为 stub Run 入口。
+
+---
+
 ## 七、构建验证
 
 ```bash

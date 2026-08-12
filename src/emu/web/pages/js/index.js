@@ -584,7 +584,10 @@
     };
 
     function waitForMidletInstaller() {
-        var deadline = Date.now() + 60000;
+        // Guest SWInst may show an untrusted-MIDlet confirmation (ifeui).
+        // Consent/auto-accept is patched in-guest; still allow enough time for
+        // AppArc registration to finish.
+        var deadline = Date.now() + 90000;
         return new Promise(function (resolve, reject) {
             function poll() {
                 var state = EKA2L1.midletInstallStatus();

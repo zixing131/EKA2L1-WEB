@@ -179,6 +179,8 @@ namespace eka2l1::hle {
         return true;
     }
 
+    static void apply_j2me_compat_patches(codeseg_ptr cs);
+
     static void buildup_import_fixup_table(loader::e32img *img, memory_system *mem, hle::lib_manager &mngr, codeseg_ptr cs) {
         if (img->epoc_ver < epocver::eka2) {
             std::uint32_t track = 0;
@@ -257,6 +259,8 @@ namespace eka2l1::hle {
             LOG_ERROR(KERNEL, "E32 image loading failed!");
             return nullptr;
         }
+
+        apply_j2me_compat_patches(cs);
 
         // Build import table so that it can patch later
         buildup_import_fixup_table(img, mem, mngr, cs);
@@ -605,16 +609,27 @@ namespace eka2l1::hle {
     // pseudo-file exposed for such binaries only carries header metadata and is never
     // re-read by the loader, so file-level patches would be silently ineffective).
     //
-    // midp2installerplugin.dll (S60v3 MIDP2 installer, used by the ROM's silent JAR
-    // installer): after a trust/consent probe returns 0, the installer unconditionally
-    // records leave-info {category=902, code=6} even on the success path, which the
-    // caller later surfaces as a silent KSWInstErrUserCancel for JARs that can't get an
-    // interactive user confirmation (there is no UI in headless/silent installs). Force
-    // the `bne` that gates that store to always take the branch, matching what a real
-    // "user confirmed"/trusted install would do.
+    // midp2installerplugin.dll (S60v3 MIDP2 installer):
+    // 1) Consent/trust helper opens an ifeui confirmation for unsigned MIDlets.
+    //    In headless installs nobody can press softkeys, the dialog Leaves, and
+    //    SWInst rolls back with KSWInstErrUserCancel (-30471). Stub that helper
+    //    to return KErrNone immediately so ifeui is never shown.
+    // 2) Even after a successful (0) consent return the same helper still wrote
+    //    leave-info {category=902, code=6}, which the caller also surfaces as
+    //    UserCancel. Force the gating `bne` to always branch past that store.
+    //
+    // ifeui.dll: other installer paths still construct a confirmation dialog and call
+    // its RunLD-equivalent, which blocks (then Leave(-25) / UserCancel) with no
+    // softkeys. Stub that Run entry to return OK immediately (NOP'ing only the
+    // call site after CreateLD left the dialog half-initialized and hung).
     static void apply_installer_compat_patch(codeseg_ptr cs) {
-        static const std::uint8_t sig[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xd1 };
-        static const std::uint8_t patch[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xe0 };
+        static const std::uint8_t leave_sig[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xd1 };
+        static const std::uint8_t leave_patch[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xe0 };
+
+        // push {r4,r5,r6,lr}; movs r4, r0; movs r0, r1; movs r1, #1
+        static const std::uint8_t consent_sig[] = { 0x70, 0xb5, 0x04, 0x00, 0x08, 0x00, 0x01, 0x21 };
+        // push {r4,r5,r6,lr}; movs r0, #0; pop {r4,r5,r6,pc}
+        static const std::uint8_t consent_patch[] = { 0x70, 0xb5, 0x00, 0x20, 0x70, 0xbd };
 
         std::uint8_t *base = nullptr;
         const address run_addr = cs->get_code_run_addr(nullptr, &base);
@@ -623,13 +638,64 @@ namespace eka2l1::hle {
         }
 
         const std::uint32_t code_size = cs->get_code_size();
-        for (std::uint32_t i = 0; (i + sizeof(sig)) <= code_size; i++) {
-            if (std::memcmp(base + i, sig, sizeof(sig)) == 0) {
-                std::memcpy(base + i, patch, sizeof(patch));
-                LOG_INFO(KERNEL, "{} compat patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+        int applied = 0;
+
+        for (std::uint32_t i = 0; (i + sizeof(consent_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, consent_sig, sizeof(consent_sig)) == 0) {
+                std::memcpy(base + i, consent_patch, sizeof(consent_patch));
+                LOG_INFO(KERNEL, "{} consent-stub patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
                     cs->name(), i, run_addr + i);
-                return;
+                applied++;
+                break;
             }
+        }
+
+        for (std::uint32_t i = 0; (i + sizeof(leave_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, leave_sig, sizeof(leave_sig)) == 0) {
+                std::memcpy(base + i, leave_patch, sizeof(leave_patch));
+                LOG_INFO(KERNEL, "{} leave-info patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                applied++;
+                break;
+            }
+        }
+
+        if (!applied) {
+            LOG_WARN(KERNEL, "{}: no J2ME installer compat patches matched", cs->name());
+        }
+    }
+
+    static void apply_ifeui_compat_patch(codeseg_ptr cs) {
+        // Confirmation Run-equivalent entry (unique in this ROM image):
+        //   push {r0,r4,r5,r6,r7,lr}; movs r1, #0; mvns r1, r1; movs r7, r0
+        // Stub to: movs r0, #1; bx lr  (pretend softkey OK, no UI wait).
+        // Returning immediately avoids both UserCancel (-30471) and the hang that
+        // happens if we only NOP the call site after CreateLD.
+        static const std::uint8_t run_sig[] = { 0xf1, 0xb5, 0x00, 0x21, 0xc9, 0x43, 0x07, 0x00 };
+        static const std::uint8_t run_stub[] = { 0x01, 0x20, 0x70, 0x47 };
+
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        int applied = 0;
+
+        for (std::uint32_t i = 0; (i + sizeof(run_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, run_sig, sizeof(run_sig)) != 0) {
+                continue;
+            }
+            std::memcpy(base + i, run_stub, sizeof(run_stub));
+            LOG_INFO(KERNEL, "{} auto-accept patch applied at codeseg offset 0x{:X} (Run stubbed OK, run addr 0x{:X})",
+                cs->name(), i, run_addr + i);
+            applied++;
+            break;
+        }
+
+        if (!applied) {
+            LOG_WARN(KERNEL, "{}: no J2ME ifeui auto-accept patch matched", cs->name());
         }
     }
 
@@ -638,6 +704,8 @@ namespace eka2l1::hle {
 
         if (name == "midp2installerplugin.dll") {
             apply_installer_compat_patch(cs);
+        } else if (name == "ifeui.dll") {
+            apply_ifeui_compat_patch(cs);
         }
     }
 
