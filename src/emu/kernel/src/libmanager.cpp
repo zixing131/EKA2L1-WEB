@@ -44,6 +44,7 @@
 #include <kernel/kernel.h>
 
 #include <cctype>
+#include <cstring>
 
 // Defined in svc.cpp; debug probe toggled by the frontend.
 extern bool eka2l1_leave_probe;
@@ -599,6 +600,47 @@ namespace eka2l1::hle {
         apply_trick_or_treat_algo();
     }
 
+    // Fine-grained instruction byte patches for ROM binaries, applied directly on the
+    // live code region right after load (works for ROM/XIP images too - the Z: VFS
+    // pseudo-file exposed for such binaries only carries header metadata and is never
+    // re-read by the loader, so file-level patches would be silently ineffective).
+    //
+    // midp2installerplugin.dll (S60v3 MIDP2 installer, used by the ROM's silent JAR
+    // installer): after a trust/consent probe returns 0, the installer unconditionally
+    // records leave-info {category=902, code=6} even on the success path, which the
+    // caller later surfaces as a silent KSWInstErrUserCancel for JARs that can't get an
+    // interactive user confirmation (there is no UI in headless/silent installs). Force
+    // the `bne` that gates that store to always take the branch, matching what a real
+    // "user confirmed"/trusted install would do.
+    static void apply_installer_compat_patch(codeseg_ptr cs) {
+        static const std::uint8_t sig[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xd1 };
+        static const std::uint8_t patch[] = { 0x00, 0x2d, 0xe0, 0x64, 0x03, 0xe0 };
+
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        for (std::uint32_t i = 0; (i + sizeof(sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, sig, sizeof(sig)) == 0) {
+                std::memcpy(base + i, patch, sizeof(patch));
+                LOG_INFO(KERNEL, "{} compat patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                return;
+            }
+        }
+    }
+
+    static void apply_j2me_compat_patches(codeseg_ptr cs) {
+        const std::string name = common::lowercase_string(cs->name());
+
+        if (name == "midp2installerplugin.dll") {
+            apply_installer_compat_patch(cs);
+        }
+    }
+
     static bool does_condition_meet_for_patch(codeseg_ptr original, patch_info &patch, const bool check_name) {
         if (check_name) {
             const std::string org_name = original->name();
@@ -722,6 +764,7 @@ namespace eka2l1::hle {
             common::lowercase_string(common::ucs2_to_utf8(eka2l1::filename(path)));
 
         auto cs = kern_->create<kernel::codeseg>(seg_name, info);
+        apply_j2me_compat_patches(cs);
 
         if (only_shell) {
             return cs;
@@ -1133,7 +1176,9 @@ namespace eka2l1::hle {
         epoc_import_func func = res->second;
 
         if (kern_->get_config()->log_svc) {
-            LOG_TRACE(KERNEL, "Calling SVC 0x{:x} {}", svcnum, func.name);
+            kernel::thread *caller = kern_->crr_thread();
+            LOG_TRACE(KERNEL, "[{}] Calling SVC 0x{:x} {}",
+                caller ? caller->name() : "?", svcnum, func.name);
         }
 
         func.func(kern_, kern_->crr_process(), kern_->get_cpu());

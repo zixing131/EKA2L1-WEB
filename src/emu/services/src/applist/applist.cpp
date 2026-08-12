@@ -1028,10 +1028,31 @@ namespace eka2l1 {
         if (conf && conf->mime_detection) {
             LOG_TRACE(SERVICE_APPLIST, "AppList::AppForDocument datatype stubbed with file extension");
 
+            // Types that must be reported exactly: the guest picks an ECom
+            // handler by MIME string, so the uppercased-extension placeholder
+            // below resolves to nothing. SWInst for instance answers
+            // KSWInstErrPackageNotSupported for a MIDlet it cannot type.
+            static const struct {
+                const char16_t *extension;
+                const char *mime;
+            } KNOWN_MIME_TYPES[] = {
+                { u".swf", "application/x-shockwave-flash" },
+                { u".jad", "text/vnd.sun.j2me.app-descriptor" },
+                { u".jar", "application/java-archive" }
+            };
+
             const std::u16string ext = eka2l1::path_extension(path);
             if (!ext.empty()) {
-                if (common::compare_ignore_case(ext, u".swf") == 0) {
-                    app.data_type.data_type.assign(nullptr, "application/x-shockwave-flash");
+                const char *mime = nullptr;
+                for (const auto &known : KNOWN_MIME_TYPES) {
+                    if (common::compare_ignore_case(ext, known.extension) == 0) {
+                        mime = known.mime;
+                        break;
+                    }
+                }
+
+                if (mime) {
+                    app.data_type.data_type.assign(nullptr, mime);
                 } else {
                     app.data_type.data_type.assign(nullptr, common::uppercase_string(common::ucs2_to_utf8(ext.substr(1))));
                 }

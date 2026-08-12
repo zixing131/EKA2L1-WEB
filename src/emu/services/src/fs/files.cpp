@@ -713,14 +713,40 @@ namespace eka2l1 {
             canonical_file_attrib_path(f->file_name())];
         node_attrib.increment_use(node->process);
 
+        // Symbian returns this handle XOR KSubSessionMangleBit (0x4000) so the
+        // client must Adopt before use. Emulator guests (and older EKA2L1
+        // behaviour) also call Duplicate and use the raw handle directly, so
+        // return the unmangled id; file_adopt accepts both forms.
         ctx->write_data_to_descriptor_argument<epoc::handle>(3, dup_handle);
         ctx->complete(epoc::error_none);
     }
 
     void fs_server_client::file_adopt(service::ipc_context *ctx) {
-        LOG_TRACE(SERVICE_EFSRV, "Fs::FileAdopt stubbed");
+        static constexpr std::uint32_t KSubSessionMangleBit = 0x4000;
 
-        ctx->write_data_to_descriptor_argument<std::uint32_t>(3, ctx->get_argument_value<std::uint32_t>(0).value());
+        std::optional<std::uint32_t> requested = ctx->get_argument_value<std::uint32_t>(0);
+        if (!requested) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        const epoc::handle mangled = static_cast<epoc::handle>(requested.value());
+        const epoc::handle demangled = static_cast<epoc::handle>(mangled ^ KSubSessionMangleBit);
+
+        // Only demangle if the raw id is not already a live subsession. Preferring
+        // demangle first mis-adopts an unrelated file whenever handle^0x4000
+        // happens to collide with another open node (seen as OTA 905 / corrupt JAR).
+        epoc::handle adopted = 0;
+        if (get_file_node(static_cast<int>(mangled))) {
+            adopted = mangled;
+        } else if (get_file_node(static_cast<int>(demangled))) {
+            adopted = demangled;
+        } else {
+            ctx->complete(epoc::error_bad_handle);
+            return;
+        }
+
+        ctx->write_data_to_descriptor_argument<epoc::handle>(3, adopted);
         ctx->complete(epoc::error_none);
     }
 

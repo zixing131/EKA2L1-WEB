@@ -43,6 +43,7 @@
 #include <set>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 // EKA2L1 headers
 #include <common/algorithm.h>
@@ -1700,6 +1701,209 @@ const char *wasm_probe_ls(const char *utf8_dir) {
 }
 
 /**
+ * Read the start of a guest file as text, for inspecting descriptors the ROM
+ * ships (JADs, policy files) without leaving the running session.
+ *
+ * @param utf8_path Guest path, UTF-8 encoded.
+ * @returns File content truncated to 4KB, or a bracketed diagnostic.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_cat(const char *utf8_path) {
+    g_java_inventory.clear();
+    if (!g_state.symsys || !utf8_path) {
+        g_java_inventory = "no-system";
+        return g_java_inventory.c_str();
+    }
+
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+    eka2l1::symfile f = io->open_file(eka2l1::common::utf8_to_ucs2(utf8_path), READ_MODE | BIN_MODE);
+    if (!f) {
+        g_java_inventory = "[missing]";
+        return g_java_inventory.c_str();
+    }
+
+    static constexpr std::size_t MAX_DUMP_SIZE = 4096;
+    const std::size_t size = (std::min)(static_cast<std::size_t>(f->size()), MAX_DUMP_SIZE);
+
+    g_java_inventory.resize(size);
+    f->read_file(g_java_inventory.data(), 1, static_cast<std::uint32_t>(size));
+    f->close();
+
+    if (g_java_inventory.empty()) {
+        g_java_inventory = "[empty]";
+    }
+    return g_java_inventory.c_str();
+}
+
+// TEMPORARY bring-up probe storage for the codeseg byte dump/patch probes below.
+static std::string g_codeseg_probe_result;
+
+static eka2l1::codeseg_ptr find_codeseg_by_name(eka2l1::kernel_system *kern, const std::string &want_lower) {
+    for (auto &seg_obj : kern->get_codeseg_list()) {
+        eka2l1::codeseg_ptr seg = reinterpret_cast<eka2l1::codeseg_ptr>(seg_obj.get());
+        if (!seg) {
+            continue;
+        }
+        std::string name = seg->name();
+        std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+        if (name == want_lower) {
+            return seg;
+        }
+    }
+    return nullptr;
+}
+
+static bool hex_to_bytes(const std::string &hex, std::vector<std::uint8_t> &out) {
+    if (hex.size() % 2 != 0) {
+        return false;
+    }
+    out.clear();
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        auto hex_nibble = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        const int hi = hex_nibble(hex[i]);
+        const int lo = hex_nibble(hex[i + 1]);
+        if ((hi < 0) || (lo < 0)) {
+            return false;
+        }
+        out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
+static std::string bytes_to_hex(const std::uint8_t *data, std::size_t len) {
+    static const char *digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (std::size_t i = 0; i < len; i++) {
+        out.push_back(digits[(data[i] >> 4) & 0xF]);
+        out.push_back(digits[data[i] & 0xF]);
+    }
+    return out;
+}
+
+/**
+ * Dump raw bytes of a loaded codeseg's *actual executing* code region (i.e.
+ * the same bytes the CPU fetches from, resolved via get_code_run_addr/real
+ * memory pointer - NOT the reconstructed pseudo-file exposed on the Z: VFS,
+ * which for ROM/XIP images only carries header metadata and is never read by
+ * the loader). Used to get ground-truth bytes for offline disassembly.
+ *
+ * @param utf8_name Codeseg name, case-insensitive (e.g. "midp2installerplugin.dll").
+ * @param offset Byte offset from the start of the code region.
+ * @param length Number of bytes to dump (clamped to the code region).
+ * @returns Hex string of the dumped bytes, or a bracketed diagnostic.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_dump_codeseg(const char *utf8_name, int offset, int length) {
+    g_codeseg_probe_result.clear();
+    if (!g_state.symsys || !utf8_name) {
+        g_codeseg_probe_result = "[no-system]";
+        return g_codeseg_probe_result.c_str();
+    }
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    std::string want = utf8_name;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
+    eka2l1::codeseg_ptr seg = find_codeseg_by_name(kern, want);
+    if (!seg) {
+        g_codeseg_probe_result = "[not-found]";
+        return g_codeseg_probe_result.c_str();
+    }
+    std::uint8_t *base = nullptr;
+    const eka2l1::address run_addr = seg->get_code_run_addr(nullptr, &base);
+    if (!run_addr || !base) {
+        g_codeseg_probe_result = "[no-run-addr]";
+        return g_codeseg_probe_result.c_str();
+    }
+    const std::uint32_t code_size = seg->get_code_size();
+    if ((offset < 0) || (static_cast<std::uint32_t>(offset) >= code_size)) {
+        g_codeseg_probe_result = "[bad-offset]";
+        return g_codeseg_probe_result.c_str();
+    }
+    std::uint32_t take = static_cast<std::uint32_t>(length);
+    if (offset + take > code_size) {
+        take = code_size - offset;
+    }
+    g_codeseg_probe_result = bytes_to_hex(base + offset, take);
+    return g_codeseg_probe_result.c_str();
+}
+
+/**
+ * Scan a loaded codeseg's actual executing code region for a byte signature
+ * and overwrite every occurrence in-place with a same-length replacement.
+ * Operates directly on the real memory backing (works for ROM/XIP images too
+ * - unlike patching the Z: VFS pseudo-file, which the loader never reads).
+ *
+ * @param utf8_name Codeseg name, case-insensitive.
+ * @param hex_sig Hex-encoded signature bytes to find.
+ * @param hex_patch Hex-encoded replacement bytes; must be same length as hex_sig.
+ * @param max_count Max number of occurrences to patch (-1 = unlimited).
+ * @returns JSON-ish diagnostic string: {"found":N,"offsets":[...]} or a bracketed error.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_patch_codeseg(const char *utf8_name, const char *hex_sig, const char *hex_patch, int max_count) {
+    g_codeseg_probe_result.clear();
+    if (!g_state.symsys || !utf8_name || !hex_sig || !hex_patch) {
+        g_codeseg_probe_result = "[no-system]";
+        return g_codeseg_probe_result.c_str();
+    }
+    std::vector<std::uint8_t> sig, patch;
+    if (!hex_to_bytes(hex_sig, sig) || !hex_to_bytes(hex_patch, patch) || sig.empty() || (sig.size() != patch.size())) {
+        g_codeseg_probe_result = "[bad-hex]";
+        return g_codeseg_probe_result.c_str();
+    }
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    std::string want = utf8_name;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
+    eka2l1::codeseg_ptr seg = find_codeseg_by_name(kern, want);
+    if (!seg) {
+        g_codeseg_probe_result = "[not-found]";
+        return g_codeseg_probe_result.c_str();
+    }
+    std::uint8_t *base = nullptr;
+    const eka2l1::address run_addr = seg->get_code_run_addr(nullptr, &base);
+    if (!run_addr || !base) {
+        g_codeseg_probe_result = "[no-run-addr]";
+        return g_codeseg_probe_result.c_str();
+    }
+    const std::uint32_t code_size = seg->get_code_size();
+    const std::size_t sig_len = sig.size();
+
+    std::vector<std::uint32_t> offsets_hit;
+    for (std::uint32_t i = 0; (i + sig_len) <= code_size; i++) {
+        if (std::memcmp(base + i, sig.data(), sig_len) == 0) {
+            offsets_hit.push_back(i);
+            if ((max_count >= 0) && (static_cast<int>(offsets_hit.size()) >= max_count)) {
+                break;
+            }
+        }
+    }
+    for (const std::uint32_t off : offsets_hit) {
+        std::memcpy(base + off, patch.data(), sig_len);
+    }
+
+    g_codeseg_probe_result = "{\"found\":" + std::to_string(offsets_hit.size()) + ",\"run_addr\":\"0x" + [&]() {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%X", run_addr);
+        return std::string(buf);
+    }() + "\",\"offsets\":[";
+    for (std::size_t i = 0; i < offsets_hit.size(); i++) {
+        if (i) g_codeseg_probe_result += ",";
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%u", offsets_hit[i]);
+        g_codeseg_probe_result += buf;
+    }
+    g_codeseg_probe_result += "]}";
+    LOG_WARN(FRONTEND_CMDLINE, "[codeseg-patch] {} sig={} patch={} found={} run_addr=0x{:X}", utf8_name, hex_sig, hex_patch, offsets_hit.size(), run_addr);
+    return g_codeseg_probe_result.c_str();
+}
+
+/**
  * Toggle full SVC/IPC tracing at runtime (very verbose; bring-up debugging only).
  * enable=1: log every executive call + every IPC message at trace level.
  * enable=0: back to warn-level logging.
@@ -1746,6 +1950,56 @@ int wasm_probe_boot_exe(const char *utf8_path) {
     }
     g_state.paused = false;
     LOG_INFO(FRONTEND_CMDLINE, "[java-probe] started {}", utf8_path);
+    return 0;
+}
+
+/**
+ * Start SystemAMSCore + midp2silentmidletinstall the same way host JAR install
+ * does, without restaging files. Used to test ROM-provided preinstall packages.
+ *
+ * @returns 0 on spawn success, negative on failure.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_probe_start_silent_installer() {
+    if (!g_state.symsys) {
+        return -1;
+    }
+
+    eka2l1::j2me::prepare_midp2_environment(g_state.symsys.get());
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+
+    static constexpr char16_t SYSTEM_AMS_CORE[] = u"Z:\\sys\\bin\\systemamscore.exe";
+    static constexpr char16_t SILENT_INSTALLER[] = u"Z:\\sys\\bin\\midp2silentmidletinstall.exe";
+    if (!io->exist(SYSTEM_AMS_CORE) || !io->exist(SILENT_INSTALLER)) {
+        return -2;
+    }
+
+    eka2l1::kernel::process *creator = kern->spawn_new_process(SYSTEM_AMS_CORE, u"");
+    if (!creator) {
+        return -3;
+    }
+    creator->run();
+
+    eka2l1::kernel::process *installer = kern->spawn_new_process(SILENT_INSTALLER, u"");
+    if (!installer) {
+        creator->kill(eka2l1::kernel::entity_exit_type::kill, u"HostMIDPInstall", 0);
+        return -4;
+    }
+
+    creator->add_child_process(installer);
+    installer->logon([creator](eka2l1::kernel::process *finished) {
+        creator->kill(eka2l1::kernel::entity_exit_type::kill, u"HostMIDPInstall", 0);
+        LOG_WARN(FRONTEND_CMDLINE, "[java-probe] silent installer exited type={} reason={}",
+            static_cast<int>(finished->get_exit_type()), finished->get_exit_reason());
+    });
+
+    if (!installer->run()) {
+        return -5;
+    }
+
+    g_state.paused = false;
+    LOG_INFO(FRONTEND_CMDLINE, "[java-probe] silent installer started with SystemAMSCore creator");
     return 0;
 }
 

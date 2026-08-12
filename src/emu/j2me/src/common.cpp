@@ -79,9 +79,17 @@ namespace eka2l1::j2me {
         long file_size = ftell(jar_file_handle);
 
         jad_content = std::string(string_buffer, fsize);
-        jad_content += "\n";
-        jad_content += "MIDlet-Jar-URL: https://12z1.com/jar/fake.jar\n";
-        jad_content += fmt::format("MIDlet-Jar-Size: {}", file_size);
+
+        // The attributes have to stay in one unbroken block: a blank line ends
+        // the section for a manifest parser, which would then never see the
+        // JAR location and size, both mandatory for a JAD-driven install.
+        while (!jad_content.empty()
+            && ((jad_content.back() == '\n') || (jad_content.back() == '\r'))) {
+            jad_content.pop_back();
+        }
+
+        jad_content += "\r\nMIDlet-Jar-URL: https://12z1.com/jar/fake.jar\r\n";
+        jad_content += fmt::format("MIDlet-Jar-Size: {}\r\n", file_size);
 
         delete[] string_buffer;
         return INSTALL_ERROR_JAR_SUCCESS;

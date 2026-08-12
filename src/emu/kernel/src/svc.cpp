@@ -1357,10 +1357,54 @@ namespace eka2l1::epoc {
         }
 
         if (kern->get_config()->log_ipc) {
-            LOG_TRACE(KERNEL, "Sending {} sync to {}", ord, ss->get_server()->name());
+            kernel::thread *sender = kern->crr_thread();
+            LOG_TRACE(KERNEL, "[{}] Sending {} {} to {}",
+                sender ? sender->name() : "?", ord, sync ? "sync" : "async",
+                ss->get_server()->name());
         }
 
         const std::string server_name = ss->get_server()->name();
+
+        // TEMPORARY bring-up probe: dump caller PC/LR/stack for MIDP2 non-native
+        // app registration/rollback opcodes so we can find the plugin code that
+        // decides to skip registration and go straight to rollback.
+        if ((server_name == "!AppListServer") && ((ord == 68) || (ord == 69) || (ord == 71) || (ord == 72))) {
+            kernel::thread *sender = kern->crr_thread();
+            if (sender) {
+                LOG_WARN(KERNEL, "[applist-probe] opcode={} thread={}", ord, sender->name());
+                sender->dump_panic_context();
+            }
+        }
+
+        // TEMPORARY bring-up probe: javaregistry is a real ROM binary (no HLE
+        // dispatch trace), so dump its raw IPC args to see what the installer
+        // is asking it and whether the registration attempt happens here.
+        if (server_name == "!javaregistry") {
+            LOG_WARN(KERNEL, "[javareg-probe] opcode={} args=[0x{:X},0x{:X},0x{:X},0x{:X}] flag=0x{:X}",
+                ord, arg.args[0], arg.args[1], arg.args[2], arg.args[3], arg.flag);
+
+            process_ptr sender_pr = kern->crr_process();
+            for (int slot = 0; slot < 4; slot++) {
+                const int type_bits = (arg.flag >> (slot * static_cast<int>(bits_per_type))) & 0b111;
+                if ((type_bits & static_cast<int>(ipc_arg_type::flag_des)) && arg.args[slot] && sender_pr) {
+                    epoc::des8 *des = eka2l1::ptr<epoc::des8>(arg.args[slot]).get(sender_pr);
+                    if (des) {
+                        const std::uint32_t len = des->get_length();
+                        const std::uint32_t safe_len = common::min<std::uint32_t>(len, 128);
+                        std::uint8_t *raw = reinterpret_cast<std::uint8_t *>(des->get_pointer_raw(sender_pr));
+                        std::string hex_dump;
+                        if (raw) {
+                            for (std::uint32_t i = 0; i < safe_len; i++) {
+                                char buf[3];
+                                std::snprintf(buf, sizeof(buf), "%02X", raw[i]);
+                                hex_dump += buf;
+                            }
+                        }
+                        LOG_WARN(KERNEL, "[javareg-probe]   arg{} des len={} bytes={}", slot, len, hex_dump);
+                    }
+                }
+            }
+        }
         kern->call_ipc_send_callbacks(server_name, ord, arg, status.ptr_address(), kern->crr_thread());
 
         const int result = sync ? ss->send_receive_sync(ord, arg, status) : ss->send_receive(ord, arg, status);
@@ -1395,8 +1439,21 @@ namespace eka2l1::epoc {
         // (warn-level) web console. Lower the log level when chasing an app
         // that dies during init — the code + thread narrow down which leave
         // was the fatal (uncaught) one.
-        LOG_TRACE(KERNEL, "Leave code={} thread={}",
-            static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->name());
+        LOG_TRACE(KERNEL, "Leave code={} thread={} lr=0x{:08X} pc=0x{:08X}",
+            static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->name(),
+            kern->get_cpu()->get_reg(14), kern->get_cpu()->get_pc());
+
+        // KErrArgument (-6) and the installer-specific -10016 are rare enough
+        // during tracing to afford a stack dump; both abort MIDlet install.
+        // Also dump when the leave code looks like a code pointer (high bit set):
+        // that usually means LeaveIfError() was fed a returned pointer/address.
+        if (kern->get_config()->log_svc) {
+            const std::int32_t leave_code = static_cast<std::int32_t>(kern->get_cpu()->get_reg(0));
+            const std::uint32_t leave_u = static_cast<std::uint32_t>(kern->get_cpu()->get_reg(0));
+            if ((leave_code == -6) || (leave_code == -10016) || (leave_u >= 0x80000000u)) {
+                thr->dump_panic_context();
+            }
+        }
 
         if (eka2l1_leave_probe) {
             LOG_WARN(KERNEL, "[probe] Leave code={} depth={} thread={} trap_handler=0x{:08X}",

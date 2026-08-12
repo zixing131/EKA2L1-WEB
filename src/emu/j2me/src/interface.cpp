@@ -151,11 +151,19 @@ namespace eka2l1::j2me {
 
         prepare_midp2_environment(sys);
 
-        const std::string base_name = make_safe_preinstall_name(path);
+        // midp2downloader copies the URI scheme into a TBuf<16>. A long bare
+        // relative name is misread as the scheme and rejected (KErrArgument).
+        // Keep the preinstall basename short so a relative MIDlet-Jar-URL stays
+        // within that limit when the downloader treats it as a local file name.
+        static constexpr char16_t SHORT_BASENAME[] = u"m";
         const std::u16string guest_jar_path = std::u16string(PREINSTALL_DIRECTORY)
-            + common::utf8_to_ucs2(base_name) + u".jar";
+            + SHORT_BASENAME + u".jar";
         std::u16string guest_jad_path = guest_jar_path;
         guest_jad_path.back() = u'd';
+
+        // Remove any previous staging leftovers so a rename cannot collide.
+        io->delete_entry(guest_jar_path);
+        io->delete_entry(guest_jad_path);
 
         const std::optional<std::u16string> raw_jar_path = io->get_raw_path(guest_jar_path);
         if (!raw_jar_path
@@ -164,7 +172,7 @@ namespace eka2l1::j2me {
         }
 
         const std::string fake_url = "MIDlet-Jar-URL: https://12z1.com/jar/fake.jar";
-        const std::string local_url = "MIDlet-Jar-URL: " + base_name + ".jar";
+        const std::string local_url = "MIDlet-Jar-URL: m.jar";
         const std::size_t fake_url_pos = jad_content.find(fake_url);
         if (fake_url_pos != std::string::npos) {
             jad_content.replace(fake_url_pos, fake_url.size(), local_url);

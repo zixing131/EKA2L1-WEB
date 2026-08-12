@@ -215,8 +215,11 @@ namespace eka2l1 {
                         & static_cast<std::uint32_t>(changed_type)) != 0);
             const bool path_matches = std::regex_search(changed_path, it->match_pattern);
 
-            LOG_WARN(SERVICE_EFSRV, "[notify-probe] candidate path={} type_match={} path_match={}",
-                common::ucs2_to_utf8(changed_entry), type_matches, path_matches);
+            kernel::thread *waiter = it->info.requester;
+            LOG_WARN(SERVICE_EFSRV, "[notify-probe] candidate path={} type_match={} path_match={} waiter={} proc={}",
+                common::ucs2_to_utf8(changed_entry), type_matches, path_matches,
+                waiter ? waiter->name() : "?",
+                (waiter && waiter->owning_process()) ? waiter->owning_process()->name() : "?");
 
             if (type_matches && path_matches) {
                 LOG_TRACE(SERVICE_EFSRV, "Completing change notification for {}",
@@ -749,8 +752,11 @@ namespace eka2l1 {
 
         notify_entries.push_back(entry);
 
-        LOG_WARN(SERVICE_EFSRV, "[notify-probe] Notify requested with wildcard: {} type={}",
-            common::ucs2_to_utf8(*wildcard_match), static_cast<std::uint32_t>(entry.type));
+        kernel::thread *owner = ctx->msg->own_thr;
+        LOG_WARN(SERVICE_EFSRV, "[notify-probe] Notify requested with wildcard: {} type={} by thread={} proc={}",
+            common::ucs2_to_utf8(*wildcard_match), static_cast<std::uint32_t>(entry.type),
+            owner ? owner->name() : "?",
+            (owner && owner->owning_process()) ? owner->owning_process()->name() : "?");
     }
 
     void fs_server_client::notify_change_cancel(service::ipc_context *ctx) {
