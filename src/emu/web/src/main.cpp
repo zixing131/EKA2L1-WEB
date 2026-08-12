@@ -1254,6 +1254,21 @@ static std::string json_escape(const std::string &in) {
     return out;
 }
 
+// Host-side J2ME entries use virtual UIDs of the form (id | 0x7E000000), i.e.
+// exactly the 0x7Exxxxxx range. Do NOT use a bit-test against 0x7E000000:
+// third-party SIS UIDs (commonly 0xAxxxxxxx) share bits with that mask and
+// would be misclassified as MIDlets (breaking icons / uninstall routing).
+static constexpr std::uint32_t J2ME_VIRTUAL_UID_PREFIX = 0x7E000000u;
+static constexpr std::uint32_t J2ME_VIRTUAL_UID_MASK = 0xFF000000u;
+
+static bool is_j2me_virtual_uid(std::uint32_t uid) {
+    return (uid & J2ME_VIRTUAL_UID_MASK) == J2ME_VIRTUAL_UID_PREFIX;
+}
+
+static std::uint32_t j2me_id_from_virtual_uid(std::uint32_t uid) {
+    return uid & ~J2ME_VIRTUAL_UID_PREFIX;
+}
+
 static void wasm_save_config() {
     chdir(g_state.conf.storage.c_str());
     g_state.conf.serialize(false);
@@ -2171,18 +2186,21 @@ const char *wasm_get_packages() {
         }
     }
 
+    json += "]";
+
     // Append J2ME (Java ME) MIDlets so they appear in the app manager. These
     // are registered in the host j2me app list (sqlite), not the SIS package
     // manager, so without this block they'd be invisible in the uninstall UI.
     // Virtual UIDs (0x7Exxxxxx) route uninstalls through wasm_uninstall_midlet.
+    // Mirror wasm_get_app_list: close the array first, then reopen to append.
     if (g_state.symsys) {
         eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
         if (j2me_list) {
-            const bool had_sis = (json.size() > 1); // more than just "["
+            const bool had_sis = (json.size() > 2); // more than just "[]"
             json.pop_back(); // remove trailing ']'
             bool j2me_first = true;
             for (auto &entry : j2me_list->get_entries()) {
-                const std::uint32_t virtual_uid = entry.id_ | 0x7E000000u;
+                const std::uint32_t virtual_uid = entry.id_ | J2ME_VIRTUAL_UID_PREFIX;
                 const std::string disp_name = entry.title_.empty() ? entry.name_ : entry.title_;
                 json += (had_sis || !j2me_first) ? "," : "";
                 json += "{\"uid\":" + std::to_string(virtual_uid);
@@ -2249,10 +2267,10 @@ int wasm_uninstall_midlet(unsigned int virtual_uid) {
     }
 
     const std::uint32_t uid32 = static_cast<std::uint32_t>(virtual_uid);
-    if (!(uid32 & 0x7E000000u)) {
+    if (!is_j2me_virtual_uid(uid32)) {
         return -2; // not a j2me virtual UID
     }
-    const std::uint32_t j2me_id = uid32 & ~0x7E000000u;
+    const std::uint32_t j2me_id = j2me_id_from_virtual_uid(uid32);
 
     if (!eka2l1::j2me::uninstall(g_state.symsys.get(), j2me_id)) {
         return -3;
@@ -2347,7 +2365,7 @@ const char *wasm_get_app_list() {
 
         bool j2me_first = true;
         for (auto &entry : j2me_list->get_entries()) {
-            const std::uint32_t virtual_uid = entry.id_ | 0x7E000000;
+            const std::uint32_t virtual_uid = entry.id_ | J2ME_VIRTUAL_UID_PREFIX;
             std::string name = entry.title_.empty() ? entry.name_ : entry.title_;
             std::string escaped;
             escaped.reserve(name.size());
@@ -2356,7 +2374,7 @@ const char *wasm_get_app_list() {
                 else if (c == '"') { escaped += "\\\""; }
                 else { escaped += c; }
             }
-            json += (had_native || !j2me_first) ? ',' : '[';
+            json += (had_native || !j2me_first) ? "," : "";
             json += "{\"uid\":";
             json += std::to_string(virtual_uid);
             json += ",\"name\":\"";
@@ -2390,14 +2408,14 @@ const char *wasm_get_app_icon(int uid) {
     }
 
     // ---- J2ME (Java ME) MIDlet icons ----
-    // Virtual UIDs use the 0x7E000000 bit. Two paths are tried:
+    // Virtual UIDs are exactly 0x7Exxxxxx (id | 0x7E000000). Two paths:
     //   1. Read the icon extracted to host storage at install time
     //      (conf.storage/j2me/...). Fast, but may be missing for MIDlets
     //      installed before the host-icon extraction was fixed.
     //   2. Extract the icon directly from the stored JAR as a fallback.
     const std::uint32_t uid32 = static_cast<std::uint32_t>(uid);
-    if (uid32 & 0x7E000000u) {
-        const std::uint32_t j2me_id = uid32 & ~0x7E000000u;
+    if (is_j2me_virtual_uid(uid32)) {
+        const std::uint32_t j2me_id = j2me_id_from_virtual_uid(uid32);
         eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
         if (j2me_list) {
             std::optional<eka2l1::j2me::app_entry> entry = j2me_list->get_entry(j2me_id);
@@ -2722,7 +2740,11 @@ EMSCRIPTEN_KEEPALIVE
 int wasm_launch_midlet(int virtual_uid) {
     if (!g_state.symsys) return -1;
 
-    const std::uint32_t j2me_id = static_cast<std::uint32_t>(virtual_uid) & ~0x7E000000u;
+    const std::uint32_t uid32 = static_cast<std::uint32_t>(virtual_uid);
+    if (!is_j2me_virtual_uid(uid32)) {
+        return -2;
+    }
+    const std::uint32_t j2me_id = j2me_id_from_virtual_uid(uid32);
 
     // Get the MIDlet name for matching against AppArc registries.
     std::string midlet_name;

@@ -241,6 +241,30 @@ EKA2L1.diagnoseJ2ME()
 | `Java apps in AppArc: 0` | 注册丢失（重启） | 触发重注册（-100 路径自动处理） |
 | 安装器 `reason` 非 0 | 安装器 panic | 查 category，可能是 ROM 不兼容 |
 | 启动后无画面 2 分钟 | KVM 启动慢或失败 | 查控制台 panic 日志 |
+| SIS 图标全丢 / 卸载列表为空 | 见 §八 回归修复 | 重新构建 WASM；图标缓存会升到 v4 自动失效 |
+
+---
+
+## 八、回归修复（SIS 图标 / 卸载列表）
+
+`150275b73` 引入 J2ME 卸载与图标路径时带了两处回归：
+
+### 8.1 卸载列表为空（`wasm_get_packages`）
+
+追加 MIDlet 时调用了 `json.pop_back()`，却**没有先**写入收尾的 `]`。
+`pop_back()` 实际删掉了最后一个 SIS 包 JSON 的 `}`，整段变成非法 JSON，
+前端 `JSON.parse` 失败后显示空列表。
+
+修复：先 `json += "]"`，再按 `wasm_get_app_list` 同样方式 pop 并追加。
+
+### 8.2 SIS 图标消失（`wasm_get_app_icon`）
+
+用 `uid & 0x7E000000` 判断「是否为 J2ME 虚拟 UID」。该掩码会命中大量
+第三方 SIS UID（常见 `0xAxxxxxxx` 也带 `0x20000000` 位），误走进 MIDlet
+图标路径并返回 `null`。
+
+修复：改为精确前缀判断 `(uid & 0xFF000000) == 0x7E000000`。
+前端图标缓存升到 `eka2l1_icons_cache_v4`，清掉被误缓存为空的 SIS 图标。
 
 ---
 

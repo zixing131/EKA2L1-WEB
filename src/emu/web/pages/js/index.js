@@ -71,7 +71,7 @@
 
     // ---- icons ----------------------------------------------------------------
 
-    var ICONS_CACHE_KEY = 'eka2l1_icons_cache_v3'; // v3: j2me MIDlet icon JAR-fallback retry
+    var ICONS_CACHE_KEY = 'eka2l1_icons_cache_v4'; // v4: fix SIS icons misclassified as j2me (0x7E bitmask)
     var ICONS_CACHE_LIMIT = 3.5 * 1024 * 1024; // stay well under the LS quota
 
     var iconCache = {}; // uid -> dataURL ('' = known to have no icon)
@@ -127,10 +127,11 @@
         if (iconPumpRunning || !coreReady || !deviceReady) return;
         // Retry j2me MIDlet icons cached as empty: before the JAR-fallback fix
         // they failed once and were cached '' (never retried again). Only the
-        // 0x7Exxxxxx virtual-UID range is retried so native apps stay cheap.
+        // exact 0x7Exxxxxx virtual-UID range is retried so native apps stay cheap.
         var pending = apps.filter(function (a) {
             if (!(a.uid in iconCache)) return true;
-            if (!iconCache[a.uid] && (a.uid >>> 0) >= 0x7E000000) return true;
+            var u = a.uid >>> 0;
+            if (!iconCache[a.uid] && (u & 0xFF000000) === 0x7E000000) return true;
             return false;
         });
         if (pending.length === 0) return;
