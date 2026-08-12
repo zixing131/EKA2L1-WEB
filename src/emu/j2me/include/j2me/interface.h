@@ -20,8 +20,10 @@
 #pragma once
 
 #include <j2me/common.h>
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace eka2l1 {
     class system;
@@ -48,7 +50,36 @@ namespace eka2l1::j2me {
     bool prepare_midp2_environment(system *sys);
 
     bool launch(system *sys, const std::uint32_t app_id, std::function<void(kernel::process*)> exit_cb);
+    bool reregister_midlet(system *sys, const std::uint32_t app_id,
+        std::function<void(kernel::process*)> exit_cb);
     install_error install(system *sys, const std::string &path, app_entry &entry_info,
         std::function<void(kernel::process*)> install_exit_cb = nullptr);
     bool uninstall(system *sys, const std::uint32_t app_id);
+
+    /**
+     * @brief 直接从已存储的 JAR 中提取 MIDlet 图标的原始字节（通常为 PNG）。
+     *
+     * 当 install 时未能把图标写入宿主存储（例如 WASM 首次安装目录缺失导致
+     * extract_icon_to_store 静默失败、entry.icon_path_ 为空），前端可调用本函数
+     * 实时从 per-MIDlet storage 中的 JAR 重新解析图标，无需重装。
+     *
+     * @param sys    系统实例
+     * @param app_id MIDlet 的真实列表 ID
+     * @param out    成功时填入图标文件的原始字节
+     * @return true 表示成功提取到图标字节
+     */
+    bool extract_midlet_icon_png(system *sys, const std::uint32_t app_id, std::vector<std::uint8_t> &out);
+
+    /**
+     * @brief 检查 ROM 是否包含运行 MIDlet 所需的 Java 运行时组件。
+     *
+     * 支持两种启动路径：
+     *   1. 独立启动器 exe（midp2midletlauncher.exe / midletlauncher.exe）
+     *   2. AppArc 非原生路径（systemamscore.exe + midp2runtimev2.dll），
+     *      MIDlet 注册到 AppArc 后由 StubMIDP2RecogExe.exe 以 opaque data 启动。
+     *
+     * @param sys 系统实例
+     * @return true 表示存在可用的 MIDlet 启动路径
+     */
+    bool check_launch_capability(system *sys);
 }

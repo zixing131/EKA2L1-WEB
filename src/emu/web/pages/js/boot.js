@@ -526,6 +526,89 @@
         return ccall('wasm_launch_app', 'number', ['number'], [uid]);
     };
 
+    EKA2L1.launchMidlet = function (uid) {
+        try { EKA2L1.requestCamera(); } catch (e) {}
+        return ccall('wasm_launch_midlet', 'number', ['number'], [uid]);
+    };
+
+    /**
+     * Check whether the ROM has a Java MIDlet launcher. Returns a diagnostic
+     * string ending with "LAUNCHER: available" or "LAUNCHER: missing".
+     */
+    EKA2L1.checkMidletLaunch = function () {
+        return ccall('wasm_check_midlet_launch', 'string');
+    };
+
+    // ---- J2ME / MIDP diagnostics (browser-console helpers) ------------------
+
+    EKA2L1.probeJavaInventory = function () {
+        return ccall('wasm_probe_java_inventory', 'string');
+    };
+
+    EKA2L1.probeLs = function (guestPath) {
+        return ccall('wasm_probe_ls', 'string', ['string'], [guestPath]);
+    };
+
+    EKA2L1.probeCat = function (guestPath) {
+        return ccall('wasm_probe_cat', 'string', ['string'], [guestPath]);
+    };
+
+    /**
+     * Comprehensive J2ME readiness diagnostic. Call from the browser console
+     * after the emulator has booted (EKA2L1.ready === true):
+     *
+     *   EKA2L1.diagnoseJ2ME()
+     *
+     * Prints a report and returns it as a string.
+     */
+    EKA2L1.diagnoseJ2ME = function () {
+        var lines = [];
+        function log(s) { lines.push(s); }
+
+        if (!EKA2L1.ready) {
+            log('[ERROR] Emulator not ready yet. Wait until the device boots.');
+        } else {
+            // 1. Java runtime inventory in ROM
+            log('=== Java runtime inventory (Z:\\sys\\bin\\) ===');
+            var inv = EKA2L1.probeJavaInventory();
+            log(inv || '(empty)');
+
+            // 2. Check critical MIDP2 binaries directly
+            log('');
+            log('=== Critical MIDP2 binaries ===');
+            var critical = [
+                'Z:\\sys\\bin\\midp2silentmidletinstall.exe',
+                'Z:\\sys\\bin\\systemamscore.exe',
+                'Z:\\sys\\bin\\midp2midletlauncher.exe',
+                'Z:\\sys\\bin\\midp2runtimev2.dll'
+            ];
+            critical.forEach(function (p) {
+                var dir = p.substring(0, p.lastIndexOf('\\') + 1);
+                var listing = EKA2L1.probeLs(dir);
+                var name = p.substring(p.lastIndexOf('\\') + 1).toLowerCase();
+                var found = false;
+                if (listing && listing !== '[missing]') {
+                    var entries = listing.split('\n');
+                    for (var i = 0; i < entries.length; i++) {
+                        if (entries[i].toLowerCase().indexOf(name) === 0) {
+                            found = true; break;
+                        }
+                    }
+                }
+                log((found ? '[OK]  ' : '[MISS] ') + p);
+            });
+
+            // 3. Check preinstall directory
+            log('');
+            log('=== Preinstall directory ===');
+            log(EKA2L1.probeLs('E:\\system\\data\\midp2\\preinstall\\'));
+        }
+
+        var report = lines.join('\n');
+        console.log(report);
+        return report;
+    };
+
     /**
      * Decoded icon for an app, or null.
      * {type:'svg', data:<b64>} | {type:'rgba', w, h, data:<b64>}

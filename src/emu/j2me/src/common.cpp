@@ -102,13 +102,20 @@ namespace eka2l1::j2me {
         }
 
         const std::string fname = eka2l1::filename(entry.icon_path_);
-        const std::string relative_path = fmt::format("j2me\\{}_{}_{}", common::lowercase_string(entry.name_),
+        // Use forward slashes so the path works on all platforms (Unix/WASM,
+        // Windows accepts both). The old back-slash form silently failed on
+        // WASM where '\\' is not a path separator.
+        const std::string relative_path = fmt::format("j2me/{}_{}_{}", common::lowercase_string(entry.name_),
             common::lowercase_string(entry.version_), fname);
         const std::string storing_file = eka2l1::add_path(conf.storage, relative_path);
 
+        // The j2me/ subdirectory may not exist yet (first MIDlet install);
+        // fopen("wb") fails if the parent dir is missing, so create it.
+        common::create_directories(eka2l1::file_directory(storing_file));
+
         FILE *out_file = common::open_c_file(storing_file, "wb");
         if (!out_file) {
-            LOG_WARN(J2ME, "Can't open storing icon file!");
+            LOG_WARN(J2ME, "Can't open storing icon file at {}!", storing_file);
 
             final_real_path = "";
             return INSTALL_ERROR_JAR_SUCCESS;

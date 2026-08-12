@@ -11,6 +11,7 @@
     var params = new URLSearchParams(location.search);
     var appUid = parseInt(params.get('uid'), 10);
     var appName = params.get('name') || '';
+    var isJ2me = params.get('j2me') === '1';
 
     var paused = false;
     var started = false;     // first emulated frame presented
@@ -259,16 +260,85 @@
 
         overlay(EKA2L1.t('overlay.launchingApp', { name: appName || EKA2L1.t('overlay.defaultAppName') }), EKA2L1.t('overlay.launchingHint'), 97);
 
-        var launch = EKA2L1.launchApp(appUid);
-        if (launch !== 0) {
-            overlayError(EKA2L1.t('overlay.launchFailedTitle'), EKA2L1.t('overlay.launchFailedText', { code: launch }));
+        if (isJ2me) {
+            // Pre-check: does the ROM ship a Java MIDlet launcher or runtime?
+            // If not, give an actionable message instead of a bare error code.
+            var diag = '';
+            try { diag = EKA2L1.checkMidletLaunch() || ''; } catch (e) {}
+            console.log('[EKA2L1] MIDlet launch capability check:\n' + diag);
+            if (diag.indexOf('LAUNCHER: missing') !== -1) {
+                overlayError(
+                    EKA2L1.t('overlay.launchFailedTitle'),
+                    EKA2L1.t('overlay.noJavaLauncher', { detail: diag })
+                );
+                return;
+            }
+            // Warn (but don't abort) if no MIDlet is registered in AppArc — the
+            // silent installer may not have completed. The launch will try the
+            // AppArc path first, then fall back to the direct launcher.
+            if (diag.indexOf('Java apps in AppArc: 0') !== -1) {
+                console.warn('[EKA2L1] No MIDlets registered in AppArc — the silent installer may have stalled.');
+            }
+        }
+
+        var launch = isJ2me ? EKA2L1.launchMidlet(appUid) : EKA2L1.launchApp(appUid);
+
+        if (launch === -100) {
+            // MIDlet not in AppArc (lost on restart). The silent installer was
+            // re-spawned to restore registration. Keep emulation running so the
+            // guest installer makes progress, poll for completion, then retry.
+            EKA2L1.setPaused(false);
+            overlay(EKA2L1.t('overlay.registeringMidlet'), EKA2L1.t('overlay.registeringHint'), 96);
+            var regT0 = performance.now();
+            var regPoll = setInterval(function () {
+                var st = EKA2L1.midletInstallStatus();
+                var elapsed = performance.now() - regT0;
+                if (st === 2) {
+                    clearInterval(regPoll);
+                    console.log('[EKA2L1] Reregister complete, retrying launch');
+                    launch = EKA2L1.launchMidlet(appUid);
+                    if (launch !== 0) {
+                        if (launch === -100) {
+                            overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                                EKA2L1.t('overlay.reregisterFailed'));
+                        } else {
+                            overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                                EKA2L1.t('overlay.launchFailedText', { code: launch }));
+                        }
+                        return;
+                    }
+                    beginFramePoll();
+                } else if (st === -4) {
+                    clearInterval(regPoll);
+                    overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                        EKA2L1.t('overlay.reregisterFailed'));
+                } else if (elapsed > 45000) {
+                    clearInterval(regPoll);
+                    overlayError(EKA2L1.t('overlay.launchTimeoutTitle'),
+                        EKA2L1.t('overlay.launchTimeoutText'));
+                } else {
+                    var secs = (elapsed / 1000) | 0;
+                    if (secs >= 2) {
+                        overlay(EKA2L1.t('overlay.registeringMidlet'),
+                            EKA2L1.t('overlay.registeringHintSecs', { secs: secs }), 96);
+                    }
+                }
+            }, 500);
             return;
         }
 
-        EKA2L1.setPaused(false);
+        if (launch !== 0) {
+            overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                EKA2L1.t('overlay.launchFailedText', { code: launch }));
+            return;
+        }
 
-        // First composed frame -> reveal the canvas.
-        var t0 = performance.now();
+        beginFramePoll();
+
+        function beginFramePoll() {
+            EKA2L1.setPaused(false);
+            // First composed frame -> reveal the canvas.
+            var t0 = performance.now();
         var poll = setInterval(function () {
             var exited = EKA2L1.lastAppExit && EKA2L1.lastAppExit();
             if (exited) {
@@ -311,6 +381,8 @@
                 }
             }
         }, 250);
+        }
+
     }).catch(function (err) {
         console.error('[EKA2L1] boot failed:', err);
         if (EKA2L1.isOOMError(err)) {

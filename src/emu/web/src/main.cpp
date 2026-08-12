@@ -1592,6 +1592,25 @@ int wasm_install_midlet(const char *jar_path) {
     eka2l1::j2me::app_entry entry;
     const eka2l1::j2me::install_error result = eka2l1::j2me::install(
         g_state.symsys.get(), jar_path, entry, [](eka2l1::kernel::process *installer) {
+            // nullptr means no guest process was started (ROM lacks the MIDP2
+            // silent installer / AMS core). The MIDlet was still registered in
+            // the host j2me app list, so treat this as a synchronous success.
+            if (!installer) {
+                LOG_INFO(FRONTEND_CMDLINE,
+                    "MIDP install completed synchronously (no guest installer)");
+                if (g_state.symsys) {
+                    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+                    auto *alserv = kern ? reinterpret_cast<eka2l1::applist_server *>(
+                        kern->get_by_name<eka2l1::service::server>(
+                            eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version()))) : nullptr;
+                    if (alserv) {
+                        alserv->rescan_registries(g_state.symsys->get_io_system());
+                    }
+                }
+                g_state.midlet_install_state.store(2, std::memory_order_release);
+                return;
+            }
+
             LOG_INFO(FRONTEND_CMDLINE, "Guest MIDP installer exited: type={}, reason={}, category={}",
                 static_cast<int>(installer->get_exit_type()), installer->get_exit_reason(),
                 eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
@@ -2152,7 +2171,30 @@ const char *wasm_get_packages() {
         }
     }
 
-    json += "]";
+    // Append J2ME (Java ME) MIDlets so they appear in the app manager. These
+    // are registered in the host j2me app list (sqlite), not the SIS package
+    // manager, so without this block they'd be invisible in the uninstall UI.
+    // Virtual UIDs (0x7Exxxxxx) route uninstalls through wasm_uninstall_midlet.
+    if (g_state.symsys) {
+        eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
+        if (j2me_list) {
+            const bool had_sis = (json.size() > 1); // more than just "["
+            json.pop_back(); // remove trailing ']'
+            bool j2me_first = true;
+            for (auto &entry : j2me_list->get_entries()) {
+                const std::uint32_t virtual_uid = entry.id_ | 0x7E000000u;
+                const std::string disp_name = entry.title_.empty() ? entry.name_ : entry.title_;
+                json += (had_sis || !j2me_first) ? "," : "";
+                json += "{\"uid\":" + std::to_string(virtual_uid);
+                json += ",\"name\":\"" + json_escape(disp_name) + "\"";
+                json += ",\"vendor\":\"" + json_escape(entry.author_) + "\"";
+                json += ",\"j2me\":1}";
+                j2me_first = false;
+            }
+            json += "]";
+        }
+    }
+
     return json.c_str();
 }
 
@@ -2181,6 +2223,43 @@ int wasm_uninstall_package(unsigned int uid) {
     }
 
     // Mirror install: rescan app registries so the list updates immediately.
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (kern) {
+        auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+        if (alserv) {
+            alserv->rescan_registries(g_state.symsys->get_io_system());
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Uninstall a J2ME (Java ME) MIDlet by its virtual UID (0x7Exxxxxx).
+ * Returns 0 on success. Removes the JAR/JAD/icon from per-MIDlet storage and
+ * deletes the entry from the host j2me app list (sqlite DB). The caller should
+ * persist (IDBFS sync) and refresh afterwards.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_uninstall_midlet(unsigned int virtual_uid) {
+    if (!g_state.symsys) {
+        return -1;
+    }
+
+    const std::uint32_t uid32 = static_cast<std::uint32_t>(virtual_uid);
+    if (!(uid32 & 0x7E000000u)) {
+        return -2; // not a j2me virtual UID
+    }
+    const std::uint32_t j2me_id = uid32 & ~0x7E000000u;
+
+    if (!eka2l1::j2me::uninstall(g_state.symsys.get(), j2me_id)) {
+        return -3;
+    }
+
+    // Refresh native app registries in case the silent installer had also
+    // registered the MIDlet in AppArc, so the game list updates immediately.
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (kern) {
         auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
@@ -2255,6 +2334,39 @@ const char *wasm_get_app_list() {
     }
 
     json += ']';
+
+    // Append J2ME (Java ME) MIDlets from the host-side j2me app list. These
+    // are apps installed via the JAR installer that may or may not have been
+    // registered in AppArc by the ROM silent installer. Using a high UID bit
+    // (0x7E000000) avoids collisions with real Symbian UIDs; the web frontend
+    // routes launches through wasm_launch_midlet for this range.
+    eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
+    if (j2me_list) {
+        const bool had_native = (json.size() > 2); // more than just "[]"
+        json.pop_back(); // remove trailing ']'
+
+        bool j2me_first = true;
+        for (auto &entry : j2me_list->get_entries()) {
+            const std::uint32_t virtual_uid = entry.id_ | 0x7E000000;
+            std::string name = entry.title_.empty() ? entry.name_ : entry.title_;
+            std::string escaped;
+            escaped.reserve(name.size());
+            for (char c : name) {
+                if (c == '\\') { escaped += "\\\\"; }
+                else if (c == '"') { escaped += "\\\""; }
+                else { escaped += c; }
+            }
+            json += (had_native || !j2me_first) ? ',' : '[';
+            json += "{\"uid\":";
+            json += std::to_string(virtual_uid);
+            json += ",\"name\":\"";
+            json += escaped;
+            json += "\",\"sys\":0,\"j2me\":1}";
+            j2me_first = false;
+        }
+        json += ']';
+    }
+
     s_json = std::move(json);
     return s_json.c_str();
 }
@@ -2274,6 +2386,54 @@ const char *wasm_get_app_icon(int uid) {
     s_icon_json = "null";
 
     if (!g_state.symsys) {
+        return s_icon_json.c_str();
+    }
+
+    // ---- J2ME (Java ME) MIDlet icons ----
+    // Virtual UIDs use the 0x7E000000 bit. Two paths are tried:
+    //   1. Read the icon extracted to host storage at install time
+    //      (conf.storage/j2me/...). Fast, but may be missing for MIDlets
+    //      installed before the host-icon extraction was fixed.
+    //   2. Extract the icon directly from the stored JAR as a fallback.
+    const std::uint32_t uid32 = static_cast<std::uint32_t>(uid);
+    if (uid32 & 0x7E000000u) {
+        const std::uint32_t j2me_id = uid32 & ~0x7E000000u;
+        eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
+        if (j2me_list) {
+            std::optional<eka2l1::j2me::app_entry> entry = j2me_list->get_entry(j2me_id);
+            std::vector<std::uint8_t> icon_bytes;
+
+            // Path 1: pre-extracted host icon.
+            if (entry && !entry->icon_path_.empty()) {
+                const std::string full_path = eka2l1::add_path(
+                    g_state.symsys->get_config()->storage, entry->icon_path_);
+                FILE *f = eka2l1::common::open_c_file(full_path, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long sz = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    if (sz > 0) {
+                        icon_bytes.resize(static_cast<std::size_t>(sz));
+                        if (fread(icon_bytes.data(), 1, icon_bytes.size(), f) != icon_bytes.size()) {
+                            icon_bytes.clear();
+                        }
+                    }
+                    fclose(f);
+                }
+            }
+
+            // Path 2: extract directly from the stored JAR (covers MIDlets
+            // whose host icon was never written — e.g. older WASM installs).
+            if (icon_bytes.empty()) {
+                eka2l1::j2me::extract_midlet_icon_png(g_state.symsys.get(), j2me_id, icon_bytes);
+            }
+
+            if (!icon_bytes.empty()) {
+                s_icon_json = "{\"type\":\"png\",\"data\":\""
+                    + eka2l1::crypt::base64_encode(icon_bytes.data(), icon_bytes.size())
+                    + "\"}";
+            }
+        }
         return s_icon_json.c_str();
     }
 
@@ -2548,6 +2708,256 @@ int wasm_launch_app(int uid) {
     }
 
     return ok ? 0 : -5;
+}
+
+/**
+ * Launch a J2ME (Java ME) MIDlet by its j2me app-list ID.
+ * The web frontend uses virtual UIDs (real_id | 0x7E000000) to distinguish
+ * j2me apps from native Symbian apps in wasm_get_app_list.
+ *
+ * @param virtual_uid The virtual UID from the app list (0x7Exxxxxx).
+ * @returns 0 on success, negative on failure.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_launch_midlet(int virtual_uid) {
+    if (!g_state.symsys) return -1;
+
+    const std::uint32_t j2me_id = static_cast<std::uint32_t>(virtual_uid) & ~0x7E000000u;
+
+    // Get the MIDlet name for matching against AppArc registries.
+    std::string midlet_name;
+    eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
+    if (j2me_list) {
+        auto entry = j2me_list->get_entry(j2me_id);
+        if (entry.has_value()) midlet_name = entry->name_;
+    }
+
+    LOG_INFO(FRONTEND_CMDLINE, "Launching J2ME MIDlet id={} uid=0x{:08X} name='{}'",
+        j2me_id, static_cast<std::uint32_t>(virtual_uid), midlet_name);
+
+    auto reset_exit_state = []() {
+        g_state.launched_app_exited.store(false, std::memory_order_release);
+        g_state.last_app_exit_type = 0;
+        g_state.last_app_exit_reason = 0;
+        g_state.last_app_exit_category.clear();
+        g_state.last_app_exit_name.clear();
+        g_state.last_app_exit_uid = 0;
+    };
+
+    auto exit_cb = [](eka2l1::kernel::process *pr) {
+        if (!pr) {
+            LOG_ERROR(FRONTEND_CMDLINE, "J2ME MIDlet exited with null process handle");
+            g_state.launched_app_exited.store(true, std::memory_order_release);
+            return;
+        }
+        g_state.last_app_exit_type = static_cast<int>(pr->get_exit_type());
+        g_state.last_app_exit_reason = pr->get_exit_reason();
+        g_state.last_app_exit_category = eka2l1::common::ucs2_to_utf8(pr->get_exit_category());
+        g_state.last_app_exit_name = pr->name();
+        g_state.last_app_exit_uid = pr->get_uid();
+        g_state.launched_app_exited.store(true, std::memory_order_release);
+        LOG_WARN(FRONTEND_CMDLINE,
+            "J2ME MIDlet exited: name={} uid=0x{:08X} type={} cat={} reason={}",
+            pr->name(), pr->get_uid(), static_cast<int>(pr->get_exit_type()),
+            eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
+    };
+
+    // --- Strategy 1: AppArc non-native launch (the proper S60v3 MIDlet path) ---
+    // On ROMs without a standalone midp2midletlauncher.exe, MIDlets are launched
+    // through AppArc: the silent installer registers the MIDlet as a non-native
+    // Java app, and AppArc invokes StubMIDP2RecogExe.exe with the proper opaque
+    // data payload to start the Java runtime.
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (kern && !midlet_name.empty()) {
+        auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+
+        if (alserv) {
+            // These match the file-scope statics in applist.cpp.
+            constexpr std::uint32_t JAVA_MIDLET_TYPE_UID = 0x10210E26;
+            constexpr std::uint32_t JAVA_MIDLET_LEGACY_TYPE = 0xB031C52A;
+
+            eka2l1::apa_app_registry *java_reg = nullptr;
+            for (auto &reg : alserv->get_registerations()) {
+                if (!(reg.caps.flags & eka2l1::apa_capability::non_native))
+                    continue;
+                if (reg.non_native_application_type != JAVA_MIDLET_TYPE_UID &&
+                    reg.non_native_application_type != JAVA_MIDLET_LEGACY_TYPE)
+                    continue;
+                const std::string reg_name = eka2l1::common::ucs2_to_utf8(
+                    reg.mandatory_info.long_caption.to_std_string(nullptr));
+                if (reg_name == midlet_name) {
+                    java_reg = &reg;
+                    break;
+                }
+            }
+
+            if (java_reg) {
+                LOG_INFO(FRONTEND_CMDLINE,
+                    "MIDlet '{}' found in AppArc (uid=0x{:08X}), launching via AppArc",
+                    midlet_name, java_reg->mandatory_info.uid);
+
+                reset_exit_state();
+                epoc::apa::command_line cmdline;
+                cmdline.launch_cmd_ = epoc::apa::command_open;
+
+                bool ok = false;
+                try {
+                    kern->lock();
+                    ok = alserv->launch_app(*java_reg, cmdline, nullptr, exit_cb);
+                    kern->unlock();
+                } catch (const std::exception &e) {
+                    kern->unlock();
+                    LOG_ERROR(FRONTEND_CMDLINE, "AppArc MIDlet launch exception: {}", e.what());
+                } catch (...) {
+                    kern->unlock();
+                    LOG_ERROR(FRONTEND_CMDLINE, "AppArc MIDlet launch unknown exception");
+                }
+
+                if (ok) {
+                    g_state.paused = false;
+                    return 0;
+                }
+                LOG_WARN(FRONTEND_CMDLINE, "AppArc launch failed for '{}', trying direct launcher", midlet_name);
+            } else {
+                // The MIDlet was installed in the host j2me app list, but it is
+                // not in AppArc (registration was lost on emulator restart, or
+                // the silent installer never completed). Re-run the silent
+                // installer to restore the registration, then tell JS to retry.
+                if (g_state.midlet_install_state.load(std::memory_order_acquire) != 1) {
+                    g_state.midlet_install_state.store(1, std::memory_order_release);
+
+                    bool reg_ok = eka2l1::j2me::reregister_midlet(g_state.symsys.get(), j2me_id,
+                        [](eka2l1::kernel::process *installer) {
+                            if (!installer) {
+                                g_state.midlet_install_state.store(-4, std::memory_order_release);
+                                return;
+                            }
+                            LOG_INFO(FRONTEND_CMDLINE,
+                                "Reregister installer exited: type={} reason={} cat={}",
+                                static_cast<int>(installer->get_exit_type()),
+                                installer->get_exit_reason(),
+                                eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
+
+                            if (g_state.symsys) {
+                                eka2l1::kernel_system *k = g_state.symsys->get_kernel_system();
+                                auto *al = k ? reinterpret_cast<eka2l1::applist_server *>(
+                                    k->get_by_name<eka2l1::service::server>(
+                                        eka2l1::get_app_list_server_name_by_epocver(k->get_epoc_version()))) : nullptr;
+                                if (al) al->rescan_registries(g_state.symsys->get_io_system());
+                            }
+
+                            const bool ok = (installer->get_exit_type() != eka2l1::kernel::entity_exit_type::panic)
+                                && (installer->get_exit_reason() == 0);
+                            g_state.midlet_install_state.store(ok ? 2 : -4, std::memory_order_release);
+                        });
+
+                    if (reg_ok) {
+                        LOG_INFO(FRONTEND_CMDLINE,
+                            "MIDlet '{}' not in AppArc; reregister triggered. Returning -100 for JS retry.",
+                            midlet_name);
+                        return -100;
+                    }
+                    g_state.midlet_install_state.store(0, std::memory_order_release);
+                }
+                LOG_WARN(FRONTEND_CMDLINE,
+                    "MIDlet '{}' not in AppArc and reregister could not start. Trying direct launcher.",
+                    midlet_name);
+            }
+        }
+    }
+
+    // --- Strategy 2: Direct launcher spawn (ROMs with midp2midletlauncher.exe) ---
+    reset_exit_state();
+    bool ok = eka2l1::j2me::launch(g_state.symsys.get(), j2me_id, exit_cb);
+    if (ok) {
+        g_state.paused = false;
+        return 0;
+    }
+
+    // Both strategies failed. Emit a single, actionable summary so the console
+    // explains the -2 the user sees in the overlay.
+    LOG_ERROR(FRONTEND_CMDLINE,
+        "MIDlet launch failed (returning -2). Either the ROM has no Java launcher "
+        "(midp2midletlauncher.exe/midletlauncher.exe missing) and the MIDlet was not "
+        "registered in AppArc, or the direct launcher spawn failed. "
+        "Run EKA2L1.checkMidletLaunch() for the full diagnostic.");
+    return -2;
+}
+
+/**
+ * Check whether the current ROM can launch J2ME MIDlets.
+ * Returns a diagnostic string (newline-separated) describing what was found
+ * and what is missing. The frontend uses this to give actionable errors.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_check_midlet_launch() {
+    static std::string result;
+    result.clear();
+
+    if (!g_state.symsys) {
+        result = "no-system";
+        return result.c_str();
+    }
+
+    eka2l1::io_system *io = g_state.symsys->get_io_system();
+    // Only the first two are standalone launchers. StubMIDP2RecogExe.exe is a
+    // file recognizer invoked by AppArc with opaque data — NOT a launcher.
+    // midp2runtimev2.dll is the actual MIDP2 KVM; without it Java can't run.
+    const char *CHECK[] = {
+        "Z:\\sys\\bin\\midp2midletlauncher.exe",
+        "Z:\\sys\\bin\\midletlauncher.exe",
+        "Z:\\sys\\bin\\StubMIDP2RecogExe.exe",
+        "Z:\\sys\\bin\\systemamscore.exe",
+        "Z:\\sys\\bin\\midp2silentmidletinstall.exe",
+        "Z:\\sys\\bin\\midp2runtimev2.dll",
+        nullptr
+    };
+
+    bool standalone_launcher_found = false;
+    bool runtime_dll_found = false;
+    bool ams_core_found = false;
+
+    for (int i = 0; CHECK[i]; i++) {
+        const bool exists = io->exist(eka2l1::common::utf8_to_ucs2(CHECK[i]));
+        if (exists && i < 2) standalone_launcher_found = true;
+        if (exists && i == 3) ams_core_found = true;
+        if (exists && i == 5) runtime_dll_found = true;
+        result += (exists ? "[OK]   " : "[MISS] ");
+        result += CHECK[i];
+        result += "\n";
+    }
+
+    // The AppArc path is viable only when the AMS core AND the KVM DLL exist.
+    const bool apparc_path_available = (ams_core_found && runtime_dll_found);
+
+    // Count how many Java MIDlets are registered in AppArc. This tells the
+    // user whether the silent installer actually completed registration.
+    int java_app_count = 0;
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (kern) {
+        auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+        if (alserv) {
+            constexpr std::uint32_t JAVA_MIDLET_TYPE_UID = 0x10210E26;
+            constexpr std::uint32_t JAVA_MIDLET_LEGACY_TYPE = 0xB031C52A;
+            for (auto &reg : alserv->get_registerations()) {
+                if ((reg.caps.flags & eka2l1::apa_capability::non_native) &&
+                    (reg.non_native_application_type == JAVA_MIDLET_TYPE_UID ||
+                     reg.non_native_application_type == JAVA_MIDLET_LEGACY_TYPE)) {
+                    java_app_count++;
+                }
+            }
+        }
+    }
+
+    result += "\nJava apps in AppArc: " + std::to_string(java_app_count);
+
+    const bool can_launch = standalone_launcher_found || apparc_path_available;
+    result += can_launch ? "\nLAUNCHER: available" : "\nLAUNCHER: missing";
+    return result.c_str();
 }
 
 /**

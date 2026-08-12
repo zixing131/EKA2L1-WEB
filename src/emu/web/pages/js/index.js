@@ -71,7 +71,7 @@
 
     // ---- icons ----------------------------------------------------------------
 
-    var ICONS_CACHE_KEY = 'eka2l1_icons_cache_v2'; // v2: SVG namespace fix
+    var ICONS_CACHE_KEY = 'eka2l1_icons_cache_v3'; // v3: j2me MIDlet icon JAR-fallback retry
     var ICONS_CACHE_LIMIT = 3.5 * 1024 * 1024; // stay well under the LS quota
 
     var iconCache = {}; // uid -> dataURL ('' = known to have no icon)
@@ -89,6 +89,9 @@
         if (!icon || !icon.type) return null;
         if (icon.type === 'svg') {
             return 'data:image/svg+xml;base64,' + icon.data;
+        }
+        if (icon.type === 'png' && icon.data) {
+            return 'data:image/png;base64,' + icon.data;
         }
         if (icon.type === 'rgba' && icon.w > 0 && icon.h > 0) {
             try {
@@ -122,7 +125,14 @@
     // Fetch missing icons one at a time so the wasm calls never jank the UI.
     function pumpIcons() {
         if (iconPumpRunning || !coreReady || !deviceReady) return;
-        var pending = apps.filter(function (a) { return !(a.uid in iconCache); });
+        // Retry j2me MIDlet icons cached as empty: before the JAR-fallback fix
+        // they failed once and were cached '' (never retried again). Only the
+        // 0x7Exxxxxx virtual-UID range is retried so native apps stay cheap.
+        var pending = apps.filter(function (a) {
+            if (!(a.uid in iconCache)) return true;
+            if (!iconCache[a.uid] && (a.uid >>> 0) >= 0x7E000000) return true;
+            return false;
+        });
         if (pending.length === 0) return;
         iconPumpRunning = true;
 
@@ -255,7 +265,8 @@
     };
 
     function playApp(app) {
-        location.href = 'run.html?uid=' + app.uid + '&name=' + encodeURIComponent(app.name || '');
+        var extra = app.j2me ? '&j2me=1' : '';
+        location.href = 'run.html?uid=' + app.uid + '&name=' + encodeURIComponent(app.name || '') + extra;
     }
 
     function refreshApps() {
@@ -572,7 +583,7 @@
     };
 
     function waitForMidletInstaller() {
-        var deadline = Date.now() + 180000;
+        var deadline = Date.now() + 60000;
         return new Promise(function (resolve, reject) {
             function poll() {
                 var state = EKA2L1.midletInstallStatus();
@@ -606,6 +617,12 @@
                 var result = EKA2L1.installMidlet(target);
                 try { EKA2L1.module.FS.unlink(target); } catch (e) {}
                 if (result !== 0) throw new Error(EKA2L1.t('error.installFailedCode', { code: result }));
+
+                // The MIDlet is registered in the host j2me app list immediately
+                // (before any guest-side install), so refresh now so it shows up
+                // even if the ROM installer later stalls or fails.
+                refreshApps();
+
                 return waitForMidletInstaller();
             })
             .then(function () {
@@ -622,8 +639,21 @@
                 try { EKA2L1.module.FS.unlink(target); } catch (e) {}
                 console.error('[EKA2L1] Java ME install failed:', err);
                 setStatus('red', EKA2L1.t('status.installFailed'));
-                showError(EKA2L1.t('error.jarInstallFailed', { msg: err.message || err }));
-                EKA2L1.toast(err.message || EKA2L1.t('toast.installFailedSeeAbove'), 4000);
+
+                // The MIDlet may have been registered even if the ROM installer
+                // timed out — refresh so it is visible and save the list.
+                refreshApps();
+                try { EKA2L1.save(); } catch (e) {}
+
+                var msg = err.message || String(err);
+                if (msg.indexOf('timed out') !== -1 || msg.indexOf('stopped before') !== -1) {
+                    // Installer async issues are non-fatal: the MIDlet is already
+                    // registered. Show a softer message instead of a blocking dialog.
+                    EKA2L1.toast(EKA2L1.t('toast.midletRegisteredInstallerIncomplete'), 5000);
+                } else {
+                    showError(EKA2L1.t('error.jarInstallFailed', { msg: msg }));
+                    EKA2L1.toast(msg, 4000);
+                }
             });
     });
 
@@ -763,7 +793,8 @@
                 btn.disabled = true;
                 btn.textContent = EKA2L1.t('action.uninstalling');
                 setTimeout(function () {
-                    var r = EKA2L1.module.ccall('wasm_uninstall_package', 'number', ['number'], [p.uid >>> 0]);
+                    var fn = p.j2me ? 'wasm_uninstall_midlet' : 'wasm_uninstall_package';
+                    var r = EKA2L1.module.ccall(fn, 'number', ['number'], [p.uid >>> 0]);
                     if (r !== 0) {
                         EKA2L1.toast(EKA2L1.t('toast.uninstallFailed', { code: r }));
                         btn.disabled = false;
@@ -771,6 +802,8 @@
                         return;
                     }
                     EKA2L1.save().catch(function () {}).then(function () {
+                        delete iconCache[p.uid];
+                        persistIconCache();
                         refreshApps();
                         renderPkgList();
                         EKA2L1.toast(EKA2L1.t('toast.uninstalled', { name: p.name }));
