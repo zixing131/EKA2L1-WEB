@@ -892,8 +892,22 @@ namespace eka2l1 {
             return;
         }
 
+        const std::string raw_utf8 = common::ucs2_to_utf8(*name_res);
         *name_res = get_full_symbian_path(ss_path, *name_res);
         std::string name_utf8 = common::ucs2_to_utf8(*name_res);
+        kernel::process *opener_pr = ctx->msg->own_thr ? ctx->msg->own_thr->owning_process() : nullptr;
+        const std::string opener_name = opener_pr ? opener_pr->name() : "?";
+        const std::string lower_opener = common::lowercase_string(opener_name);
+        const bool j9_opener = (lower_opener.find("j9") != std::string::npos)
+            || (lower_opener.find("systemams") != std::string::npos);
+        const std::string lower_name = common::lowercase_string(name_utf8);
+        const bool j9_suite_file = j9_opener
+            && ((lower_name.find(".jad") != std::string::npos)
+                || (lower_name.find(".jar") != std::string::npos)
+                || (lower_name.find("\\private\\102033e6\\") != std::string::npos)
+                || (lower_name.find("midlet") != std::string::npos)
+                || (raw_utf8.find("file:") != std::string::npos)
+                || (raw_utf8.find('/') != std::string::npos));
 
         io_system *io = ctx->sys->get_io_system();
 
@@ -913,7 +927,21 @@ namespace eka2l1 {
 
             // Do a check to return epoc::error_path_not_found
             if (!io->exist(file_dir)) {
-                LOG_TRACE(SERVICE_EFSRV, "Base directory of file {} not found", name_utf8);
+                const std::string lower_dir = common::lowercase_string(name_utf8);
+                if (lower_dir.find("\\resource\\ive\\bin\\") != std::string::npos) {
+                    if (io->create_directories(file_dir)) {
+                        LOG_WARN(SERVICE_EFSRV, "Created J9 locale directory {}",
+                            common::ucs2_to_utf8(file_dir));
+                    }
+                }
+            }
+            if (!io->exist(file_dir)) {
+                if (j9_opener) {
+                    LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs no-dir raw='{}' resolved='{}' ss='{}' from {}",
+                        raw_utf8, name_utf8, common::ucs2_to_utf8(ss_path), opener_name);
+                } else {
+                    LOG_TRACE(SERVICE_EFSRV, "Base directory of file {} not found", name_utf8);
+                }
 
                 ctx->complete(epoc::error_path_not_found);
                 return;
@@ -931,16 +959,46 @@ namespace eka2l1 {
         }
 
         if (!is_it_avail && (existence == exist_mode_neccessary)) {
-            LOG_ERROR(SERVICE_EFSRV, "Trying to open a non-existent file: {} while the open mode requires its availbility!",
-                name_utf8);
-
-            ctx->complete(epoc::error_not_found);
-            return;
+            if (j9_opener) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs miss raw='{}' resolved='{}' ss='{}' from {}",
+                    raw_utf8, name_utf8, common::ucs2_to_utf8(ss_path), opener_name);
+            }
+            const bool java_integrity_store = (lower_name.find("\\private\\1028247a\\") != std::string::npos)
+                && ((lower_name.size() >= 4)
+                    && ((lower_name.compare(lower_name.size() - 4, 4, ".drv") == 0)
+                        || (lower_name.compare(lower_name.size() - 4, 4, ".log") == 0)));
+            const bool java_locale_props = (lower_name.find("\\resource\\ive\\bin\\java") != std::string::npos)
+                && (lower_name.size() >= 11)
+                && (lower_name.compare(lower_name.size() - 11, 11, ".properties") == 0);
+            const bool java_jxe_cache = (lower_name.find("\\private\\102033e6\\") != std::string::npos)
+                && (lower_name.find("jxe=") != std::string::npos);
+            if (java_integrity_store || java_locale_props || java_jxe_cache) {
+                if (symfile created = io->open_file(*name_res, WRITE_MODE | BIN_MODE)) {
+                    created->close();
+                    LOG_WARN(SERVICE_EFSRV, "Materialized empty Java file {}", name_utf8);
+                } else {
+                    LOG_ERROR(SERVICE_EFSRV, "Trying to open a non-existent file: {} while the open mode requires its availbility!",
+                        name_utf8);
+                    ctx->complete(epoc::error_not_found);
+                    return;
+                }
+            } else {
+                LOG_ERROR(SERVICE_EFSRV, "Trying to open a non-existent file: {} while the open mode requires its availbility!",
+                    name_utf8);
+                ctx->complete(epoc::error_not_found);
+                return;
+            }
         }
 
         LOG_INFO(SERVICE_EFSRV, "Opening file: {}, raw mode {}", name_utf8, open_mode_res.value());
         int handle = new_node(ctx->sys->get_io_system(), ctx->msg->own_thr, *name_res,
             *open_mode_res, overwrite, temporary);
+
+        if (j9_opener && (j9_suite_file || (handle <= 0))) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs Open raw='{}' resolved='{}' exist={} mode={} handle={} ss='{}' from {}",
+                raw_utf8, name_utf8, is_it_avail ? 1 : 0, open_mode_res.value(), handle,
+                common::ucs2_to_utf8(ss_path), opener_name);
+        }
 
         if (handle <= 0) {
             ctx->complete(handle);
@@ -1044,7 +1102,19 @@ namespace eka2l1 {
         new_node->vfs_node = io->open_file(name, access_mode);
 
         if (!new_node->vfs_node) {
-            LOG_TRACE(SERVICE_EFSRV, "Can't open file {}", common::ucs2_to_utf8(name));
+            const std::string utf8 = common::ucs2_to_utf8(name);
+            if (sender && sender->owning_process()) {
+                const std::string opener = common::lowercase_string(sender->owning_process()->name());
+                if ((opener.find("j9") != std::string::npos)
+                    || (opener.find("systemams") != std::string::npos)) {
+                    LOG_WARN(SERVICE_EFSRV, "Can't open file {} (from {})",
+                        utf8, sender->owning_process()->name());
+                } else {
+                    LOG_TRACE(SERVICE_EFSRV, "Can't open file {}", utf8);
+                }
+            } else {
+                LOG_TRACE(SERVICE_EFSRV, "Can't open file {}", utf8);
+            }
             return epoc::error_not_found;
         }
 

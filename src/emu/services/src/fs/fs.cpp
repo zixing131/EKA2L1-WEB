@@ -121,25 +121,56 @@ namespace eka2l1 {
         return drive_u16 + get_private_path_trim_uid(pr);
     }
 
+    static std::u16string normalize_guest_fs_path(std::u16string path) {
+        if (path.size() >= 8) {
+            const std::u16string head8 = common::lowercase_ucs2_string(path.substr(0, 8));
+            if (head8 == u"file:///") {
+                path.erase(0, 8);
+            } else if (path.size() >= 7) {
+                const std::u16string head7 = common::lowercase_ucs2_string(path.substr(0, 7));
+                if (head7 == u"file://") {
+                    path.erase(0, 7);
+                    if (path.size() >= 10
+                        && (common::lowercase_ucs2_string(path.substr(0, 10)) == u"localhost\\"
+                            || common::lowercase_ucs2_string(path.substr(0, 10)) == u"localhost/")) {
+                        path.erase(0, 10);
+                    }
+                }
+            }
+        } else if (path.size() >= 7) {
+            const std::u16string head7 = common::lowercase_ucs2_string(path.substr(0, 7));
+            if (head7 == u"file://") {
+                path.erase(0, 7);
+            }
+        }
+        for (char16_t &ch : path) {
+            if (ch == u'/') {
+                ch = u'\\';
+            }
+        }
+        return path;
+    }
+
     std::u16string get_full_symbian_path(const std::u16string &session_path, const std::u16string &target_path) {
-        if (target_path.empty()) {
+        const std::u16string normalized = normalize_guest_fs_path(target_path);
+        if (normalized.empty()) {
             return session_path;
         }
 
         // For some reasons some apps throw path with ton of spaces at the end
         // Windows is fine with it (probably through tons of fixes they have to do to ensure compatibilities!),
         // but not the case for other OSes
-        if (is_separator(target_path[0])) {
+        if (is_separator(normalized[0])) {
             // Only append the root directory to the beginning
-            return common::trim_spaces(eka2l1::absolute_path(target_path, eka2l1::root_name(session_path, true), true));
+            return common::trim_spaces(eka2l1::absolute_path(normalized, eka2l1::root_name(session_path, true), true));
         }
 
         // Check if the path has a root directory
-        if (!eka2l1::has_root_dir(target_path)) {
-            return common::trim_spaces(eka2l1::absolute_path(target_path, session_path, true));
+        if (!eka2l1::has_root_dir(normalized)) {
+            return common::trim_spaces(eka2l1::absolute_path(normalized, session_path, true));
         }
 
-        return common::trim_spaces(target_path);
+        return common::trim_spaces(normalized);
     }
 
     size_t fs_path_case_insensitive_hasher::operator()(const utf16_str &key) const {
@@ -176,28 +207,65 @@ namespace eka2l1 {
 
         system_drive_prop->first = static_cast<int>(FS_UID);
         system_drive_prop->second = static_cast<int>(SYSTEM_DRIVE_KEY);
+
+        // Fake-success SWInst opcode 516 never creates files, so the silent
+        // installer waits forever on "?:\\...". Kick that wait once after 516
+        // completes 0. Completing on every NotifyChangeEx re-register busy-loops.
+        java_ipc_complete_cb_ = kern->register_ipc_complete_callback(
+            [this](ipc_msg *msg, const std::int32_t complete_code) {
+                if (!msg || (complete_code != 0) || (msg->function != 516)) {
+                    return;
+                }
+                const std::string server_name = (msg->msg_session && msg->msg_session->get_server())
+                    ? msg->msg_session->get_server()->name()
+                    : msg->debug_server_name;
+                if (server_name.find("AppServer") == std::string::npos) {
+                    return;
+                }
+                java_swinst_ok_ = true;
+                kick_java_preinstall_waits();
+            });
     }
 
     fs_server::~fs_server() {
+        if (java_ipc_complete_cb_ && kern) {
+            kern->unregister_ipc_complete_callback(java_ipc_complete_cb_);
+            java_ipc_complete_cb_ = 0;
+        }
         io_system *io = sys->get_io_system();
         for (const std::u16string &path: temporary_file_cleanset_) {
             io->delete_entry(path);
         }
     }
 
-    void fs_server::notify_change(const std::u16string &path, const fs_server_client::notify_type type) {
-        bool has_waiter = false;
+    void fs_server::kick_java_preinstall_waits() {
         for (auto &[uid, session] : sessions) {
             (void)uid;
-            if (!reinterpret_cast<fs_server_client *>(session.get())->notify_entries.empty()) {
-                has_waiter = true;
-                break;
+            reinterpret_cast<fs_server_client *>(session.get())->kick_java_preinstall_wait();
+        }
+    }
+
+    void fs_server_client::kick_java_preinstall_wait() {
+        if (java_preinstall_kicked_) {
+            return;
+        }
+        for (auto it = notify_entries.begin(); it != notify_entries.end(); ++it) {
+            if (!it->java_drive_wildcard) {
+                continue;
             }
+            kernel::thread *waiter = it->info.requester;
+            LOG_WARN(SERVICE_EFSRV,
+                "[notify-probe] kicking silent-installer ?:\\\\... wait waiter={} proc={}",
+                waiter ? waiter->name() : "?",
+                (waiter && waiter->owning_process()) ? waiter->owning_process()->name() : "?");
+            it->info.complete(epoc::error_none);
+            notify_entries.erase(it);
+            java_preinstall_kicked_ = true;
+            return;
         }
-        if (has_waiter) {
-            LOG_WARN(SERVICE_EFSRV, "[notify-probe] mutation path={} type={}",
-                common::ucs2_to_utf8(path), static_cast<std::uint32_t>(type));
-        }
+    }
+
+    void fs_server::notify_change(const std::u16string &path, const fs_server_client::notify_type type) {
         for (auto &[uid, session] : sessions) {
             (void)uid;
             reinterpret_cast<fs_server_client *>(session.get())->notify(path, type);
@@ -215,13 +283,13 @@ namespace eka2l1 {
                         & static_cast<std::uint32_t>(changed_type)) != 0);
             const bool path_matches = std::regex_search(changed_path, it->match_pattern);
 
-            kernel::thread *waiter = it->info.requester;
-            LOG_WARN(SERVICE_EFSRV, "[notify-probe] candidate path={} type_match={} path_match={} waiter={} proc={}",
-                common::ucs2_to_utf8(changed_entry), type_matches, path_matches,
-                waiter ? waiter->name() : "?",
-                (waiter && waiter->owning_process()) ? waiter->owning_process()->name() : "?");
-
             if (type_matches && path_matches) {
+                kernel::thread *waiter = it->info.requester;
+                LOG_WARN(SERVICE_EFSRV,
+                    "[notify-probe] completing path={} type={} waiter={} proc={}",
+                    common::ucs2_to_utf8(changed_entry), static_cast<std::uint32_t>(changed_type),
+                    waiter ? waiter->name() : "?",
+                    (waiter && waiter->owning_process()) ? waiter->owning_process()->name() : "?");
                 LOG_TRACE(SERVICE_EFSRV, "Completing change notification for {}",
                     common::ucs2_to_utf8(changed_entry));
                 it->info.complete(epoc::error_none);
@@ -617,6 +685,12 @@ namespace eka2l1 {
         }
 
         ss_path = std::move(new_path.value());
+        if (ctx->msg->own_thr && ctx->msg->own_thr->owning_process()) {
+            const std::string opener = ctx->msg->own_thr->owning_process()->name();
+            if (common::lowercase_string(opener).find("j9") != std::string::npos) {
+                LOG_WARN(SERVICE_EFSRV, "[j9-fs] SetSessionPath '{}'", common::ucs2_to_utf8(ss_path));
+            }
+        }
         ctx->complete(epoc::error_none);
     }
 
@@ -732,6 +806,7 @@ namespace eka2l1 {
         // does not know about that filesystem-specific token.
         if (lowered_match == u"?:\\...") {
             entry.match_pattern = ".*";
+            entry.java_drive_wildcard = true;
         } else {
             entry.match_pattern = common::wildcard_to_regex_string(
                 common::ucs2_to_utf8(lowered_match));
@@ -757,6 +832,10 @@ namespace eka2l1 {
             common::ucs2_to_utf8(*wildcard_match), static_cast<std::uint32_t>(entry.type),
             owner ? owner->name() : "?",
             (owner && owner->owning_process()) ? owner->owning_process()->name() : "?");
+
+        if (entry.java_drive_wildcard && server<fs_server>()->java_swinst_ok_) {
+            kick_java_preinstall_wait();
+        }
     }
 
     void fs_server_client::notify_change_cancel(service::ipc_context *ctx) {
@@ -884,9 +963,18 @@ namespace eka2l1 {
         }
 
         std::u16string fname = std::move(*fname_op);
+        const std::string raw_utf8 = common::ucs2_to_utf8(fname);
         fname = get_full_symbian_path(ss_path, fname);
 
+        kernel::process *opener_pr = ctx->msg->own_thr ? ctx->msg->own_thr->owning_process() : nullptr;
+        const std::string opener_name = opener_pr ? opener_pr->name() : "?";
+        const bool j9_opener = common::lowercase_string(opener_name).find("j9") != std::string::npos;
+
         if (!check_path_capabilities_pass(fname, ctx->msg->own_thr->owning_process(), epoc::fs::private_comp_access_policy, epoc::fs::sys_read_only_access_policy, epoc::fs::resource_read_only_access_policy)) {
+            if (j9_opener) {
+                LOG_WARN(SERVICE_EFSRV, "[j9-fs] Entry denied raw='{}' resolved='{}' from {}",
+                    raw_utf8, common::ucs2_to_utf8(fname), opener_name);
+            }
             ctx->complete(epoc::error_permission_denied);
             return;
         }
@@ -906,6 +994,12 @@ namespace eka2l1 {
         }
 
         LOG_TRACE(SERVICE_EFSRV, "Get entry result for {}: {}", common::ucs2_to_utf8(fname), entry_hle ? "found" : "not found");
+
+        if (j9_opener) {
+            LOG_WARN(SERVICE_EFSRV, "[j9-fs] Entry raw='{}' resolved='{}' found={} ss='{}' from {}",
+                raw_utf8, common::ucs2_to_utf8(fname), entry_hle ? 1 : 0,
+                common::ucs2_to_utf8(ss_path), opener_name);
+        }
 
         if (!entry_hle) {
             ctx->complete(epoc::error_not_found);

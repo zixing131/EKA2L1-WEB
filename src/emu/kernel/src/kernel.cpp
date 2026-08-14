@@ -952,6 +952,12 @@ namespace eka2l1 {
             return nullptr;
         }
 
+        // ROM executable code segments may already be cached before
+        // lib_manager::load_as_romimg() sees the launch path. Re-run the
+        // idempotent, signature-matched J2ME compatibility hook here so the
+        // silent installer is patched before its entry point executes.
+        hle::apply_j2me_compat_patches(cs, process_name);
+
         LOG_TRACE(KERNEL, "Spawned process: {}, entry point = 0x{:X}", process_name, cs->get_code_run_addr(&(*pr)));
         
         if (eka2l1::has_root_name(path, true)) {

@@ -114,6 +114,10 @@ namespace eka2l1 {
             std::size_t info_index_;
         };
 
+        // Apply narrowly signature-matched compatibility fixes to selected
+        // S60 Java runtime code segments before their first instruction runs.
+        void apply_j2me_compat_patches(codeseg_ptr cs, const std::string &name_hint = {});
+
         /**
          * \brief Manage libraries and HLE functions.
 		 * 

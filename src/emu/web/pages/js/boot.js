@@ -67,10 +67,25 @@
         canvas.getContext = function (type, attrs) {
             if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
                 attrs = attrs || {};
-                attrs.powerPreference = 'high-performance';
+                attrs.powerPreference = attrs.powerPreference || 'high-performance';
                 attrs.alpha = false;
                 attrs.antialias = false;
-                attrs.desynchronized = true;
+                var first = {};
+                for (var k in attrs) {
+                    if (Object.prototype.hasOwnProperty.call(attrs, k)) first[k] = attrs[k];
+                }
+                first.desynchronized = true;
+                var ctx = original(type, first);
+                if (ctx) {
+                    return ctx;
+                }
+                attrs.desynchronized = false;
+                attrs.powerPreference = 'default';
+                ctx = original(type, attrs);
+                if (ctx) {
+                    console.warn('[EKA2L1] WebGL context created without desynchronized/high-performance');
+                }
+                return ctx;
             }
             return original(type, attrs);
         };
@@ -545,6 +560,10 @@
         return ccall('wasm_probe_java_inventory', 'string');
     };
 
+    EKA2L1.probeJavaRuntime = function () {
+        return ccall('wasm_probe_java_runtime', 'string');
+    };
+
     EKA2L1.probeLs = function (guestPath) {
         return ccall('wasm_probe_ls', 'string', ['string'], [guestPath]);
     };
@@ -577,6 +596,7 @@
             log('');
             log('=== Critical MIDP2 binaries ===');
             var critical = [
+                'Z:\\sys\\bin\\j9midps60.exe',
                 'Z:\\sys\\bin\\midp2silentmidletinstall.exe',
                 'Z:\\sys\\bin\\systemamscore.exe',
                 'Z:\\sys\\bin\\midp2midletlauncher.exe',
@@ -598,10 +618,15 @@
                 log((found ? '[OK]  ' : '[MISS] ') + p);
             });
 
-            // 3. Check preinstall directory
+            // 3. Check preinstall / AMS suite directories
             log('');
             log('=== Preinstall directory ===');
             log(EKA2L1.probeLs('E:\\system\\data\\midp2\\preinstall\\'));
+            log('');
+            log('=== AMS suite directory ===');
+            log(EKA2L1.probeLs('C:\\private\\102033E6\\MIDlets\\'));
+            log(EKA2L1.probeLs('C:\\private\\10203636\\systemams\\'));
+            log(EKA2L1.probeLs('C:\\system\\data\\midp2\\systemams\\'));
 
             // 4. AppArc registration + launcher viability (wasm_check_midlet_launch)
             log('');
@@ -630,6 +655,15 @@
                 });
             } catch (e) {
                 log('[ERROR] appList failed: ' + e);
+            }
+
+            // 6. Live AMS / trader / J9 processes and servers
+            try {
+                log('');
+                log('=== Java runtime (live) ===');
+                log(EKA2L1.probeJavaRuntime() || '(empty)');
+            } catch (e) {
+                log('[ERROR] probeJavaRuntime failed: ' + e);
             }
         }
 

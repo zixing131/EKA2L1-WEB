@@ -76,6 +76,8 @@
 #include <config/config.h>
 #include <system/devices.h>
 
+#include <vector>
+
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
 #endif
@@ -150,6 +152,70 @@ namespace eka2l1::epoc {
         return locale;
     }
 
+    // TDayName / TMonthName / TDateSuffix read LOCALE_LANG_KEY as arrays of
+    // pointers to NUL-terminated UTF-16 strings. Publishing the property with
+    // null tables makes Get succeed and skip euser's ROM fallback, then
+    // ldr [0, day*4] becomes KERN-EXEC 3 (J9 formats timestamps this way).
+    static address put_locale_u16_string(kernel_system *kern, const char16_t *text) {
+        std::size_t units = 0;
+        while (text[units] != 0) {
+            units++;
+        }
+        units++;
+        return kern->put_global_kernel_binary(
+            reinterpret_cast<const std::uint8_t *>(text), units * sizeof(char16_t));
+    }
+
+    static address put_locale_u16_table(kernel_system *kern, const char16_t *const *texts,
+        const std::size_t count) {
+        std::vector<address> addrs(count);
+        for (std::size_t i = 0; i < count; i++) {
+            addrs[i] = put_locale_u16_string(kern, texts[i]);
+        }
+        return kern->put_static_array(addrs.data(), addrs.size());
+    }
+
+    static void fill_locale_language_tables(kernel_system *kern, epoc::locale_language &lang) {
+        static const char16_t *DATE_SUFFIX[] = {
+            u"st", u"nd", u"rd", u"th", u"th", u"th", u"th", u"th", u"th", u"th",
+            u"th", u"th", u"th", u"th", u"th", u"th", u"th", u"th", u"th", u"th",
+            u"st", u"nd", u"rd", u"th", u"th", u"th", u"th", u"th", u"th", u"th",
+            u"st"
+        };
+        static const char16_t *DAYS[] = {
+            u"Monday", u"Tuesday", u"Wednesday", u"Thursday", u"Friday", u"Saturday", u"Sunday"
+        };
+        static const char16_t *DAYS_ABB[] = {
+            u"Mon", u"Tue", u"Wed", u"Thu", u"Fri", u"Sat", u"Sun"
+        };
+        static const char16_t *MONTHS[] = {
+            u"January", u"February", u"March", u"April", u"May", u"June",
+            u"July", u"August", u"September", u"October", u"November", u"December"
+        };
+        static const char16_t *MONTHS_ABB[] = {
+            u"Jan", u"Feb", u"Mar", u"Apr", u"May", u"Jun",
+            u"Jul", u"Aug", u"Sep", u"Oct", u"Nov", u"Dec"
+        };
+        static const char16_t *AM_PM[] = { u"am", u"pm" };
+        static const char16_t *MSGS[] = {
+            u"Retry", u"Stop", u"Put the disk back", u"or data will be lost",
+            u"Batteries too low", u"Cannot complete write to disk",
+            u"Disk error - cannot complete write", u"Retry or data will be lost",
+            u"Chimes", u"Rings", u"Signal", u"Internal",
+            u"External(01)", u"External(02)", u"External(03)", u"External(04)",
+            u"External(05)", u"External(06)", u"External(07)", u"External(08)",
+            u"Socket(01)", u"Socket(02)", u"Socket(03)", u"Socket(04)"
+        };
+
+        lang.date_suffix_table = eka2l1::ptr<char>(put_locale_u16_table(kern, DATE_SUFFIX, 31));
+        lang.day_table = eka2l1::ptr<char>(put_locale_u16_table(kern, DAYS, 7));
+        lang.day_abb_table = eka2l1::ptr<char>(put_locale_u16_table(kern, DAYS_ABB, 7));
+        lang.month_table = eka2l1::ptr<char>(put_locale_u16_table(kern, MONTHS, 12));
+        lang.month_abb_table = eka2l1::ptr<char>(put_locale_u16_table(kern, MONTHS_ABB, 12));
+        lang.am_pm_table = eka2l1::ptr<char>(put_locale_u16_table(kern, AM_PM, 2));
+        lang.msg_table = eka2l1::ptr<std::uint16_t>(put_locale_u16_table(kern, MSGS, 24));
+    }
+
     static void initialize_system_properties(eka2l1::system *sys, eka2l1::config::state *cfg) {
         auto lang = epoc::locale_language{ epoc::lang_english, 0, 0, 0, 0, 0, 0, 0 };
         auto locale = epoc::get_locale_info();
@@ -166,12 +232,7 @@ namespace eka2l1::epoc {
             }
         }
 
-        address am_pm_names_addr[] = {
-            kern->put_global_kernel_string("am"),
-            kern->put_global_kernel_string("pm"),
-        };
-
-        lang.am_pm_table = eka2l1::ptr<char>(kern->put_static_array(am_pm_names_addr, 2));
+        fill_locale_language_tables(kern, lang);
 
         epoc::locale_locale_settings locale_settings;
         locale_settings.locale_extra_settings_dll_ptr = 0;

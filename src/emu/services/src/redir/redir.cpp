@@ -47,7 +47,7 @@ namespace eka2l1 {
         case redir_write: {
             std::optional<std::string> outstr = ctx->get_argument_value<std::string>(0);
             if (outstr.has_value()) {
-                LOG_INFO(EMULATED_STDOUT, "{}", outstr.value());
+                LOG_WARN(EMULATED_STDOUT, "{}", outstr.value());
             }
             break;
         }

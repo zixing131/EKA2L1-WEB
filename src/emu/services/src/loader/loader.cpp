@@ -205,7 +205,15 @@ namespace eka2l1 {
         }
 
         if (!cs) {
-            LOG_DEBUG(SERVICE_LOADER, "Try loading {} to {} failed", lib_name, own_pr->name());
+            // 5320 ROM has no Midp2VmArgModifier.dll. j9_23_midp2ams loads it
+            // optionally (skip on KErrNotFound) to append extra -Xgc flags.
+            if (common::compare_ignore_case(lib_name.c_str(), "Midp2VmArgModifier.dll") == 0) {
+                LOG_INFO(SERVICE_LOADER, "Loader::LoadLibrary optional plugin missing: {} (process={})",
+                    lib_name, own_pr->name());
+            } else {
+                LOG_WARN(SERVICE_LOADER, "Loader::LoadLibrary failed: {} (process={})",
+                    lib_name, own_pr->name());
+            }
             ctx.complete(epoc::error_not_found);
             return;
         }
@@ -214,6 +222,16 @@ namespace eka2l1 {
         auto lib_handle_and_obj = ctx.sys->get_kernel_system()->create_and_add_thread<kernel::library>(
             static_cast<kernel::owner_type>(handle_owner), ctx.msg->own_thr, cs);
 
+        {
+            const std::string opener = common::lowercase_string(own_pr->name());
+            if ((opener.find("j9") != std::string::npos)
+                && ((lib_name.find("Runtime") != std::string::npos)
+                    || (lib_name.find("runtime") != std::string::npos)
+                    || (lib_name.find("VmArg") != std::string::npos))) {
+                LOG_WARN(SERVICE_LOADER, "Loader::LoadLibrary ok: {} (process={})",
+                    lib_name, own_pr->name());
+            }
+        }
         LOG_TRACE(SERVICE_LOADER, "Loaded library: {}", lib_name);
 
         if (info) {

@@ -48,6 +48,7 @@
 #include <utils/system.h>
 
 #include <ctime>
+#include <cstdio>
 #include <utils/err.h>
 
 // Debug probe: when set (from the frontend), every guest Leave / thread kill /
@@ -365,6 +366,34 @@ namespace eka2l1::epoc {
         }
     }
 
+    static bool java_env_slot_trace(kernel::process *pr) {
+        if (!pr) {
+            return false;
+        }
+        const std::string n = common::lowercase_string(pr->raw_name());
+        return (n.find("stubmidp") != std::string::npos)
+            || (n.find("j9midp") != std::string::npos);
+    }
+
+    static bool j9_vm_process(kernel::process *pr) {
+        if (!pr) {
+            return false;
+        }
+        return common::lowercase_string(pr->raw_name()).find("j9midp") != std::string::npos;
+    }
+
+    static std::string slot_hex_prefix(const std::vector<std::uint8_t> &data, const std::size_t n = 24) {
+        std::string hex;
+        const std::size_t lim = std::min(data.size(), n);
+        hex.reserve(lim * 2);
+        for (std::size_t i = 0; i < lim; i++) {
+            char buf[3];
+            std::snprintf(buf, sizeof(buf), "%02X", data[i]);
+            hex += buf;
+        }
+        return hex;
+    }
+
     BRIDGE_FUNC(std::int32_t, process_data_parameter_length, std::int32_t slot) {
         kernel::process *crr_process = kern->crr_process();
 
@@ -376,8 +405,18 @@ namespace eka2l1::epoc {
         auto slot_ptr = crr_process->get_arg_slot(slot);
 
         if (!slot_ptr || !slot_ptr->used) {
-            LOG_ERROR(KERNEL, "Getting descriptor length of unused slot: {}", slot);
+            if (java_env_slot_trace(crr_process)) {
+                LOG_WARN(KERNEL, "{} DataParameterLength slot {} unused (guest will parse text cmdline)",
+                    crr_process->name(), slot);
+            } else {
+                LOG_ERROR(KERNEL, "Getting descriptor length of unused slot: {}", slot);
+            }
             return epoc::error_not_found;
+        }
+
+        if (java_env_slot_trace(crr_process)) {
+            LOG_WARN(KERNEL, "{} DataParameterLength slot {} size={} hex={}",
+                crr_process->name(), slot, slot_ptr->data.size(), slot_hex_prefix(slot_ptr->data));
         }
 
         return static_cast<std::int32_t>(slot_ptr->data.size());
@@ -432,11 +471,15 @@ namespace eka2l1::epoc {
         auto slot = *pr->get_arg_slot(slot_num);
 
         if (!slot.used) {
-            LOG_ERROR(KERNEL, "Parameter slot unused, error: {}", slot_num);
+            if (java_env_slot_trace(pr)) {
+                LOG_WARN(KERNEL, "{} GetDataParameter slot {} unused", pr->name(), slot_num);
+            } else {
+                LOG_ERROR(KERNEL, "Parameter slot unused, error: {}", slot_num);
+            }
             return epoc::error_not_found;
         }
 
-        if (length < slot.data.size()) {
+        if (length < static_cast<std::int32_t>(slot.data.size())) {
             LOG_ERROR(KERNEL, "Given length is not large enough to slot length ({} vs {})",
                 length, slot.data.size());
             return epoc::error_no_memory;
@@ -446,6 +489,11 @@ namespace eka2l1::epoc {
         std::copy(slot.data.begin(), slot.data.end(), data);
 
         std::size_t written_size = slot.data.size();
+        if (java_env_slot_trace(pr)) {
+            LOG_WARN(KERNEL, "{} GetDataParameter slot {} wrote {} bytes to 0x{:X} max={} hex={}",
+                pr->name(), slot_num, written_size, data_ptr.ptr_address(), length,
+                slot_hex_prefix(slot.data));
+        }
         pr->mark_slot_free(static_cast<std::uint8_t>(slot_num));
 
         return static_cast<std::int32_t>(written_size);
@@ -499,11 +547,20 @@ namespace eka2l1::epoc {
             return;
         }
 
+        // EKA2 RProcess::CommandLine takes TDes16. Length is in UTF-16
+        // characters, matching process_command_line_length. Writing
+        // chars<<1 made ESTLIB's TBuf report a byte length; the 8-bit
+        // argv splitter then stopped at the first UTF-16 NUL, so J9
+        // started with a truncated command line and later data-aborted.
+        auto *data16 = reinterpret_cast<epoc::des16 *>(data);
         std::u16string cmdline = pr->get_cmd_args();
-        char *data_ptr = data->get_pointer(crr_process);
-
-        memcpy(data_ptr, cmdline.data(), cmdline.length() << 1);
-        data->set_length(crr_process, static_cast<std::uint32_t>(cmdline.length() << 1));
+        const std::uint32_t max_chars = data16->get_max_length(crr_process);
+        if (max_chars && (cmdline.size() > max_chars)) {
+            LOG_WARN(KERNEL, "Command line truncated from {} to {} UTF-16 units",
+                cmdline.size(), max_chars);
+            cmdline.resize(max_chars);
+        }
+        data16->assign(crr_process, cmdline);
     }
 
     BRIDGE_FUNC(void, process_set_flags, kernel::handle h, std::uint32_t clear_mask, std::uint32_t set_mask) {
@@ -628,7 +685,7 @@ namespace eka2l1::epoc {
             }
         }
 
-        if (eka2l1_leave_probe) {
+        if (eka2l1_leave_probe || j9_vm_process(pr) || j9_vm_process(kern->crr_process())) {
             LOG_WARN(KERNEL, "[probe] process_kill target={} etype={} reason={} from thread={}",
                 pr->name(), static_cast<int>(etype), reason, kern->crr_thread()->name());
             kern->crr_thread()->dump_panic_context();
@@ -792,6 +849,55 @@ namespace eka2l1::epoc {
 
     BRIDGE_FUNC(void, message_complete, std::int32_t msg_handle, std::int32_t val) {
         ipc_msg_ptr msg = kern->get_msg(msg_handle);
+
+        if (msg && msg->own_thr && msg->own_thr->owning_process()) {
+            const std::string client_name = common::lowercase_string(
+                msg->own_thr->owning_process()->raw_name());
+            const std::string server_name = (msg->msg_session && msg->msg_session->get_server())
+                ? msg->msg_session->get_server()->name() : "";
+            const bool stub_client = client_name.find("stubmidp") != std::string::npos;
+            const bool j9_client = client_name.find("j9") != std::string::npos;
+            const bool installer_client = (client_name.find("midp2silentmidletinstall") != std::string::npos)
+                || (client_name == "installer");
+            // StubMIDP2's primary thread is named "Main"; ping Complete(0) is
+            // the success path, so it must be logged even when val==0.
+            if (stub_client || (j9_client && (val != 0))
+                || (installer_client && (val != 0))
+                || ((server_name.find("AppServer") != std::string::npos) && (msg->function == 516))) {
+                LOG_WARN(KERNEL,
+                    "[java-ipc-complete] client={} server={} opcode={} result={}",
+                    msg->own_thr->owning_process()->name(),
+                    server_name.empty() ? "?" : server_name,
+                    msg->function, val);
+            }
+            // Silent MIDlet install: SWInst opcode 516 still returns
+            // KSWInstErrInsufficientMemory (-30472 / OTA 901) after the plugin
+            // disk-space/Leave patches. The installer then hangs on a notify
+            // and never commits the suite into AMS. Treat this as success so
+            // the preinstaller can finish JavaReg/AMS registration.
+            if ((server_name.find("AppServer") != std::string::npos) && (msg->function == 516)
+                && (val == -30472)) {
+                kernel::thread *completer = kern->crr_thread();
+                LOG_WARN(KERNEL, "[java-ipc-complete] rewriting SWInst opcode 516 -30472 -> 0 (client={} completer={})",
+                    msg->own_thr->owning_process()->name(),
+                    completer ? completer->name() : "?");
+                if (completer) {
+                    completer->dump_panic_context();
+                }
+                val = 0;
+            }
+            if (((server_name.find("MIDP.SystemAMS.MIDP2") != std::string::npos) && (msg->function == 1) && (val != 0))
+                || ((server_name.find("AppServer") != std::string::npos) && (msg->function == 516) && (val != 0))
+                || ((server_name.find("integrity") != std::string::npos) && (val != 0))) {
+                kernel::thread *completer = kern->crr_thread();
+                LOG_WARN(KERNEL, "[java-ipc-complete-site] server='{}' opcode={} result={} completer={}",
+                    server_name, msg->function, val,
+                    completer ? completer->name() : "?");
+                if (completer) {
+                    completer->dump_panic_context();
+                }
+            }
+        }
 
         if (msg->request_sts) {
             epoc::request_status *status = msg->request_sts.get(msg->own_thr->owning_process());
@@ -1267,12 +1373,32 @@ namespace eka2l1::epoc {
         const std::string server_name = server_name_des.get(pr)->to_std_string(pr);
         server_ptr server = kern->get_by_name<service::server>(server_name);
 
+        const std::string proc = pr ? pr->name() : "?";
+        const std::string lower_proc = common::lowercase_string(proc);
+        const bool java_client = (lower_proc.find("stubmidp") != std::string::npos)
+            || (lower_proc.find("j9") != std::string::npos)
+            || (lower_proc.find("systemams") != std::string::npos)
+            || (lower_proc.find("javaredir") != std::string::npos)
+            || (server_name.find("SystemAMS") != std::string::npos)
+            || (server_name.find("MIDP") != std::string::npos)
+            || (server_name.find("Windowserver") != std::string::npos)
+            || (server_name.find("MIDletSuiteAMS") != std::string::npos);
+
         if (!server) {
-            LOG_TRACE(KERNEL, "Create session to unexist server: {}", server_name);
+            if (java_client) {
+                LOG_WARN(KERNEL, "CreateSession: no server '{}' (len={}) from {}",
+                    server_name, server_name.size(), proc);
+            } else {
+                LOG_TRACE(KERNEL, "Create session to unexist server: {}", server_name);
+            }
             return epoc::error_not_found;
         }
 
-        return do_create_session_from_server(kern, server, msg_slot, sec, mode);
+        const std::int32_t created = do_create_session_from_server(kern, server, msg_slot, sec, mode);
+        if (java_client) {
+            LOG_WARN(KERNEL, "CreateSession: '{}' -> {} from {}", server_name, created, proc);
+        }
+        return created;
     }
 
     BRIDGE_FUNC(std::int32_t, session_create_from_handle, kernel::handle h, std::int32_t msg_slots, eka2l1::ptr<void> sec, std::int32_t mode) {
@@ -1344,7 +1470,15 @@ namespace eka2l1::epoc {
 
         session_ptr ss = kern->get<service::session>(h);
 
+        const std::string proc_name = crr_pr ? crr_pr->name() : "?";
+        const std::string proc_lower = common::lowercase_string(proc_name);
+        const bool stub_proc = proc_lower.find("stubmidp") != std::string::npos;
+        const bool j9_proc = proc_lower.find("j9") != std::string::npos;
+
         if (!ss) {
+            if (stub_proc) {
+                LOG_WARN(KERNEL, "[ams-ipc] bad handle=0x{:X} opcode={} from {}", h, ord, proc_name);
+            }
             return epoc::error_bad_handle;
         }
 
@@ -1364,6 +1498,51 @@ namespace eka2l1::epoc {
         }
 
         const std::string server_name = ss->get_server()->name();
+
+        const bool j9_interesting = j9_proc
+            && ((server_name.find("SystemAMS") != std::string::npos)
+                || (server_name.find("MIDP") != std::string::npos)
+                || (server_name.find("Windowserver") != std::string::npos)
+                || (server_name.find("MIDletSuiteAMS") != std::string::npos)
+                || (server_name.find("Java.Redir") != std::string::npos));
+        if (stub_proc || j9_interesting) {
+            kernel::thread *sender = kern->crr_thread();
+            LOG_WARN(KERNEL, "[ams-ipc] server='{}' opcode={} args=[0x{:X},0x{:X},0x{:X},0x{:X}] from {} thread={}",
+                server_name, ord, arg.args[0], arg.args[1], arg.args[2], arg.args[3], proc_name,
+                sender ? sender->name() : "?");
+        }
+
+        if (j9_proc && (server_name.find("Java.Redir") != std::string::npos) && crr_pr) {
+            bool dumped = false;
+            for (int slot = 0; slot < 4; slot++) {
+                if (!arg.args[slot]) {
+                    continue;
+                }
+                const int type_bits = (arg.flag >> (slot * static_cast<int>(bits_per_type))) & 0b111;
+                const bool as16 = (type_bits & static_cast<int>(ipc_arg_type::flag_16b)) != 0;
+                if (as16) {
+                    epoc::desc16 *des = eka2l1::ptr<epoc::desc16>(arg.args[slot]).get(crr_pr);
+                    if (des && des->is_valid_descriptor() && des->get_pointer(crr_pr)
+                        && (des->get_length() > 0) && (des->get_length() < 2048)) {
+                        LOG_WARN(EMULATED_STDOUT, "[java-redir] {}",
+                            common::ucs2_to_utf8(des->to_std_string(crr_pr)));
+                        dumped = true;
+                    }
+                } else {
+                    epoc::desc8 *des = eka2l1::ptr<epoc::desc8>(arg.args[slot]).get(crr_pr);
+                    if (des && des->is_valid_descriptor() && des->get_pointer(crr_pr)
+                        && (des->get_length() > 0) && (des->get_length() < 2048)) {
+                        LOG_WARN(EMULATED_STDOUT, "[java-redir] {}", des->to_std_string(crr_pr));
+                        dumped = true;
+                    }
+                }
+            }
+            if (!dumped) {
+                LOG_WARN(EMULATED_STDOUT,
+                    "[java-redir] opcode={} flag=0x{:X} args=[0x{:X},0x{:X},0x{:X},0x{:X}]",
+                    ord, arg.flag, arg.args[0], arg.args[1], arg.args[2], arg.args[3]);
+            }
+        }
 
         // TEMPORARY bring-up probe: dump caller PC/LR/stack for MIDP2 non-native
         // app registration/rollback opcodes so we can find the plugin code that
@@ -1439,16 +1618,23 @@ namespace eka2l1::epoc {
         // (warn-level) web console. Lower the log level when chasing an app
         // that dies during init — the code + thread narrow down which leave
         // was the fatal (uncaught) one.
-        LOG_TRACE(KERNEL, "Leave code={} thread={} lr=0x{:08X} pc=0x{:08X}",
-            static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->name(),
-            kern->get_cpu()->get_reg(14), kern->get_cpu()->get_pc());
+        const std::int32_t leave_code = static_cast<std::int32_t>(kern->get_cpu()->get_reg(0));
+        if (j9_vm_process(kern->crr_process())) {
+            LOG_WARN(KERNEL, "Leave code={} thread={} lr=0x{:08X} pc=0x{:08X}",
+                leave_code, thr->name(),
+                kern->get_cpu()->get_reg(14), kern->get_cpu()->get_pc());
+            thr->dump_panic_context();
+        } else {
+            LOG_TRACE(KERNEL, "Leave code={} thread={} lr=0x{:08X} pc=0x{:08X}",
+                leave_code, thr->name(),
+                kern->get_cpu()->get_reg(14), kern->get_cpu()->get_pc());
+        }
 
         // KErrArgument (-6) and the installer-specific -10016 are rare enough
         // during tracing to afford a stack dump; both abort MIDlet install.
         // Also dump when the leave code looks like a code pointer (high bit set):
         // that usually means LeaveIfError() was fed a returned pointer/address.
         if (kern->get_config()->log_svc) {
-            const std::int32_t leave_code = static_cast<std::int32_t>(kern->get_cpu()->get_reg(0));
             const std::uint32_t leave_u = static_cast<std::uint32_t>(kern->get_cpu()->get_reg(0));
             if ((leave_code == -6) || (leave_code == -10016) || (leave_u >= 0x80000000u)) {
                 thr->dump_panic_context();
@@ -2414,7 +2600,7 @@ namespace eka2l1::epoc {
             exit_category = reason_des.get(pr)->to_std_string(pr);
         }
 
-        if (eka2l1_leave_probe) {
+        if (eka2l1_leave_probe || j9_vm_process(thr->owning_process()) || j9_vm_process(pr)) {
             LOG_WARN(KERNEL, "[probe] thread_kill target={} etype={} reason={} from thread={}",
                 thr->name(), static_cast<int>(etype), reason, kern->crr_thread()->name());
             kern->crr_thread()->dump_panic_context();
@@ -2584,6 +2770,16 @@ namespace eka2l1::epoc {
 
     BRIDGE_FUNC(void, thread_set_flags_eka1, std::uint32_t clear_mask, std::uint32_t set_mask, kernel::handle h) {
         thread_set_flags(kern, h, clear_mask, set_mask);
+    }
+
+    // User::Critical() on epoc93: Exec::ThreadCriticalFlags, no handle.
+    // Returns the current thread's KThreadFlag*Critical / *Permanent bits.
+    BRIDGE_FUNC(std::uint32_t, thread_critical_flags) {
+        kernel::thread *thr = kern->crr_thread();
+        if (!thr) {
+            return 0;
+        }
+        return thr->get_flags() & 0x0F;
     }
 
     BRIDGE_FUNC(std::int32_t, thread_open_by_id, const std::uint32_t id, const epoc::owner_type owner) {
@@ -3154,6 +3350,36 @@ namespace eka2l1::epoc {
         return epoc::error_none;
     }
 
+    /**********************/
+    /* UNDERTAKER */
+    /**********************/
+    BRIDGE_FUNC(std::int32_t, undertaker_create, epoc::owner_type owner) {
+        return kern->create_and_add<kernel::undertaker>(static_cast<kernel::owner_type>(owner)).first;
+    }
+
+    BRIDGE_FUNC(std::int32_t, undertaker_logon, kernel::handle h, eka2l1::ptr<epoc::request_status> req_sts,
+        eka2l1::ptr<kernel::handle> thr_handle) {
+        kernel::undertaker *utake = kern->get<kernel::undertaker>(h);
+        if (!utake) {
+            return epoc::error_bad_handle;
+        }
+        if (!utake->logon(kern->crr_thread(), req_sts, thr_handle)) {
+            return epoc::error_in_use;
+        }
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC(std::int32_t, undertaker_logon_cancel, kernel::handle h) {
+        kernel::undertaker *utake = kern->get<kernel::undertaker>(h);
+        if (!utake) {
+            return epoc::error_bad_handle;
+        }
+        if (!utake->logon_cancel()) {
+            return epoc::error_general;
+        }
+        return epoc::error_none;
+    }
+
     /* MESSAGE QUEUE */
     BRIDGE_FUNC(std::int32_t, message_queue_notify_data_available, const kernel::handle h, eka2l1::ptr<epoc::request_status> sts) {
         kernel::thread *request_thread = kern->crr_thread();
@@ -3279,9 +3505,10 @@ namespace eka2l1::epoc {
             return;
         }
 
-        if (eka2l1_leave_probe) {
+        if (eka2l1_leave_probe || j9_vm_process(kern->crr_process())) {
             // RDebug::Print carries the HLE patch libraries' own diagnostics
             // (scdv, mediaclient, ...); surface it while the probe is armed.
+            // J9 also uses this for "Unrecognized argument" / toolkit errors.
             LOG_WARN(EMULATED_STDOUT, "{}", tdes->to_std_string(kern->crr_process()));
             return;
         }
@@ -6482,6 +6709,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x2B, thread_set_priority),
         BRIDGE_REGISTER(0x2C, thread_process_priority),
         BRIDGE_REGISTER(0x2D, thread_set_process_priority),
+        BRIDGE_REGISTER(0x2E, thread_critical_flags),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),
         BRIDGE_REGISTER(0x31, thread_exit_type),
@@ -6547,6 +6775,9 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x84, timer_after), // Actually TimerHighRes
         BRIDGE_REGISTER(0x85, after), // Actually AfterHighRes
         BRIDGE_REGISTER(0x86, change_notifier_create),
+        BRIDGE_REGISTER(0x87, undertaker_create),
+        BRIDGE_REGISTER(0x88, undertaker_logon),
+        BRIDGE_REGISTER(0x89, undertaker_logon_cancel),
         BRIDGE_REGISTER(0x9B, wait_dll_lock),
         BRIDGE_REGISTER(0x9C, release_dll_lock),
         BRIDGE_REGISTER(0x9D, library_attach),
@@ -6592,6 +6823,10 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xD0, process_get_data_parameter),
         BRIDGE_REGISTER(0xD1, process_data_parameter_length),
         BRIDGE_REGISTER(0xD3, thread_stack_info),
+        BRIDGE_REGISTER(0xD6, condvar_create),
+        BRIDGE_REGISTER(0xD7, condvar_wait),
+        BRIDGE_REGISTER(0xD8, condvar_signal),
+        BRIDGE_REGISTER(0xD9, condvar_broadcast),
         BRIDGE_REGISTER(0xDA, plat_sec_diagnostic),
         BRIDGE_REGISTER(0xDB, exception_descriptor),
         BRIDGE_REGISTER(0xDC, thread_request_signal),

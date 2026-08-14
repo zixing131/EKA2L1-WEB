@@ -1232,6 +1232,36 @@ namespace eka2l1 {
         elem.first = nullptr;
     }
 
+    // 5320 ROM has no Z:\resource\ive\bin\java_*.properties. J9's -app path
+    // opens those with must-exist and Leaves on KErrNotFound/KErrPathNotFound.
+    // Z: is write-protected ROM, so serve the already-provisioned C: copies.
+    static std::u16string overlay_j9_ive_path(const std::u16string &path) {
+        if (path.size() < 4) {
+            return path;
+        }
+        const char16_t drive = path[0];
+        if (((drive != u'Z') && (drive != u'z')) || (path[1] != u':')) {
+            return path;
+        }
+        const std::u16string lower = common::lowercase_ucs2_string(path);
+        if (lower.find(u"\\resource\\ive\\bin") == std::u16string::npos) {
+            return path;
+        }
+        std::u16string out = path;
+        out[0] = u'C';
+        return out;
+    }
+
+    static void log_j9_ive_overlay(const std::u16string &from, const std::u16string &to) {
+        static bool logged = false;
+        if (logged) {
+            return;
+        }
+        logged = true;
+        LOG_WARN(VFS, "Overlay J9 IVE path {} -> {}", common::ucs2_to_utf8(from),
+            common::ucs2_to_utf8(to));
+    }
+
     io_system::io_system()
         : drive_change_callbacks(io_drive_callback_free_check_func, io_drive_callback_free_func) {
     }
@@ -1303,6 +1333,11 @@ namespace eka2l1 {
 
     std::unique_ptr<file> io_system::open_file(utf16_str vir_path, int mode) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const utf16_str mapped = overlay_j9_ive_path(vir_path);
+        if (mapped != vir_path) {
+            log_j9_ive_overlay(vir_path, mapped);
+            vir_path = mapped;
+        }
 
         for (auto &[id, fs] : filesystems) {
             if (auto f = fs->open_file(vir_path, mode)) {
@@ -1315,6 +1350,11 @@ namespace eka2l1 {
 
     std::unique_ptr<directory> io_system::open_dir(std::u16string vir_path, epoc::uid_type type, const std::uint32_t attrib) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const std::u16string mapped = overlay_j9_ive_path(vir_path);
+        if (mapped != vir_path) {
+            log_j9_ive_overlay(vir_path, mapped);
+            vir_path = mapped;
+        }
 
         for (auto &[id, fs] : filesystems) {
             if (auto dir = fs->open_directory(vir_path, type, attrib)) {
@@ -1327,9 +1367,11 @@ namespace eka2l1 {
 
     bool io_system::exist(const std::u16string &path) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const std::u16string mapped = overlay_j9_ive_path(path);
+        const std::u16string &lookup = (mapped != path) ? mapped : path;
 
         for (auto &[id, fs] : filesystems) {
-            if (fs->exists(path)) {
+            if (fs->exists(lookup)) {
                 return true;
             }
         }
@@ -1375,9 +1417,11 @@ namespace eka2l1 {
 
     bool io_system::create_directories(const std::u16string &path) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const std::u16string mapped = overlay_j9_ive_path(path);
+        const std::u16string &lookup = (mapped != path) ? mapped : path;
 
         for (auto &[id, fs] : filesystems) {
-            if (fs->create_directories(path)) {
+            if (fs->create_directories(lookup)) {
                 return true;
             }
         }
@@ -1387,9 +1431,11 @@ namespace eka2l1 {
 
     bool io_system::create_directory(const std::u16string &path) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const std::u16string mapped = overlay_j9_ive_path(path);
+        const std::u16string &lookup = (mapped != path) ? mapped : path;
 
         for (auto &[id, fs] : filesystems) {
-            if (fs->create_directory(path)) {
+            if (fs->create_directory(lookup)) {
                 return true;
             }
         }
@@ -1399,9 +1445,11 @@ namespace eka2l1 {
 
     std::optional<entry_info> io_system::get_entry_info(const std::u16string &path) {
         const std::lock_guard<std::mutex> guard(access_lock);
+        const std::u16string mapped = overlay_j9_ive_path(path);
+        const std::u16string &lookup = (mapped != path) ? mapped : path;
 
         for (auto &[id, fs] : filesystems) {
-            if (auto e = fs->get_entry_info(path)) {
+            if (auto e = fs->get_entry_info(lookup)) {
                 return e;
             }
         }

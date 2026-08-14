@@ -50,8 +50,35 @@ namespace eka2l1::j2me {
     bool prepare_midp2_environment(system *sys);
 
     bool launch(system *sys, const std::uint32_t app_id, std::function<void(kernel::process*)> exit_cb);
+
+    /**
+     * @brief After launch() returns false: true means AMS is still coming up.
+     *
+     * The caller should keep the emulator running and retry launch() shortly.
+     * wasm_launch_midlet maps this to -101.
+     */
+    bool launch_should_retry();
+
+    /**
+     * @brief Kill a hung MIDP2SilentMIDletInstall / SWInst so a new JAR install
+     *        is not rejected as "already in progress".
+     */
+    void stop_silent_installer(system *sys);
+
     bool reregister_midlet(system *sys, const std::uint32_t app_id,
         std::function<void(kernel::process*)> exit_cb);
+
+    /**
+     * @brief Restage a stored MIDlet into the guest preinstall directories.
+     *
+     * Copies the per-MIDlet JAR/JAD to both the S60v3 MIDP2 preinstall path
+     * (`E:\system\data\midp2\preinstall\`) and the later OMJ path
+     * (`E:\resource\java\preinstall\`), then rewrites MIDlet-Jar-URL to a
+     * local relative name. Used before AppArc inject / silent re-register.
+     *
+     * @param jad_path_out Filled with the staged MIDP2 JAD path on success.
+     */
+    bool stage_midlet_for_launch(system *sys, const std::uint32_t app_id, std::u16string &jad_path_out);
     install_error install(system *sys, const std::string &path, app_entry &entry_info,
         std::function<void(kernel::process*)> install_exit_cb = nullptr);
     bool uninstall(system *sys, const std::uint32_t app_id);
@@ -73,9 +100,10 @@ namespace eka2l1::j2me {
     /**
      * @brief 检查 ROM 是否包含运行 MIDlet 所需的 Java 运行时组件。
      *
-     * 支持两种启动路径：
-     *   1. 独立启动器 exe（midp2midletlauncher.exe / midletlauncher.exe）
-     *   2. AppArc 非原生路径（systemamscore.exe + midp2runtimev2.dll），
+     * 支持三种启动路径：
+     *   1. IBM J9（j9midps60.exe），5320 / S60v3 的实际 VM
+     *   2. 独立启动器 exe（midp2midletlauncher.exe / midletlauncher.exe）
+     *   3. AppArc 非原生路径（systemamscore.exe + midp2runtimev2.dll），
      *      MIDlet 注册到 AppArc 后由 StubMIDP2RecogExe.exe 以 opaque data 启动。
      *
      * @param sys 系统实例

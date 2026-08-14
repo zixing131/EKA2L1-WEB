@@ -240,7 +240,9 @@ namespace eka2l1 {
         drive_name.back() += static_cast<char>(drv - drive_a);
 
 #define VOLUME_INFO_GETTERS(info_name)                                                \
-    LOG_WARN(SERVICE_EFSRV, "Volume size stubbed with 1GB");                          \
+    LOG_WARN(SERVICE_EFSRV, "Volume size stubbed with 1GB (ver {}.{}.{} drv={} v2={})", \
+        cli_ver.major, cli_ver.minor, cli_ver.build, static_cast<int>(drv),           \
+        cli_ver.major >= 2);                                                          \
     fill_drive_info(reinterpret_cast<epoc::fs::drive_info_v1 *>(&info_name.drv_info), \
         io_drive.has_value() ? &io_drive.value() : nullptr, cli_ver);                 \
     info_name.uid = drv;                                                              \

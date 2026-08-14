@@ -252,6 +252,12 @@ namespace eka2l1 {
             int wait_object_timeout_callback_type;
             bool is_in_timeout;
 
+            // Mutex this thread must reacquire after RCondVar wait. J9 parks
+            // multiple monitors on one condvar, so this cannot live only on
+            // the condvar itself.
+            mutex *condvar_mutex_;
+            int condvar_lock_count_;
+
         protected:
             epoc9_std_epoc_thread_create_info *metadata;
             std::queue<std::uint32_t> last_syscalls;

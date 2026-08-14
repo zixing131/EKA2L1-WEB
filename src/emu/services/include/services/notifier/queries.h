@@ -26,6 +26,21 @@ namespace eka2l1 {
     class kernel_system;
 
     namespace epoc::notifier {
+        class memory_card_dialog_plugin : public plugin_base {
+        public:
+            explicit memory_card_dialog_plugin(kernel_system *kern)
+                : plugin_base(kern) {
+            }
+
+            epoc::uid unique_id() const override {
+                return 0x101F467A;
+            }
+
+            void handle(epoc::desc8 *request, epoc::des8 *response,
+                epoc::notify_info &complete_info) override;
+            void cancel() override;
+        };
+
         void add_builtin_plugins(kernel_system *kern, std::vector<plugin_instance> &plugins);
     }
 };

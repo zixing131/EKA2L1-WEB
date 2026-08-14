@@ -239,6 +239,10 @@ namespace eka2l1::kernel {
         address get_code_run_addr(kernel::process *pr, std::uint8_t **base = nullptr);
         address get_data_run_addr(kernel::process *pr, std::uint8_t **base = nullptr);
 
+        std::uint8_t *get_constant_data() {
+            return constant_data.get();
+        }
+
         std::uint32_t get_bss_size() const {
             return bss_size;
         }

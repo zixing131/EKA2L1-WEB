@@ -54,6 +54,8 @@
 #include <utils/event.h>
 
 #include <kernel/kernel.h>
+#include <kernel/process.h>
+#include <kernel/thread.h>
 #include <kernel/timing.h>
 #include <system/devices.h>
 #include <system/epoc.h>
@@ -353,6 +355,10 @@ namespace eka2l1::epoc {
         group_casted->name = common::utf8_to_ucs2(fmt::format("WindowGroup{:X}", header->client_handle));
 
         std::uint32_t id = add_object(group);
+        if (ctx.msg && ctx.msg->own_thr && ctx.msg->own_thr->owning_process()) {
+            LOG_WARN(SERVICE_WINDOW, "create_window_group handle={} focus={} from {}",
+                id, header->focus, ctx.msg->own_thr->owning_process()->name());
+        }
         ctx.complete(id);
     }
 

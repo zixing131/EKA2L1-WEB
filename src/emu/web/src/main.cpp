@@ -85,6 +85,7 @@
 
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
+#include <kernel/server.h>
 #include <kernel/thread.h>
 #include <mem/ptr.h>
 
@@ -1606,7 +1607,12 @@ EMSCRIPTEN_KEEPALIVE
 int wasm_install_midlet(const char *jar_path) {
     if (!jar_path) return -1;
     if (!g_state.symsys) return -2;
-    if (g_state.midlet_install_state.load(std::memory_order_acquire) == 1) return -3;
+    if (g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
+        LOG_WARN(FRONTEND_CMDLINE,
+            "Previous MIDlet installer still in-progress; stopping it so a new JAR can install");
+        eka2l1::j2me::stop_silent_installer(g_state.symsys.get());
+        g_state.midlet_install_state.store(0, std::memory_order_release);
+    }
 
     g_state.midlet_install_state.store(1, std::memory_order_release);
     eka2l1::j2me::app_entry entry;
@@ -1653,11 +1659,23 @@ int wasm_install_midlet(const char *jar_path) {
                     static_cast<int>(installer->get_exit_type()), installer->get_exit_reason(),
                     eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
             }
+            // Host already marked the JAR as installed (state 2). Do not
+            // regress that to -4 if SWInst later panics or is killed.
+            if (g_state.midlet_install_state.load(std::memory_order_acquire) == 2) {
+                return;
+            }
             g_state.midlet_install_state.store(success ? 2 : -4, std::memory_order_release);
         });
 
     if (result != eka2l1::j2me::INSTALL_ERROR_JAR_SUCCESS) {
         g_state.midlet_install_state.store(0, std::memory_order_release);
+    } else if (g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
+        // Host j2me list already has the MIDlet. Guest SWInst hangs on
+        // "?:\\..." after a fake-success 516 and would otherwise leave the
+        // library UI spinning until timeout, then reject the next JAR (-3).
+        LOG_INFO(FRONTEND_CMDLINE,
+            "MIDlet registered in host list; completing install without waiting for guest SWInst");
+        g_state.midlet_install_state.store(2, std::memory_order_release);
     }
     return static_cast<int>(result);
 }
@@ -1706,6 +1724,111 @@ const char *wasm_probe_java_inventory() {
     dump_dir(u"Z:\\resource\\java\\");
     dump_dir(u"Z:\\private\\102033e6\\");
     return g_java_inventory.c_str();
+}
+
+static std::string g_java_runtime;
+
+/**
+ * Snapshot of guest Java processes and servers. Safe to call while the
+ * emulator is running; does not spawn anything. Used to see whether
+ * SystemAMSCore -proxy actually published !SystemAMSTrader.Public.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char *wasm_probe_java_runtime() {
+    g_java_runtime.clear();
+    if (!g_state.symsys) {
+        g_java_runtime = "no-system";
+        return g_java_runtime.c_str();
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        g_java_runtime = "no-kernel";
+        return g_java_runtime.c_str();
+    }
+
+    auto has_server = [&](const char *name) {
+        return kern->get_by_name<eka2l1::service::server>(name) != nullptr;
+    };
+
+    g_java_runtime += "trader_public=";
+    g_java_runtime += has_server("!SystemAMSTrader.Public") ? "1" : "0";
+    g_java_runtime += " trader_private=";
+    g_java_runtime += has_server("!SystemAMSTrader.Private") ? "1" : "0";
+    g_java_runtime += " midp2=";
+    g_java_runtime += has_server("!MIDP.SystemAMS.MIDP2") ? "1" : "0";
+    g_java_runtime += " systemams=";
+    g_java_runtime += has_server("!MIDP.SystemAMS.SystemAMS") ? "1" : "0";
+    g_java_runtime += " windowserver=";
+    g_java_runtime += has_server("!Windowserver") ? "1" : "0";
+    g_java_runtime += " redraw=";
+    g_java_runtime += std::to_string(s_redraw_cb_count.load());
+    g_java_runtime += "\n";
+
+    g_java_runtime += "=== processes ===\n";
+    int proc_n = 0;
+    for (auto &obj : kern->get_process_list()) {
+        auto *pr = reinterpret_cast<eka2l1::kernel::process *>(obj.get());
+        if (!pr) {
+            continue;
+        }
+        const std::string lower = eka2l1::common::lowercase_string(pr->raw_name());
+        if ((lower.find("systemams") == std::string::npos)
+            && (lower.find("j9") == std::string::npos)
+            && (lower.find("midp") == std::string::npos)
+            && (lower.find("java") == std::string::npos)
+            && (lower.find("amsdb") == std::string::npos)
+            && (lower.find("stubmidp") == std::string::npos)) {
+            continue;
+        }
+        g_java_runtime += pr->name();
+        g_java_runtime += " cmd='";
+        g_java_runtime += eka2l1::common::ucs2_to_utf8(pr->get_cmd_args());
+        g_java_runtime += "' exit=";
+        g_java_runtime += std::to_string(static_cast<int>(pr->get_exit_type()));
+        g_java_runtime += "/";
+        g_java_runtime += std::to_string(pr->get_exit_reason());
+        g_java_runtime += "\n";
+        proc_n++;
+    }
+    if (proc_n == 0) {
+        g_java_runtime += "(none)\n";
+    }
+
+    g_java_runtime += "=== servers ===\n";
+    int start = 0;
+    int n = 0;
+    for (;;) {
+        auto found = kern->find_object("*", start, eka2l1::kernel::object_type::server, false);
+        if (!found) {
+            break;
+        }
+        start = static_cast<int>(found->index);
+        std::string full;
+        found->obj->full_name(full);
+        const std::string nm = found->obj->name();
+        const std::string low = eka2l1::common::lowercase_string(nm + " " + full);
+        if ((low.find("ams") != std::string::npos)
+            || (low.find("java") != std::string::npos)
+            || (low.find("midp") != std::string::npos)
+            || (low.find("trader") != std::string::npos)
+            || (low.find("j9") != std::string::npos)
+            || (low.find("windowserver") != std::string::npos)
+            || (low.find("midletsuiteams") != std::string::npos)) {
+            g_java_runtime += "  ";
+            g_java_runtime += nm;
+            if (!full.empty() && full != nm) {
+                g_java_runtime += " full=";
+                g_java_runtime += full;
+            }
+            g_java_runtime += "\n";
+        }
+        n++;
+        if (n >= 128) {
+            break;
+        }
+    }
+    return g_java_runtime.c_str();
 }
 
 /**
@@ -2777,7 +2900,7 @@ int wasm_launch_midlet(int virtual_uid) {
         g_state.last_app_exit_uid = 0;
     };
 
-    auto exit_cb = [](eka2l1::kernel::process *pr) {
+    auto report_app_exit = [](eka2l1::kernel::process *pr) {
         if (!pr) {
             LOG_ERROR(FRONTEND_CMDLINE, "J2ME MIDlet exited with null process handle");
             g_state.launched_app_exited.store(true, std::memory_order_release);
@@ -2795,11 +2918,51 @@ int wasm_launch_midlet(int virtual_uid) {
             eka2l1::common::ucs2_to_utf8(pr->get_exit_category()), pr->get_exit_reason());
     };
 
+    // StubMIDP2 / SystemAMSCore / registry helpers are trampolines. Overlay must
+    // track j9midps60.exe (the IBM J9 VM), not the AMS bounce process exiting.
+    auto exit_cb = [report_app_exit](eka2l1::kernel::process *pr) {
+        if (pr && g_state.symsys) {
+            const std::string lower = eka2l1::common::lowercase_string(pr->raw_name());
+            const bool trampoline = (lower.find("stubmidp2") != std::string::npos)
+                || (lower.find("systemamscore") != std::string::npos)
+                || (lower.find("javaregistry") != std::string::npos)
+                || (lower.find("amsdb") != std::string::npos)
+                || (lower.find("javaredir") != std::string::npos);
+            if (trampoline) {
+                LOG_INFO(FRONTEND_CMDLINE,
+                    "Java trampoline {} exited; looking for j9midps60", pr->name());
+                eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+                if (kern) {
+                    for (auto &obj : kern->get_process_list()) {
+                        auto *cand = reinterpret_cast<eka2l1::kernel::process *>(obj.get());
+                        if (!cand || (cand->get_exit_type() != eka2l1::kernel::entity_exit_type::pending)) {
+                            continue;
+                        }
+                        if (eka2l1::common::lowercase_string(cand->raw_name()).find("j9midps60")
+                            != std::string::npos) {
+                            cand->logon([report_app_exit](eka2l1::kernel::process *vm) {
+                                report_app_exit(vm);
+                            });
+                            return;
+                        }
+                    }
+                }
+                LOG_WARN(FRONTEND_CMDLINE,
+                    "Java trampoline {} exited and no j9midps60 process is running", pr->name());
+            }
+        }
+        report_app_exit(pr);
+    };
+
     // --- Strategy 1: AppArc non-native launch (the proper S60v3 MIDlet path) ---
     // On ROMs without a standalone midp2midletlauncher.exe, MIDlets are launched
     // through AppArc: the silent installer registers the MIDlet as a non-native
     // Java app, and AppArc invokes StubMIDP2RecogExe.exe with the proper opaque
     // data payload to start the Java runtime.
+    //
+    // If the guest installer never committed (headless UserCancel), inject a
+    // session-local AppArc entry that points at the staged JAD so launch can
+    // proceed without waiting for SWInst.
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (kern && (!midlet_name.empty() || !midlet_title.empty())) {
         auto *alserv = reinterpret_cast<eka2l1::applist_server *>(
@@ -2807,9 +2970,9 @@ int wasm_launch_midlet(int virtual_uid) {
                 eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
 
         if (alserv) {
-            // These match the file-scope statics in applist.cpp.
             constexpr std::uint32_t JAVA_MIDLET_TYPE_UID = 0x10210E26;
             constexpr std::uint32_t JAVA_MIDLET_LEGACY_TYPE = 0xB031C52A;
+            const std::uint32_t injected_uid = 0x20000000u | (j2me_id & 0x00FFFFFFu);
 
             auto names_match = [&](const std::string &reg_name) {
                 if (reg_name.empty()) {
@@ -2826,59 +2989,76 @@ int wasm_launch_midlet(int virtual_uid) {
                 return false;
             };
 
-            eka2l1::apa_app_registry *java_reg = nullptr;
-            for (auto &reg : alserv->get_registerations()) {
-                if (!(reg.caps.flags & eka2l1::apa_capability::non_native))
-                    continue;
-                if (reg.non_native_application_type != JAVA_MIDLET_TYPE_UID &&
-                    reg.non_native_application_type != JAVA_MIDLET_LEGACY_TYPE)
-                    continue;
-                const std::string reg_name = eka2l1::common::ucs2_to_utf8(
-                    reg.mandatory_info.long_caption.to_std_string(nullptr));
-                if (names_match(reg_name)) {
-                    java_reg = &reg;
-                    break;
+            auto find_java_reg = [&]() -> eka2l1::apa_app_registry * {
+                eka2l1::apa_app_registry *by_uid = alserv->get_registration(injected_uid);
+                if (by_uid && (by_uid->caps.flags & eka2l1::apa_capability::non_native)) {
+                    return by_uid;
+                }
+                for (auto &reg : alserv->get_registerations()) {
+                    if (!(reg.caps.flags & eka2l1::apa_capability::non_native))
+                        continue;
+                    if (reg.non_native_application_type != JAVA_MIDLET_TYPE_UID &&
+                        reg.non_native_application_type != JAVA_MIDLET_LEGACY_TYPE)
+                        continue;
+                    const std::string reg_name = eka2l1::common::ucs2_to_utf8(
+                        reg.mandatory_info.long_caption.to_std_string(nullptr));
+                    if (names_match(reg_name)) {
+                        return &reg;
+                    }
+                }
+                return nullptr;
+            };
+
+            eka2l1::apa_app_registry *java_reg = find_java_reg();
+            if (!java_reg) {
+                // Point AppArc at the AMS suite JAD that j2me::launch() restages.
+                // Do not restage to preinstall: AMS -boot would auto-spawn the
+                // silent installer and race J9.
+                char uid_hex[9];
+                std::snprintf(uid_hex, sizeof(uid_hex), "%08X", injected_uid);
+                const std::u16string suite_jad = u"C:\\private\\102033E6\\MIDlets\\"
+                    + eka2l1::common::utf8_to_ucs2(uid_hex) + u"\\m.jad";
+                const std::string caption_utf8 = midlet_title.empty() ? midlet_name : midlet_title;
+                java_reg = alserv->inject_non_native_java_midlet(injected_uid,
+                    eka2l1::common::utf8_to_ucs2(caption_utf8), suite_jad);
+                if (java_reg) {
+                    LOG_INFO(FRONTEND_CMDLINE,
+                        "MIDlet '{}' not in AppArc; injected host-side registration uid=0x{:08X} jad='{}'",
+                        caption_utf8, injected_uid, eka2l1::common::ucs2_to_utf8(suite_jad));
+                } else {
+                    LOG_WARN(FRONTEND_CMDLINE,
+                        "MIDlet '{}' not in AppArc and inject failed",
+                        midlet_name.empty() ? midlet_title : midlet_name);
                 }
             }
 
             if (java_reg) {
                 LOG_INFO(FRONTEND_CMDLINE,
-                    "MIDlet '{}' found in AppArc (uid=0x{:08X}), launching via AppArc",
+                    "MIDlet '{}' in AppArc (uid=0x{:08X}); launching J9 / MIDP2 runtime",
                     midlet_name.empty() ? midlet_title : midlet_name,
                     java_reg->mandatory_info.uid);
 
+                // 5320: j2me::launch() restages the suite, boots AMS -boot,
+                // then StubMIDP2RecogExe with CApaCommandLine in env slot 1 so
+                // AMS can spawn j9midps60. Overlay still tracks the VM.
                 reset_exit_state();
-                epoc::apa::command_line cmdline;
-                cmdline.launch_cmd_ = epoc::apa::command_open;
-
-                bool ok = false;
-                try {
-                    kern->lock();
-                    ok = alserv->launch_app(*java_reg, cmdline, nullptr, exit_cb);
-                    kern->unlock();
-                } catch (const std::exception &e) {
-                    kern->unlock();
-                    LOG_ERROR(FRONTEND_CMDLINE, "AppArc MIDlet launch exception: {}", e.what());
-                } catch (...) {
-                    kern->unlock();
-                    LOG_ERROR(FRONTEND_CMDLINE, "AppArc MIDlet launch unknown exception");
-                }
-
-                if (ok) {
+                if (eka2l1::j2me::launch(g_state.symsys.get(), j2me_id, exit_cb)) {
                     g_state.paused = false;
                     return 0;
                 }
-                LOG_WARN(FRONTEND_CMDLINE, "AppArc launch failed for '{}', trying direct launcher",
+                if (eka2l1::j2me::launch_should_retry()) {
+                    g_state.paused = false;
+                    LOG_INFO(FRONTEND_CMDLINE,
+                        "Java AMS still starting for '{}'; returning -101 for JS retry",
+                        midlet_name.empty() ? midlet_title : midlet_name);
+                    return -101;
+                }
+
+                LOG_WARN(FRONTEND_CMDLINE,
+                    "J9/MIDP2 launch failed for '{}'; skipping StubMIDP2 trampoline "
+                    "(it exits with None -1 on this ROM)",
                     midlet_name.empty() ? midlet_title : midlet_name);
             } else {
-                // The MIDlet was installed in the host j2me app list, but it is
-                // not in AppArc (registration was lost on emulator restart, or
-                // the silent installer never completed). Re-run the silent
-                // installer to restore the registration, then tell JS to retry.
-                //
-                // If a previous attempt left midlet_install_state stuck at 1
-                // (installer hung on NotifyChange after UserCancel), reset so
-                // a fresh reregister can start.
                 const int prev_state = g_state.midlet_install_state.load(std::memory_order_acquire);
                 if (prev_state == 1) {
                     LOG_WARN(FRONTEND_CMDLINE,
@@ -2936,13 +3116,17 @@ int wasm_launch_midlet(int virtual_uid) {
         g_state.paused = false;
         return 0;
     }
+    if (eka2l1::j2me::launch_should_retry()) {
+        g_state.paused = false;
+        LOG_INFO(FRONTEND_CMDLINE, "Java AMS still starting; returning -101 for JS retry");
+        return -101;
+    }
 
     // Both strategies failed. Emit a single, actionable summary so the console
     // explains the -2 the user sees in the overlay.
     LOG_ERROR(FRONTEND_CMDLINE,
-        "MIDlet launch failed (returning -2). Either the ROM has no Java launcher "
-        "(midp2midletlauncher.exe/midletlauncher.exe missing) and the MIDlet was not "
-        "registered in AppArc, or the direct launcher spawn failed. "
+        "MIDlet launch failed (returning -2). ROM has no usable Java launcher "
+        "(j9midps60.exe / midp2midletlauncher.exe missing) or the VM spawn failed. "
         "Run EKA2L1.checkMidletLaunch() for the full diagnostic.");
     return -2;
 }
@@ -2963,13 +3147,15 @@ const char *wasm_check_midlet_launch() {
     }
 
     eka2l1::io_system *io = g_state.symsys->get_io_system();
-    // Only the first two are standalone launchers. StubMIDP2RecogExe.exe is a
+    // j9midps60.exe is the IBM J9 VM on 5320. StubMIDP2RecogExe.exe is a
     // file recognizer invoked by AppArc with opaque data — NOT a launcher.
-    // midp2runtimev2.dll is the actual MIDP2 KVM; without it Java can't run.
+    // midp2runtimev2.dll is loaded by J9 / the MIDP2 runtime.
     const char *CHECK[] = {
+        "Z:\\sys\\bin\\j9midps60.exe",
         "Z:\\sys\\bin\\midp2midletlauncher.exe",
         "Z:\\sys\\bin\\midletlauncher.exe",
         "Z:\\sys\\bin\\StubMIDP2RecogExe.exe",
+        "Z:\\sys\\bin\\systemams.exe",
         "Z:\\sys\\bin\\systemamscore.exe",
         "Z:\\sys\\bin\\midp2silentmidletinstall.exe",
         "Z:\\sys\\bin\\midp2runtimev2.dll",
@@ -2982,9 +3168,9 @@ const char *wasm_check_midlet_launch() {
 
     for (int i = 0; CHECK[i]; i++) {
         const bool exists = io->exist(eka2l1::common::utf8_to_ucs2(CHECK[i]));
-        if (exists && i < 2) standalone_launcher_found = true;
-        if (exists && i == 3) ams_core_found = true;
-        if (exists && i == 5) runtime_dll_found = true;
+        if (exists && i < 3) standalone_launcher_found = true;
+        if (exists && i == 5) ams_core_found = true;
+        if (exists && i == 7) runtime_dll_found = true;
         result += (exists ? "[OK]   " : "[MISS] ");
         result += CHECK[i];
         result += "\n";

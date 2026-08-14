@@ -360,7 +360,8 @@ namespace eka2l1 {
         bool launch_app(const std::u16string &exe_path, const std::u16string &cmd, kernel::uid *thread_id,
             kernel::process *requester = nullptr, const epoc::uid known_uid = 0,
             std::function<void(kernel::process*)> app_exit_callback = nullptr,
-            const bool pass_command_line_in_env_slot = false);
+            const bool pass_command_line_in_env_slot = false,
+            const std::vector<std::uint8_t> *guest_env_slot = nullptr);
 
     public:
         explicit applist_server(system *sys);
@@ -373,6 +374,21 @@ namespace eka2l1 {
 
         bool launch_app(apa_app_registry &registry, epoc::apa::command_line &parameter, kernel::uid *thread_id,
                         std::function<void(kernel::process*)> app_exit_callback = nullptr);
+
+        /**
+         * @brief Inject a Java MIDlet into the in-memory AppArc table.
+         *
+         * Used when the guest silent installer cannot complete AppArc
+         * registration (headless unsigned-consent / SWInst rollback). The
+         * entry is session-local; launch still goes through StubMIDP2RecogExe
+         * with the supplied logical JAD path as document name + opaque data.
+         *
+         * If an injected entry with the same UID already exists it is updated.
+         *
+         * @return Pointer into the live registry vector, or nullptr on failure.
+         */
+        apa_app_registry *inject_non_native_java_midlet(epoc::uid app_uid,
+            const std::u16string &caption, const std::u16string &logical_jad_path);
 
         std::optional<apa_app_masked_icon_bitmap> get_icon(apa_app_registry &registry, const std::int8_t index);
 

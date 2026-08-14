@@ -42,6 +42,7 @@
 #include <vfs/vfs.h>
 
 #include <functional>
+#include <algorithm>
 #include <cstring>
 #include <utils/err.h>
 
@@ -932,6 +933,62 @@ namespace eka2l1 {
         return {};
     }
 
+    apa_app_registry *applist_server::inject_non_native_java_midlet(epoc::uid app_uid,
+        const std::u16string &caption, const std::u16string &logical_jad_path) {
+        if (!app_uid || logical_jad_path.empty()) {
+            return nullptr;
+        }
+
+        const std::lock_guard<std::mutex> guard(list_access_mut_);
+
+        apa_app_registry *existing = nullptr;
+        for (auto &reg : regs) {
+            if (reg.mandatory_info.uid == app_uid) {
+                existing = &reg;
+                break;
+            }
+        }
+
+        if (!existing) {
+            regs.emplace_back();
+            existing = &regs.back();
+        }
+
+        existing->mandatory_info.uid = app_uid;
+        existing->mandatory_info.app_path.assign(nullptr, logical_jad_path);
+        existing->mandatory_info.short_caption.assign(nullptr, caption);
+        existing->mandatory_info.long_caption.assign(nullptr, caption);
+        existing->caps.flags |= apa_capability::non_native;
+        existing->caps.is_hidden = 0;
+        existing->caps.launch_in_background = 0;
+        existing->land_drive = drive_e;
+        existing->non_native_application_type = JAVA_MIDLET_APPLICATION_TYPE_UID;
+
+        // StubMIDP2RecogExe reads two TInt32s from OpaqueData (suite UID + MIDlet
+        // index) and sends them as !MIDP.SystemAMS.MIDP2 opcode 1. A UTF-16 path
+        // here is the wrong payload; empty opaque is KErrEof (-25).
+        existing->non_native_opaque_data.resize(8);
+        const std::uint32_t uid_le = app_uid;
+        const std::uint32_t midlet_le = 1;
+        std::memcpy(existing->non_native_opaque_data.data(), &uid_le, 4);
+        std::memcpy(existing->non_native_opaque_data.data() + 4, &midlet_le, 4);
+
+        sort_registry_list();
+
+        auto found = std::lower_bound(regs.begin(), regs.end(), app_uid,
+            [](const apa_app_registry &lhs, const std::uint32_t rhs) {
+                return lhs.mandatory_info.uid < rhs;
+            });
+        if (found == regs.end() || found->mandatory_info.uid != app_uid) {
+            return nullptr;
+        }
+
+        LOG_INFO(SERVICE_APPLIST,
+            "Injected host-side Java MIDlet uid=0x{:08X} caption='{}' jad='{}'",
+            app_uid, common::ucs2_to_utf8(caption), common::ucs2_to_utf8(logical_jad_path));
+        return &(*found);
+    }
+
     void applist_session::get_native_executable_name_if_non_native(service::ipc_context &ctx) {
         std::optional<std::u16string> path = ctx.get_argument_value<std::u16string>(1);
 
@@ -1796,7 +1853,15 @@ namespace eka2l1 {
             native_executable_path = mandatory_info.app_path.to_std_string(nullptr);
         }
 
-        args.document_name_ = eka2l1::replace_extension(eka2l1::filename(app_path), u"");
+        // Native apps historically receive just the filename as the document.
+        // Non-native Java MIDlets are launched through StubMIDP2RecogExe, which
+        // treats DocumentName / ExecutableName as the suite/JAD to open — pass
+        // the full logical path so a host-injected registration can start.
+        if (caps.flags & apa_capability::non_native) {
+            args.document_name_ = app_path;
+        } else {
+            args.document_name_ = eka2l1::replace_extension(eka2l1::filename(app_path), u"");
+        }
         args.executable_path_ = app_path;
         args.default_screen_number_ = default_screen_number;
     }
@@ -1805,7 +1870,7 @@ namespace eka2l1 {
 
     bool applist_server::launch_app(const std::u16string &exe_path, const std::u16string &cmd, kernel::uid *thread_id,
                                     kernel::process *requester, const epoc::uid known_uid, std::function<void(kernel::process*)> app_exit_callback,
-                                    const bool pass_command_line_in_env_slot) {
+                                    const bool pass_command_line_in_env_slot, const std::vector<std::uint8_t> *guest_env_slot) {
         static constexpr std::size_t MINIMAL_LAUNCH_STACK_SIZE = 0x10000;
         static constexpr std::size_t MINIMAL_LAUNCH_STACK_SIZE_S3 = 0x80000;
 
@@ -1825,10 +1890,15 @@ namespace eka2l1 {
         // opaque data out of the command line. Native apps must not get one,
         // because the serialised CApaCommandLine carries parent_process_id_ = 0
         // and Avkon then opens process 0 and leaves during startup.
-        if (pass_command_line_in_env_slot && (legacy_level() >= APA_LEGACY_LEVEL_MORDEN) && !cmd.empty()) {
-            pr->set_arg_slot(ENVIRONMENT_SLOT_MAIN,
-                reinterpret_cast<std::uint8_t *>(const_cast<char16_t *>(cmd.data())),
-                cmd.size() * sizeof(char16_t));
+        if (pass_command_line_in_env_slot && (legacy_level() >= APA_LEGACY_LEVEL_MORDEN)) {
+            if (guest_env_slot && !guest_env_slot->empty()) {
+                pr->set_arg_slot(ENVIRONMENT_SLOT_MAIN,
+                    const_cast<std::uint8_t *>(guest_env_slot->data()), guest_env_slot->size());
+            } else if (!cmd.empty()) {
+                pr->set_arg_slot(ENVIRONMENT_SLOT_MAIN,
+                    reinterpret_cast<std::uint8_t *>(const_cast<char16_t *>(cmd.data())),
+                    cmd.size() * sizeof(char16_t));
+            }
         }
 
         if (thread_id)
@@ -1940,10 +2010,16 @@ namespace eka2l1 {
         }
 
         const bool is_non_native = (registry.caps.flags & apa_capability::non_native) != 0;
-        std::u16string apacmddat = parameter.to_string(legacy_level() < APA_LEGACY_LEVEL_MORDEN);
+        std::vector<std::uint8_t> guest_slot;
+        std::u16string apacmddat;
+        if (is_non_native && (legacy_level() >= APA_LEGACY_LEVEL_MORDEN)) {
+            guest_slot = parameter.to_guest_env_slot();
+        } else {
+            apacmddat = parameter.to_string(legacy_level() < APA_LEGACY_LEVEL_MORDEN);
+        }
 
         return launch_app(executable_to_run, apacmddat, thread_id, nullptr, registry.mandatory_info.uid,
-            app_exit_callback, is_non_native);
+            app_exit_callback, is_non_native, guest_slot.empty() ? nullptr : &guest_slot);
     }
 
     std::optional<apa_app_masked_icon_bitmap> applist_server::get_icon(apa_app_registry &registry, const std::int8_t index) {

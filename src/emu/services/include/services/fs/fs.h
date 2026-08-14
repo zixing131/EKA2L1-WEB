@@ -31,6 +31,7 @@
 #include <clocale>
 #include <memory>
 #include <regex>
+#include <set>
 #include <unordered_map>
 
 namespace eka2l1::kernel {
@@ -209,13 +210,16 @@ namespace eka2l1 {
             std::regex match_pattern;
             notify_type type;
             epoc::notify_info info;
+            bool java_drive_wildcard = false;
         };
 
         std::vector<notify_entry> notify_entries;
         epoc::notify_info dismount_notify_;
 
         void notify(const utf16_str &entry, const notify_type type);
+        void kick_java_preinstall_wait();
         bool should_notify_failures;
+        bool java_preinstall_kicked_{ false };
     };
 
     enum file_wild {
@@ -327,8 +331,11 @@ namespace eka2l1 {
 
         std::uint32_t flags;
         std::set<std::u16string> temporary_file_cleanset_;
+        std::size_t java_ipc_complete_cb_{ 0 };
+        bool java_swinst_ok_{ false };
 
         void init();
+        void kick_java_preinstall_waits();
 
     public:
         explicit fs_server(system *sys);

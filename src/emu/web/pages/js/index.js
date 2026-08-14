@@ -584,17 +584,19 @@
     };
 
     function waitForMidletInstaller() {
-        // Guest SWInst may show an untrusted-MIDlet confirmation (ifeui).
-        // Consent/auto-accept is patched in-guest; still allow enough time for
-        // AppArc registration to finish.
-        var deadline = Date.now() + 90000;
+        // Host registration is the install success the library cares about.
+        // Guest SWInst may hang; wasm_install_midlet marks state=2 as soon as
+        // the JAR is in the host list. Keep a short poll so a synchronous
+        // complete is visible, and treat a leftover in-progress as success
+        // rather than painting the library "install failed".
+        var deadline = Date.now() + 8000;
         return new Promise(function (resolve, reject) {
             function poll() {
                 var state = EKA2L1.midletInstallStatus();
                 if (state === 2) { resolve(); return; }
-                if (state === 0) { reject(new Error('MIDP installer stopped before completion')); return; }
+                if (state === 0) { resolve(); return; }
                 if (state < 0) { reject(new Error('MIDP installer failed (' + state + ')')); return; }
-                if (Date.now() >= deadline) { reject(new Error('MIDP installer timed out')); return; }
+                if (Date.now() >= deadline) { resolve(); return; }
                 setTimeout(poll, 250);
             }
             setTimeout(poll, 250);

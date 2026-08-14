@@ -303,7 +303,9 @@ namespace eka2l1 {
             , backup_state(thread_state::stop)
             , flags(0)
             , wait_object_timeout_callback_type(0)
-            , is_in_timeout(false) {
+            , is_in_timeout(false)
+            , condvar_mutex_(nullptr)
+            , condvar_lock_count_(0) {
             if (owner) {
                 owner->increase_thread_count();
 
@@ -572,6 +574,33 @@ namespace eka2l1 {
 
             LOG_WARN(KERNEL, "Panic context: pc=0x{:08X} ({}) lr=0x{:08X} ({}) sp=0x{:08X}",
                 pc, resolve(pc), lr, resolve(lr), sp);
+            if ((kern->crr_thread() == this) && core) {
+                LOG_WARN(KERNEL, "  r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} r4=0x{:08X} r5=0x{:08X} r6=0x{:08X} r7=0x{:08X}",
+                    core->get_reg(0), core->get_reg(1), core->get_reg(2), core->get_reg(3),
+                    core->get_reg(4), core->get_reg(5), core->get_reg(6), core->get_reg(7));
+                LOG_WARN(KERNEL, "  r8=0x{:08X} r9=0x{:08X} r10=0x{:08X} r11=0x{:08X} r12=0x{:08X} cpsr=0x{:08X}",
+                    core->get_reg(8), core->get_reg(9), core->get_reg(10), core->get_reg(11),
+                    core->get_reg(12), core->get_cpsr());
+                if (pr && (pc < 0x80000000u) && (pc > 0x10000u)) {
+                    auto dump_words = [&](const char *tag, const std::uint32_t addr, const int n) {
+                        if (!addr) {
+                            return;
+                        }
+                        std::string s;
+                        for (int i = 0; i < n; i++) {
+                            std::uint32_t *w = reinterpret_cast<std::uint32_t *>(
+                                pr->get_ptr_on_addr_space(addr + static_cast<std::uint32_t>(i * 4)));
+                            s += w ? fmt::format(" {:08X}", *w) : " ????????";
+                        }
+                        LOG_WARN(KERNEL, "  mem {} @0x{:08X}:{}", tag, addr, s);
+                    };
+                        dump_words("r0", core->get_reg(0), 24);
+                        dump_words("r1", core->get_reg(1), 8);
+                        dump_words("r4", core->get_reg(4), 16);
+                        dump_words("r5", core->get_reg(5), 8);
+                        dump_words("pc", pc & ~3u, 8);
+                }
+            }
 
             // Code bytes around a return address, for offline disassembly of
             // stripped ROM binaries when chasing guest panics.

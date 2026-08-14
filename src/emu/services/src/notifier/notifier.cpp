@@ -26,6 +26,7 @@
 #include <utils/consts.h>
 #include <utils/err.h>
 
+#include <common/algorithm.h>
 #include <common/cvt.h>
 
 namespace eka2l1 {
@@ -73,7 +74,27 @@ namespace eka2l1 {
 
         epoc::notifier::plugin_base *plug = server<notifier_server>()->get_plugin(plugin_uid.value());
         if (!plug) {
-            LOG_ERROR(SERVICE_NOTIFIER, "Can't find the plugin with UID 0x{:X}. This is fine (but take note).", plugin_uid.value());
+            kernel::process *caller_pr = ctx->msg->own_thr->owning_process();
+            epoc::desc8 *request_data = eka2l1::ptr<epoc::desc8>(ctx->msg->args.args[1]).get(caller_pr);
+            epoc::des8 *response_data = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(caller_pr);
+            LOG_ERROR(SERVICE_NOTIFIER,
+                "Can't find notifier plugin UID 0x{:X}: function={} caller={} request_len={} response_len={} response_max={}",
+                plugin_uid.value(), ctx->msg->function, caller_pr ? caller_pr->name() : "?",
+                request_data ? request_data->get_length() : 0,
+                response_data ? response_data->get_length() : 0,
+                response_data ? response_data->get_max_length(caller_pr) : 0);
+
+            if (request_data && caller_pr) {
+                const std::uint8_t *raw = reinterpret_cast<const std::uint8_t *>(request_data->get_pointer_raw(caller_pr));
+                const std::uint32_t take = common::min<std::uint32_t>(request_data->get_length(), 128);
+                std::string hex;
+                for (std::uint32_t i = 0; raw && i < take; i++) {
+                    char byte[3];
+                    std::snprintf(byte, sizeof(byte), "%02X", raw[i]);
+                    hex += byte;
+                }
+                LOG_ERROR(SERVICE_NOTIFIER, "Missing notifier request bytes={}", hex);
+            }
             ctx->complete(epoc::error_none);
 
             return;

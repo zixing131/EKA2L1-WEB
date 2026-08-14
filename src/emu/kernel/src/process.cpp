@@ -426,9 +426,61 @@ namespace eka2l1::kernel {
         const std::string lower_name = common::lowercase_string(raw_name());
         if ((lower_name.find("midp") != std::string::npos)
             || (lower_name.find("install") != std::string::npos)
-            || (lower_name.find("java") != std::string::npos)) {
-            LOG_WARN(KERNEL, "Java install process exit: process={} type={} reason={} category={}",
-                name(), static_cast<int>(ext), reason, common::ucs2_to_utf8(category));
+            || (lower_name.find("java") != std::string::npos)
+            || (lower_name.find("j9") != std::string::npos)
+            || (lower_name.find("systemams") != std::string::npos)) {
+            const char *j9_hint = "";
+            if (lower_name.find("stubmidp2") != std::string::npos) {
+                switch (reason) {
+                case 0:
+                    j9_hint = " (MIDP2 launch IPC returned; AMS should spawn j9midps60 asynchronously)";
+                    break;
+                case -1:
+                    j9_hint = " (GetCommandLine failed, or Connect: !SystemAMSTrader.Public down / ping failed, or !MIDP.SystemAMS.MIDP2 down)";
+                    break;
+                case -4:
+                    j9_hint = " (CApaCommandLine alloc failed)";
+                    break;
+                case -25:
+                    j9_hint = " (KErrEof: env slot 1 unused → empty cmdline, or InternalizeL/opaque ReadInt32 hit EOF)";
+                    break;
+                default:
+                    j9_hint = " (StubMIDP2 / MIDP2Client launch IPC error)";
+                    break;
+                }
+            } else if (lower_name.find("j9midps60") != std::string::npos) {
+                switch (reason) {
+                case 1:
+                    j9_hint = " (export2 status 1: Java Args.usage/unrecognizedArg/startApp, or j9main Leave — not factory)";
+                    break;
+                case 11:
+                    j9_hint = " (export2 status 11: RuntimeV2 factory Load/NewL failed)";
+                    break;
+                case 2:
+                    j9_hint = " (runtime object init failed)";
+                    break;
+                case 3:
+                    j9_hint = " (runtime setup step 3 failed)";
+                    break;
+                case 4:
+                    j9_hint = " (argv alloc failed)";
+                    break;
+                case 5:
+                    j9_hint = " (argv UTF-16 convert failed)";
+                    break;
+                case 6:
+                    j9_hint = " (command-line parse failed)";
+                    break;
+                case 7:
+                    j9_hint = " (suitehash extra setup failed)";
+                    break;
+                default:
+                    break;
+                }
+            }
+            LOG_WARN(KERNEL, "Java install process exit: process={} cmd='{}' type={} reason={} category={}{}",
+                name(), common::ucs2_to_utf8(cmd_args), static_cast<int>(ext), reason,
+                common::ucs2_to_utf8(category), j9_hint);
         }
 
         exit_type = ext;

@@ -66,16 +66,31 @@ namespace eka2l1::kernel {
             LOG_ERROR(KERNEL, "Calling condvar wait in an abnormal state (not running!");
             return false;
         }
-        if (holding_ && (holding_ != mut)) {
-            LOG_ERROR(KERNEL, "Calling wait on an already waited condvar with different mutex!");
-            return false;
-        }
-        if (!holding_) {
+
+        // POSIX / J9: a condvar is not permanently bound to one mutex.
+        // Concurrent waiters may even use different mutexes (each reacquires
+        // its own). Only treat holding_ as "the last mutex used".
+        if (waits.empty() && suspended.empty()) {
+            holding_ = mut;
+        } else if (!holding_) {
             holding_ = mut;
         }
 
-        // Release the mutex
-        mut->signal(mut->holder());
+        thr->condvar_mutex_ = mut;
+        thr->condvar_lock_count_ = 0;
+
+        // Object.wait() / RCondVar::Wait must drop the full recursive lock
+        // count, then restore it on wake. One signal() leaves lock_count > 0
+        // and the waiter still "owns" the mutex.
+        if (mut->holding == thr) {
+            thr->condvar_lock_count_ = mut->lock_count;
+            mut->lock_count = 1;
+            mut->signal(thr);
+        } else {
+            LOG_TRACE(KERNEL, "Condvar wait without owning mutex (thread={}, mutex={})",
+                thr->name(), mut->name());
+        }
+
         thr->get_scheduler()->wait(thr);
 
         thr->state = thread_state::wait_condvar;
@@ -121,17 +136,34 @@ namespace eka2l1::kernel {
     }
 
     void condvar::unblock_thread(thread *thr) {
+        mutex *mut = thr->condvar_mutex_ ? thr->condvar_mutex_ : holding_;
+        const int saved_locks = thr->condvar_lock_count_;
+        thr->condvar_mutex_ = nullptr;
+        thr->condvar_lock_count_ = 0;
+
         thr->wait_obj = nullptr;
         timing_->unschedule_event(timeout_event_, thr->unique_id());
+
+        if (!mut) {
+            thr->get_scheduler()->dewait(thr);
+            return;
+        }
 
         if (thr->state == thread_state::wait_condvar_suspend) {
             // You will still be in waiting state
             // NOTE: Right now it's put into mutex's suspend queue waiting for resume
             // It's not reclaim right away. I think this is correct though.
-            holding_->transfer_suspend_from_condvar(thr);
+            mut->transfer_suspend_from_condvar(thr);
         } else {
             thr->get_scheduler()->dewait(thr);
-            holding_->wait(thr);
+            if (saved_locks > 0) {
+                mut->wait(thr);
+                mut->lock_count = saved_locks;
+            }
+        }
+
+        if (waits.empty() && suspended.empty()) {
+            holding_ = nullptr;
         }
     }
 
@@ -152,7 +184,7 @@ namespace eka2l1::kernel {
     }
 
     void condvar::broadcast() {
-        while (!waits.empty()) {
+        while (!waits.empty() || !suspended.empty()) {
             signal();
         }
     }

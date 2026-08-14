@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace eka2l1::common {
     class chunkyseri;
@@ -57,5 +58,12 @@ namespace eka2l1::epoc::apa {
 
         void do_it_newarch(common::chunkyseri &seri);
         std::u16string to_string(const bool oldarch);
+
+        // Env-slot blob for guest CApaCommandLine::InternalizeL.
+        // Unicode descriptors use odd TCardinality + one Latin-1 byte per
+        // character (this ROM's HBufC::NewL uncompressed path). Even
+        // cardinality selects the Unicode compressor, which EKA2L1's writer
+        // does not match → KErrEof (-25).
+        std::vector<std::uint8_t> to_guest_env_slot() const;
     };
 }

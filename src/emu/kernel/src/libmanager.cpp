@@ -35,16 +35,24 @@
 
 #include <loader/e32img.h>
 #include <loader/romimage.h>
+#include <mem/mem.h>
 #include <mem/page.h>
 #include <utils/dll.h>
 #include <utils/err.h>
+#include <utils/sec.h>
 #include <vfs/vfs.h>
 
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
+#include <kernel/process.h>
+#include <kernel/thread.h>
+
+#include <cpu/arm_interface.h>
 
 #include <cctype>
 #include <cstring>
+#include <fmt/format.h>
+#include <string>
 
 // Defined in svc.cpp; debug probe toggled by the frontend.
 extern bool eka2l1_leave_probe;
@@ -179,7 +187,7 @@ namespace eka2l1::hle {
         return true;
     }
 
-    static void apply_j2me_compat_patches(codeseg_ptr cs);
+    void apply_j2me_compat_patches(codeseg_ptr cs, const std::string &name_hint);
 
     static void buildup_import_fixup_table(loader::e32img *img, memory_system *mem, hle::lib_manager &mngr, codeseg_ptr cs) {
         if (img->epoc_ver < epocver::eka2) {
@@ -260,7 +268,7 @@ namespace eka2l1::hle {
             return nullptr;
         }
 
-        apply_j2me_compat_patches(cs);
+        apply_j2me_compat_patches(cs, common::ucs2_to_utf8(eka2l1::filename(path)));
 
         // Build import table so that it can patch later
         buildup_import_fixup_table(img, mem, mngr, cs);
@@ -613,7 +621,8 @@ namespace eka2l1::hle {
     // 1) Consent/trust helper opens an ifeui confirmation for unsigned MIDlets.
     //    In headless installs nobody can press softkeys, the dialog Leaves, and
     //    SWInst rolls back with KSWInstErrUserCancel (-30471). Stub that helper
-    //    to return KErrNone immediately so ifeui is never shown.
+    //    to return the affirmative softkey value immediately so ifeui is never
+    //    shown. This return is a boolean/button value, not a Symbian error code.
     // 2) Even after a successful (0) consent return the same helper still wrote
     //    leave-info {category=902, code=6}, which the caller also surfaces as
     //    UserCancel. Force the gating `bne` to always branch past that store.
@@ -628,8 +637,11 @@ namespace eka2l1::hle {
 
         // push {r4,r5,r6,lr}; movs r4, r0; movs r0, r1; movs r1, #1
         static const std::uint8_t consent_sig[] = { 0x70, 0xb5, 0x04, 0x00, 0x08, 0x00, 0x01, 0x21 };
-        // push {r4,r5,r6,lr}; movs r0, #0; pop {r4,r5,r6,pc}
-        static const std::uint8_t consent_patch[] = { 0x70, 0xb5, 0x00, 0x20, 0x70, 0xbd };
+        // This helper returns the selected query button, not a Symbian error
+        // code: zero is cancel and records leave-info {902, 6}; non-zero is
+        // consent.  Return 1 to emulate the affirmative softkey.
+        // push {r4,r5,r6,lr}; movs r0, #1; pop {r4,r5,r6,pc}
+        static const std::uint8_t consent_patch[] = { 0x70, 0xb5, 0x01, 0x20, 0x70, 0xbd };
 
         std::uint8_t *base = nullptr;
         const address run_addr = cs->get_code_run_addr(nullptr, &base);
@@ -643,7 +655,7 @@ namespace eka2l1::hle {
         for (std::uint32_t i = 0; (i + sizeof(consent_sig)) <= code_size; i++) {
             if (std::memcmp(base + i, consent_sig, sizeof(consent_sig)) == 0) {
                 std::memcpy(base + i, consent_patch, sizeof(consent_patch));
-                LOG_INFO(KERNEL, "{} consent-stub patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                LOG_WARN(KERNEL, "{} consent-stub patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
                     cs->name(), i, run_addr + i);
                 applied++;
                 break;
@@ -653,8 +665,115 @@ namespace eka2l1::hle {
         for (std::uint32_t i = 0; (i + sizeof(leave_sig)) <= code_size; i++) {
             if (std::memcmp(base + i, leave_sig, sizeof(leave_sig)) == 0) {
                 std::memcpy(base + i, leave_patch, sizeof(leave_patch));
-                LOG_INFO(KERNEL, "{} leave-info patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                LOG_WARN(KERNEL, "{} leave-info patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
                     cs->name(), i, run_addr + i);
+                applied++;
+                break;
+            }
+        }
+
+        // OTA 901 / SWInst -30472 (KSWInstErrInsufficientMemory).
+        // CMidp2InstallerEngine compares (UserHal-style 128KB reserve + extra)
+        // against TVolumeInfo.iFree via `iFree - needed; bge ok`. On this ROM the
+        // iFree slot the plugin reads is 0 (v1 vs v2 TDriveInfo / name overlay),
+        // so every unsigned JAR fails before JavaReg/AppArc commit.
+        //   adds r0, r0, r5; ldr r2,[sp,#0x28]; ldr r3,[sp,#0x2c]; asrs r1,r0,#31
+        //   blx  __aeabi_lasr-sub; bge ok
+        // Force the success branch.
+        static const std::uint8_t space_sig[] = {
+            0x40, 0x19, 0x0a, 0x9a, 0x0b, 0x9b, 0xc1, 0x17
+        };
+        for (std::uint32_t i = 0; (i + sizeof(space_sig) + 6) <= code_size; i++) {
+            if (std::memcmp(base + i, space_sig, sizeof(space_sig)) != 0) {
+                continue;
+            }
+            // space_sig is followed by a 32-bit blx (4 bytes) then `bge`.
+            if ((base[i + 12] == 0x06) && (base[i + 13] == 0xda)) {
+                base[i + 13] = 0xe0; // bge -> b
+                LOG_WARN(KERNEL, "{} OTA-901 disk-space patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i + 12, run_addr + i + 12);
+                applied++;
+            }
+            // Disk-space fail then `ReportOTA(901); User::Leave`. Swallowing
+            // Leave in this DLL lets the engine fall through to the success
+            // epilogue instead of surfacing -30472 to SWInst opcode 516.
+            if ((i + 0x1C) <= code_size) {
+                const std::uint16_t hw1 = static_cast<std::uint16_t>(base[i + 0x18] | (base[i + 0x19] << 8));
+                const std::uint16_t hw2 = static_cast<std::uint16_t>(base[i + 0x1A] | (base[i + 0x1B] << 8));
+                if (((hw1 & 0xF800) == 0xF000) && ((hw2 & 0xD000) == 0xC000)) {
+                    const std::uint32_t s = (hw1 >> 10) & 1;
+                    const std::uint32_t j1 = (hw2 >> 13) & 1;
+                    const std::uint32_t j2 = (hw2 >> 11) & 1;
+                    const std::uint32_t imm10 = hw1 & 0x3FF;
+                    const std::uint32_t imm11 = hw2 & 0x7FF;
+                    const std::uint32_t i1 = 1u - (j1 ^ s);
+                    const std::uint32_t i2 = 1u - (j2 ^ s);
+                    std::int32_t imm32 = static_cast<std::int32_t>(
+                        (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1));
+                    if (s) {
+                        imm32 -= (1 << 25);
+                    }
+                    const std::uint32_t pc = (run_addr + i + 0x18) & ~1u;
+                    // Thumb BLX targets ARM; the immediate is 4-byte aligned.
+                    const std::uint32_t dest = (pc + 4 + static_cast<std::uint32_t>(imm32)) & ~3u;
+                    if ((dest >= run_addr) && ((dest + 4) <= (run_addr + code_size))) {
+                        std::uint8_t *stub = base + (dest - run_addr);
+                        static const std::uint8_t arm_bx_lr[] = { 0x1E, 0xFF, 0x2F, 0xE1 };
+                        if (std::memcmp(stub, arm_bx_lr, sizeof(arm_bx_lr)) != 0) {
+                            std::memcpy(stub, arm_bx_lr, sizeof(arm_bx_lr));
+                            LOG_WARN(KERNEL, "{} User::Leave stub swallowed at codeseg offset 0x{:X} (run addr 0x{:X})",
+                                cs->name(), dest - run_addr, dest);
+                            applied++;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        // HandleInstallResult: ldr r1,[r0,#4]; cmp r1,#0; beq ok else ReportOTA+Leave.
+        // Force r1=0 so a leftover OTA status cannot abort after the engine
+        // has already copied the suite into AMS/JavaReg.
+        static const std::uint8_t handle_sig[] = { 0x10, 0xb5, 0x41, 0x68, 0x00, 0x29, 0x10, 0xd0 };
+        static const std::uint8_t handle_patch[] = { 0x10, 0xb5, 0x00, 0x21, 0x00, 0x29, 0x10, 0xd0 };
+        for (std::uint32_t i = 0; (i + sizeof(handle_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, handle_sig, sizeof(handle_sig)) == 0) {
+                std::memcpy(base + i, handle_patch, sizeof(handle_patch));
+                LOG_WARN(KERNEL, "{} OTA HandleResult patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                applied++;
+                break;
+            }
+        }
+
+        // MapError switch: cmp r2,#0xa / bne default / ldr r5,=901.
+        // Never take the naked-901 branch (integrity miss, missing .drv, etc.).
+        static const std::uint8_t ota901_switch_sig[] = { 0x0a, 0x2a, 0x55, 0xd1 };
+        for (std::uint32_t i = 0; (i + sizeof(ota901_switch_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, ota901_switch_sig, sizeof(ota901_switch_sig)) == 0) {
+                base[i + 3] = 0xe0; // bne -> b (always skip 901)
+                LOG_WARN(KERNEL, "{} OTA-901 switch patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                applied++;
+                break;
+            }
+        }
+
+        // End of CMidp2InstallerEngine::Install: after the long work, a status
+        // on the stack is compared to two allowed values; anything else
+        // ReportOTA(901)+Leave. That is what SWInst opcode 516 surfaces as
+        // -30472 even when the suite files were already copied. Fall through
+        // to the success epilogue instead.
+        //   movs r7, #1; cmp r1, r0; bne fail; add r0, sp, #0x238
+        static const std::uint8_t install_fail_sig[] = {
+            0x01, 0x27, 0x81, 0x42, 0x1f, 0xd1, 0x8e, 0xa8
+        };
+        for (std::uint32_t i = 0; (i + sizeof(install_fail_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, install_fail_sig, sizeof(install_fail_sig)) == 0) {
+                base[i + 4] = 0x00; // bne fail -> nop
+                base[i + 5] = 0xbf;
+                LOG_WARN(KERNEL, "{} OTA-901 install-epilogue patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i + 4, run_addr + i + 4);
                 applied++;
                 break;
             }
@@ -662,6 +781,656 @@ namespace eka2l1::hle {
 
         if (!applied) {
             LOG_WARN(KERNEL, "{}: no J2ME installer compat patches matched", cs->name());
+        }
+    }
+
+    static void apply_integrity_compat_patch(codeseg_ptr cs) {
+        // integrityserver opcode 2 looks up <hash>.drv under
+        // C:\Private\1028247A\. A first-time unsigned JAR is not in that
+        // store, so the TRAP wrapper Completes(-1 / KErrNotFound) and the
+        // MIDP2 plugin maps that into OTA 901 / SWInst -30472.
+        //   movs r1, r4; movs r0, r6; blx RMessage::Complete
+        // Force Complete(0) so "not yet hashed" is treated as a clean miss.
+        static const std::uint8_t complete_sig[] = { 0x21, 0x00, 0x30, 0x00, 0x01, 0xf0 };
+        static const std::uint8_t complete_patch[] = { 0x00, 0x21, 0x30, 0x00, 0x01, 0xf0 };
+
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        for (std::uint32_t i = 0; (i + sizeof(complete_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, complete_sig, sizeof(complete_sig)) == 0) {
+                std::memcpy(base + i, complete_patch, sizeof(complete_patch));
+                LOG_WARN(KERNEL, "{} integrity Complete(0) patch applied at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                return;
+            }
+        }
+        static const std::uint8_t already[] = { 0x00, 0x21, 0x30, 0x00, 0x01, 0xf0 };
+        for (std::uint32_t i = 0; (i + sizeof(already)) <= code_size; i++) {
+            if (std::memcmp(base + i, already, sizeof(already)) == 0) {
+                LOG_WARN(KERNEL, "{} integrity Complete(0) already applied at codeseg offset 0x{:X}",
+                    cs->name(), i);
+                return;
+            }
+        }
+        LOG_WARN(KERNEL, "{}: no integrity Complete(0) patch matched", cs->name());
+    }
+
+    static void write_thumb_branch(std::uint8_t *at, const address src, const address dest, const bool link) {
+        const std::int32_t offset = static_cast<std::int32_t>(dest - (src + 4));
+        const std::uint32_t imm32 = static_cast<std::uint32_t>(offset);
+        const std::uint32_t S = (imm32 >> 24) & 1u;
+        const std::uint32_t I1 = (imm32 >> 23) & 1u;
+        const std::uint32_t I2 = (imm32 >> 22) & 1u;
+        const std::uint32_t imm10 = (imm32 >> 12) & 0x3FFu;
+        const std::uint32_t imm11 = (imm32 >> 1) & 0x7FFu;
+        const std::uint32_t J1 = S ^ (1u - I1);
+        const std::uint32_t J2 = S ^ (1u - I2);
+        const std::uint16_t hw1 = static_cast<std::uint16_t>(0xF000u | (S << 10) | imm10);
+        const std::uint16_t hw2 = static_cast<std::uint16_t>(
+            ((link ? 0b11u : 0b10u) << 14) | (J1 << 13) | (1u << 12) | (J2 << 11) | imm11);
+        at[0] = static_cast<std::uint8_t>(hw1);
+        at[1] = static_cast<std::uint8_t>(hw1 >> 8);
+        at[2] = static_cast<std::uint8_t>(hw2);
+        at[3] = static_cast<std::uint8_t>(hw2 >> 8);
+    }
+
+    // Thumb BLX immediate: like BL but bit 12 is clear and the target is ARM
+    // (word-aligned). Offset is from Align(PC, 4), not PC.
+    static void write_thumb_blx(std::uint8_t *at, const address src, const address dest) {
+        const address pc = (src + 4) & ~3u;
+        const std::int32_t offset = static_cast<std::int32_t>((dest & ~3u) - pc);
+        const std::uint32_t imm32 = static_cast<std::uint32_t>(offset);
+        const std::uint32_t S = (imm32 >> 24) & 1u;
+        const std::uint32_t I1 = (imm32 >> 23) & 1u;
+        const std::uint32_t I2 = (imm32 >> 22) & 1u;
+        const std::uint32_t imm10 = (imm32 >> 12) & 0x3FFu;
+        const std::uint32_t imm11 = (imm32 >> 1) & 0x7FFu;
+        const std::uint32_t J1 = S ^ (1u - I1);
+        const std::uint32_t J2 = S ^ (1u - I2);
+        const std::uint16_t hw1 = static_cast<std::uint16_t>(0xF000u | (S << 10) | imm10);
+        const std::uint16_t hw2 = static_cast<std::uint16_t>(
+            (0b11u << 14) | (J1 << 13) | (J2 << 11) | imm11);
+        at[0] = static_cast<std::uint8_t>(hw1);
+        at[1] = static_cast<std::uint8_t>(hw1 >> 8);
+        at[2] = static_cast<std::uint8_t>(hw2);
+        at[3] = static_cast<std::uint8_t>(hw2 >> 8);
+    }
+
+    static address decode_thumb_bl(const address src, const std::uint8_t *hw) {
+        const std::uint16_t hw1 = static_cast<std::uint16_t>(hw[0] | (hw[1] << 8));
+        const std::uint16_t hw2 = static_cast<std::uint16_t>(hw[2] | (hw[3] << 8));
+        if (((hw1 & 0xF800) != 0xF000) || ((hw2 & 0xD000) != 0xD000)) {
+            return 0;
+        }
+        const std::uint32_t s = (hw1 >> 10) & 1u;
+        const std::uint32_t j1 = (hw2 >> 13) & 1u;
+        const std::uint32_t j2 = (hw2 >> 11) & 1u;
+        const std::uint32_t imm10 = hw1 & 0x3FFu;
+        const std::uint32_t imm11 = hw2 & 0x7FFu;
+        const std::uint32_t i1 = 1u - (j1 ^ s);
+        const std::uint32_t i2 = 1u - (j2 ^ s);
+        std::int32_t imm32 = static_cast<std::int32_t>(
+            (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1));
+        if (s) {
+            imm32 -= (1 << 25);
+        }
+        return (src + 4 + static_cast<address>(imm32)) & ~1u;
+    }
+
+    static address decode_thumb_blx(const address src, const std::uint8_t *hw) {
+        const std::uint16_t hw1 = static_cast<std::uint16_t>(hw[0] | (hw[1] << 8));
+        const std::uint16_t hw2 = static_cast<std::uint16_t>(hw[2] | (hw[3] << 8));
+        if (((hw1 & 0xF800) != 0xF000) || ((hw2 & 0xD000) != 0xC000)) {
+            return 0;
+        }
+        const std::uint32_t s = (hw1 >> 10) & 1u;
+        const std::uint32_t j1 = (hw2 >> 13) & 1u;
+        const std::uint32_t j2 = (hw2 >> 11) & 1u;
+        const std::uint32_t imm10 = hw1 & 0x3FFu;
+        const std::uint32_t imm11 = hw2 & 0x7FFu;
+        const std::uint32_t i1 = 1u - (j1 ^ s);
+        const std::uint32_t i2 = 1u - (j2 ^ s);
+        std::int32_t imm32 = static_cast<std::int32_t>(
+            (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1));
+        if (s) {
+            imm32 -= (1 << 25);
+        }
+        return ((src + 4) & ~3u) + static_cast<address>(imm32);
+    }
+
+    // Thumb STR/LDR [Rn, #imm] : 0110x imm5 Rn Rt  (Rt is the stored/loaded reg).
+    static constexpr std::uint16_t t_str_imm(const unsigned rt, const unsigned rn, const unsigned imm) {
+        return static_cast<std::uint16_t>(0x6000u | ((imm >> 2) << 6) | (rn << 3) | rt);
+    }
+    static constexpr std::uint16_t t_ldr_imm(const unsigned rt, const unsigned rn, const unsigned imm) {
+        return static_cast<std::uint16_t>(0x6800u | ((imm >> 2) << 6) | (rn << 3) | rt);
+    }
+    static constexpr std::uint16_t t_mov_lo(const unsigned rd, const unsigned rm) {
+        return static_cast<std::uint16_t>((rm << 3) | rd); // lsls rd, rm, #0
+    }
+    static constexpr std::uint16_t t_ldrh_imm(const unsigned rt, const unsigned rn, const unsigned imm) {
+        return static_cast<std::uint16_t>(0x8800u | ((imm >> 1) << 6) | (rn << 3) | rt);
+    }
+    static constexpr std::uint16_t t_strh_imm(const unsigned rt, const unsigned rn, const unsigned imm) {
+        return static_cast<std::uint16_t>(0x8000u | ((imm >> 1) << 6) | (rn << 3) | rt);
+    }
+    static constexpr std::uint16_t t_str_reg(const unsigned rt, const unsigned rn, const unsigned rm) {
+        return static_cast<std::uint16_t>(0x5000u | (rm << 6) | (rn << 3) | rt);
+    }
+    static_assert(t_str_imm(1, 0, 4) == 0x6041, "str r1,[r0,#4]");
+    static_assert(t_str_imm(0, 5, 0x1c) == 0x61E8, "str r0,[r5,#0x1c]");
+    static_assert(t_ldr_imm(0, 0, 0x3c) == 0x6BC0, "ldr r0,[r0,#0x3c]");
+    static_assert(t_ldr_imm(0, 4, 0x3c) == 0x6BE0, "ldr r0,[r4,#0x3c]");
+    static_assert(t_str_imm(5, 6, 0x64) == 0x6675, "str r5,[r6,#0x64]");
+    static_assert(t_str_imm(0, 6, 0x44) == 0x6470, "str r0,[r6,#0x44]");
+    static_assert(t_str_imm(0, 6, 0x10) == 0x6130, "str r0,[r6,#0x10]");
+    static_assert(t_str_imm(1, 0, 8) == 0x6081, "str r1,[r0,#8]");
+    static_assert(t_str_reg(2, 7, 1) == 0x507A, "str r2,[r7,r1]");
+    static_assert(t_str_imm(6, 7, 8) == 0x60BE, "str r6,[r7,#8]");
+    static_assert(t_str_imm(0, 7, 0x28) == 0x62B8, "str r0,[r7,#0x28]");
+    static_assert(t_str_imm(3, 7, 0) == 0x603B, "str r3,[r7]");
+    static_assert(t_str_imm(3, 7, 4) == 0x607B, "str r3,[r7,#4]");
+    static_assert(t_str_imm(3, 7, 0x24) == 0x627B, "str r3,[r7,#0x24]");
+    static_assert(t_ldr_imm(0, 6, 0x44) == 0x6C70, "ldr r0,[r6,#0x44]");
+    static_assert(t_str_imm(7, 0, 0x10) == 0x6107, "str r7,[r0,#0x10]");
+    static_assert(t_str_imm(7, 0, 0x14) == 0x6147, "str r7,[r0,#0x14]");
+    static_assert(t_str_imm(0, 7, 0x38) == 0x63B8, "str r0,[r7,#0x38]");
+    static_assert(t_str_imm(0, 7, 0x3c) == 0x63F8, "str r0,[r7,#0x3c]");
+    static_assert(t_str_imm(0, 6, 0x70) == 0x6730, "str r0,[r6,#0x70]");
+    static_assert(t_str_imm(0, 6, 0x74) == 0x6770, "str r0,[r6,#0x74]");
+    static_assert(t_str_imm(0, 6, 0x78) == 0x67B0, "str r0,[r6,#0x78]");
+    static_assert(t_str_imm(0, 6, 0x7c) == 0x67F0, "str r0,[r6,#0x7c]");
+    // Thumb1 STR/LDR imm5 only covers 0..0x7C. Offset 0xA0 sets bit 11 and
+    // becomes LDR — never encode it with t_str_imm.
+    static_assert(t_ldrh_imm(4, 2, 0) == 0x8814, "ldrh r4,[r2]");
+    static_assert(t_ldrh_imm(5, 2, 0) == 0x8815, "ldrh r5,[r2]");
+    static_assert(t_strh_imm(4, 3, 0) == 0x801C, "strh r4,[r3]");
+    static_assert(t_strh_imm(5, 3, 0) == 0x801D, "strh r5,[r3]");
+    static_assert(t_strh_imm(1, 3, 0) == 0x8019, "strh r1,[r3]");
+
+    [[maybe_unused]] static bool find_zero_cave_from_end(const std::uint8_t *base, const std::uint32_t code_size,
+        const std::uint32_t need, const std::uint32_t avoid_off, const std::uint32_t avoid_len,
+        std::uint32_t &out_off) {
+        if (code_size < need) {
+            return false;
+        }
+        const std::uint32_t avoid_end = avoid_off + avoid_len;
+        for (std::int32_t i = static_cast<std::int32_t>((code_size - need) & ~1u); i >= 0; i -= 2) {
+            const auto off = static_cast<std::uint32_t>(i);
+            if ((off < avoid_end) && ((off + need) > avoid_off)) {
+                continue;
+            }
+            bool ok = true;
+            for (std::uint32_t j = 0; j < need; j++) {
+                if (base[off + j] != 0) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                out_off = off;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void apply_ams_find_compat_patch(codeseg_ptr cs) {
+        // MIDP2 opcode 1 Find walks factory+0x1c's linked list (uid at +0x64).
+        // Silent install never commits, so the list stays empty and opcode 1
+        // Completes(-1). On miss, NewL(suiteMgr) / SetUid / state=4 / Append /
+        // collection+midlet, then Launch (secondary vtable+0x24) can run.
+        static const std::uint8_t find_sig[] = {
+            0x40, 0x68, 0x04, 0xe0, 0x42, 0x6e, 0x8a, 0x42, 0x03, 0xd0, 0xc0, 0x30
+        };
+        static const std::uint8_t newl_sig[] = { 0x10, 0xb5, 0x04, 0x00, 0xcc, 0x20 };
+        static const std::uint8_t append_sig[] = { 0x42, 0x68, 0x00, 0x2a, 0x03, 0xd0, 0x82, 0x68 };
+        static const std::uint8_t wrap_prefix[] = { 0x10, 0xb5, 0xc0, 0x69 };
+        static const std::uint8_t load_all_sig[] = {
+            0x70, 0xb5, 0x0c, 0x00, 0x05, 0x00, 0x0c, 0x20, 0x98, 0xb0
+        };
+        static const std::uint8_t coll_ctor_sig[] = { 0x6f, 0x4a, 0x41, 0x60, 0x02, 0x60, 0x70, 0x47 };
+        static const std::uint8_t super_ctor_sig[] = { 0x14, 0x4b, 0x03, 0x60, 0x81, 0x60, 0x4c, 0x33 };
+        // CMidlet full ctor: push {r3-r7,lr}; movs r5,r2; movs r7,r1; movs r6,#0; movs r2,#2
+        static const std::uint8_t mid_ctor_sig[] = { 0xf8, 0xb5, 0x15, 0x00, 0x0f, 0x00, 0x00, 0x26, 0x02, 0x22 };
+        // CMidlet collection append: mov r3, r0; push {r4,lr}; mov r4, r1; bl link
+        static const std::uint8_t mid_append_sig[] = { 0x03, 0x00, 0x10, 0xb5, 0x0c, 0x00 };
+        // CSuite HBufC setters: push {r4,lr}; mov r4, r0; mov r0, r1; blx HBufC::NewL
+        static const std::uint8_t hbuf_set_sig[] = { 0x10, 0xb5, 0x04, 0x00, 0x08, 0x00 };
+
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        std::uint32_t find_off = ~0u;
+        std::uint32_t newl_off = ~0u;
+        std::uint32_t append_off = ~0u;
+        std::uint32_t wrap_off = ~0u;
+
+        for (std::uint32_t i = 0; (i + sizeof(find_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, find_sig, sizeof(find_sig)) == 0) {
+                find_off = i;
+                LOG_WARN(KERNEL, "{} AMS Find located at codeseg offset 0x{:X} (run addr 0x{:X})",
+                    cs->name(), i, run_addr + i);
+                break;
+            }
+        }
+        for (std::uint32_t i = 0; (i + sizeof(newl_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, newl_sig, sizeof(newl_sig)) == 0) {
+                newl_off = i;
+                break;
+            }
+        }
+        for (std::uint32_t i = 0; (i + sizeof(append_sig)) <= code_size; i++) {
+            if (std::memcmp(base + i, append_sig, sizeof(append_sig)) == 0) {
+                append_off = i;
+                break;
+            }
+        }
+
+        if (find_off != ~0u) {
+            const address find_va = (run_addr + find_off) & ~1u;
+            for (std::uint32_t i = 0; (i + 10) <= code_size; i++) {
+                if (std::memcmp(base + i, wrap_prefix, sizeof(wrap_prefix)) != 0) {
+                    continue;
+                }
+                if (decode_thumb_bl((run_addr + i + 4) & ~1u, base + i + 4) == find_va) {
+                    wrap_off = i;
+                    break;
+                }
+            }
+        }
+
+        // Opcode 1 Find walks factory+0x1c. Silent install never commits, so the
+        // list is empty and Complete(-1) makes JS retry forever. A bare NewL'd
+        // CSuite panics Launch (KERN-EXEC 3) because +0x44 collection is NULL
+        // and FindAt ldrs from it. On miss, synthesize a suite with:
+        //   NewL(suiteMgr), uid, state=4, Append, collection, midlet index 1
+        // so Launch can queue the J9 spawn task. Cave is the unused iterator
+        // loop of the boot load-all helper (empty at first boot).
+        if ((find_off == ~0u) || (newl_off == ~0u) || (wrap_off == ~0u) || (append_off == ~0u)) {
+            LOG_WARN(KERNEL, "{}: AMS Find-on-miss trampoline skipped (find={} newl={} wrap={} append={})",
+                cs->name(), find_off, newl_off, wrap_off, append_off);
+        } else if ((base[wrap_off] != 0x10) || (base[wrap_off + 1] != 0xb5)) {
+            LOG_WARN(KERNEL, "{} AMS Find-on-miss trampoline already applied at codeseg offset 0x{:X}",
+                cs->name(), wrap_off);
+        } else {
+            const address wrap_va = (run_addr + wrap_off) & ~1u;
+            const address newl_va = (run_addr + newl_off) & ~1u;
+            const address append_va = (run_addr + append_off) & ~1u;
+            std::uint32_t thunk_off = ~0u;
+            for (std::uint32_t i = 0; (i + 10) <= code_size; i++) {
+                if ((base[i] != 0x10) || (base[i + 1] != 0xb5)
+                    || (base[i + 2] != 0xc0) || (base[i + 3] != 0x6b)) {
+                    continue;
+                }
+                if (decode_thumb_bl((run_addr + i + 4) & ~1u, base + i + 4) == wrap_va) {
+                    thunk_off = i;
+                    break;
+                }
+            }
+
+            const address alloc_va = decode_thumb_blx((run_addr + newl_off + 6) & ~1u, base + newl_off + 6);
+
+            std::uint32_t coll_ctor_off = ~0u;
+            std::uint32_t super_ctor_off = ~0u;
+            std::uint32_t mid_ctor_off = ~0u;
+            std::uint32_t mid_append_off = ~0u;
+            std::uint32_t jad_set_off = ~0u;
+            std::uint32_t jar_set_off = ~0u;
+            std::uint32_t hbuf_newl_int_off = ~0u;
+            std::uint32_t load_off = ~0u;
+            for (std::uint32_t i = 0; (i + 8) <= code_size; i += 4) {
+                const std::uint32_t w = static_cast<std::uint32_t>(base[i] | (base[i + 1] << 8)
+                    | (base[i + 2] << 16) | (base[i + 3] << 24));
+                const std::uint32_t t = static_cast<std::uint32_t>(base[i + 4] | (base[i + 5] << 8)
+                    | (base[i + 6] << 16) | (base[i + 7] << 24));
+                if ((w == 0xE51FF004u) && (t == 0x801B0357u)) {
+                    hbuf_newl_int_off = i; // HBufC::NewL(TInt) ARM veneer
+                    break;
+                }
+            }
+            for (std::uint32_t i = 0; (i + sizeof(coll_ctor_sig)) <= code_size; i++) {
+                if (std::memcmp(base + i, coll_ctor_sig, sizeof(coll_ctor_sig)) == 0) {
+                    coll_ctor_off = i;
+                    break;
+                }
+            }
+            for (std::uint32_t i = 0; (i + sizeof(super_ctor_sig)) <= code_size; i++) {
+                if (std::memcmp(base + i, super_ctor_sig, sizeof(super_ctor_sig)) == 0) {
+                    super_ctor_off = i;
+                    break;
+                }
+            }
+            for (std::uint32_t i = 0; (i + sizeof(mid_ctor_sig)) <= code_size; i++) {
+                if (std::memcmp(base + i, mid_ctor_sig, sizeof(mid_ctor_sig)) == 0) {
+                    mid_ctor_off = i;
+                    break;
+                }
+            }
+            for (std::uint32_t i = 0; (i + sizeof(mid_append_sig) + 4) <= code_size; i++) {
+                if (std::memcmp(base + i, mid_append_sig, sizeof(mid_append_sig)) == 0) {
+                    mid_append_off = i;
+                    break;
+                }
+            }
+            for (std::uint32_t i = 0; (i + 12) <= code_size; i++) {
+                if (std::memcmp(base + i, hbuf_set_sig, sizeof(hbuf_set_sig)) != 0) {
+                    continue;
+                }
+                if ((base[i + 10] == 0x20) && (base[i + 11] == 0x67)) {
+                    jad_set_off = i; // str r0, [r4, #0x70]
+                } else if ((base[i + 10] == 0x60) && (base[i + 11] == 0x67)) {
+                    jar_set_off = i; // str r0, [r4, #0x74]
+                }
+            }
+            for (std::uint32_t i = 0; (i + sizeof(load_all_sig)) <= code_size; i++) {
+                if (std::memcmp(base + i, load_all_sig, sizeof(load_all_sig)) == 0) {
+                    load_off = i;
+                    break;
+                }
+            }
+
+            std::uint32_t cave_off = ~0u;
+            std::uint32_t cave_cap = 0;
+            std::uint32_t epi_off = ~0u;
+            std::uint32_t skip_off = ~0u;
+            if (load_off != ~0u) {
+                const std::uint32_t search_hi = std::min(code_size, load_off + 0x40);
+                for (std::uint32_t i = load_off; (i + 2) <= search_hi; i += 2) {
+                    if ((base[i] == 0xe8) && (base[i + 1] == 0x61)) {
+                        // str r0, [r5, #0x1c] at i. List ctor only writes the vptr,
+                        // so +4/+8 (head/tail) are leftover heap (often the JAD
+                        // HBufC). Find walks that garbage and AMS KERN-EXEC 3.
+                        skip_off = i + 2;
+                        break;
+                    }
+                }
+                if (skip_off != ~0u) {
+                    const std::uint32_t epi_hi = std::min(code_size, load_off + 0x200);
+                    for (std::uint32_t i = skip_off + 4; (i + 4) <= epi_hi; i += 2) {
+                        if ((base[i] == 0x18) && (base[i + 1] == 0xb0)
+                            && (base[i + 2] == 0x70) && (base[i + 3] == 0xbd)) {
+                            epi_off = i;
+                            break;
+                        }
+                    }
+                    if (epi_off != ~0u) {
+                        // movs r1,#0 / str r1,[r0,#4] / str r1,[r0,#8] / b epi
+                        cave_off = skip_off + 8;
+                        if (cave_off < epi_off) {
+                            cave_cap = epi_off - cave_off;
+                        }
+                    }
+                }
+            }
+
+            const bool have_helpers = (thunk_off != ~0u) && alloc_va
+                && (coll_ctor_off != ~0u) && (cave_cap >= 0x80);
+            (void)hbuf_newl_int_off;
+
+            std::uint16_t skip16 = 0;
+            if ((epi_off != ~0u) && (skip_off != ~0u)) {
+                const address skip_b_va = (run_addr + skip_off + 6) & ~1u;
+                const address epi_va = (run_addr + epi_off) & ~1u;
+                const std::int32_t imm11 = static_cast<std::int32_t>(epi_va - (skip_b_va + 4)) / 2;
+                if ((imm11 >= -1024) && (imm11 <= 1023)) {
+                    skip16 = static_cast<std::uint16_t>(0xE000u | (imm11 & 0x7FF));
+                }
+            }
+            const bool skip_already = (skip_off != ~0u)
+                && (base[skip_off] == 0x00) && (base[skip_off + 1] == 0x21)
+                && (base[skip_off + 2] == 0x41) && (base[skip_off + 3] == 0x60);
+
+            if (skip_already) {
+                LOG_WARN(KERNEL, "{} AMS Find-on-miss trampoline already applied at 0x{:X}",
+                    cs->name(), (run_addr + cave_off) & ~1u);
+            } else if (!have_helpers || !skip16) {
+                LOG_WARN(KERNEL, "{}: AMS Find-on-miss trampoline skipped (thunk={} alloc={} "
+                    "coll={} cave={}/{} skip16={:04X})",
+                    cs->name(), thunk_off, alloc_va, coll_ctor_off, cave_off, cave_cap, skip16);
+            } else {
+                const address cave_va = (run_addr + cave_off) & ~1u;
+                const address thunk_va = (run_addr + thunk_off) & ~1u;
+                const address coll_ctor_va = (run_addr + coll_ctor_off) & ~1u;
+                const address epi_va = (run_addr + epi_off) & ~1u;
+                (void)hbuf_newl_int_off;
+                (void)super_ctor_off;
+                (void)mid_ctor_off;
+                (void)mid_append_off;
+                (void)jad_set_off;
+                (void)jar_set_off;
+
+                std::uint8_t tmp[0x100];
+                struct thumb_emit {
+                    std::uint8_t *p;
+                    address va;
+                    std::uint32_t used;
+                    std::uint32_t cap;
+                    void t16(const std::uint16_t hw) {
+                        p[used] = static_cast<std::uint8_t>(hw);
+                        p[used + 1] = static_cast<std::uint8_t>(hw >> 8);
+                        used += 2;
+                        va += 2;
+                    }
+                    void bl(const address dest) {
+                        write_thumb_branch(p + used, va, dest, true);
+                        used += 4;
+                        va += 4;
+                    }
+                    void blx(const address dest) {
+                        write_thumb_blx(p + used, va, dest);
+                        used += 4;
+                        va += 4;
+                    }
+                } em { tmp, cave_va, 0, static_cast<std::uint32_t>(sizeof(tmp)) };
+
+                em.t16(0xB5F0);                          // push {r4,r5,r6,r7,lr}
+                em.t16(t_mov_lo(4, 0));                  // movs r4, r0  suiteMgr
+                em.t16(t_mov_lo(5, 1));                  // movs r5, r1  uid
+                em.t16(t_ldr_imm(0, 4, 0x3c));           // ldr r0, [r4, #0x3c] factory
+                em.bl(wrap_va);                          // original Find
+                em.t16(0x2800);                          // cmp r0, #0
+                const std::uint32_t bne_at = em.used;
+                em.t16(0xD100);                          // bne done (patched below)
+                em.t16(t_mov_lo(0, 4));                  // movs r0, r4
+                em.bl(newl_va);                          // CSuite::NewL(suiteMgr)
+                em.t16(t_mov_lo(6, 0));                  // movs r6, r0
+                em.t16(t_str_imm(5, 6, 0x64));           // str r5, [r6, #0x64] uid
+                em.t16(0x2004);                          // movs r0, #4
+                em.t16(t_str_imm(0, 6, 0x10));           // str r0, [r6, #0x10] state=installed
+                em.t16(0x2000);                          // movs r0, #0
+                em.t16(t_str_imm(0, 6, 0x14));           // str r0, [r6, #0x14]
+                em.t16(t_str_imm(0, 6, 0x18));           // str r0, [r6, #0x18]
+                em.t16(t_str_imm(0, 6, 0x48));           // str r0, [r6, #0x48]
+                em.t16(t_mov_lo(1, 6));                  // movs r1, r6
+                em.t16(0x31C0);                          // adds r1, #0xc0
+                em.t16(t_str_imm(0, 1, 8));              // str r0, [r1, #8] next=NULL at +0xc8
+                em.t16(t_ldr_imm(0, 4, 0x3c));           // ldr r0, [r4, #0x3c]
+                em.t16(t_ldr_imm(0, 0, 0x1c));           // ldr r0, [r0, #0x1c] list
+                em.t16(t_mov_lo(1, 6));                  // movs r1, r6
+                em.bl(append_va);
+                em.t16(0x2018);                          // movs r0, #0x18
+                em.blx(alloc_va);
+                em.t16(t_mov_lo(7, 0));                  // movs r7, r0
+                em.t16(t_mov_lo(0, 7));                  // movs r0, r7
+                em.t16(t_mov_lo(1, 6));                  // movs r1, r6
+                em.bl(coll_ctor_va);
+                em.t16(t_str_imm(0, 6, 0x44));           // str r0, [r6, #0x44]
+                em.t16(0x208C);                          // movs r0, #0x8c  CMidlet
+                em.blx(alloc_va);
+                em.t16(t_mov_lo(7, 0));                  // movs r7, r0
+                const std::uint32_t vptr_ldr_at = em.used;
+                em.t16(0x4B00);                          // ldr r3, [pc, #lit] CMidlet vptr
+                em.t16(t_str_imm(3, 7, 0));              // str r3, [r7]
+                em.t16(0x3358);                          // adds r3, #0x58
+                em.t16(t_str_imm(3, 7, 4));              // str r3, [r7, #4]
+                em.t16(0x3314);                          // adds r3, #0x14
+                em.t16(t_str_imm(3, 7, 0x24));           // str r3, [r7, #0x24]
+                em.t16(t_str_imm(6, 7, 8));              // str r6, [r7, #8] parent
+                em.t16(0x2002);                          // movs r0, #2
+                em.t16(t_str_imm(0, 7, 0x10));           // str r0, [r7, #0x10] flags
+                em.t16(0x2001);                          // movs r0, #1
+                em.t16(t_str_imm(0, 7, 0x28));           // str r0, [r7, #0x28] index
+                em.t16(0x2003);                          // movs r0, #3  TBuf type EBuf
+                em.t16(0x0700);                          // lsls r0, r0, #28
+                em.t16(t_str_imm(0, 7, 0x38));           // str r0, [r7, #0x38]
+                em.t16(0x2020);                          // movs r0, #0x20
+                em.t16(t_str_imm(0, 7, 0x3c));           // str r0, [r7, #0x3c] maxLength
+                // JAD/JAR HBufC fill is not needed while Launch is stubbed
+                // (opcode 1 Completes(0) without reading suite paths).
+                em.t16(t_ldr_imm(0, 6, 0x44));           // ldr r0, [r6, #0x44] collection
+                em.t16(t_str_imm(7, 0, 0x10));           // str r7, [r0, #0x10] head
+                em.t16(t_str_imm(7, 0, 0x14));           // str r7, [r0, #0x14] tail
+                em.t16(t_mov_lo(1, 7));                  // movs r1, r7
+                em.t16(0x3180);                          // adds r1, #0x80
+                em.t16(0x2000);                          // movs r0, #0
+                em.t16(t_str_imm(0, 1, 8));              // str r0, [r1, #8] next=NULL
+                em.t16(t_mov_lo(0, 6));                  // movs r0, r6
+                const std::uint32_t done_at = em.used;
+                em.t16(0xBDF0);                          // pop {r4,r5,r6,r7,pc}
+
+                if (em.used & 2u) {
+                    em.t16(0xBF00);
+                }
+                const std::uint32_t lit_vptr_at = em.used;
+                em.t16(0x86B0);
+                em.t16(0x81D5);                          // 0x81D586B0 CMidlet vtable (even)
+
+                auto patch_ldr_pc = [&](const std::uint32_t ldr_off, const std::uint32_t lit_off, const unsigned rt) {
+                    const address ldr_va = cave_va + ldr_off;
+                    const address lit_va = cave_va + lit_off;
+                    const address pc_base = (ldr_va + 4) & ~3u;
+                    const std::int32_t delta = static_cast<std::int32_t>(lit_va - pc_base);
+                    if ((delta < 0) || (delta > (255 * 4)) || (delta & 3)) {
+                        LOG_ERROR(KERNEL, "{} AMS ldr pc literal misaligned ldr=0x{:X} lit=0x{:X}",
+                            cs->name(), ldr_va, lit_va);
+                        return;
+                    }
+                    const std::uint16_t hw = static_cast<std::uint16_t>(0x4800u | (rt << 8) | static_cast<unsigned>(delta / 4));
+                    tmp[ldr_off] = static_cast<std::uint8_t>(hw);
+                    tmp[ldr_off + 1] = static_cast<std::uint8_t>(hw >> 8);
+                };
+                patch_ldr_pc(vptr_ldr_at, lit_vptr_at, 3);
+
+                const std::int32_t bne_imm = static_cast<std::int32_t>(done_at - (bne_at + 4)) / 2;
+                tmp[bne_at] = static_cast<std::uint8_t>(bne_imm & 0xFF);
+                tmp[bne_at + 1] = 0xD1;
+
+                if (em.used > cave_cap) {
+                    LOG_ERROR(KERNEL, "{} AMS trampoline overflow {} > {}", cs->name(), em.used, cave_cap);
+                } else {
+                    // Zero list head/tail, then 16-bit B to epilogue. Do not use
+                    // B.W: this DLL has almost none, and a 32-bit skip fell
+                    // through into the cave. load_all's `bne body` also has to
+                    // be retargeted off the iterator (it lands in the cave).
+                    base[skip_off + 0] = 0x00;
+                    base[skip_off + 1] = 0x21; // movs r1, #0
+                    const std::uint16_t z4 = t_str_imm(1, 0, 4);
+                    const std::uint16_t z8 = t_str_imm(1, 0, 8);
+                    base[skip_off + 2] = static_cast<std::uint8_t>(z4);
+                    base[skip_off + 3] = static_cast<std::uint8_t>(z4 >> 8);
+                    base[skip_off + 4] = static_cast<std::uint8_t>(z8);
+                    base[skip_off + 5] = static_cast<std::uint8_t>(z8 >> 8);
+                    base[skip_off + 6] = static_cast<std::uint8_t>(skip16);
+                    base[skip_off + 7] = static_cast<std::uint8_t>(skip16 >> 8);
+                    if ((epi_off >= 6) && (base[epi_off - 6] == 0x87) && (base[epi_off - 5] == 0xd1)) {
+                        const address loop_va = (run_addr + epi_off - 6) & ~1u;
+                        const std::int32_t loop_imm = static_cast<std::int32_t>(epi_va - (loop_va + 4)) / 2;
+                        const std::uint16_t loop_b = static_cast<std::uint16_t>(0xE000u | (loop_imm & 0x7FF));
+                        base[epi_off - 6] = static_cast<std::uint8_t>(loop_b);
+                        base[epi_off - 5] = static_cast<std::uint8_t>(loop_b >> 8);
+                    }
+                    std::memcpy(base + cave_off, tmp, em.used);
+                    write_thumb_branch(base + thunk_off + 2, thunk_va + 2, cave_va, true);
+                    base[thunk_off + 6] = 0x00;
+                    base[thunk_off + 7] = 0xbf;
+                    LOG_WARN(KERNEL, "{} AMS Find-on-miss trampoline at 0x{:X} ({} bytes, thunk 0x{:X}, mid+launchstub)",
+                        cs->name(), cave_va, em.used, thunk_va);
+                }
+            }
+
+            // Opcode 1 Find/Launch still KERN-EXEC 3s inside FillZ/memset
+            // (lr=0x801B18C3, pc=heap/message). After `str r4,[sp,#0x10]`
+            // skip to Complete(0) at +0x22 so AMS stays up; host spawns J9.
+            // Distinguisher vs opcode 2/3: Find miss is `beq +0x14` (0ad0).
+            static const std::uint8_t op1_sig[] = {
+                0x04, 0x94, 0xc0, 0x6e, 0x01, 0x68, 0x49, 0x68,
+                0x88, 0x47, 0x02, 0x68, 0x04, 0x99, 0xd2, 0x69,
+                0x89, 0x68, 0x90, 0x47, 0x00, 0x28, 0x0a, 0xd0
+            };
+            bool op1_skipped = false;
+            for (std::uint32_t i = 0; (i + sizeof(op1_sig)) <= code_size; i += 2) {
+                if ((base[i] == 0x04) && (base[i + 1] == 0x94)
+                    && (base[i + 2] == 0x0e) && (base[i + 3] == 0xe0)
+                    && (std::memcmp(base + i + 4, op1_sig + 4, sizeof(op1_sig) - 4) == 0)) {
+                    LOG_WARN(KERNEL, "{} AMS opcode 1 already Complete(0) at 0x{:X}",
+                        cs->name(), (run_addr + i) & ~1u);
+                    op1_skipped = true;
+                    break;
+                }
+                if (std::memcmp(base + i, op1_sig, sizeof(op1_sig)) != 0) {
+                    continue;
+                }
+                // b Complete(0): (0x22 - 6)/2 = 14 = 0xE00E
+                base[i + 2] = 0x0e;
+                base[i + 3] = 0xe0;
+                LOG_WARN(KERNEL, "{} AMS opcode 1 Complete(0) skip at 0x{:X} (keep AMS alive for J9)",
+                    cs->name(), (run_addr + i) & ~1u);
+                op1_skipped = true;
+                break;
+            }
+            if (!op1_skipped) {
+                LOG_WARN(KERNEL, "{}: AMS opcode 1 Complete(0) skip not found", cs->name());
+            }
+
+            // Launch (vtable+0x24) NewL/Copy still KERN-EXEC 3s on the
+            // synthesized suite. Stub it so opcode 1 Completes(0) and AMS
+            // stays up; host then spawns j9midps60 as an AMS child.
+            // 12-byte sig is unique: the other push/{r4,r5,r6,lr}; movs r4,r0;
+            // movs r5,r1; movs r0,#0x14 sites BLX a different veneer.
+            static const std::uint8_t launch_sig[] = {
+                0x70, 0xb5, 0x04, 0x00, 0x0d, 0x00, 0x14, 0x20, 0x12, 0xf0, 0xe2, 0xeb
+            };
+            static const std::uint8_t launch_stubbed_sig[] = {
+                0x00, 0x20, 0x70, 0x47, 0x0d, 0x00, 0x14, 0x20, 0x12, 0xf0, 0xe2, 0xeb
+            };
+            bool launch_stubbed = false;
+            for (std::uint32_t i = 0; (i + sizeof(launch_sig)) <= code_size; i += 2) {
+                if (std::memcmp(base + i, launch_stubbed_sig, sizeof(launch_stubbed_sig)) == 0) {
+                    LOG_WARN(KERNEL, "{} AMS Launch already stubbed at 0x{:X}",
+                        cs->name(), (run_addr + i) & ~1u);
+                    launch_stubbed = true;
+                    break;
+                }
+                if (std::memcmp(base + i, launch_sig, sizeof(launch_sig)) != 0) {
+                    continue;
+                }
+                base[i + 0] = 0x00;
+                base[i + 1] = 0x20; // movs r0, #0
+                base[i + 2] = 0x70;
+                base[i + 3] = 0x47; // bx lr
+                LOG_WARN(KERNEL, "{} AMS Launch stubbed at 0x{:X} (keep AMS alive for J9)",
+                    cs->name(), (run_addr + i) & ~1u);
+                launch_stubbed = true;
+                break;
+            }
+            if (!launch_stubbed) {
+                LOG_WARN(KERNEL, "{}: AMS Launch stub not found (code_size=0x{:X})",
+                    cs->name(), code_size);
+            }
+        }
+
+        if (find_off == ~0u) {
+            LOG_WARN(KERNEL, "{}: no AMS Find signature matched", cs->name());
         }
     }
 
@@ -688,7 +1457,7 @@ namespace eka2l1::hle {
                 continue;
             }
             std::memcpy(base + i, run_stub, sizeof(run_stub));
-            LOG_INFO(KERNEL, "{} auto-accept patch applied at codeseg offset 0x{:X} (Run stubbed OK, run addr 0x{:X})",
+            LOG_WARN(KERNEL, "{} auto-accept patch applied at codeseg offset 0x{:X} (Run stubbed OK, run addr 0x{:X})",
                 cs->name(), i, run_addr + i);
             applied++;
             break;
@@ -699,13 +1468,375 @@ namespace eka2l1::hle {
         }
     }
 
-    static void apply_j2me_compat_patches(codeseg_ptr cs) {
-        const std::string name = common::lowercase_string(cs->name());
+    static void apply_silent_midlet_installer_compat_patch(codeseg_ptr cs) {
+        // The S60v3 release build of MIDP2SilentMIDletInstall hard-codes
+        // TInstallOptions::iUntrusted to EPolicyNotAllowed.  Consequently every
+        // unsigned MIDlet is rejected by SWInst before the Java/AppArc
+        // registration phase, even though this executable is specifically the
+        // unattended preinstaller.  The corresponding debug build selects
+        // EPolicyAllowed instead.
+        //
+        //   cmp  r0, #0
+        //   bne  use_allowed
+        //   movs r1, #1       ; EPolicyNotAllowed
+        //   b    store
+        // use_allowed:
+        //   movs r1, #0       ; EPolicyAllowed
+        //
+        // Make the release-build arm select EPolicyAllowed as well.  Match the
+        // complete conditional sequence so the patch cannot hit an unrelated
+        // `movs r1, #1` instruction.
+        // Match the cmp/bne/movs-r1-#1 prefix. The following `b` encoding is
+        // not stable across reloc/XIP copies; only the policy immediate is.
+        static const std::uint8_t untrusted_policy_prefix[] = {
+            0x00, 0x28, 0x01, 0xd1, 0x01, 0x21
+        };
 
-        if (name == "midp2installerplugin.dll") {
+        std::uint8_t *base = nullptr;
+        address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (run_addr) {
+            run_addr &= ~1u;
+        }
+        if ((!base || !run_addr) && cs->get_code_base()) {
+            kernel_system *kern = cs->get_kernel_object_owner();
+            if (kern && kern->get_memory_system()) {
+                run_addr = cs->get_code_base() & ~1u;
+                base = reinterpret_cast<std::uint8_t *>(kern->get_memory_system()->get_real_pointer(run_addr));
+            }
+        }
+        if (!run_addr || !base) {
+            LOG_WARN(KERNEL, "{}: unsigned-MIDlet policy patch skipped (no mapped code)", cs->name());
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        std::uint32_t search_size = code_size;
+        if (cs->is_rom() && (search_size < 0x800)) {
+            search_size = 0x2000;
+        }
+
+        auto apply_at = [&](const std::uint32_t off) {
+            base[off + 4] = 0x00; // movs r1, #0  (EPolicyAllowed)
+            LOG_WARN(KERNEL, "{} unsigned-MIDlet policy patch applied at codeseg offset 0x{:X} (run addr 0x{:X} size={})",
+                cs->name(), off, run_addr + off, code_size);
+        };
+
+        for (std::uint32_t i = 0; (i + sizeof(untrusted_policy_prefix)) <= search_size; i++) {
+            if (std::memcmp(base + i, untrusted_policy_prefix, sizeof(untrusted_policy_prefix)) == 0) {
+                apply_at(i);
+                return;
+            }
+        }
+
+        // 5320 MIDP2SilentMIDletInstall.exe: sequence is at code+0x3C2.
+        if ((search_size > 0x3C8)
+            && (base[0x3C2] == 0x00) && (base[0x3C3] == 0x28)
+            && (base[0x3C4] == 0x01) && (base[0x3C5] == 0xd1)
+            && (base[0x3C6] == 0x01) && (base[0x3C7] == 0x21)) {
+            apply_at(0x3C2);
+            return;
+        }
+
+        // Live mapping may already be EPolicyAllowed (00 21) after the first apply.
+        if ((search_size > 0x3C8)
+            && (base[0x3C2] == 0x00) && (base[0x3C3] == 0x28)
+            && (base[0x3C4] == 0x01) && (base[0x3C5] == 0xd1)
+            && (base[0x3C6] == 0x00) && (base[0x3C7] == 0x21)) {
+            LOG_WARN(KERNEL, "{} unsigned-MIDlet policy already Allowed at codeseg offset 0x3C2",
+                cs->name());
+            return;
+        }
+
+        LOG_WARN(KERNEL, "{}: no unsigned-MIDlet policy patch matched (run=0x{:X} size={} [0x3C2]={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X})",
+            cs->name(), run_addr, code_size,
+            (search_size > 0x3CB) ? base[0x3C2] : 0,
+            (search_size > 0x3CB) ? base[0x3C3] : 0,
+            (search_size > 0x3CB) ? base[0x3C4] : 0,
+            (search_size > 0x3CB) ? base[0x3C5] : 0,
+            (search_size > 0x3CB) ? base[0x3C6] : 0,
+            (search_size > 0x3CB) ? base[0x3C7] : 0,
+            (search_size > 0x3CB) ? base[0x3C8] : 0,
+            (search_size > 0x3CB) ? base[0x3C9] : 0,
+            (search_size > 0x3CB) ? base[0x3CA] : 0,
+            (search_size > 0x3CB) ? base[0x3CB] : 0);
+    }
+
+    // j9midps60.exe ships without AllFiles. Host-spawned J9 then gets
+    // KErrPermissionDenied (-46) as soon as it touches Z:\sys\ or AMS's
+    // private dir (C:\private\10203636\). Real AMS launches the VM as a
+    // child; we still grant AllFiles so either path can open those files.
+    static void apply_j9_allfiles_patch(codeseg_ptr cs) {
+        epoc::security_info &info = cs->get_sec_info();
+        if (info.caps.get(epoc::cap_all_files)) {
+            return;
+        }
+        info.caps.set(epoc::cap_all_files);
+        LOG_INFO(KERNEL, "{} AllFiles capability granted for host J9 launch", cs->name());
+    }
+
+    // j9_23_midp2ams.dll keeps a TDesC* at .data+0x28 (RAM 0x3FFF0028 on
+    // the 5320 image). ROM .data is all-zero, so the pointer stays NULL
+    // until option parsing allocates an HBufC. JvmNativePort registers a
+    // Compare callback against that slot first, then later asks whether a
+    // native name equals it — TDesC::Compare(NULL) is KERN-EXEC 3
+    // (euser.dll+0x5170, lr in midp2ams).
+    //
+    // Point the slot at an existing in-image TLitC (do NOT write into the
+    // 12 zero bytes after the ARM dtor walker — that is its literal pool:
+    // start/end of an empty static-destructor list. Overwriting it made
+    // DllMain(ProcessDetach) ldr from 0x20 and KERN-EXEC 3 at
+    // j9_23_midp2ams.dll+0x4C).
+    static void apply_j9_midp2ams_desc_patch(codeseg_ptr cs) {
+        std::uint8_t *data = cs->get_constant_data();
+        const std::uint32_t data_size = cs->get_data_size();
+        if (!data || data_size < 0x2C) {
+            return;
+        }
+
+        std::uint32_t current = 0;
+        std::memcpy(&current, data + 0x28, sizeof(current));
+        if (current != 0) {
+            return;
+        }
+
+        std::uint8_t *code = nullptr;
+        const address code_addr = cs->get_code_run_addr(nullptr, &code);
+        if (!code_addr || !code) {
+            return;
+        }
+
+        // Prefer a length-1 TLitC so euser Compare does not take the
+        // length-0 ldrle path. L"\\" and L":" live in the UTF-16 string
+        // table, not in an ARM literal pool.
+        static const std::uint8_t litc_backslash[] = {
+            0x01, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x00, 0x00
+        };
+        static const std::uint8_t litc_colon[] = {
+            0x01, 0x00, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x00
+        };
+
+        const std::uint32_t code_size = cs->get_code_size();
+        address litc_addr = 0;
+        const std::uint8_t *patterns[] = { litc_backslash, litc_colon };
+        for (const std::uint8_t *pat : patterns) {
+            for (std::uint32_t i = 0; i + 8 <= code_size; i += 2) {
+                if (std::memcmp(code + i, pat, 8) == 0) {
+                    litc_addr = code_addr + i;
+                    break;
+                }
+            }
+            if (litc_addr) {
+                break;
+            }
+        }
+
+        if (!litc_addr) {
+            LOG_WARN(KERNEL, "{}: no length-1 TLitC to seed charset Compare pointer", cs->name());
+            return;
+        }
+
+        std::memcpy(data + 0x28, &litc_addr, sizeof(litc_addr));
+        LOG_INFO(KERNEL, "{} .data+0x28 TDesC* seeded with existing TLitC at 0x{:X}", cs->name(), litc_addr);
+    }
+
+    // NativeFile._open builds a TPtrC16 at sp+8, then calls
+    // (*(0x3fff0018))->vtable+0x20(TPtrC, mode=0). A BKPT after the
+    // TPtrC ctor dumps the exact UTF-16 path Java handed over — this is
+    // the only authoritative answer to "which path" / "is it Chinese".
+    static address g_j9_nf_path_bkpt = 0;
+    static address g_j9_nf_result_bkpt = 0;
+
+    static std::u16string read_guest_utf16(kernel::process *pr, const address ptr, std::uint32_t len) {
+        if (!pr || !ptr || (len == 0)) {
+            return {};
+        }
+        if (len > 512) {
+            len = 512;
+        }
+        const auto *chars = reinterpret_cast<const char16_t *>(pr->get_ptr_on_addr_space(ptr));
+        if (!chars) {
+            return {};
+        }
+        return std::u16string(chars, chars + len);
+    }
+
+    static void j9_restore_thumb_and_advance(arm::core *core, kernel::process *pr,
+        const address pc, const std::uint16_t original, const std::uint32_t r5) {
+        if (pr) {
+            if (auto *half = reinterpret_cast<std::uint16_t *>(pr->get_ptr_on_addr_space(pc))) {
+                *half = original;
+            }
+        }
+        core->set_reg(5, r5);
+        core->set_pc(pc + 2);
+    }
+
+    static void j9_nativefile_open_bkpt(arm::core *core, kernel::thread *thr, const std::uint32_t addr) {
+        if (!core || !thr) {
+            return;
+        }
+        const address pc = addr & ~1u;
+        const bool path_hit = (pc == (g_j9_nf_path_bkpt & ~1u))
+            || ((pc >= 0x81A5D4C8) && (pc <= 0x81A5D4CC));
+        const bool result_hit = (pc == (g_j9_nf_result_bkpt & ~1u))
+            || ((pc >= 0x81A5D4DE) && (pc <= 0x81A5D4E2));
+        if (!path_hit && !result_hit) {
+            return;
+        }
+
+        kernel::process *pr = thr->owning_process();
+        if (result_hit) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] Open result r0={} (0x{:X}) from {}",
+                static_cast<std::int32_t>(core->get_reg(0)), core->get_reg(0),
+                pr ? pr->name() : "?");
+            j9_restore_thumb_and_advance(core, pr, pc, 0x0005, core->get_reg(0));
+            return;
+        }
+
+        const address sp = core->get_reg(13);
+        const auto *tdesc = reinterpret_cast<const std::uint32_t *>(pr ? pr->get_ptr_on_addr_space(sp + 8) : nullptr);
+        const std::uint32_t type_len = tdesc ? tdesc[0] : 0;
+        const address str_ptr = tdesc ? tdesc[1] : 0;
+        const std::uint32_t len = type_len & 0x0FFFFFFFu;
+        std::u16string path = read_guest_utf16(pr, str_ptr, len);
+        if (path.empty()) {
+            path = read_guest_utf16(pr, core->get_reg(6), len);
+        }
+
+        std::string hex;
+        hex.reserve(path.size() * 5);
+        bool non_ascii = false;
+        std::uint32_t slash_fix = 0;
+        for (char16_t &ch : path) {
+            hex += fmt::format("{:04X} ", static_cast<std::uint16_t>(ch));
+            if (static_cast<std::uint16_t>(ch) > 0x7F) {
+                non_ascii = true;
+            }
+            if (ch == u'/') {
+                ch = u'\\';
+                ++slash_fix;
+            }
+        }
+        if ((slash_fix > 0) && str_ptr && pr) {
+            if (auto *writable = reinterpret_cast<char16_t *>(pr->get_ptr_on_addr_space(str_ptr))) {
+                std::memcpy(writable, path.data(), path.size() * sizeof(char16_t));
+            }
+        }
+
+        std::uint32_t file_obj = 0;
+        std::uint32_t file_vt = 0;
+        if (pr) {
+            if (const auto *slot = reinterpret_cast<const std::uint32_t *>(pr->get_ptr_on_addr_space(0x3FFF0018))) {
+                file_obj = slot[0];
+                if (const auto *obj = reinterpret_cast<const std::uint32_t *>(pr->get_ptr_on_addr_space(file_obj))) {
+                    file_vt = obj[0];
+                }
+            }
+        }
+
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] path='{}' len={} non_ascii={} slash_fix={} hex=[{}] "
+            "tdesc=0x{:X}/0x{:X} r6=0x{:X} file_obj=0x{:X} vtable=0x{:X} from {}",
+            common::ucs2_to_utf8(path), len, non_ascii ? 1 : 0, slash_fix, hex,
+            type_len, str_ptr, core->get_reg(6), file_obj, file_vt,
+            pr ? pr->name() : "?");
+
+        j9_restore_thumb_and_advance(core, pr, pc, 0x2500, 0);
+    }
+
+    static void apply_j9_nativefile_open_hook(codeseg_ptr cs) {
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        // NativeFile._open: push {r0-r2,r4-r7,lr}; sub sp,#0x10; movs r2,#0;
+        // movs r4,r0; ldr r0,[r0]; movs r7,#5
+        static const std::uint8_t open_sig[] = {
+            0xf7, 0xb5, 0x84, 0xb0, 0x00, 0x22, 0x04, 0x00, 0x00, 0x68, 0x05, 0x27
+        };
+        static constexpr std::uint32_t k_path_off = 0x38; // movs r5, #0 after TPtrC
+        static constexpr std::uint32_t k_result_off = 0x4E; // movs r5, r0 after Open
+
+        for (std::uint32_t i = 0; (i + k_result_off + 2) <= code_size; i += 2) {
+            if (std::memcmp(base + i, open_sig, sizeof(open_sig)) != 0) {
+                continue;
+            }
+            if (!(((base[i + k_path_off] == 0x00) && (base[i + k_path_off + 1] == 0x25))
+                    || ((base[i + k_path_off] == 0x00) && (base[i + k_path_off + 1] == 0xBE)))) {
+                break;
+            }
+            if (!(((base[i + k_result_off] == 0x00) && (base[i + k_result_off + 1] == 0x05))
+                    || ((base[i + k_result_off] == 0x00) && (base[i + k_result_off + 1] == 0xBE)))) {
+                break;
+            }
+
+            base[i + k_path_off] = 0x00;
+            base[i + k_path_off + 1] = 0xBE;
+            base[i + k_result_off] = 0x00;
+            base[i + k_result_off + 1] = 0xBE;
+            g_j9_nf_path_bkpt = run_addr + i + k_path_off;
+            g_j9_nf_result_bkpt = run_addr + i + k_result_off;
+
+            kernel_system *kern = cs->get_kernel_object_owner();
+            static bool hooked = false;
+            if (kern && !hooked) {
+                kern->register_breakpoint_hit_callback(j9_nativefile_open_bkpt);
+                hooked = true;
+            }
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hooked {} path@0x{:X} result@0x{:X}",
+                cs->name(), g_j9_nf_path_bkpt, g_j9_nf_result_bkpt);
+            break;
+        }
+    }
+
+    // export 2 factory V2/V1 both NULL used to User::Exit(1), same as
+    // Java Args.usage(). Remap that native failure to 11 so it is not
+    // confused with parse/startApp Exit(1).
+    //
+    // Do NOT inject a bare "-app" into the CDesCArray. Args.parse treats
+    // -app as iAppClassName (next token) and -event as the AMS event
+    // name. A flag with no value calls usage() → "Bad command line".
+    // Host CommandLine now passes `-app <MIDlet-1 class>` without `-event`.
+    static void apply_j9_midp2ams_app_arg_patch(codeseg_ptr cs) {
+        std::uint8_t *base = nullptr;
+        const address run_addr = cs->get_code_run_addr(nullptr, &base);
+        if (!run_addr || !base) {
+            return;
+        }
+
+        const std::uint32_t code_size = cs->get_code_size();
+        static const std::uint8_t factory_sig[] = { 0x20, 0x60, 0x01, 0xd1, 0x01, 0x20, 0xde, 0xe7 };
+        for (std::uint32_t i = 0; (i + sizeof(factory_sig)) <= code_size; i += 2) {
+            if (std::memcmp(base + i, factory_sig, sizeof(factory_sig)) == 0) {
+                base[i + 4] = 11;
+                LOG_WARN(KERNEL, "{} export2 factory-fail status remapped 1→11 at 0x{:X}",
+                    cs->name(), (run_addr + i + 4) & ~1u);
+                break;
+            }
+        }
+    }
+
+    void apply_j2me_compat_patches(codeseg_ptr cs, const std::string &name_hint) {
+        const std::string name = common::lowercase_string(name_hint.empty() ? cs->name() : name_hint);
+
+        if (name.find("midp2silentmidletinstall") != std::string::npos) {
+            apply_silent_midlet_installer_compat_patch(cs);
+        } else if (name == "midp2installerplugin.dll") {
             apply_installer_compat_patch(cs);
         } else if (name == "ifeui.dll") {
             apply_ifeui_compat_patch(cs);
+        } else if (name.find("j9midps60") != std::string::npos) {
+            apply_j9_allfiles_patch(cs);
+        } else if (name.find("j9_23_midp2ams") != std::string::npos) {
+            apply_j9_midp2ams_desc_patch(cs);
+            apply_j9_midp2ams_app_arg_patch(cs);
+            apply_j9_nativefile_open_hook(cs);
+        } else if (name.find("integrityserver") != std::string::npos) {
+            apply_integrity_compat_patch(cs);
+        } else if (name.find("midp2systemams") != std::string::npos) {
+            apply_ams_find_compat_patch(cs);
         }
     }
 
@@ -794,6 +1925,7 @@ namespace eka2l1::hle {
 
     codeseg_ptr lib_manager::load_as_e32img(loader::e32img &img, const std::u16string &path) {
         if (auto seg = kern_->get_by_name<kernel::codeseg>(get_e32_codeseg_name_from_path(path))) {
+            apply_j2me_compat_patches(seg, common::ucs2_to_utf8(eka2l1::filename(path)));
             return seg;
         }
 
@@ -802,6 +1934,10 @@ namespace eka2l1::hle {
 
     codeseg_ptr lib_manager::load_as_romimg(loader::romimg &romimg, const std::u16string &path, const bool only_shell) {
         if (auto seg = kern_->pull_codeseg_by_ep(romimg.header.entry_point)) {
+            // Executable code segments can be materialized while the ROM image
+            // is indexed, before their process is launched. Apply targeted
+            // runtime compatibility patches here as well as on first import.
+            apply_j2me_compat_patches(seg, common::ucs2_to_utf8(eka2l1::filename(path)));
             return seg;
         }
 
@@ -832,7 +1968,7 @@ namespace eka2l1::hle {
             common::lowercase_string(common::ucs2_to_utf8(eka2l1::filename(path)));
 
         auto cs = kern_->create<kernel::codeseg>(seg_name, info);
-        apply_j2me_compat_patches(cs);
+        apply_j2me_compat_patches(cs, seg_name);
 
         if (only_shell) {
             return cs;

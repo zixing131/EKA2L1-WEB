@@ -283,6 +283,46 @@
 
         var launch = isJ2me ? EKA2L1.launchMidlet(appUid) : EKA2L1.launchApp(appUid);
 
+        if (launch === -101) {
+            // SystemAMSCore -boot is running but !MIDP.SystemAMS.SystemAMS is
+            // not listening yet. Keep emulation going and retry launch.
+            EKA2L1.setPaused(false);
+            overlay(EKA2L1.t('overlay.startingJavaAms'), EKA2L1.t('overlay.startingJavaAmsHint'), 96);
+            var amsT0 = performance.now();
+            var amsPoll = setInterval(function () {
+                var elapsed = performance.now() - amsT0;
+                launch = EKA2L1.launchMidlet(appUid);
+                if (launch === 0) {
+                    clearInterval(amsPoll);
+                    console.log('[EKA2L1] Java AMS ready, MIDlet launch succeeded');
+                    beginFramePoll();
+                    return;
+                }
+                if (launch === -101) {
+                    var secs = (elapsed / 1000) | 0;
+                    if (secs >= 2) {
+                        overlay(EKA2L1.t('overlay.startingJavaAms'),
+                            EKA2L1.t('overlay.startingJavaAmsHintSecs', { secs: secs }), 96);
+                    }
+                    if (elapsed > 45000) {
+                        clearInterval(amsPoll);
+                        overlayError(EKA2L1.t('overlay.launchTimeoutTitle'),
+                            EKA2L1.t('overlay.startingJavaAmsTimeout'));
+                    }
+                    return;
+                }
+                clearInterval(amsPoll);
+                if (launch === -100) {
+                    overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                        EKA2L1.t('overlay.reregisterFailed'));
+                } else {
+                    overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                        EKA2L1.t('overlay.launchFailedText', { code: launch }));
+                }
+            }, 400);
+            return;
+        }
+
         if (launch === -100) {
             // MIDlet not in AppArc (lost on restart). The silent installer was
             // re-spawned to restore registration. Keep emulation running so the
@@ -355,6 +395,7 @@
                 overlayError(
                     EKA2L1.t('overlay.appExitedTitle'),
                     EKA2L1.t('overlay.appExitedText', {
+                        name: exited.name || '?',
                         category: cat,
                         reason: reason,
                         hint: hint
