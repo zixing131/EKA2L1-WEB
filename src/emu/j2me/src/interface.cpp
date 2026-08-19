@@ -35,6 +35,7 @@
 #include <utils/err.h>
 #include <vfs/vfs.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -123,6 +124,400 @@ namespace eka2l1::j2me {
         return copy_guest_file(io, src, dst, false, false);
     }
 
+    static bool write_guest_bytes(io_system *io, const std::u16string &dst, const void *data,
+        const std::size_t size) {
+        if (!io || !data) {
+            return false;
+        }
+        const std::u16string dir = eka2l1::file_directory(dst);
+        if (!dir.empty()) {
+            io->create_directories(dir);
+        }
+        io->delete_entry(dst);
+        symfile out = io->open_file(dst, WRITE_MODE | BIN_MODE);
+        if (!out) {
+            return false;
+        }
+        const bool ok = (out->write_file(data, 1, static_cast<std::uint32_t>(size)) == size);
+        out->close();
+        return ok;
+    }
+
+    static int explode_jar_to_home(io_system *io, const std::u16string &jar_path,
+        const std::u16string &home) {
+        if (!io || jar_path.empty() || home.empty()) {
+            return 0;
+        }
+        symfile jar = io->open_file(jar_path, READ_MODE | BIN_MODE);
+        if (!jar) {
+            return 0;
+        }
+        std::vector<char> buf(jar->size());
+        const auto nread = jar->read_file(buf.data(), 1, static_cast<std::uint32_t>(buf.size()));
+        jar->close();
+        if (nread != buf.size()) {
+            return 0;
+        }
+        mz_zip_archive archive{};
+        if (!mz_zip_reader_init_mem(&archive, buf.data(), buf.size(), 0)) {
+            return 0;
+        }
+        int n = 0;
+        for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&archive); ++i) {
+            mz_zip_archive_file_stat stat{};
+            if (!mz_zip_reader_file_stat(&archive, i, &stat) || stat.m_is_directory) {
+                continue;
+            }
+            const std::string name = stat.m_filename;
+            if (name.rfind("META-INF/", 0) == 0) {
+                continue;
+            }
+            std::u16string rel;
+            rel.reserve(name.size());
+            for (unsigned char c : name) {
+                rel.push_back((c == static_cast<unsigned char>('/'))
+                    ? u'\\' : static_cast<char16_t>(c));
+            }
+            std::vector<char> out(static_cast<std::size_t>(stat.m_uncomp_size));
+            if (stat.m_uncomp_size
+                && !mz_zip_reader_extract_to_mem(&archive, i, out.data(), out.size(), 0)) {
+                continue;
+            }
+            if (write_guest_bytes(io, home + rel, out.empty() ? "" : out.data(), out.size())) {
+                ++n;
+            }
+        }
+        mz_zip_reader_end(&archive);
+        return n;
+    }
+
+    // jar2jxe embeds a ZIP (rom.classes + META-INF/JXE.MF) in the ROM XIP
+    // image. iveLoadJxeFromFile wants that ZIP, not the surrounding DLL.
+    // The first PK\x03\x04 in a DLL is often a false hit inside a string
+    // (jclcldc11_23 has "PK\x03\x04zipsup.c:..."); only accept an EOCD
+    // whose central directory and local header actually line up.
+    static bool extract_embedded_jxe_zip(const std::vector<char> &blob, std::vector<char> &zip_out) {
+        if (blob.size() < 22) {
+            return false;
+        }
+        std::size_t best_start = static_cast<std::size_t>(-1);
+        std::size_t best_end = 0;
+        bool best_has_j99 = false;
+        for (std::size_t i = blob.size() - 22; i > 0; --i) {
+            if ((blob[i] != 'P') || (blob[i + 1] != 'K') || (blob[i + 2] != 5) || (blob[i + 3] != 6)) {
+                continue;
+            }
+            const std::uint16_t nent = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(blob[i + 8])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 9])) << 8));
+            const std::uint16_t tnent = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(blob[i + 10])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 11])) << 8));
+            const std::uint32_t csize = static_cast<std::uint32_t>(
+                static_cast<unsigned char>(blob[i + 12])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 13])) << 8)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 14])) << 16)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 15])) << 24));
+            const std::uint32_t coff = static_cast<std::uint32_t>(
+                static_cast<unsigned char>(blob[i + 16])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 17])) << 8)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 18])) << 16)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 19])) << 24));
+            const std::uint16_t comment = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(blob[i + 20])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(blob[i + 21])) << 8));
+            if ((nent != tnent) || (nent == 0) || (nent > 4096) || (comment > 256)
+                || (csize < 46) || (csize > 0x100000) || (i < csize)) {
+                continue;
+            }
+            const std::size_t cdir = i - csize;
+            if ((cdir + 4) > blob.size()
+                || (blob[cdir] != 'P') || (blob[cdir + 1] != 'K')
+                || (blob[cdir + 2] != 1) || (blob[cdir + 3] != 2)
+                || (cdir < coff)) {
+                continue;
+            }
+            const std::size_t start = cdir - coff;
+            if ((start + 4) > blob.size()
+                || (blob[start] != 'P') || (blob[start + 1] != 'K')
+                || (blob[start + 2] != 3) || (blob[start + 3] != 4)) {
+                continue;
+            }
+            const std::size_t zip_end = i + 22 + comment;
+            if (zip_end > blob.size()) {
+                continue;
+            }
+            bool has_j99 = false;
+            const std::size_t scan_lim = (start + 64 < zip_end) ? (start + 64) : zip_end;
+            for (std::size_t j = start; (j + 4) <= scan_lim; ++j) {
+                if ((blob[j] == 'J') && (blob[j + 1] == '9')
+                    && (blob[j + 2] == '9') && (blob[j + 3] == 'J')) {
+                    has_j99 = true;
+                    break;
+                }
+            }
+            if ((best_start == static_cast<std::size_t>(-1)) || (has_j99 && !best_has_j99)
+                || (has_j99 == best_has_j99 && (zip_end - start) > (best_end - best_start))) {
+                best_start = start;
+                best_end = zip_end;
+                best_has_j99 = has_j99;
+            }
+        }
+        if (best_start == static_cast<std::size_t>(-1)) {
+            return false;
+        }
+        zip_out.assign(blob.begin() + static_cast<std::ptrdiff_t>(best_start),
+            blob.begin() + static_cast<std::ptrdiff_t>(best_end));
+        return !zip_out.empty();
+    }
+
+    // jar2jxe ZIP is STORE. type=JXE / iveLoadJxe fopen("jxe=<ptr>") maps the
+    // file as a raw J9 image; feeding it the wrapping PK makes romMethods
+    // resolve to address 0 (KERN-EXEC 3 at j9vmall ldr [r7,#8]).
+    static bool extract_stored_zip_member(const std::vector<char> &zip, const char *name,
+        std::vector<char> &out) {
+        if (!name || zip.size() < 30) {
+            return false;
+        }
+        const std::size_t nlen = std::strlen(name);
+        std::size_t i = 0;
+        while (i + 30 <= zip.size()) {
+            if ((zip[i] != 'P') || (zip[i + 1] != 'K') || (zip[i + 2] != 3) || (zip[i + 3] != 4)) {
+                const auto *hit = reinterpret_cast<const char *>(
+                    std::memchr(zip.data() + i + 1, 'P', zip.size() - i - 1));
+                if (!hit) {
+                    return false;
+                }
+                i = static_cast<std::size_t>(hit - zip.data());
+                continue;
+            }
+            const std::uint16_t method = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(zip[i + 8])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 9])) << 8));
+            const std::uint32_t csize = static_cast<std::uint32_t>(
+                static_cast<unsigned char>(zip[i + 18])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 19])) << 8)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 20])) << 16)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 21])) << 24));
+            const std::uint32_t usize = static_cast<std::uint32_t>(
+                static_cast<unsigned char>(zip[i + 22])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 23])) << 8)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 24])) << 16)
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 25])) << 24));
+            const std::uint16_t fnlen = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(zip[i + 26])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 27])) << 8));
+            const std::uint16_t extra = static_cast<std::uint16_t>(
+                static_cast<unsigned char>(zip[i + 28])
+                | (static_cast<unsigned int>(static_cast<unsigned char>(zip[i + 29])) << 8));
+            const std::size_t data = i + 30 + fnlen + extra;
+            if ((data + csize) > zip.size()) {
+                return false;
+            }
+            if ((fnlen == nlen) && (std::memcmp(zip.data() + i + 30, name, nlen) == 0)) {
+                if ((method != 0) || (csize != usize) || (usize < 16)) {
+                    return false;
+                }
+                out.assign(zip.begin() + static_cast<std::ptrdiff_t>(data),
+                    zip.begin() + static_cast<std::ptrdiff_t>(data + usize));
+                return (out[0] == 'J') && (out[1] == '9') && (out[2] == '9') && (out[3] == 'J');
+            }
+            i = data + csize;
+        }
+        return false;
+    }
+
+    static bool extract_jxe_from_guest_dll(io_system *io, const std::u16string &dll,
+        const std::u16string &dst) {
+        if (!io->exist(dll)) {
+            return false;
+        }
+        symfile src = io->open_file(dll, READ_MODE | BIN_MODE);
+        if (!src) {
+            return false;
+        }
+        std::vector<char> blob(src->size());
+        src->read_file(blob.data(), 1, static_cast<std::uint32_t>(blob.size()));
+        src->close();
+        std::vector<char> zip;
+        if (!extract_embedded_jxe_zip(blob, zip)) {
+            return false;
+        }
+        // Bootclasspath is now C:\jcl.jxe (ends in .jxe), so j9ext.c takes
+        // the JXE/hyzip file path instead of treating "jxe=%p" as a JAR.
+        // That path wants the wrapping ZIP (PK + rom.classes at +48), not
+        // the inner naked J99J — hyzip looks up "rom.classes" by name.
+        return write_guest_bytes(io, dst, zip.data(), zip.size());
+    }
+
+    // iveLoadJxe of an in-memory JXESL pointer (J9GetJXE) crashes in
+    // j9vmall dynload on this port (null+0x28). iveLoadJxeFromFile of the
+    // same ZIP works — JCL already takes that path. Rewrite every staged
+    // type=JXESL odc to type=JXE and drop the embedded ZIP next to it.
+    static void rewrite_jxsl_odcs_to_file_jxe(io_system *io) {
+        static constexpr char16_t C_EXT[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\";
+        static constexpr char16_t C_EXT_ODC[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\odc\\";
+        auto listing = io->open_dir(std::u16string(C_EXT) + u"*", {}, io_attrib_include_file);
+        if (!listing) {
+            return;
+        }
+        int converted = 0;
+        while (auto ent = listing->get_next_entry()) {
+            const std::string fname = ent->name;
+            const std::string lower_fn = common::lowercase_string(fname);
+            if ((lower_fn.size() < 4) || (lower_fn.compare(lower_fn.size() - 4, 4, ".odc") != 0)) {
+                continue;
+            }
+            const std::u16string odc_path = std::u16string(C_EXT) + common::utf8_to_ucs2(fname);
+            symfile f = io->open_file(odc_path, READ_MODE | BIN_MODE);
+            if (!f) {
+                continue;
+            }
+            std::string text(static_cast<std::size_t>(f->size()), '\0');
+            f->read_file(text.data(), 1, static_cast<std::uint32_t>(text.size()));
+            f->close();
+            const std::string lower_text = common::lowercase_string(text);
+            if (lower_text.find("type=jxesl") == std::string::npos) {
+                continue;
+            }
+            std::string container;
+            const std::size_t npos = lower_text.find("name=");
+            if (npos != std::string::npos) {
+                const std::size_t start = npos + 5;
+                const std::size_t end = text.find_first_of("\r\n", start);
+                container = text.substr(start, ((end == std::string::npos) ? text.size() : end) - start);
+                while (!container.empty() && ((container.back() == ' ') || (container.back() == '\t'))) {
+                    container.pop_back();
+                }
+            }
+            if (container.empty()) {
+                continue;
+            }
+            std::string stem = container;
+            const std::string stem_l = common::lowercase_string(stem);
+            if ((stem_l.size() >= 4) && (stem_l.compare(stem_l.size() - 4, 4, ".jxe") == 0)) {
+                stem.resize(stem.size() - 4);
+            }
+            const std::u16string dll = u"Z:\\sys\\bin\\" + common::utf8_to_ucs2(stem) + u".dll";
+            const std::string jxe_name = stem + ".jxe";
+            const std::u16string jxe_path = std::u16string(C_EXT) + common::utf8_to_ucs2(jxe_name);
+            if (!extract_jxe_from_guest_dll(io, dll, jxe_path)) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] JXESL {} extract failed from {}", fname,
+                    common::ucs2_to_utf8(dll));
+                continue;
+            }
+            copy_guest_file(io, jxe_path, std::u16string(C_EXT_ODC) + common::utf8_to_ucs2(jxe_name), true, false);
+            std::string out = text;
+            auto replace_key = [&](const char *key, const std::string &val) {
+                const std::string lkey = common::lowercase_string(key);
+                const std::size_t p = common::lowercase_string(out).find(lkey);
+                if (p == std::string::npos) {
+                    return;
+                }
+                const std::size_t e = out.find_first_of("\r\n", p);
+                const std::size_t n = (e == std::string::npos) ? (out.size() - p) : (e - p);
+                out.replace(p, n, std::string(key) + val);
+            };
+            replace_key("name=", jxe_name);
+            replace_key("type=", "JXE");
+            write_guest_bytes(io, odc_path, out.data(), out.size());
+            ++converted;
+        }
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] converted {} JXESL odc(s) to type=JXE file load", converted);
+    }
+
+    static void copy_guest_dir_files(io_system *io, const std::u16string &src_dir,
+        const std::u16string &dst_dir) {
+        io->create_directories(dst_dir);
+        auto listing = io->open_dir(src_dir + u"*", {}, io_attrib_include_file);
+        if (!listing) {
+            return;
+        }
+        while (auto ent = listing->get_next_entry()) {
+            if (ent->name.empty() || (ent->name[0] == '.')) {
+                continue;
+            }
+            copy_guest_file(io, src_dir + common::utf8_to_ucs2(ent->name),
+                dst_dir + common::utf8_to_ucs2(ent->name), true, false);
+        }
+    }
+
+    // J9 dynload scans %c:\resource\ive\lib\jclCldc11\ext\*.odc.
+    // %c is the system drive (C:), so an empty C: ext hides the ROM
+    // type=JXESL descriptors. Copy the ROM odc tree onto C: (keep
+    // type=JXESL so J9GetJXE + in-DLL natives stay together) and also
+    // extract the embedded JXE ZIPs as files for iveLoadJxeFromFile.
+    static void stage_j9_jxe_runtime(io_system *io) {
+        static constexpr char16_t Z_EXT[] = u"Z:\\resource\\ive\\lib\\jclCldc11\\ext\\";
+        static constexpr char16_t C_EXT[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\";
+        static constexpr char16_t C_EXT_ODC[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\odc\\";
+        static constexpr char16_t Z_MIDP[] = u"Z:\\sys\\bin\\j9_23_midp2ams.dll";
+        static constexpr char16_t Z_JCL[] = u"Z:\\sys\\bin\\jclcldc11_23.dll";
+        static constexpr char16_t C_MIDP_JXE[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\midp2ams.jxe";
+        static constexpr char16_t C_JCL_JXE[] = u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\jcl.jxe";
+
+        copy_guest_dir_files(io, Z_EXT, C_EXT);
+        copy_guest_dir_files(io, std::u16string(Z_EXT) + u"odc\\", C_EXT_ODC);
+
+        const bool midp_ok = extract_jxe_from_guest_dll(io, Z_MIDP, C_MIDP_JXE);
+        const bool jcl_ok = extract_jxe_from_guest_dll(io, Z_JCL, C_JCL_JXE);
+        if (midp_ok) {
+            copy_guest_file(io, C_MIDP_JXE, std::u16string(C_EXT_ODC) + u"midp2ams.jxe", true, false);
+            copy_guest_file(io, C_MIDP_JXE, u"C:\\midp2ams.jxe", true, false);
+        }
+        if (jcl_ok) {
+            copy_guest_file(io, C_JCL_JXE, std::u16string(C_EXT_ODC) + u"jcl.jxe", true, false);
+            copy_guest_file(io, C_JCL_JXE, u"C:\\jcl.jxe", true, false);
+            copy_guest_file(io, C_JCL_JXE, u"C:\\jcl.zip", true, false);
+            copy_guest_file(io, C_JCL_JXE, u"C:\\resource\\ive\\lib\\jclCldc11\\jclcldc11_23.jxe", true, false);
+            copy_guest_file(io, C_JCL_JXE, u"C:\\resource\\ive\\lib\\jclCldc11\\jclcdc11_23.jxe", true, false);
+            copy_guest_file(io, C_JCL_JXE, u"C:\\resource\\ive\\lib\\jclCldc11\\romclass_cln.jxe", true, false);
+        }
+
+        // JCL is a plain JXE file. midp2ams stays ROM type=JXESL so
+        // J9GetJXE + J9VMDllMain still bind JNI natives.
+        static const char JCL_ODC[] =
+            "[container]\n"
+            "name=jcl.jxe\n"
+            "type=JXE\n"
+            "\n"
+            "[packages]\n"
+            "com/ibm/oti/io\n"
+            "com/ibm/oti/lang\n"
+            "com/ibm/oti/util\n"
+            "com/ibm/oti/vm\n"
+            "java/io\n"
+            "java/lang\n"
+            "java/lang/ref\n"
+            "java/security\n"
+            "java/util\n"
+            "javax/microedition/io\n"
+            "\n"
+            "[properties]\n";
+        write_guest_bytes(io, std::u16string(C_EXT) + u"0_jcl_jxe.odc",
+            JCL_ODC, sizeof(JCL_ODC) - 1);
+
+        rewrite_jxsl_odcs_to_file_jxe(io);
+
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] staged JXE midp={} ({} bytes) jcl={} ({} bytes) odc-on-C",
+            midp_ok ? 1 : 0,
+            io->exist(C_MIDP_JXE) ? 1 : 0,
+            jcl_ok ? 1 : 0,
+            io->exist(C_JCL_JXE) ? 1 : 0);
+        if (midp_ok) {
+            if (symfile jf = io->open_file(C_MIDP_JXE, READ_MODE | BIN_MODE)) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] midp2ams.jxe size={}", jf->size());
+                jf->close();
+            }
+        }
+        if (jcl_ok) {
+            if (symfile jf = io->open_file(C_JCL_JXE, READ_MODE | BIN_MODE)) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] jcl.jxe size={}", jf->size());
+                jf->close();
+            }
+        }
+    }
+
     static kernel::process *find_running_process_with_args(kernel_system *kern, const char *needle,
         const char *args_needle) {
         if (!kern || !needle || !needle[0]) {
@@ -151,6 +546,19 @@ namespace eka2l1::j2me {
 
     static kernel::process *find_running_process(kernel_system *kern, const char *needle) {
         return find_running_process_with_args(kern, needle, nullptr);
+    }
+
+    std::u16string build_j9midps60_args(std::uint32_t suite_uid, const std::u16string &midlet_class) {
+        // Do NOT pass -jcl/-Xjcl: midp2ams Args.parse does not know those
+        // flags (Unrecognized argument → usage → Exit(1)). j9vmall loads
+        // the JCL itself as jclcdc11_23.dll; the loader aliases that to
+        // the ROM's jclcldc11_23.dll.
+        std::u16string args = u"-jad C:/j.jad -jar C:/j.jar -msid "
+            + common::utf8_to_ucs2(fmt::format("{}", suite_uid)) + u" -msin 1";
+        if (!midlet_class.empty()) {
+            args += u" -app " + midlet_class;
+        }
+        return args;
     }
 
     // SystemAMSCore -boot scans ?:\system\data\midp2\preinstall\ (and the later
@@ -551,13 +959,37 @@ namespace eka2l1::j2me {
             }
         }
 
-        static const char16_t *J9_PROPS[] = {
-            u"C:\\resource\\ive\\bin\\java.properties",
+        // RPKG has the real 35KB java.properties. An empty C: stub from an
+        // earlier bring-up pass must be replaced, or J9 boots with no
+        // java.home / bootstrap library path.
+        static constexpr char16_t Z_JAVA_PROPS[] = u"Z:\\resource\\ive\\bin\\java.properties";
+        static constexpr char16_t C_JAVA_PROPS[] = u"C:\\resource\\ive\\bin\\java.properties";
+        bool c_props_empty = true;
+        if (symfile cf = io->open_file(C_JAVA_PROPS, READ_MODE | BIN_MODE)) {
+            c_props_empty = (cf->size() == 0);
+            cf->close();
+        }
+        if (c_props_empty) {
+            if (copy_guest_file(io, Z_JAVA_PROPS, C_JAVA_PROPS, true, false)) {
+                LOG_WARN(J2ME, "Provisioned java.properties from ROM");
+            }
+        }
+
+        // Previous DirOpen fallback created an empty nokiaextcldc that
+        // hid the JXESL in j9_23_midp2ams.dll. Remove it if still there.
+        static constexpr char16_t PHANTOM_NOKIAEXT[] =
+            u"C:\\resource\\ive\\lib\\jclCldc11\\nokiaextcldc\\";
+        if (io->exist(PHANTOM_NOKIAEXT)) {
+            io->delete_entry(PHANTOM_NOKIAEXT);
+            LOG_WARN(J2ME, "Removed empty phantom nokiaextcldc");
+        }
+
+        static const char16_t *J9_LOCALE_PROPS[] = {
             u"C:\\resource\\ive\\bin\\java_en.properties",
             u"C:\\resource\\ive\\bin\\java_en_GB.properties",
             u"C:\\resource\\ive\\bin\\java_en_US.properties",
         };
-        for (const char16_t *prop : J9_PROPS) {
+        for (const char16_t *prop : J9_LOCALE_PROPS) {
             if (io->exist(prop)) {
                 continue;
             }
@@ -1222,6 +1654,13 @@ namespace eka2l1::j2me {
         static constexpr char16_t CMD_JAD[] = u"C:/j.jad";
         static constexpr char16_t CMD_JAR[] = u"C:/j.jar";
         io->create_directories(PRIV_DIR);
+        io->create_directories(u"C:\\sys\\bin\\");
+        io->create_directories(u"C:\\logs\\java\\");
+        stage_j9_jxe_runtime(io);
+        // j9vmall fopen/Load "jclcdc11_23.dll"; ROM name is jclcldc11_23.dll.
+        static constexpr char16_t ROM_JCL[] = u"Z:\\sys\\bin\\jclcldc11_23.dll";
+        copy_guest_file(io, ROM_JCL, u"C:\\sys\\bin\\jclcdc11_23.dll", false, false);
+        copy_guest_file(io, ROM_JCL, std::u16string(PRIV_DIR) + u"jclcdc11_23.dll", false, false);
         if (!copy_guest_file(io, suite_jar, PRIV_JAR, true, true) || !io->exist(PRIV_JAR)) {
             LOG_ERROR(J2ME, "Can't copy suite JAR to {}", common::ucs2_to_utf8(PRIV_JAR));
             return nullptr;
@@ -1240,6 +1679,34 @@ namespace eka2l1::j2me {
             return nullptr;
         }
         copy_guest_file(io, PRIV_JAD, ROOT_JAD, true, false);
+
+        // findSuiteHome does RFs::Entry on C:\Private\102033E6\<msid>.
+        // Args.parse feeds -msid to TLex::Val (decimal): "0x20000004" stops
+        // at 'x' and the suite id becomes 0. Stage that home (and the
+        // decimal / hex spellings) so Entry succeeds even if the next
+        // command line still carries a 0x prefix.
+        auto stage_suite_home = [&](const std::u16string &home, const bool explode) {
+            io->create_directories(home);
+            copy_guest_file(io, PRIV_JAR, home + u"j.jar", true, false);
+            copy_guest_file(io, PRIV_JAR, home + u"m.jar", true, false);
+            copy_guest_file(io, PRIV_JAD, home + u"j.jad", true, false);
+            copy_guest_file(io, PRIV_JAD, home + u"m.jad", true, false);
+            if (explode) {
+                const int n = explode_jar_to_home(io, PRIV_JAR, home);
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] exploded JAR n={} into '{}'",
+                    n, common::ucs2_to_utf8(home));
+            }
+        };
+        const std::u16string msid_dec = common::utf8_to_ucs2(fmt::format("{}", suite_uid));
+        const std::u16string msid_hex = common::utf8_to_ucs2(fmt::format("{:x}", suite_uid));
+        const std::u16string msid_hex8 = common::utf8_to_ucs2(fmt::format("{:08X}", suite_uid));
+        stage_suite_home(std::u16string(PRIV_DIR) + u"0\\", true);
+        stage_suite_home(std::u16string(PRIV_DIR) + msid_dec + u"\\", false);
+        stage_suite_home(std::u16string(PRIV_DIR) + msid_hex + u"\\", false);
+        stage_suite_home(std::u16string(PRIV_DIR) + msid_hex8 + u"\\", false);
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] staged suite homes 0/{}/{}", 
+            common::ucs2_to_utf8(msid_dec), common::ucs2_to_utf8(msid_hex8));
+
         if (!midlet_class.empty()) {
             copy_guest_file(io, PRIV_JAR, std::u16string(PRIV_DIR) + midlet_class + u".jar", true, false);
             copy_guest_file(io, PRIV_JAR, u"C:\\" + midlet_class + u".jar", true, false);
@@ -1284,15 +1751,13 @@ namespace eka2l1::j2me {
         // and CMS.run throws → main catch → exit(1).
         (void)suite_name;
         (void)suite_dir;
-        const std::u16string msid = u"0x" + common::utf8_to_ucs2(fmt::format("{:08X}", suite_uid));
+        // Decimal: TLex::Val on "0x20000004" yields 0 (stops at 'x').
+        const std::u16string msid = msid_dec;
         if (midlet_class.empty()) {
             midlet_class = midlet_class_from_guest_jad(io, jad);
         }
-        std::u16string args = u"-jad " + std::u16string(CMD_JAD) + u" -jar " + std::u16string(CMD_JAR)
-            + u" -msid " + msid + u" -msin 1";
-        if (!midlet_class.empty()) {
-            args += u" -app " + midlet_class;
-        } else {
+        std::u16string args = build_j9midps60_args(suite_uid, midlet_class);
+        if (midlet_class.empty()) {
             LOG_WARN(J2ME, "JAD has no MIDlet-1 class; J9 will not startApp");
         }
         LOG_WARN(EMULATED_STDOUT, "[j9-nf] args='{}'", common::ucs2_to_utf8(args));

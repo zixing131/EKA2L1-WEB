@@ -87,6 +87,7 @@ namespace eka2l1 {
             bool scan_org_only = false);
 
         eka2l1::central_repo *load_repo(eka2l1::io_system *io, device_manager *mngr, const std::uint32_t key);
+        eka2l1::central_repo *synthesize_missing_repo(const std::uint32_t key, const std::string &requester);
         void callback_on_drive_change(eka2l1::io_system *io, const drive_number drv, int act);
 
         int closerep(io_system *io, const std::uint32_t repo_id, const std::uint32_t ss_id);

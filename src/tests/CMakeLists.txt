@@ -16,7 +16,8 @@ target_link_libraries(ekatests PRIVATE
     epocio
     epockern
     epocloader
-    epocservs)
+    epocservs
+    j2me)
 
 add_test(
   NAME ekatests

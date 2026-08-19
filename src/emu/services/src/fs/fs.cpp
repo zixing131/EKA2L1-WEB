@@ -48,6 +48,8 @@
 #include <re2/re2.h>
 
 namespace eka2l1 {
+    void note_j9_fs_miss(const std::u16string &raw, const int err);
+    bool resolve_j9_jxe_path(io_system *io, kernel::process *pr, std::u16string &path, std::string &path_utf8);
     bool check_path_capabilities_pass(const std::u16string &path, kernel::process *pr, epoc::security_policy &private_policy, epoc::security_policy &sys_policy, epoc::security_policy &resource_policy) {
         if (!pr->get_kernel_object_owner()->support_capabilities()) {
             return true;
@@ -996,12 +998,101 @@ namespace eka2l1 {
         LOG_TRACE(SERVICE_EFSRV, "Get entry result for {}: {}", common::ucs2_to_utf8(fname), entry_hle ? "found" : "not found");
 
         if (j9_opener) {
-            LOG_WARN(SERVICE_EFSRV, "[j9-fs] Entry raw='{}' resolved='{}' found={} ss='{}' from {}",
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs Entry raw='{}' resolved='{}' found={} ss='{}' from {}",
                 raw_utf8, common::ucs2_to_utf8(fname), entry_hle ? 1 : 0,
                 common::ucs2_to_utf8(ss_path), opener_name);
         }
 
+        if (!entry_hle && j9_opener) {
+            const std::string lower_miss = common::lowercase_string(common::ucs2_to_utf8(fname));
+            if ((lower_miss.find("jclcdc") != std::string::npos)
+                && (lower_miss.find("jclcldc") == std::string::npos)) {
+                static const std::u16string REAL_JCL = u"Z:\\sys\\bin\\jclcldc11_23.dll";
+                if (io->exist(REAL_JCL)) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs Entry redirect '{}' -> '{}' (jclcdc -> jclcldc) from {}",
+                        common::ucs2_to_utf8(fname), common::ucs2_to_utf8(REAL_JCL), opener_name);
+                    fname = REAL_JCL;
+                    entry_hle = io->get_entry_info(fname);
+                }
+            }
+        }
+
+        if (j9_opener && (fname.size() >= 2) && (fname[1] == u':')) {
+            const std::string lower_miss = common::lowercase_string(common::ucs2_to_utf8(fname));
+            if (lower_miss.find("\\resource\\ive\\lib") != std::string::npos) {
+                std::u16string alt = fname;
+                if ((alt[0] == u'Z') || (alt[0] == u'z')) {
+                    alt[0] = u'C';
+                    if (io->exist(alt)) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs Entry redirect '{}' -> '{}' (prefer staged ive/lib) from {}",
+                            common::ucs2_to_utf8(fname), common::ucs2_to_utf8(alt), opener_name);
+                        fname = alt;
+                        entry_hle = io->get_entry_info(fname);
+                    }
+                } else if (((alt[0] == u'C') || (alt[0] == u'c')) && !entry_hle) {
+                    alt[0] = u'Z';
+                    if (io->exist(alt)) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs Entry redirect '{}' -> '{}' (ive/lib ROM fallback) from {}",
+                            common::ucs2_to_utf8(fname), common::ucs2_to_utf8(alt), opener_name);
+                        fname = alt;
+                        entry_hle = io->get_entry_info(fname);
+                    }
+                }
+            }
+        }
+
+        if (!entry_hle && j9_opener && opener_pr) {
+            const std::string lower_jxe = common::lowercase_string(common::ucs2_to_utf8(fname));
+            if (lower_jxe.find("jxe=") != std::string::npos) {
+                std::u16string alt = fname;
+                std::string alt8 = common::ucs2_to_utf8(alt);
+                if (resolve_j9_jxe_path(io, opener_pr, alt, alt8)) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs Entry redirect '{}' -> '{}' (jxe pointer) from {}",
+                        common::ucs2_to_utf8(fname), alt8, opener_name);
+                    fname = alt;
+                    entry_hle = io->get_entry_info(fname);
+                }
+            }
+        }
+
+        if (!entry_hle && j9_opener) {
+            // Same truncated-suite / numeric-id probe as FileOpen: J9
+            // findSuiteHome does Entry on C:\Private\102033E6\<msid> and
+            // LeaveIfError is not used (it just Exit(1) after a few misses).
+            const std::string lower_name = common::lowercase_string(common::ucs2_to_utf8(fname));
+            const std::size_t last_sep = lower_name.find_last_of("\\");
+            const std::string tail = (last_sep == std::string::npos)
+                ? lower_name : lower_name.substr(last_sep + 1);
+            const bool numeric_home = (lower_name.find("102033e6") != std::string::npos)
+                && !tail.empty()
+                && (tail.find('.') == std::string::npos)
+                && (tail.find_first_not_of("0123456789") == std::string::npos);
+            if (numeric_home) {
+                std::u16string home = fname;
+                if (!home.empty() && (home.back() != u'\\')) {
+                    home.push_back(u'\\');
+                }
+                io->create_directories(home);
+                entry_hle = io->get_entry_info(fname);
+                if (!entry_hle) {
+                    entry_hle = io->get_entry_info(home);
+                }
+                if (entry_hle) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs Entry created suite home '{}' from {}",
+                        common::ucs2_to_utf8(home), opener_name);
+                }
+            }
+        }
+
         if (!entry_hle) {
+            if (j9_opener) {
+                note_j9_fs_miss(fname, -12);
+            }
             ctx->complete(epoc::error_not_found);
             LOG_TRACE(SERVICE_EFSRV, "Get entry completed not found: {}", common::ucs2_to_utf8(fname));
             return;

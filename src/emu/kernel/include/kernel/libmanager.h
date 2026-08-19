@@ -57,6 +57,7 @@ namespace eka2l1 {
         class chunk;
         class process;
         class codeseg;
+        class thread;
     }
 
     using process_ptr = kernel::process *;
@@ -192,6 +193,18 @@ namespace eka2l1 {
 
             system *get_sys();
         };
+
+        using j9_ws_bind_fn = bool (*)(kernel::process *pr, kernel::thread *thr);
+        using j9_ws_present_fn = bool (*)(const std::uint32_t *rgba, int width, int height);
+        void j9_register_ws_bind(j9_ws_bind_fn fn);
+        bool j9_bind_windowserver(kernel::process *pr, kernel::thread *thr);
+        void j9_register_ws_present(j9_ws_present_fn fn);
+        bool j9_present_surface(const std::uint32_t *rgba, int width, int height);
+        bool j9_host_run_midlet(kernel::process *pr, const char *main_class);
+        void j9_host_midp_reset();
+        bool j9_host_midp_active();
+        void j9_host_tick_midp();
+        bool j9_host_key_event(int scancode, int pressed);
     }
 
     namespace epoc {

@@ -24,6 +24,7 @@
 #include <utils/err.h>
 
 #include <common/cvt.h>
+#include <kernel/kernel.h>
 #include <system/devices.h>
 
 #include <algorithm>
@@ -438,6 +439,12 @@ namespace eka2l1 {
         central_repo_entry *entry = get_entry(the_key.value(), 0);
 
         if (!entry) {
+            std::string requester = "?";
+            if (ctx->msg && ctx->msg->own_thr && ctx->msg->own_thr->owning_process()) {
+                requester = ctx->msg->own_thr->owning_process()->name();
+            }
+            LOG_WARN(SERVICE_CENREP, "CenRep Get miss repo=0x{:X} key=0x{:X} from {}",
+                attach_repo ? attach_repo->uid : 0, the_key.value(), requester);
             ctx->complete(epoc::error_not_found);
             return;
         }

@@ -110,4 +110,8 @@ namespace eka2l1::j2me {
      * @return true 表示存在可用的 MIDlet 启动路径
      */
     bool check_launch_capability(system *sys);
+
+    // Command line fed to j9midps60.exe. Decimal -msid (TLex::Val) and
+    // -app <MIDlet-1 class>. No -jcl: midp2ams Args.parse rejects it.
+    std::u16string build_j9midps60_args(std::uint32_t suite_uid, const std::u16string &midlet_class);
 }

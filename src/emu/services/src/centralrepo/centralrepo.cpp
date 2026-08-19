@@ -33,6 +33,9 @@
 #include <utils/err.h>
 #include <vfs/vfs.h>
 
+#include <kernel/kernel.h>
+
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -257,19 +260,48 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_fail, "CenRep::TransactionFail");
     }
 
+    static std::string cenrep_requester_name(service::ipc_context *ctx) {
+        if (ctx && ctx->msg && ctx->msg->own_thr && ctx->msg->own_thr->owning_process()) {
+            return ctx->msg->own_thr->owning_process()->name();
+        }
+
+        return "?";
+    }
+
+    static bool cenrep_requester_is_java(const std::string &name) {
+        const std::string lower = common::lowercase_string(name);
+        return (lower.find("j9") != std::string::npos)
+            || (lower.find("java") != std::string::npos)
+            || (lower.find("midp") != std::string::npos)
+            || (lower.find("systemams") != std::string::npos);
+    }
+
     void central_repo_client_session::init(service::ipc_context *ctx) {
         // The UID repo to load
         const std::uint32_t repo_uid = *ctx->get_argument_value<std::uint32_t>(0);
         device_manager *mngr = ctx->sys->get_device_manager();
         eka2l1::central_repo *repo = server->load_repo_with_lookup(ctx->sys->get_io_system(), mngr, repo_uid);
+        const std::string requester = cenrep_requester_name(ctx);
 
         if (!repo) {
-            LOG_TRACE(SERVICE_CENREP, "Repository not found with UID 0x{:X}", repo_uid);
+            // JCL (jclcldc11_23) calls CRepository::NewL(0x10274B74) from
+            // epoch.jcl.cpp; that UID is not in the 5320 RPKG. NewL LeaveIfError
+            // then kills j9midps60 with reason=1. Native apps still get
+            // KErrNotFound so optional-repo probes stay honest.
+            static constexpr std::uint32_t JCL_EPOCH_REPO = 0x10274B74;
+            if ((repo_uid == JCL_EPOCH_REPO) || cenrep_requester_is_java(requester)) {
+                repo = server->synthesize_missing_repo(repo_uid, requester);
+            }
+        }
+
+        if (!repo) {
+            LOG_WARN(SERVICE_CENREP, "Repository not found with UID 0x{:X} from {}", repo_uid, requester);
             ctx->complete(epoc::error_not_found);
             return;
         }
 
         // New client session
+        LOG_INFO(SERVICE_CENREP, "CenRep init: repo 0x{:X} opened from {}", repo_uid, requester);
         central_repo_client_subsession clisubsession;
         clisubsession.attach_repo = repo;
         clisubsession.server = server;
@@ -479,6 +511,40 @@ namespace eka2l1 {
 
         repos.emplace(key, std::make_unique<eka2l1::central_repo>(repo));
         return repos[key].get();
+    }
+
+    eka2l1::central_repo *central_repo_server::synthesize_missing_repo(const std::uint32_t key, const std::string &requester) {
+        auto stub = std::make_unique<central_repo>();
+        stub->uid = key;
+        stub->owner_uid = key;
+        stub->ver = 1;
+        stub->keyspace_type = 0;
+        stub->access_count = 1;
+        stub->reside_place = drive_c;
+        stub->time_stamp = 0;
+
+        // jclcldc11_23 epoch.jcl.cpp Get(key=0) as TDes16 — a Java TimeZone id.
+        static constexpr std::uint32_t JCL_EPOCH_REPO = 0x10274B74;
+        if (key == JCL_EPOCH_REPO) {
+            central_repo_entry_variant var;
+            var.etype = central_repo_entry_type::string;
+            var.intd = 0;
+            var.reald = 0.0;
+            const std::u16string gmt = u"GMT";
+            var.strd.resize(gmt.size() * sizeof(char16_t));
+            std::memcpy(var.strd.data(), gmt.data(), var.strd.size());
+            stub->add_new_entry(0, var);
+            LOG_WARN(SERVICE_CENREP,
+                "Repository not found with UID 0x{:X} from {}; synthesizing JCL epoch stub (key 0 = GMT)",
+                key, requester);
+        } else {
+            LOG_WARN(SERVICE_CENREP,
+                "Repository not found with UID 0x{:X} from {}; synthesizing empty stub",
+                key, requester);
+        }
+
+        auto inserted = repos.emplace(key, std::move(stub));
+        return inserted.first->second.get();
     }
 
     eka2l1::central_repo *central_repo_server::load_repo_with_lookup(eka2l1::io_system *io, device_manager *mngr, const std::uint32_t key) {

@@ -34,7 +34,260 @@
 
 #include <services/fs/sec.h>
 
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
 namespace eka2l1 {
+    // Ring of the last failed RFs opens by a J9/AMS opener, recorded in
+    // fs open dispatch; printed in the j9midps60 exit hint (process.cpp) so a
+    // truncated console still shows which file returned KErrNotFound.
+    std::string eka2l1_j9_fs_miss_path[4];
+    int eka2l1_j9_fs_miss_err[4] = { 0, 0, 0, 0 };
+    std::uint32_t eka2l1_j9_fs_miss_seq = 0;
+
+    void note_j9_fs_miss(const std::u16string &raw, const int err) {
+        const std::uint32_t slot = eka2l1_j9_fs_miss_seq % 4;
+        eka2l1_j9_fs_miss_path[slot] = common::ucs2_to_utf8(raw);
+        eka2l1_j9_fs_miss_err[slot] = err;
+        eka2l1_j9_fs_miss_seq++;
+    }
+
+    // J9 port fopen's in-memory JXEs as the fake path "jxe=<hexptr>".
+    // On device hyfile intercepts that; here it becomes a real RFs open.
+    static bool guest_bytes_eq(kernel::process *pr, const address addr,
+        const char *want, const std::size_t n) {
+        const auto *mem = reinterpret_cast<const std::uint8_t *>(pr->get_ptr_on_addr_space(addr));
+        return mem && (std::memcmp(mem, want, n) == 0);
+    }
+
+    static bool find_valid_guest_zip(kernel::process *pr, address hint,
+        address &start_out, std::size_t &size_out) {
+        address scan = hint;
+        if (guest_bytes_eq(pr, hint, "J99J", 4)) {
+            for (std::uint32_t back = 30; back <= 80; back += 2) {
+                if (hint < back) {
+                    break;
+                }
+                if (guest_bytes_eq(pr, hint - back, "PK\x03\x04", 4)) {
+                    scan = hint - back;
+                    break;
+                }
+            }
+        }
+        if (!guest_bytes_eq(pr, scan, "PK\x03\x04", 4)) {
+            return false;
+        }
+        for (std::size_t off = 0; off + 22 < 0x100000; off += 1) {
+            const address eocd_addr = scan + static_cast<address>(off);
+            const auto *page = reinterpret_cast<const std::uint8_t *>(
+                pr->get_ptr_on_addr_space(eocd_addr));
+            if (!page) {
+                break;
+            }
+            if ((page[0] != 'P') || (page[1] != 'K') || (page[2] != 5) || (page[3] != 6)) {
+                continue;
+            }
+            const std::uint16_t nent = static_cast<std::uint16_t>(page[8] | (page[9] << 8));
+            const std::uint16_t tnent = static_cast<std::uint16_t>(page[10] | (page[11] << 8));
+            const std::uint32_t csize = static_cast<std::uint32_t>(page[12] | (page[13] << 8)
+                | (page[14] << 16) | (page[15] << 24));
+            const std::uint32_t coff = static_cast<std::uint32_t>(page[16] | (page[17] << 8)
+                | (page[18] << 16) | (page[19] << 24));
+            const std::uint16_t comment = static_cast<std::uint16_t>(page[20] | (page[21] << 8));
+            if ((nent != tnent) || (nent == 0) || (nent > 4096) || (comment > 256)
+                || (csize < 46) || (csize > 0x100000) || (eocd_addr < csize)) {
+                continue;
+            }
+            const address cdir = eocd_addr - csize;
+            if (!guest_bytes_eq(pr, cdir, "PK\x01\x02", 4) || (cdir < coff)) {
+                continue;
+            }
+            const address start = cdir - coff;
+            if (!guest_bytes_eq(pr, start, "PK\x03\x04", 4)) {
+                continue;
+            }
+            start_out = start;
+            size_out = static_cast<std::size_t>(eocd_addr - start) + 22 + comment;
+            return size_out >= 64;
+        }
+        return false;
+    }
+
+    static bool redirect_jxe_to_staged(io_system *io, kernel::process *pr, const address addr,
+        std::u16string &path, std::string &path_utf8) {
+        static const char16_t *STAGED[] = {
+            u"C:\\jcl.jxe",
+            u"C:\\midp2ams.jxe",
+            u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\jcl.jxe",
+            u"C:\\resource\\ive\\lib\\jclCldc11\\ext\\midp2ams.jxe",
+        };
+        const auto *mem = reinterpret_cast<const std::uint8_t *>(pr->get_ptr_on_addr_space(addr));
+        if (!mem) {
+            return false;
+        }
+        for (const char16_t *cand : STAGED) {
+            if (!io->exist(cand)) {
+                continue;
+            }
+            symfile f = io->open_file(cand, READ_MODE | BIN_MODE);
+            if (!f) {
+                continue;
+            }
+            char head[16] = {};
+            const std::uint64_t n = f->read_file(head, 1, sizeof(head));
+            const std::uint64_t fsz = f->size();
+            f->close();
+            if (n < 16) {
+                continue;
+            }
+            bool matched = (std::memcmp(mem, head, 16) == 0);
+            if (!matched && (mem[0] == 'J') && (head[0] == 'P')) {
+                char more[80] = {};
+                if (symfile f2 = io->open_file(cand, READ_MODE | BIN_MODE)) {
+                    const std::uint64_t m = f2->read_file(more, 1, sizeof(more));
+                    f2->close();
+                    for (std::size_t i = 0; (i + 16) <= m; ++i) {
+                        if (std::memcmp(more + i, mem, 16) == 0) {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Guest pointer is the wrapping ZIP; staged file is rom.classes.
+            if (!matched && (mem[0] == 'P') && (head[0] == 'J')) {
+                for (std::size_t i = 0; (i + 16) <= 80; ++i) {
+                    if (std::memcmp(mem + i, head, 16) == 0) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            // In-memory JCL patch points at a RW J99J copy of C:\jcl.jxe.
+            if (!matched && (mem[0] == 'J') && (head[0] == 'J')
+                && (std::memcmp(mem, "J99J", 4) == 0) && (std::memcmp(head, "J99J", 4) == 0)) {
+                matched = true;
+            }
+            if (!matched) {
+                continue;
+            }
+            path = cand;
+            path_utf8 = common::ucs2_to_utf8(cand);
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] jxe=0x{:X} magic={:02X}{:02X}{:02X}{:02X} -> staged '{}' ({} bytes) from {}",
+                addr, mem[0], mem[1], mem[2], mem[3], path_utf8, static_cast<unsigned>(fsz), pr->name());
+            return true;
+        }
+        return false;
+    }
+
+    static bool materialize_jxe_pointer_file(io_system *io, kernel::process *pr,
+        std::u16string &path, std::string &path_utf8) {
+        if (!io || !pr) {
+            return false;
+        }
+        const std::string utf8 = common::ucs2_to_utf8(path);
+        const std::string lower = common::lowercase_string(utf8);
+        const std::size_t mark = lower.rfind("jxe=");
+        if (mark == std::string::npos) {
+            return false;
+        }
+        // dynload.c only treats a path that *starts* with "jxe=" as an
+        // in-memory ZIP pointer (iveFindFileInJar(ptr, "rom.classes")).
+        // Materializing that fake path into C:\jcl.jxe makes the regular
+        // JAR classloader succeed at fopen and look for Object.class
+        // inside the ZIP — which does not exist — so JVMJ9VM019E.
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] jxe= leave-unresolved '{}' from {}", utf8, pr->name());
+        return false;
+        const char *digits = utf8.c_str() + mark + 4;
+        char *endp = nullptr;
+        const unsigned long addr_ul = std::strtoul(digits, &endp, 16);
+        if ((addr_ul < 0x10000ul) || (addr_ul > 0xFFFF0000ul) || (endp == digits)) {
+            return false;
+        }
+        const address addr = static_cast<address>(addr_ul);
+        const auto *mem = reinterpret_cast<const std::uint8_t *>(pr->get_ptr_on_addr_space(addr));
+        if (!mem) {
+            return false;
+        }
+        if (redirect_jxe_to_staged(io, pr, addr, path, path_utf8)) {
+            return true;
+        }
+        address zip_start = addr;
+        std::size_t size = 0;
+        if (!find_valid_guest_zip(pr, addr, zip_start, size)) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] jxe=0x{:X} magic={:02X}{:02X}{:02X}{:02X} unusable from {}",
+                addr, mem[0], mem[1], mem[2], mem[3], pr->name());
+            return false;
+        }
+        const auto *src = reinterpret_cast<const std::uint8_t *>(pr->get_ptr_on_addr_space(zip_start));
+        if (!src) {
+            return false;
+        }
+        const std::uint8_t *write_src = src;
+        std::uint32_t write_n = static_cast<std::uint32_t>(size);
+        std::vector<std::uint8_t> rom;
+        std::size_t zi = 0;
+        while (zi + 30 <= size) {
+            if ((src[zi] != 'P') || (src[zi + 1] != 'K') || (src[zi + 2] != 3) || (src[zi + 3] != 4)) {
+                const auto *hit = reinterpret_cast<const std::uint8_t *>(
+                    std::memchr(src + zi + 1, 'P', size - zi - 1));
+                if (!hit) {
+                    break;
+                }
+                zi = static_cast<std::size_t>(hit - src);
+                continue;
+            }
+            const std::uint16_t method = static_cast<std::uint16_t>(src[zi + 8] | (src[zi + 9] << 8));
+            const std::uint32_t csize = static_cast<std::uint32_t>(src[zi + 18] | (src[zi + 19] << 8)
+                | (src[zi + 20] << 16) | (src[zi + 21] << 24));
+            const std::uint32_t usize = static_cast<std::uint32_t>(src[zi + 22] | (src[zi + 23] << 8)
+                | (src[zi + 24] << 16) | (src[zi + 25] << 24));
+            const std::uint16_t fnlen = static_cast<std::uint16_t>(src[zi + 26] | (src[zi + 27] << 8));
+            const std::uint16_t extra = static_cast<std::uint16_t>(src[zi + 28] | (src[zi + 29] << 8));
+            const std::size_t data = zi + 30 + fnlen + extra;
+            if ((data + csize) > size) {
+                break;
+            }
+            if ((fnlen == 11) && (std::memcmp(src + zi + 30, "rom.classes", 11) == 0)
+                && (method == 0) && (csize == usize) && (usize >= 16)
+                && (src[data] == 'J') && (src[data + 1] == '9')) {
+                rom.assign(src + data, src + data + usize);
+                write_src = rom.data();
+                write_n = usize;
+                break;
+            }
+            zi = data + csize;
+        }
+        char dst8[40];
+        std::snprintf(dst8, sizeof(dst8), "C:\\jxe_%08lX.jxe", addr_ul);
+        const std::u16string dst = common::utf8_to_ucs2(dst8);
+        io->delete_entry(dst);
+        symfile out = io->open_file(dst, WRITE_MODE | BIN_MODE);
+        if (!out) {
+            return false;
+        }
+        const std::size_t wrote = out->write_file(write_src, 1, write_n);
+        out->close();
+        if (wrote != write_n) {
+            return false;
+        }
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] materialized jxe=0x{:X} start=0x{:X} -> '{}' ({} bytes{}) from {}",
+            addr, zip_start, dst8, write_n, rom.empty() ? "" : ", rom.classes", pr->name());
+        path = dst;
+        path_utf8 = dst8;
+        return true;
+    }
+}
+
+namespace eka2l1 {
+    bool resolve_j9_jxe_path(io_system *io, kernel::process *pr, std::u16string &path, std::string &path_utf8) {
+        return materialize_jxe_pointer_file(io, pr, path, path_utf8);
+    }
+
     // True when the directory is exactly <drive>:\private\<caller SID>\, the one place a
     // process may create and read files without any capability.
     static bool is_process_own_private_dir(kernel::process *pr, const std::u16string &dir) {
@@ -910,6 +1163,33 @@ namespace eka2l1 {
                 || (raw_utf8.find('/') != std::string::npos));
 
         io_system *io = ctx->sys->get_io_system();
+        if (j9_opener) {
+            materialize_jxe_pointer_file(io, opener_pr, *name_res, name_utf8);
+        }
+
+        // MIDP2SystemAMSv1_5 (UID3 0x101F9F6C) builds its trust-root policy
+        // path as Z:\Private\<own uid>\security\midp2_trp.xml. On the real
+        // device the file ships in the SystemAMS v2 private dir
+        // (Z:\private\10203636\security\, present in the RPKG) — same XML.
+        // The whole 101F9F6C directory is absent, so without this rewrite the
+        // request dies in the directory-existence check below with
+        // KErrPathNotFound, Leave(-1)s out of J9 startup (Exit(1)).
+        if (j9_opener && (existence != exist_mode_must_not)) {
+            static const std::string V15_PRIV = "z:\\private\\101f9f6c\\";
+            static const std::size_t V15_PRIV_LEN = 20; // "z:\private\101f9f6c\"
+            if ((lower_name.size() > V15_PRIV_LEN)
+                && (lower_name.compare(0, V15_PRIV_LEN, V15_PRIV) == 0)) {
+                const std::u16string alt = u"Z:\\private\\10203636\\"
+                    + name_res->substr(V15_PRIV_LEN);
+                if (io->exist(alt)) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs redirect '{}' -> '{}' (MIDP2 v1.5 private dir -> v2) from {}",
+                        name_utf8, common::ucs2_to_utf8(alt), opener_name);
+                    *name_res = alt;
+                    name_utf8 = common::ucs2_to_utf8(alt);
+                }
+            }
+        }
 
         {
             auto file_dir = eka2l1::file_directory(*name_res);
@@ -937,18 +1217,122 @@ namespace eka2l1 {
             }
             if (!io->exist(file_dir)) {
                 if (j9_opener) {
-                    LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs no-dir raw='{}' resolved='{}' ss='{}' from {}",
+                    // Classpath probes (Main.class, java/lang/*.class) must
+                    // see KErrNotFound so the VM tries the next entry /
+                    // JXESL. KErrPathNotFound aborts the search.
+                    LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs no-dir raw='{}' resolved='{}' ss='{}' from {} -> notfound",
                         raw_utf8, name_utf8, common::ucs2_to_utf8(ss_path), opener_name);
-                } else {
-                    LOG_TRACE(SERVICE_EFSRV, "Base directory of file {} not found", name_utf8);
+                    note_j9_fs_miss(*name_res, -12);
+                    ctx->complete(epoc::error_not_found);
+                    return;
                 }
-
+                LOG_TRACE(SERVICE_EFSRV, "Base directory of file {} not found", name_utf8);
                 ctx->complete(epoc::error_path_not_found);
                 return;
             }
         }
 
-        const bool is_it_avail = io->exist(name_res.value());
+        // j9vmall fopen/Load of jclcdc11_23.dll (hardcoded next to -Xjcl:).
+        // ROM file is jclcldc11_23.dll — rewrite the path before exist().
+        if (j9_opener && !io->exist(name_res.value())) {
+            const std::string lower_miss = common::lowercase_string(name_utf8);
+            if ((lower_miss.find("jclcdc") != std::string::npos)
+                && (lower_miss.find("jclcldc") == std::string::npos)) {
+                static const std::u16string REAL_JCL = u"Z:\\sys\\bin\\jclcldc11_23.dll";
+                if (io->exist(REAL_JCL)) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs redirect '{}' -> '{}' (jclcdc -> jclcldc) from {}",
+                        name_utf8, common::ucs2_to_utf8(REAL_JCL), opener_name);
+                    *name_res = REAL_JCL;
+                    name_utf8 = common::ucs2_to_utf8(*name_res);
+                }
+            }
+        }
+
+        // Staged JXE/odc live on C:\resource\ive\lib\...; ROM copies on Z:.
+        // dynload builds Z:\...\ext\<file> even after DirOpen listed C:,
+        // so a Z: hit would hide the staged file. Prefer C: when present.
+        if (j9_opener && (name_res->size() >= 2) && ((*name_res)[1] == u':')) {
+            const std::string lower_miss = common::lowercase_string(name_utf8);
+            if (lower_miss.find("\\resource\\ive\\lib") != std::string::npos) {
+                std::u16string alt = *name_res;
+                if ((alt[0] == u'Z') || (alt[0] == u'z')) {
+                    alt[0] = u'C';
+                    if (io->exist(alt)) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs redirect '{}' -> '{}' (prefer staged ive/lib) from {}",
+                            name_utf8, common::ucs2_to_utf8(alt), opener_name);
+                        *name_res = alt;
+                        name_utf8 = common::ucs2_to_utf8(*name_res);
+                    }
+                } else if (((alt[0] == u'C') || (alt[0] == u'c')) && !io->exist(*name_res)) {
+                    alt[0] = u'Z';
+                    if (io->exist(alt)) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs redirect '{}' -> '{}' (ive/lib ROM fallback) from {}",
+                            name_utf8, common::ucs2_to_utf8(alt), opener_name);
+                        *name_res = alt;
+                        name_utf8 = common::ucs2_to_utf8(*name_res);
+                    }
+                }
+            }
+        }
+
+        bool is_it_avail = io->exist(name_res.value());
+
+        // J9's Java layer sometimes hands NativeFile a suite path cut
+        // mid-way (observed on 5320: the 25-char jar path arrives as
+        // `C:/private/102`, and TBuf<40> copies of the suite path end in
+        // `...m.ja`). Those opens fail with KErrNotFound and loadManifest
+        // throws an empty-message IOException, so the MIDlet never draws.
+        // j2me::launch stages short copies of the suite (C:\j.jar /
+        // C:\private\102033E6\m.jar / C:\m.jar) before the VM starts —
+        // redirect the truncated probes there. The NativeFile._open BKPT
+        // hook rewrites most of these in place already; this is the
+        // FileServer-level safety net for paths that reach RFs directly.
+        if (j9_opener && !is_it_avail && (existence != exist_mode_must_not)) {
+            static const std::string SUITE_PROBE_FULL[] = {
+                "c:\\private\\102033e6\\m.jar",
+                "c:\\private\\102033e6\\j.jar",
+                "c:\\private\\102033e6\\m.jad",
+                "c:\\private\\102033e6\\j.jad"
+            };
+
+            bool truncated_suite_probe = false;
+            for (const std::string &full : SUITE_PROBE_FULL) {
+                if ((lower_name.size() >= 14) && (lower_name.size() < full.size())
+                    && (lower_name.compare(0, lower_name.size(), full) == 0)) {
+                    truncated_suite_probe = true;
+                    break;
+                }
+            }
+            if (!truncated_suite_probe && (lower_name.find("102033e6") != std::string::npos)) {
+                const std::size_t last_sep = lower_name.find_last_of("\\");
+                const std::string tail = (last_sep == std::string::npos)
+                    ? lower_name : lower_name.substr(last_sep + 1);
+                truncated_suite_probe = !tail.empty()
+                    && (tail.find('.') == std::string::npos)
+                    && (tail.find_first_not_of("0123456789") == std::string::npos);
+            }
+
+            if (truncated_suite_probe) {
+                static const std::u16string SHORT_COPIES[] = {
+                    u"C:\\j.jar", u"C:\\private\\102033E6\\m.jar", u"C:\\m.jar"
+                };
+                for (const std::u16string &copy : SHORT_COPIES) {
+                    if (!io->exist(copy)) {
+                        continue;
+                    }
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs redirect '{}' -> '{}' (truncated suite probe) from {}",
+                        name_utf8, common::ucs2_to_utf8(copy), opener_name);
+                    *name_res = copy;
+                    name_utf8 = common::ucs2_to_utf8(*name_res);
+                    is_it_avail = true;
+                    break;
+                }
+            }
+        }
 
         if (is_it_avail && (existence == exist_mode_must_not)) {
             LOG_ERROR(SERVICE_EFSRV, "Trying to open existing file: {}, while the requirement open mode forbidded this!",
@@ -962,17 +1346,16 @@ namespace eka2l1 {
             if (j9_opener) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs miss raw='{}' resolved='{}' ss='{}' from {}",
                     raw_utf8, name_utf8, common::ucs2_to_utf8(ss_path), opener_name);
+                note_j9_fs_miss(*name_res, -1); // KErrNotFound
             }
             const bool java_integrity_store = (lower_name.find("\\private\\1028247a\\") != std::string::npos)
                 && ((lower_name.size() >= 4)
                     && ((lower_name.compare(lower_name.size() - 4, 4, ".drv") == 0)
                         || (lower_name.compare(lower_name.size() - 4, 4, ".log") == 0)));
-            const bool java_locale_props = (lower_name.find("\\resource\\ive\\bin\\java") != std::string::npos)
+            const bool java_locale_props = (lower_name.find("\\resource\\ive\\bin\\java_") != std::string::npos)
                 && (lower_name.size() >= 11)
                 && (lower_name.compare(lower_name.size() - 11, 11, ".properties") == 0);
-            const bool java_jxe_cache = (lower_name.find("\\private\\102033e6\\") != std::string::npos)
-                && (lower_name.find("jxe=") != std::string::npos);
-            if (java_integrity_store || java_locale_props || java_jxe_cache) {
+            if (java_integrity_store || java_locale_props) {
                 if (symfile created = io->open_file(*name_res, WRITE_MODE | BIN_MODE)) {
                     created->close();
                     LOG_WARN(SERVICE_EFSRV, "Materialized empty Java file {}", name_utf8);
@@ -994,7 +1377,11 @@ namespace eka2l1 {
         int handle = new_node(ctx->sys->get_io_system(), ctx->msg->own_thr, *name_res,
             *open_mode_res, overwrite, temporary);
 
-        if (j9_opener && (j9_suite_file || (handle <= 0))) {
+        const bool j9_jxe_file = j9_opener
+            && ((lower_name.find(".jxe") != std::string::npos)
+                || (lower_name.find("jcl.zip") != std::string::npos)
+                || (lower_name.find("jcl.jar") != std::string::npos));
+        if (j9_opener && (j9_suite_file || j9_jxe_file || (handle <= 0))) {
             LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs Open raw='{}' resolved='{}' exist={} mode={} handle={} ss='{}' from {}",
                 raw_utf8, name_utf8, is_it_avail ? 1 : 0, open_mode_res.value(), handle,
                 common::ucs2_to_utf8(ss_path), opener_name);

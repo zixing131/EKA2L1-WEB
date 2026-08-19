@@ -1232,9 +1232,11 @@ namespace eka2l1 {
         elem.first = nullptr;
     }
 
-    // 5320 ROM has no Z:\resource\ive\bin\java_*.properties. J9's -app path
-    // opens those with must-exist and Leaves on KErrNotFound/KErrPathNotFound.
-    // Z: is write-protected ROM, so serve the already-provisioned C: copies.
+    // 5320 RPKG *does* ship Z:\resource\ive\bin\java.properties (35KB of
+    // bootstrap keys). Only the locale variants (java_en.properties, …)
+    // are missing. An earlier blanket Z→C remap plus an empty C: stub
+    // hid the real file; J9 then GetDir'd a broken java.home and
+    // LeaveIfError(-12) out of RDir::Open. Remap locale variants only.
     static std::u16string overlay_j9_ive_path(const std::u16string &path) {
         if (path.size() < 4) {
             return path;
@@ -1244,7 +1246,7 @@ namespace eka2l1 {
             return path;
         }
         const std::u16string lower = common::lowercase_ucs2_string(path);
-        if (lower.find(u"\\resource\\ive\\bin") == std::u16string::npos) {
+        if (lower.find(u"\\resource\\ive\\bin\\java_") == std::u16string::npos) {
             return path;
         }
         std::u16string out = path;

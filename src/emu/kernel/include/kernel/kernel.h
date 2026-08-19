@@ -561,6 +561,10 @@ namespace eka2l1 {
             return mem_;
         }
 
+        io_system *get_io_system() {
+            return io_;
+        }
+
         hle::lib_manager *get_lib_manager() {
             return lib_mngr_.get();
         }

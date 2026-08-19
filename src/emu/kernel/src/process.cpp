@@ -24,6 +24,9 @@
 #include <common/path.h>
 #include <config/app_settings.h>
 
+#include <fmt/format.h>
+#include <string>
+
 #include <kernel/kernel.h>
 #include <mem/mem.h>
 
@@ -35,7 +38,54 @@
 #include <mem/mmu.h>
 #include <mem/process.h>
 
+// Defined in svc.cpp — last Leaves raised inside the J9 VM process (globals,
+// same trick as eka2l1_leave_probe above).
+extern std::int32_t eka2l1_j9_last_leave_code;
+extern std::uint32_t eka2l1_j9_last_leave_pc;
+extern std::uint32_t eka2l1_j9_last_leave_lr;
+extern std::uint32_t eka2l1_j9_last_leave_seq;
+extern std::int32_t eka2l1_j9_leave_ring_code[4];
+extern std::uint32_t eka2l1_j9_leave_ring_pc[4];
+extern std::uint32_t eka2l1_j9_leave_ring_lr[4];
+extern std::uint32_t eka2l1_j9_last_leave_bt[8];
+extern std::uint32_t eka2l1_j9_last_leave_bt_n;
+
+// Defined in libmanager.cpp — last NativeFile._open seen by the hook.
+namespace eka2l1 {
+    namespace hle {
+        extern std::string j9_nf_last_path;
+        extern std::int32_t j9_nf_last_result;
+        extern bool j9_nf_open_seen;
+        extern bool j9_nf_hook_installed;
+        extern std::string j9_loaded_libs;
+    }
+}
+
+namespace eka2l1 {
+    // Defined in services/fs/files.cpp — last failed opens by a J9 opener.
+    extern std::string eka2l1_j9_fs_miss_path[4];
+    extern int eka2l1_j9_fs_miss_err[4];
+    extern std::uint32_t eka2l1_j9_fs_miss_seq;
+}
+
 namespace eka2l1::kernel {
+    static std::string j9_resolve_addr(kernel_system *kern, kernel::process *pr, const std::uint32_t addr) {
+        if (!kern || !pr) {
+            return "?";
+        }
+        for (auto &seg_obj : kern->get_codeseg_list()) {
+            codeseg *seg = reinterpret_cast<codeseg *>(seg_obj.get());
+            if (!seg) {
+                continue;
+            }
+            const address beg = seg->get_code_run_addr(pr);
+            if (beg && (addr >= beg) && (addr < beg + seg->get_text_size())) {
+                return fmt::format("{}+0x{:X}", seg->name(), addr - beg);
+            }
+        }
+        return fmt::format("0x{:08X}", addr);
+    }
+
     std::int32_t process::refresh_generation() {
         if (flags & FLAG_KERNEL_PROCESS) {
             return 0;
@@ -430,6 +480,7 @@ namespace eka2l1::kernel {
             || (lower_name.find("j9") != std::string::npos)
             || (lower_name.find("systemams") != std::string::npos)) {
             const char *j9_hint = "";
+            std::string j9_context;
             if (lower_name.find("stubmidp2") != std::string::npos) {
                 switch (reason) {
                 case 0:
@@ -477,10 +528,77 @@ namespace eka2l1::kernel {
                 default:
                     break;
                 }
+                if (ext == entity_exit_type::panic) {
+                    if ((reason == 42) && (common::lowercase_string(common::ucs2_to_utf8(category)) == "user")) {
+                        j9_hint = " (USER 42: euser TDes/invariant; J9GetJXE miss or JNI UnsatisfiedLink)";
+                    } else {
+                        j9_hint = " (guest panic)";
+                    }
+                }
+
+                // Carry the VM's last moments in the exit line itself: leaves
+                // are logged separately but the console is often truncated,
+                // and this is the line the user actually pastes.
+                if (eka2l1_j9_last_leave_seq > 0) {
+                    j9_context += fmt::format(" [leaves total={} last: {} @ {} lr={}]",
+                        eka2l1_j9_last_leave_seq, eka2l1_j9_last_leave_code,
+                        j9_resolve_addr(kern, this, eka2l1_j9_last_leave_pc),
+                        j9_resolve_addr(kern, this, eka2l1_j9_last_leave_lr));
+                    if (eka2l1_j9_last_leave_bt_n > 0) {
+                        j9_context += " bt=[";
+                        for (std::uint32_t i = 0; i < eka2l1_j9_last_leave_bt_n; i++) {
+                            j9_context += fmt::format("{}{}{}", (i == 0) ? "" : "; ",
+                                j9_resolve_addr(kern, this, eka2l1_j9_last_leave_bt[i]),
+                                (i + 1 == eka2l1_j9_last_leave_bt_n) ? "]" : "");
+                        }
+                    }
+                    j9_context += " ring=[";
+                    const std::uint32_t total = eka2l1_j9_last_leave_seq;
+                    const std::uint32_t shown = (total < 4) ? total : 4;
+                    for (std::uint32_t i = 0; i < shown; i++) {
+                        // ring order: oldest first
+                        const std::uint32_t slot = (total < 4) ? i : ((total + i) % 4);
+                        j9_context += fmt::format("{}{} @ {} lr={}{}", (i == 0) ? "" : "; ",
+                            eka2l1_j9_leave_ring_code[slot],
+                            j9_resolve_addr(kern, this, eka2l1_j9_leave_ring_pc[slot]),
+                            j9_resolve_addr(kern, this, eka2l1_j9_leave_ring_lr[slot]),
+                            (i + 1 == shown) ? "]" : "");
+                    }
+                }
+                if (hle::j9_nf_hook_installed) {
+                    if (hle::j9_nf_open_seen) {
+                        j9_context += fmt::format(" [last NativeFile open: path='{}' result={}]",
+                            hle::j9_nf_last_path, hle::j9_nf_last_result);
+                    } else {
+                        j9_context += " [NativeFile hook installed but never hit: J9 died before loadManifest]";
+                    }
+                } else {
+                    j9_context += " [NativeFile hook NOT installed: j9_23_midp2ams not loaded or signature search failed]";
+                }
+                if (!hle::j9_loaded_libs.empty()) {
+                    j9_context += fmt::format(" [libs {}]", hle::j9_loaded_libs);
+                } else {
+                    j9_context += " [libs none]";
+                }
+                if (eka2l1_j9_fs_miss_seq > 0) {
+                    j9_context += fmt::format(" [fs misses total={} last='{}' err={}]",
+                        eka2l1_j9_fs_miss_seq,
+                        eka2l1_j9_fs_miss_path[(eka2l1_j9_fs_miss_seq - 1) % 4],
+                        eka2l1_j9_fs_miss_err[(eka2l1_j9_fs_miss_seq - 1) % 4]);
+                    j9_context += " ring=[";
+                    const std::uint32_t mtotal = eka2l1_j9_fs_miss_seq;
+                    const std::uint32_t mshown = (mtotal < 4) ? mtotal : 4;
+                    for (std::uint32_t i = 0; i < mshown; i++) {
+                        const std::uint32_t slot = (mtotal < 4) ? i : ((mtotal + i) % 4);
+                        j9_context += fmt::format("{}'{}'({}){}", (i == 0) ? "" : "; ",
+                            eka2l1_j9_fs_miss_path[slot], eka2l1_j9_fs_miss_err[slot],
+                            (i + 1 == mshown) ? "]" : "");
+                    }
+                }
             }
-            LOG_WARN(KERNEL, "Java install process exit: process={} cmd='{}' type={} reason={} category={}{}",
+            LOG_WARN(KERNEL, "Java install process exit: process={} cmd='{}' type={} reason={} category={}{}{}",
                 name(), common::ucs2_to_utf8(cmd_args), static_cast<int>(ext), reason,
-                common::ucs2_to_utf8(category), j9_hint);
+                common::ucs2_to_utf8(category), j9_hint, j9_context);
         }
 
         exit_type = ext;

@@ -34,7 +34,33 @@
 
 #include <utils/err.h>
 
+#include <utility>
+
 namespace eka2l1 {
+    void note_j9_fs_miss(const std::u16string &raw, const int err);
+
+    static std::u16string j9_dir_parent_to_create(std::u16string path) {
+        path = eka2l1::transform_separators<char16_t>(path, true, eka2l1::get_separator_16);
+        // Strip a trailing wildcard / filename so we create the directory,
+        // not a file named "*".
+        const std::size_t last = path.find_last_of(u'\\');
+        if ((last != std::u16string::npos) && (last + 1 < path.size())) {
+            const std::u16string tail = path.substr(last + 1);
+            if (tail.empty() || (tail.find(u'*') != std::u16string::npos)
+                || (tail.find(u'?') != std::u16string::npos)
+                || (tail.find(u'.') != std::u16string::npos)) {
+                path.resize(last + 1);
+            }
+        }
+        if (!path.empty() && (path.back() != u'\\')) {
+            path.push_back(u'\\');
+        }
+        if ((path.size() >= 2) && ((path[0] == u'Z') || (path[0] == u'z')) && (path[1] == u':')) {
+            path[0] = u'C';
+        }
+        return path;
+    }
+
     void fs_server_client::open_dir(service::ipc_context *ctx) {
         auto dir = ctx->get_argument_value<std::u16string>(0);
         std::optional<epoc::uid_type> utype = ctx->get_argument_data_from_descriptor<epoc::uid_type>(2);
@@ -64,7 +90,18 @@ namespace eka2l1 {
         dir.value() = get_full_symbian_path(path_relative, dir.value());
         LOG_TRACE(SERVICE_EFSRV, "Opening directory: {}", common::ucs2_to_utf8(*dir));
 
+        kernel::process *opener_pr = ctx->msg->own_thr ? ctx->msg->own_thr->owning_process() : nullptr;
+        const std::string opener_name = opener_pr ? opener_pr->name() : "?";
+        const std::string lower_opener = common::lowercase_string(opener_name);
+        const bool j9_opener = (lower_opener.find("j9") != std::string::npos)
+            || (lower_opener.find("systemams") != std::string::npos);
+
         if (!dir || !utype.has_value()) {
+            if (j9_opener) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs DirOpen bad-args raw='{}' from {}",
+                    common::ucs2_to_utf8(*dir), opener_name);
+                note_j9_fs_miss(*dir, -6);
+            }
             ctx->complete(epoc::error_argument);
             return;
         }
@@ -101,13 +138,84 @@ namespace eka2l1 {
         fs_server *serv = server<fs_server>();
         fs_node *node = serv->make_new<fs_node>();
 
-        node->vfs_node = ctx->sys->get_io_system()->open_dir(*dir, utype.value(), attrib);
+        io_system *io = ctx->sys->get_io_system();
+        // Prefer the staged C: IVE lib (type=JXE odc + extracted .jxe)
+        // over the ROM Z: tree (type=JXESL, needs J9GetJXE).
+        if (j9_opener && (dir->size() >= 2)
+            && (((*dir)[0] == u'Z') || ((*dir)[0] == u'z')) && ((*dir)[1] == u':')) {
+            const std::string lower_dir = common::lowercase_string(common::ucs2_to_utf8(*dir));
+            if (lower_dir.find("\\resource\\ive\\lib") != std::string::npos) {
+                std::u16string staged = *dir;
+                staged[0] = u'C';
+                if (auto staged_dir = io->open_dir(staged, utype.value(), attrib)) {
+                    node->vfs_node = std::move(staged_dir);
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] fs DirOpen '{}' -> '{}' (prefer staged ive/lib) from {}",
+                        common::ucs2_to_utf8(*dir), common::ucs2_to_utf8(staged), opener_name);
+                }
+            }
+        }
+        if (!node->vfs_node) {
+            node->vfs_node = io->open_dir(*dir, utype.value(), attrib);
+        }
         node->serv = serv;
 
+        if (!node->vfs_node && j9_opener) {
+            // dynload lists %c:\resource\ive\lib\jclCldc11\ext\*.odc.
+            // An empty C: listing hides the ROM odc files (type=JXESL/JXE)
+            // and J9 falls back to exploded .class under the suite home.
+            // Prefer the other drive's IVE lib (C: staged JXE, Z: ROM odc)
+            // and never materialise an empty ive\lib directory.
+            const std::string lower_dir = common::lowercase_string(common::ucs2_to_utf8(*dir));
+            const bool ive_lib = lower_dir.find("\\resource\\ive\\lib") != std::string::npos;
+            if (ive_lib && (dir->size() >= 2) && ((*dir)[1] == u':')) {
+                std::u16string alt = *dir;
+                if ((alt[0] == u'C') || (alt[0] == u'c')) {
+                    alt[0] = u'Z';
+                } else if ((alt[0] == u'Z') || (alt[0] == u'z')) {
+                    alt[0] = u'C';
+                }
+                if (alt[0] != (*dir)[0]) {
+                    node->vfs_node = io->open_dir(alt, utype.value(), attrib);
+                    if (node->vfs_node) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs DirOpen '{}' -> '{}' (ive/lib other drive) from {}",
+                            common::ucs2_to_utf8(*dir), common::ucs2_to_utf8(alt), opener_name);
+                    }
+                }
+            }
+            if (!node->vfs_node && !ive_lib) {
+                // RDir::Open / GetDir LeaveIfError's any error (j9vmall+0x436C5).
+                const std::u16string create_dir = j9_dir_parent_to_create(*dir);
+                if (!create_dir.empty()) {
+                    io->create_directories(create_dir);
+                    node->vfs_node = io->open_dir(create_dir, utype.value(), attrib);
+                    if (node->vfs_node) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] fs DirOpen created '{}' for '{}' from {}",
+                            common::ucs2_to_utf8(create_dir), common::ucs2_to_utf8(*dir), opener_name);
+                    }
+                }
+            }
+        }
+
         if (!node->vfs_node) {
-            ctx->complete(epoc::error_path_not_found);
+            if (j9_opener) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs DirOpen miss raw='{}' resolved='{}' ss='{}' from {}",
+                    common::ucs2_to_utf8(*dir), common::ucs2_to_utf8(*dir),
+                    common::ucs2_to_utf8(ss_path), opener_name);
+                note_j9_fs_miss(*dir, -12);
+            }
+            // Match device RDir::Open: missing dir with an existing parent
+            // is KErrNotFound, and j9vmall LeaveIfError's that code.
+            ctx->complete(epoc::error_not_found);
             server<fs_server>()->remove(node);
             return;
+        }
+
+        if (j9_opener) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs DirOpen ok '{}' from {}",
+                common::ucs2_to_utf8(*dir), opener_name);
         }
 
         size_t dir_handle = obj_table_.add(node);

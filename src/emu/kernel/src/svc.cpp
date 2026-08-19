@@ -33,6 +33,10 @@
 #include <kernel/kernel.h>
 #include <kernel/svc.h>
 
+namespace eka2l1::hle {
+    extern address j9_jcl_vm_dllmain;
+}
+
 #include <loader/rom.h>
 
 #include <config/config.h>
@@ -49,11 +53,29 @@
 
 #include <ctime>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <utils/err.h>
 
 // Debug probe: when set (from the frontend), every guest Leave / thread kill /
 // process kill logs at WARN with a guest backtrace. Off by default.
 bool eka2l1_leave_probe = false;
+
+// Last Leaves raised inside the IBM J9 VM process (j9midps60), recorded by
+// leave_start. The j9midps60 exit hint (process.cpp) prints them, so even a
+// truncated console log shows the fatal leave that killed the MIDlet.
+std::int32_t eka2l1_j9_last_leave_code = 0;
+std::uint32_t eka2l1_j9_last_leave_pc = 0;
+std::uint32_t eka2l1_j9_last_leave_lr = 0;
+std::uint32_t eka2l1_j9_last_leave_seq = 0;
+// Ring of the last 4 leaves (code + pc); seq counts total.
+std::int32_t eka2l1_j9_leave_ring_code[4] = { 0, 0, 0, 0 };
+std::uint32_t eka2l1_j9_leave_ring_pc[4] = { 0, 0, 0, 0 };
+std::uint32_t eka2l1_j9_leave_ring_lr[4] = { 0, 0, 0, 0 };
+// Heuristic backtrace of the LAST leave: guest stack words that land inside a
+// codeseg text section (caller chain of User::Leave), resolved at exit time.
+std::uint32_t eka2l1_j9_last_leave_bt[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+std::uint32_t eka2l1_j9_last_leave_bt_n = 0;
 
 namespace eka2l1::epoc {
     static security_policy server_exclamation_point_name_policy({ cap_prot_serv });
@@ -1536,6 +1558,15 @@ namespace eka2l1::epoc {
                         dumped = true;
                     }
                 }
+                if (const auto *raw = reinterpret_cast<const char *>(
+                        crr_pr->get_ptr_on_addr_space(static_cast<address>(arg.args[slot])))) {
+                    if ((raw[0] >= 32) && (raw[0] < 127)) {
+                        std::string s(raw, strnlen(raw, 256));
+                        if (!s.empty() && (s.find("JVM") == std::string::npos)) {
+                            LOG_WARN(EMULATED_STDOUT, "[java-redir] arg{}='{}'", slot, s);
+                        }
+                    }
+                }
             }
             if (!dumped) {
                 LOG_WARN(EMULATED_STDOUT,
@@ -1624,6 +1655,44 @@ namespace eka2l1::epoc {
                 leave_code, thr->name(),
                 kern->get_cpu()->get_reg(14), kern->get_cpu()->get_pc());
             thr->dump_panic_context();
+
+            eka2l1_j9_last_leave_code = leave_code;
+            eka2l1_j9_last_leave_pc = kern->get_cpu()->get_pc();
+            eka2l1_j9_last_leave_lr = kern->get_cpu()->get_reg(14);
+            const std::uint32_t slot = eka2l1_j9_last_leave_seq % 4;
+            eka2l1_j9_leave_ring_code[slot] = leave_code;
+            eka2l1_j9_leave_ring_pc[slot] = kern->get_cpu()->get_pc();
+            eka2l1_j9_leave_ring_lr[slot] = kern->get_cpu()->get_reg(14);
+            eka2l1_j9_last_leave_seq++;
+
+            // Capture a heuristic caller chain into globals so the pasted exit
+            // line can name the DLL that raised the leave (pc is always the
+            // generic EUser stub and carries no cause by itself).
+            eka2l1_j9_last_leave_bt_n = 0;
+            if (kernel::process *lv_pr = kern->crr_process()) {
+                auto in_codeseg_text = [&](const std::uint32_t addr) -> bool {
+                    for (auto &seg_obj : kern->get_codeseg_list()) {
+                        kernel::codeseg *seg = reinterpret_cast<kernel::codeseg *>(seg_obj.get());
+                        if (!seg) {
+                            continue;
+                        }
+                        const address beg = seg->get_code_run_addr(lv_pr);
+                        if (beg && (addr >= beg) && (addr < beg + seg->get_text_size())) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const std::uint32_t sp = kern->get_cpu()->get_reg(13);
+                for (std::uint32_t off = 0; (off < 512) && (eka2l1_j9_last_leave_bt_n < 8); off += 4) {
+                    std::uint32_t *word = reinterpret_cast<std::uint32_t *>(
+                        lv_pr->get_ptr_on_addr_space(sp + off));
+                    if (word && in_codeseg_text(*word)) {
+                        eka2l1_j9_last_leave_bt[eka2l1_j9_last_leave_bt_n++] = *word;
+                    }
+                }
+            }
         } else {
             LOG_TRACE(KERNEL, "Leave code={} thread={} lr=0x{:08X} pc=0x{:08X}",
                 leave_code, thr->name(),
@@ -2400,8 +2469,16 @@ namespace eka2l1::epoc {
             return 0;
         }
 
-        std::optional<uint32_t> func_addr = lib->get_ordinal_address(kern->crr_process(),
-            ord_index);
+        kernel::process *pr = kern->crr_process();
+        std::optional<uint32_t> func_addr = lib->get_ordinal_address(pr, ord_index);
+
+        if (pr) {
+            const std::string pname = common::lowercase_string(pr->name());
+            if (pname.find("j9") != std::string::npos) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] Lookup {} ord={} -> 0x{:X} from {}",
+                    lib->name(), ord_index, func_addr ? *func_addr : 0, pr->name());
+            }
+        }
 
         if (!func_addr) {
             return 0;

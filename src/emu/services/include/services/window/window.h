@@ -59,6 +59,11 @@ namespace eka2l1 {
     class fbs_server;
     struct fbsbitmap;
 
+    namespace kernel {
+        class process;
+        class thread;
+    }
+
     namespace drivers {
         class graphics_driver;
     }
@@ -67,6 +72,7 @@ namespace eka2l1 {
 namespace eka2l1::epoc {
     struct window;
     struct window_key_shipper;
+    struct bitmap_backed_canvas;
 
     struct event_mod_notifier {
         event_modifier what;
@@ -541,5 +547,16 @@ namespace eka2l1 {
         int get_deliver_delay_report_visiblity_event() const {
             return deliver_report_visibility_evt_;
         }
+
+        bool host_bind_j9_surface(kernel::process *pr, kernel::thread *thr);
+        bool host_present_j9_rgba(const std::uint32_t *rgba, int width, int height);
+        bool has_j9_host_surface() const {
+            return j9_host_surface_;
+        }
+        void pump_j9_host_redraws();
+
+    private:
+        bool j9_host_surface_{ false };
+        epoc::bitmap_backed_canvas *j9_host_canvas_{ nullptr };
     };
 }

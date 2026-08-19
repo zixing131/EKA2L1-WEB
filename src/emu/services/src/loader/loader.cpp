@@ -204,6 +204,30 @@ namespace eka2l1 {
             mngr->search_paths.erase(mngr->search_paths.begin(), mngr->search_paths.begin() + search_list.size());
         }
 
+        // j9vmall hardcodes the default JCL as jclcdc11_23 (see -Xjcl:
+        // next to that literal). The 5320 ROM ships jclcldc11_23.dll
+        // (jcl + cldc11 + _23). Without this alias java.lang.* never
+        // comes from the JXESL and J9 hunts Main.class on the suite path.
+        if (!cs) {
+            const std::string lower_lib = common::lowercase_string(lib_name);
+            const std::size_t cut = lower_lib.find("jclcdc");
+            if ((cut != std::string::npos) && (lower_lib.find("jclcldc") == std::string::npos)) {
+                std::u16string alt = *lib_path;
+                const std::string alt8 = common::ucs2_to_utf8(alt);
+                const std::string lower_alt = common::lowercase_string(alt8);
+                const std::size_t pos = lower_alt.find("jclcdc");
+                if (pos != std::string::npos) {
+                    alt.insert(alt.begin() + static_cast<std::ptrdiff_t>(pos) + 4, u'l');
+                    cs = mngr->load(alt);
+                    if (cs) {
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] LoadLibrary aliased {} -> {} (process={})",
+                            lib_name, common::ucs2_to_utf8(alt), own_pr->name());
+                    }
+                }
+            }
+        }
+
         if (!cs) {
             // 5320 ROM has no Midp2VmArgModifier.dll. j9_23_midp2ams loads it
             // optionally (skip on KErrNotFound) to append extra -Xgc flags.
@@ -211,6 +235,8 @@ namespace eka2l1 {
                 LOG_INFO(SERVICE_LOADER, "Loader::LoadLibrary optional plugin missing: {} (process={})",
                     lib_name, own_pr->name());
             } else {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] LoadLibrary failed: {} (process={})",
+                    lib_name, own_pr->name());
                 LOG_WARN(SERVICE_LOADER, "Loader::LoadLibrary failed: {} (process={})",
                     lib_name, own_pr->name());
             }
@@ -224,11 +250,8 @@ namespace eka2l1 {
 
         {
             const std::string opener = common::lowercase_string(own_pr->name());
-            if ((opener.find("j9") != std::string::npos)
-                && ((lib_name.find("Runtime") != std::string::npos)
-                    || (lib_name.find("runtime") != std::string::npos)
-                    || (lib_name.find("VmArg") != std::string::npos))) {
-                LOG_WARN(SERVICE_LOADER, "Loader::LoadLibrary ok: {} (process={})",
+            if (opener.find("j9") != std::string::npos) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] LoadLibrary ok: {} (process={})",
                     lib_name, own_pr->name());
             }
         }

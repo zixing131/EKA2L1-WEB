@@ -22,6 +22,7 @@ add_library(epockern
         include/kernel/condvar.h
         include/kernel/ipc.h
         include/kernel/ldd.h
+        include/kernel/j9_jni_table.h
         include/kernel/libmanager.h
         include/kernel/library.h
         include/kernel/kernel_obj.h
@@ -71,6 +72,7 @@ add_library(epockern
         src/session.cpp
         src/svc.cpp
         src/undertaker.cpp
+        src/j9_host_midp.cpp
         )
 
 target_include_directories(epoctiming PUBLIC include)
@@ -88,6 +90,7 @@ target_link_libraries(epockern PUBLIC
         drivers
         epocio
         epocutils
+        stb
         xxHash)
 
 target_link_libraries(epockern PRIVATE

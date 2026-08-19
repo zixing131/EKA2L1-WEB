@@ -483,4 +483,351 @@ reason=
 
 不要只贴 `java-redir`。等 20–30s 后还可 `EKA2L1.redrawCount()`、`probeJavaRuntime()`、`lastAppExit()`。
 
+### 10.9 截断路径的就地重写（BUILD `74520ac70404` 起）
+
+针对 §10.6 的权威失败（JAR 路径 25 字符被截成 14 字符 `C:/private/102`），
+不再只靠盘上别名文件兜底，而是**在两处把路径本身修正**：
+
+1. **`NativeFile._open` BKPT 钩子改为常驻**（`libmanager.cpp`）。
+   旧实现命中一次后把原指令写回（一次性），J9 后续的 `_open`（JAD、JAR、jxe cache…）
+   全部不可见。现在保留 BKPT，直接模拟被替换的 16 位指令
+   （`movs r5,#0` / `movs r5,r0`）并 `pc += 2`。
+2. **TPtrC16 就地重写**：命中 path 断点后，若路径匹配以下「截断套件路径」特征之一
+   - `c:\private\102033e6` 的真前缀（长度 ≥ 14，如 `C:/private/102`）
+   - `private\102033e6` 的真前缀（长度 ≥ 11，会话相对形态）
+   - 含 `102033e6` 且以 `.ja` / `.j` 结尾（TBuf<40> 截断，如 `...m.ja`）
+
+   则把 guest 缓冲区内容改写为 **`C:\j.jar`**（8 字符，任何截断缓冲都放得下），
+   并把描述符 iTypeLength 的长度位改为 8（保留高 4 位类型）。
+   之后的 size/seek 读到的都是真 JAR，而不是碰巧同名的别名。
+   日志：`[j9-nf] rewrote truncated suite path '...' -> 'C:\j.jar'`。
+3. **FileServer 层兜底**（`files.cpp`）：J9/SystemAMS 打开者打开不存在的文件、
+   且名字匹配同一组截断特征（套件文件真前缀，或含 `102033e6` 且末段是无点纯数字）
+   时，重定向到 `C:\j.jar` → `C:\private\102033E6\m.jar` → `C:\m.jar`（第一个存在者）。
+   日志：`[j9-nf] fs redirect '...' -> '...' (truncated suite probe)`。
+
+命令行拼法**没有改动**（仍是 `-jad C:/j.jad -jar C:/j.jar -msid … -msin 1 -app <类名>`），
+`spawn_j9_with_ams()` 的盘上别名（`C:\private\102` 等）保留作第三层防线。
+
+调试过滤在 §10.8 基础上新增两行：
+
+```
+[j9-nf] rewrote truncated suite path / fs redirect
+```
+
+### 10.10 退出行自带死因（BUILD `62625bc05e79` 起）
+
+控制台经常被截断，`Leave code=` 行经常丢失。现在 `j9midps60` 的退出行
+（`Java install process exit: … reason=1 …`）会直接附加 VM 临终上下文：
+
+- `[last Leave: code=… pc=… lr=… seq=…]` —— svc.cpp `leave_start` 里记录的
+  J9 进程内**最后一次** Symbian Leave（seq 是累计次数，可判断是否一路 Leave 到死）
+- `[last NativeFile open: path='…' result=…]` —— `[j9-nf]` 钩子看到的最后一次
+  `NativeFile._open` 路径与返回值（result=0 即打开成功）
+- `[NativeFile hook never hit: …]` —— 钩子一次都没触发：要么 `j9_23_midp2ams`
+  的 BKPT 没装上，要么 J9 在 `loadManifest` 之前就死了（Args.parse / usage 路径）
+
+判读：
+- `last Leave` 存在 + `NativeFile open result=0` → JAR 已打开，死在后续（AMS/
+  安全/窗口服务器）；拿 Leave pc 对照 `j9vmall23.dll+offset` 反汇编。
+- 无 `last Leave` + hook never hit → 命令行解析层就退了，回头查 `args=` 行。
+
+### 10.11 BUILD `36c84203ffb4`：退出行升级 + ROM 地址解析结论
+
+BUILD `62625bc05e79` 实测：`reason=1`，`[last Leave: code=-1 pc=0x8019E2FC … seq=2]`，
+`[NativeFile hook never hit]`。把 pc/lr 对到本地 ROM（`/Users/zixing/Downloads/5320 (S60v3)/SYM.ROM`）：
+
+- ROM header：base `0x80000000`，**pageable_start=0x67D000**（bytepair 逐页压缩），
+  所以 `VA-0x80000000=文件偏移` 只对 **unpaged 段**成立；j9 系 DLL 全在 pageable 段，
+  **直接从文件反汇编 j9 代码是无效的**。
+- `0x8019E2FC` / `0x801AD55F` 都落在 **EUser.dll**（unpaged）。ARM 反汇编显示
+  `0x8019E2F8: svc #0xde; 0x8019E2FC: bx lr` —— SVC 0xDE 就是 `leave_start`
+  （EKA2L1 `svc.cpp` 的 `BRIDGE_REGISTER(0xDE, leave_start)`）。**Leave pc 只是泛型
+  User::Leave 桩，不含死因**；真正的调用者在 pageable 段无法静态反汇编。
+- 结论：需要 **guest 运行时数据**（哪个文件 KErrNotFound），静态分析到头了。
+
+退出行因此再次升级：
+
+- `[leaves total=N last: <code> @ <模块+偏移>] ring=[…]`（最近 4 次 Leave，
+  pc 用 codeseg 表解析成 `模块+off`）
+- NativeFile 钩子状态三态：`installed but never hit`（J9 死在 loadManifest 前）/
+  `NOT installed`（j9_23_midp2ams 签名搜索失败）/ `open path=… result=…`
+- **`[fs misses total=N ring=['路径'(err); …]]`** —— J9/AMS 打开者最近 4 次
+  RFs 打开失败的路径与错误码（`files.cpp` 环形记录）。**这是下一次日志里
+  定位 KErrNotFound 根因的关键字段**。
+
+ROM 目录/反汇编脚本：`/tmp/rommap.py`（遍历 ROM 目录树，可按 VA 找模块；
+unpaged 段可用 capstone 反汇编，pageable 段需先按 rom_page_idx 表 bytepair 解压）。
+
+### 10.12 BUILD `36c84203ffb4` 实测：根因 = `midp2_trp.xml` 路径错位（已修）
+
+退出行给出的关键数据：
+
+```
+[fs misses total=1 last='z:\Private\101F9F6C\security\midp2_trp.xml' err=-25]
+```
+
+排查（本地 `SYM.RPKG` 解析脚本 `/tmp/rpkglist.py`）：
+
+- ROM 目录树里**没有**任何 101F9F6C / trp / private xml。
+- RPKG（真机 Z: dump）里有 **`Z:\private\10203636\security\midp2_trp.xml`（4509 字节）**，
+  内容是厂商证书信任根策略（Nokia Content Signing CA …）。
+- 引用者：**`MIDP2SystemAMSv1_5.dll`**（UID3 = `0x101F9F6C`）内嵌该文件名的
+  UTF-16 串（+0x2DB8C）——它按 `Z:\Private\<自己的UID>\security\midp2_trp.xml`
+  构造路径，但文件实际发在 SystemAMS v2 的 `10203636` 目录。v1.5 探测
+  KErrPathNotFound → Leave(-12/-1) → J9 Exit(1) 黑屏。
+- 附带发现：j9_23_bluetooth_obex.dll / MIDP2BluetoothPushService.dll 也内嵌该 UID
+  （作为 server SID，与本案无关）。
+
+**修复**（`files.cpp`，BUILD `b27c7114f512`）：J9/AMS 打开者打开 `z:\private\101f9f6c\*`
+不存在时，重定向到 `z:\private\10203636\*`（前缀长度 20，注意别写成 21）。
+日志：`[j9-nf] fs redirect '…' -> '…' (MIDP2 v1.5 private dir -> v2)`。
+泛化：v1.5 组件在该目录下找的**所有**文件都会落到 v2 副本。
+
+⚠️ 第一版（`6cb1c361b9f5`）把重定向放在了 `is_it_avail` 计算之后，但
+`z:\Private\101F9F6C\security\` 整个目录不存在，请求在更早的「目录存在性检查」
+（no-dir 分支）就以 KErrPathNotFound(-25) 提前 return 了，重定向永远走不到
+（症状：退出行仍报同一 miss err=-25）。第二版把重定向挪到 `file_dir` 计算**之前**。
+
+同时补了 `apply_j9_nativefile_open_hook` 的失败日志：签名命中但 0x38/0x4E 偏移处
+指令不符时打印实际字节（上一版静默失败，退出行只能显示 NOT installed）。
+
+**前提**：必须安装 RPKG（ROM-only 时 Z: 没有该 XML，重定向后仍 404）。
+
+### 10.14 BUILD `50634dfcdc5a` 实测：bt 指向 CenRep（已加日志待验证）
+
+bt 数据：`bt=[euser+0x1272F; jclcldc11_23.dll+0xE99D; ...]`。离线分析
+（`/tmp/rpkgdis.py`，RPKG DLL 是 **ROM image 格式**：0x78 字节 TRomImageHeader 后跟代码，
+bt 偏移 +0x78 = 文件偏移；import thunk 为 ARM `ldr pc,[pc,#-4]; .word 绝对ROM地址`）：
+
+- `euser+0x126F6` = `User::Leave` 内部；`euser+0x12722` = **`User::LeaveIfError`**
+  （`subs r4,r0; bge skip; Leave(r4)`）。
+- `jclcldc+0xE998` 处 `blx` thunk → 目标 **0x80561F51 = centralrepository.dll+0x79**
+  （ROM VA 表映射），即 JCL CLDC 启动时调用 CenRep 客户端 API，返回 -12/-1 后
+  `LeaveIfError` → J9 Exit(1)。
+- EKA2L1 的 CenRep 从 `Z:\private\10202be9\<UID>.txt|.cre` 加载
+  （`centralrepo.cpp: load_repo_adv`）；RPKG 里有 **285 个 repo ini**——文件在，
+  但 J9 要的 UID 未必在列，或路径/mount 有问题。
+- cenrep init 失败原有 `Repository not found with UID 0x...` 日志但是 TRACE 级，
+  web 控制台看不到。
+
+BUILD `3e3306a4ba50`：
+
+- `centralrepo.cpp` init 失败日志 TRACE→**WARN**（web 控制台可见），成功路径加 INFO。
+- 预期下一次运行能看到 `Repository not found with UID 0xXXXXXX`，据此合成缺失 repo
+  或修加载路径。
+
+注意：ROM 里 cenrep.dll 段是 pageable 压缩的，无法离线反汇编确认 +0x79 具体是哪个
+导出（NewL vs GetInt），靠运行时日志定位。
+
+### 10.15 离线钉死：缺失 CenRep `0x10274B74`（JCL epoch）
+
+不必再等运行时 UID 日志。从 RPKG 抽出 `jclcldc11_23.dll`（ROM image，header `0x78`）：
+
+| 项 | 值 |
+|----|----|
+| 唯一 `CRepository::NewL` | `jclcldc+0xE998` → import `0x1361C` → `centralrepository.dll+0x79` |
+| 唯一 `Get` | `jclcldc+0xE9CE` → `centralrepository.dll+0x109`，`aKey=0`，`TDes16` |
+| UID 字面量 | `ldr r0,[pc,#0xD8]` @ `0xE994` → `0x81982B4C` → **`0x10274B74`** |
+| 源文件 | 邻接 ASCII `"epoch.jcl.cpp:175"` |
+| RPKG | **289 个** `Z:\private\10202BE9\*.txt/.cre` 里**没有** `10274b74`；该 UID 只出现在 `jclcldc11_23.dll` |
+
+真机上这块多半是 Java 首次启动写到 C: 的 factory persist，RPKG/ROM 不带。`CRepository::NewL` 对缺失 repo `LeaveIfError(-1)` → J9 `Exit(1)` 黑屏。同函数里 Get 失败只是 `return 0`（JNI 走默认时区），**不会** Leave。
+
+**修复**（`centralrepo.cpp` / `repo.cpp`）：
+
+1. 仓库缺失且（UID=`0x10274B74` **或** 调用者是 j9/java/midp/systemams）时，合成内存 stub，不再 `KErrNotFound`。
+2. `0x10274B74` 预置 key `0` = UTF-16 `"GMT"`（合法 Java `TimeZone` id）。
+3. init / Get miss 日志带进程名：`Repository not found with UID 0x… from …`、`CenRep Get miss repo=… key=… from …`。
+4. 原生进程要的其它缺失 repo 仍返回 not found，避免把可选探测变成“仓库存在”。
+
+调试时请确认：
+
+```
+CenRep: Repository not found with UID 0x10274B74 from j9midps60…; synthesizing JCL epoch stub
+```
+
+之后不应再因这一枪 `Leave(-1)`。若仍 `reason=1`，看新的 `Get miss` / `fs misses` / `last Leave`。
+
+### 10.16 BUILD `2810178cad7a` 实测：`RDir::Open` Leave(-12) + 空 `java.properties` 挡路
+
+退出行：
+
+```
+reason=1 [leaves total=1 last: -12 @ euser.dll+0x3494 lr=euser.dll+0x126F7]
+bt=[euser.dll+0x1272F; efsrv.dll+0xDD9; efsrv.dll+0xE1F; j9vmall23.dll+0x436C5]
+[NativeFile hook NOT installed]
+```
+
+离线：
+
+- `j9vmall+0x436C0` `blx` → `efsrv+0xDE6` = **`RDir::Open` / `RFs::GetDir`**（opcode `0x31` = `fs_msg_dir_open`）。
+- `efsrv+0xDD4` 对 IPC 结果 `LeaveIfError`；缺目录时 J9 直接死，JNI 包装自己并不 TRAP。
+- NativeFile 钩子没装上是因为死在 `j9vmall` 里，`j9_23_midp2ams` 还没加载——不是签名搜失败。
+- 退出行没有 `fs misses`：旧 `open_dir` 失败回 `-25` 且不记 ring。
+
+更狠的是先前的 IVE overlay：
+
+- RPKG **有** `Z:\resource\ive\bin\java.properties`（35220 字节，bootstrap 路径）。
+- 旧逻辑把整个 `Z:\resource\ive\bin\*` 映射到 C:，而 `prepare_midp2` 在 C: 上建了**空** `java.properties`。
+- J9 读到空配置 → `java.home` / bootstrap lib 路径是空的 → `GetDir` 打到不存在的目录 → Leave(-12)。
+
+**修复**：
+
+1. overlay 只改写 `java_*` 语言变体，**不再**挡 `java.properties`。
+2. `prepare_midp2` 用 ROM 里那份覆盖空的 C: stub；只给 `java_en*.properties` 留空文件。
+3. `open_dir` 对 J9：打 `[j9-nf] fs DirOpen`、记 fs-miss ring、缺目录则在 C: 建好再重试；失败改回 `-12`（对齐真机）。
+4. FileServer `Entry` miss 也进 ring。
+
+调试请看：
+
+```
+Provisioned java.properties from ROM
+[j9-nf] fs DirOpen
+```
+
+### 10.17 BUILD `c4bbbc3b8f76` 实测：`Entry C:\Private\102033E6\0` ×5
+
+DirOpen 已通（`jclCldc11\ext`、`nokiaextcldc`）。J9 仍 `reason=1`，无 Leave，NativeFile 钩子仍未装（死在 midp2ams `_open` 之前）。
+
+```
+[fs misses total=5 last='C:\Private\102033E6\0' err=-12]
+```
+
+这是 **`RFs::Entry`**（不是 Open）。`findSuiteHome` 去探 `C:\Private\102033E6\<msid>`。
+
+命令行仍是 `-msid 0x20000004`。`TLex::Val` 按十进制读，遇到 `x` 停住 → **suite id = 0** → 连探 5 次 `...\0` → Java 侧 `Exit(1)`。
+
+**修复**：
+
+1. `-msid` 改成十进制（`536870916`）。
+2. 在 `C:\private\102033E6\{0, <dec>, <hex>, <HEX8>}\` 各放一份 `j.jar`/`m.jar`/`j.jad`/`m.jad`。
+3. `Entry` 对「`102033e6` + 无点纯数字」缺项时建目录再查；日志改到 `[j9-nf] fs Entry`。
+
+### 10.18 BUILD `c9c2eb869d8f` 实测：在套件目录里找 `Main.class`
+
+`-msid` 已是十进制，但 findSuiteHome 仍用 `0`（无 AMS 注册时的默认槽）。真正的死因是 49 次：
+
+```
+no-dir ...\0\com\symbian\j2me\midp\runtimeV2\Main.class      err=-25
+no-dir ...\0\com\symbian\j2me\framework\Framework.class
+no-dir ...\0\com\symbian\j2me\midp\runtimeV2\Args.class
+no-dir ...\0\java\lang\RuntimeException.class
+```
+
+这些类在 `0_j9_23_midp2ams_jxe.odc` 里，类型 **JXESL**，容器是 `j9_23_midp2ams.dll`（含 `java/lang`、`runtimeV2`、`com/ibm/oti/nokiaextcldc`）。
+
+上一轮 DirOpen 给不存在的 `Z:\resource\ive\lib\jclCldc11\nokiaextcldc\` **造了空目录并返回成功**。J9 把空目录当成 exploded package，**不再加载 DLL 里的 JXE**，然后在套件 classpath 上找 `.class`，`KErrPathNotFound (-25)` 又中止回退。最后连 `RuntimeException` 都加载不了，`Exit(1)`。
+
+**修复**：
+
+1. DirOpen **不再**给 `resource\ive\lib` 造假目录；只给 `\private\` 建目录。
+2. 启动时删掉已存在的空 `C:\resource\ive\lib\jclCldc11\nokiaextcldc\`。
+3. J9 打开缺父目录的文件时回 `-12`（KErrPathNotFound）。注意 Symbian：`KErrNotFound=-1`，`KErrPathNotFound=-12`，`KErrEof=-25`。
+
+### 10.19 BUILD `d979757d2c16` 实测：JAR 已开，缺 `-jcl`，GetDir Leave(-1)
+
+```
+Open/Entry C:\Private\102033E6\\j.jar exist=1
+no-dir ...\0\java\lang\ClassNotFoundException.class -> notfound
+… Main/Framework/Args/RuntimeException.class
+Leave -1  bt=LeaveIfError; efsrv GetDir; j9vmall+0x436C5
+```
+
+JAR 路径通了。`Main`/`java.lang.*` 在 **`jclcldc11_23.dll` + `j9_23_midp2ams.dll` 的嵌入式 JXE**（`META-INF/JXE.MF`，`J9GetJXE`），不是松散 `.class`。
+
+j9.dll 认 `-jcl:cldc11` / `-Xjcl:`，对应 `jclcldc11_23.dll`。宿主命令行没带 `-jcl`，JCL 不加载，classpath 找不到 `Main`，再 `GetDir nokiaextcldc`（ROM 无此目录）`LeaveIfError(-1)`。
+
+上一轮「不要造 nokiaextcldc」让 GetDir 直接 Leave；造空目录能躲过 Leave，但没有 `-jcl` 仍然没有 `java.lang`。
+
+**修复**：命令行加上 **`-jcl:cldc11`**；DirOpen 对缺失目录仍给空 listing（避免 GetDir Leave）。
+
+### 10.20 BUILD `f591cca23b98` 实测：`-jcl` 进了 midp2ams Args，JCL DLL 名也不对
+
+`-jcl:cldc11` 出现在 cmd 里，但 J9 仍在 `...\0\` 找 `Main.class`，无 Leave。
+
+两件事：
+
+1. **midp2ams Args.parse 不认识 `-jcl`**（选项表只有 `-jad/-jar/-msid/-app/…`）。整段被当成 Unrecognized → Java `usage()` → Exit(1)，而且 `-jcl` 到不了 j9.dll。
+2. j9vmall 默认 JCL 库名是硬编码的 **`jclcdc11_23`**（`-Xjcl:` 旁边的字面量）。5320 ROM 文件是 **`jclcldc11_23.dll`**（多一个 `l`）。LoadLibrary 找不到，`java.lang.*` 的 JXESL 从未加载。
+
+jcl 的 JXE.MF 里是 `containsJCLs1` + `vmOption-jcl:cldc11`；midp2ams 的 JXE 是 `containsJCLs0`，依赖这份 JCL。
+
+**修复**：从命令行拿掉 `-jcl`；`Loader::LoadLibrary` 把 `jclcdc*` 映射到 `jclcldc*`。
+
+### 10.21 别名可能没走到 Loader
+
+`7c8c39706322` 仍在 `...\0\` 找 `Main.class`，日志里没有 `LoadLibrary aliased`。J9 还可能用 **RFs 打开** `jclcdc11_23.dll`（`iveLoadJxeFromFile`），或 session 相对路径 `C:\Private\102033E6\jclcdc11_23.dll`。
+
+**再补**：`lib_manager::load` 入口改名；FileOpen/Entry 重定向到 `Z:\sys\bin\jclcldc11_23.dll`；spawn 时拷到 `C:\sys\bin\` 和 J9 private 目录。日志走 `[j9-nf] LoadLibrary` / `codeseg load` / `fs redirect`。
+
+### 10.22 BUILD `404faf613eb8` 实测：JXE 从未注册，仍在套件目录找 `.class`
+
+命令行已是十进制 `-msid`，无 `-jcl`，但 49 次 miss 仍是：
+
+```
+C:\Private\102033E6\0\com\symbian\j2me\midp\runtimeV2\Main.class
+C:\Private\102033E6\0\com\symbian\j2me\framework\Framework.class
+C:\Private\102033E6\0\com\symbian\j2me\midp\runtimeV2\Args.class
+C:\Private\102033E6\0\java\lang\RuntimeException.class
+```
+
+这些类在 DLL 嵌入式 JXE（ZIP：`rom.classes` + `META-INF/JXE.MF`，magic `J99J`）里，不是松散 `.class`。
+
+`j9vmall` dynload.c 认三种 odc `type=`：`JAR` / `JXE` / `JXESL`。ROM 的 `0_j9_23_midp2ams_jxe.odc` 是 **JXESL**，靠 `LoadLibrary` + **`J9GetJXE`**。EPOC 的 `RLibrary::Lookup` 只有序数；midp2ams 的 export 1 不是那个无参 getter，命名查找失败，JXE 不注册。JCL 同样没挂上，所以连 `java.lang.RuntimeException` 都走文件系统。
+
+另一条坑：dynload 扫 **`%c:\resource\ive\lib\jclCldc11\ext\*.odc`**（`%c` = 系统盘 C:）。DirOpen 给缺失的 C: `ive\lib` 造空目录后，GetDir 是空列表，ROM 里的 odc 全被挡住。
+
+midp2ams 内部还会把 `L"-jcl:cldc11:nokiaextcldc"` 传给 j9.dll。`-jcl:<config>[:options]` 的 `:nokiaextcldc` 会让 J9 去 `jclCldc11\nokiaextcldc\` 找 exploded 包。
+
+**修复**：
+
+1. spawn 时把 `Z:\resource\ive\lib\jclCldc11\ext\` 拷到 C:；从 `j9_23_midp2ams.dll` / `jclcldc11_23.dll` 抽出嵌入 ZIP，写成 `midp2ams.jxe` / `jcl.jxe`。
+2. 覆盖 C: 上的 midp2ams odc 为 **`type=JXE` `name=midp2ams.jxe`**，并加一份 JCL 的 `0_jcl_jxe.odc`。dynload 走 `iveLoadJxeFromFile`，不再依赖 `J9GetJXE`。
+3. DirOpen：Z: `ive\lib` 优先改用已 stage 的 C:；C: 缺失则回退 Z:；**不再**给 `ive\lib` 造空目录。FileOpen/Entry 对 `ive\lib` 做 C:↔Z: 对开。
+4. 把 midp2ams 里的 `-jcl:cldc11:nokiaextcldc` 截成 `-jcl:cldc11`。
+5. 退出行增加 `[libs …]`（已加载的 j9/jcl codeseg）。
+
+成功时控制台应出现 `[j9-nf] staged JXE`、`codeseg attached`、`fs DirOpen … prefer staged ive/lib`，且 **不再** 在 `...\0\com\symbian\...Main.class` 上 miss。
+
+### 10.23 BUILD `687b72ab9865` 实测：JCL 已加载，但 JXESL 仍走 Z:，USER 42
+
+```
+libs j9midps60,j9_23_midp2ams.dll,j9.dll,j9vmall23.dll,j9mjit23.dll,jclcldc11_23.dll
+Entry Z:\resource\ive\lib\jclCldc11\ext\0_j9_23_midp2ams_jxe.odc found=1
+fs miss ...\0\com\nokia\mj\impl\vmport\VmPort.class
+… J9VmPortImplCldc / Integer / UnsatisfiedLinkError / LinkageError
+exit type=2 reason=42 category=USER
+```
+
+进步：JCL DLL 和 JIT 都起来了，不再卡在 `Main`/`RuntimeException`。J9 对 odc 做 **Entry 的是自己拼的 Z: 路径**，Z: 上原件存在就不会改走 C: 的 `type=JXE`。ROM odc 仍是 **JXESL**，`J9GetJXE` 按序数 Lookup(1)，但 midp2ams export 1 不是无参 getter。
+
+末尾 `UnsatisfiedLinkError`：Java 已跑到调 native，JNI 没绑上（JXE 没从同一份 DLL 注册）。USER 42 是随后的 euser TDes/invariant。
+
+NativeFile 钩子 `result=0x0500`：`movs r5, r0` 的小端是 `05 00`，不是 `00 05`。
+
+**修复**：
+
+1. midp2ams 加载时找到嵌入 ZIP（`PK\x03\x04`），把 tiny getter 的字面量改成 ZIP 地址，**export 1 改指这个 getter**（`J9GetJXE`）。
+2. C: odc 保持 ROM 的 **type=JXESL**（和 native 同 DLL）；不再改写成 type=JXE。
+3. Z: `ive\lib` 的 Entry/Open **只要 C: 有文件就优先 C:**。
+4. NativeFile 钩子接受 `05 00`。Lookup ord≤8 打日志。
+
+### 10.24 KERN-EXEC 3 @ `j9vmall+0x390FC`：ZIP PK 被当成 J9ROMClass
+
+```
+jxe=0x8194FF98 magic=504B0304 -> staged 'C:\jcl.jxe' (204612 bytes)
+fs Open raw='...\jxe=8194FF98' resolved='C:\jcl.jxe' exist=1
+Access violation reading address 0x8
+  pc=0x818FAF34 (j9vmall23.dll+0x390FC)
+```
+
+`fopen("jxe=<ptr>")` 只是探测。真正当镜像用的仍是 JCL 字面量 `0x8194FF98`（嵌入 ZIP 的 `PK\x03\x04`）。`iveLoadJxe` 把 PK 当 `J9ROMClass*`，`romMethods` SRP 落到 0，`ldr r2,[r7,#8]` → KERN-EXEC 3。改 `C:\jcl.jxe` 文件内容改变不了这个指针。
+
+JCL 里只有一处该字面量（`0x819412F4`，`ldr r2,[pc,#0x38]`）。`rom.classes`（J99J，204612 字节）完整落在 codeseg 内。把 J99J 拷到独立 RW chunk，并把该字面量改成 RW 基址。不要覆盖 XIP（会砸毁 JCL），也不要改 JCL export 1（不是 `J9GetJXE`）。
+
+
+
+
+
 

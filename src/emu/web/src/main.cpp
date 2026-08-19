@@ -83,8 +83,11 @@
 #include <loader/svgb.h>
 #include <vfs/vfs.h>
 
+#include <common/linked.h>
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
+#include <kernel/libmanager.h>
+#include <kernel/process.h>
 #include <kernel/server.h>
 #include <kernel/thread.h>
 #include <mem/ptr.h>
@@ -1053,6 +1056,9 @@ static void main_loop() {
     // (inline-dispatched on this thread), which would deadlock on the ntimer
     // thread while it holds the kernel lock.
     if (g_state.winserv) {
+        if (g_state.winserv->has_j9_host_surface()) {
+            g_state.winserv->pump_j9_host_redraws();
+        }
         g_state.winserv->get_anim_scheduler()->flush_pending_redraws();
     }
 
@@ -1062,6 +1068,10 @@ static void main_loop() {
             g_state.graphics_driver->pump();
         }
         return;
+    }
+
+    if (eka2l1::hle::j9_host_midp_active()) {
+        eka2l1::hle::j9_host_tick_midp();
     }
 
     // (Previously pulsed LSK/OK here during MIDlet install. That raced with ifeui
@@ -1793,6 +1803,28 @@ const char *wasm_probe_java_runtime() {
     }
     if (proc_n == 0) {
         g_java_runtime += "(none)\n";
+    }
+
+    g_java_runtime += "=== j9 threads ===\n";
+    int tn = 0;
+    for (auto &obj : kern->get_thread_list()) {
+        auto *thr = reinterpret_cast<eka2l1::kernel::thread *>(obj.get());
+        if (!thr || !thr->owning_process()) {
+            continue;
+        }
+        const std::string plow = eka2l1::common::lowercase_string(thr->owning_process()->raw_name());
+        if (plow.find("j9") == std::string::npos) {
+            continue;
+        }
+        const auto &ctx = thr->get_thread_context();
+        char line[192];
+        std::snprintf(line, sizeof(line), "  %s pc=0x%08X lr=0x%08X st=%d\n",
+            thr->name().c_str(), ctx.get_pc(), ctx.get_lr(),
+            static_cast<int>(thr->current_state()));
+        g_java_runtime += line;
+        if (++tn >= 8) {
+            break;
+        }
     }
 
     g_java_runtime += "=== servers ===\n";
@@ -3257,7 +3289,14 @@ void wasm_set_paused(int paused) {
  */
 EMSCRIPTEN_KEEPALIVE
 void wasm_send_key(int scancode, int pressed) {
-    if (!g_state.winserv || !scancode) {
+    if (!scancode) {
+        return;
+    }
+    if (eka2l1::hle::j9_host_midp_active()) {
+        eka2l1::hle::j9_host_key_event(scancode, pressed);
+        return;
+    }
+    if (!g_state.winserv) {
         return;
     }
 
