@@ -1,7 +1,9 @@
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
 #include <kernel/process.h>
+#include <kernel/thread.h>
 
+#include <common/algorithm.h>
 #include <common/cvt.h>
 #include <common/fileutils.h>
 #include <common/log.h>
@@ -28,14 +30,23 @@
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
+#include <miniz.h>
+
+#include <kernel/j9_gbk_map.inc>
 
 namespace eka2l1::hle {
     namespace {
         constexpr int k_lcd_w = 240;
         constexpr int k_lcd_h = 320;
-        constexpr int k_max_steps = 80000000;
+        // Hard cap per invoke. The previous 80e6 let a game loop freeze the
+        // browser tab (run.html looks like it "never loads").
+        constexpr int k_max_steps = 80000;
         constexpr int k_max_depth = 96;
-        constexpr int k_font_px = 12;
+        constexpr int k_slice_ms = 6;
+        constexpr int k_boot_ms = 400;
+        constexpr int k_boot_steps = 2500000;
+        // 14px keeps CJK in DroidSansFallback readable on 240-wide LCDUI.
+        constexpr int k_font_px = 14;
 
         enum : std::uint8_t {
             k_utf8 = 1,
@@ -135,6 +146,14 @@ namespace eka2l1::hle {
         static int g_font = 0;
         static bool g_event_ready = false;
         static kernel::process *g_pr = nullptr;
+        static std::string g_pending_midlet_class;
+        static int g_attach_tries = 0;
+        static bool g_attach_started = false;
+        static std::vector<int> g_thread_queue;
+        static int g_slice_ms = k_slice_ms;
+        static int g_slice_steps = k_max_steps;
+        static std::vector<std::uint8_t> g_jar;
+        static bool g_jar_tried = false;
 
         static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref, const std::int32_t *args, int nargs, int depth);
         static cf_method *find_method(cf_class *c, const std::string &name, const std::string &sig);
@@ -377,6 +396,87 @@ namespace eka2l1::hle {
             return !out.name.empty();
         }
 
+        struct boot_budget {
+            boot_budget() {
+                g_slice_ms = k_boot_ms;
+                g_slice_steps = k_boot_steps;
+            }
+            ~boot_budget() {
+                g_slice_ms = k_slice_ms;
+                g_slice_steps = k_max_steps;
+            }
+        };
+
+        static bool ensure_suite_jar(kernel::process *pr) {
+            if (g_jar_tried) {
+                return !g_jar.empty();
+            }
+            g_jar_tried = true;
+            static const char16_t *k_jars[] = {
+                u"C:\\j.jar",
+                u"C:\\m.jar",
+                u"C:\\private\\102033E6\\j.jar",
+                u"C:\\private\\102033E6\\m.jar",
+                u"C:\\Private\\102033E6\\0\\j.jar",
+                u"C:\\Private\\102033E6\\0\\m.jar",
+            };
+            for (const char16_t *p : k_jars) {
+                if (guest_read(pr, p, g_jar) && (g_jar.size() > 32)
+                    && (g_jar[0] == 'P') && (g_jar[1] == 'K')) {
+                    LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-jar {} bytes={}",
+                        common::ucs2_to_utf8(p), g_jar.size());
+                    return true;
+                }
+                g_jar.clear();
+            }
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-jar-miss");
+            return false;
+        }
+
+        static bool jar_read(kernel::process *pr, const std::string &name, std::vector<std::uint8_t> &out) {
+            if (!ensure_suite_jar(pr) || name.empty()) {
+                return false;
+            }
+            mz_zip_archive z{};
+            if (!mz_zip_reader_init_mem(&z, g_jar.data(), g_jar.size(), 0)) {
+                return false;
+            }
+            std::string want = name;
+            for (char &c : want) {
+                if (c == '\\') {
+                    c = '/';
+                }
+            }
+            while (!want.empty() && want[0] == '/') {
+                want.erase(want.begin());
+            }
+            bool ok = false;
+            for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i) {
+                mz_zip_archive_file_stat st{};
+                if (!mz_zip_reader_file_stat(&z, i, &st) || st.m_is_directory) {
+                    continue;
+                }
+                std::string fn = st.m_filename;
+                if ((fn != want) && (fn.size() != want.size())) {
+                    // case-insensitive tail match
+                    if (fn.size() < want.size()) {
+                        continue;
+                    }
+                }
+                if (common::lowercase_string(fn) != common::lowercase_string(want)) {
+                    continue;
+                }
+                out.resize(static_cast<std::size_t>(st.m_uncomp_size));
+                if (out.empty()
+                    || mz_zip_reader_extract_to_mem(&z, i, out.data(), out.size(), 0)) {
+                    ok = true;
+                }
+                break;
+            }
+            mz_zip_reader_end(&z);
+            return ok && !out.empty();
+        }
+
         static cf_class *load_class(kernel::process *pr, const std::string &name) {
             auto it = g_classes.find(name);
             if (it != g_classes.end()) {
@@ -388,7 +488,7 @@ namespace eka2l1::hle {
             }
             std::vector<std::uint8_t> buf;
             std::string path = name + ".class";
-            if (!guest_read_any(pr, path, buf)) {
+            if (!guest_read_any(pr, path, buf) && !jar_read(pr, path, buf)) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-class-miss '{}'", name);
                 return nullptr;
             }
@@ -404,6 +504,7 @@ namespace eka2l1::hle {
                 raw->name, raw->super, raw->methods.size(), raw->fields.size());
             if (cf_method *clinit = find_method(raw, "<clinit>", "()V")) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-clinit {}", raw->name);
+                boot_budget boot;
                 run_java(raw, clinit, 0, nullptr, 0, 0);
             }
             return raw;
@@ -485,7 +586,8 @@ namespace eka2l1::hle {
             }
         }
 
-        static void blit(host_obj *dst, int dx, int dy, host_obj *src, int sx, int sy, int sw, int sh) {
+        static void blit(host_obj *dst, int dx, int dy, host_obj *src, int sx, int sy, int sw, int sh,
+            host_obj *clip = nullptr) {
             if (!dst || !src || dst->pixels.empty() || src->pixels.empty()) {
                 return;
             }
@@ -495,16 +597,22 @@ namespace eka2l1::hle {
             if (sh <= 0) {
                 sh = src->h;
             }
+            const int cx0 = clip ? clip->cx : 0;
+            const int cy0 = clip ? clip->cy : 0;
+            const int cx1 = clip ? (clip->cx + clip->cw) : dst->w;
+            const int cy1 = clip ? (clip->cy + clip->ch) : dst->h;
             for (int y = 0; y < sh; ++y) {
                 const int dy2 = dy + y;
                 const int sy2 = sy + y;
-                if ((dy2 < 0) || (dy2 >= dst->h) || (sy2 < 0) || (sy2 >= src->h)) {
+                if ((dy2 < 0) || (dy2 >= dst->h) || (sy2 < 0) || (sy2 >= src->h)
+                    || (dy2 < cy0) || (dy2 >= cy1)) {
                     continue;
                 }
                 for (int x = 0; x < sw; ++x) {
                     const int dx2 = dx + x;
                     const int sx2 = sx + x;
-                    if ((dx2 < 0) || (dx2 >= dst->w) || (sx2 < 0) || (sx2 >= src->w)) {
+                    if ((dx2 < 0) || (dx2 >= dst->w) || (sx2 < 0) || (sx2 >= src->w)
+                        || (dx2 < cx0) || (dx2 >= cx1)) {
                         continue;
                     }
                     const std::uint32_t px = src->pixels[static_cast<unsigned>(sy2 * src->w + sx2)];
@@ -514,6 +622,115 @@ namespace eka2l1::hle {
                     dst->pixels[static_cast<unsigned>(dy2 * dst->w + dx2)] = px;
                 }
             }
+        }
+
+        static void plot(host_obj *dst, int x, int y, std::uint32_t col, host_obj *clip) {
+            if (!dst || dst->pixels.empty()) {
+                return;
+            }
+            if ((x < 0) || (y < 0) || (x >= dst->w) || (y >= dst->h)) {
+                return;
+            }
+            if (clip) {
+                if ((x < clip->cx) || (y < clip->cy) || (x >= clip->cx + clip->cw)
+                    || (y >= clip->cy + clip->ch)) {
+                    return;
+                }
+            }
+            dst->pixels[static_cast<unsigned>(y * dst->w + x)] = col;
+        }
+
+        static void draw_line(host_obj *g, int x0, int y0, int x1, int y1) {
+            host_obj *dst = (g && g->target) ? obj(g->target) : fb();
+            if (!dst) {
+                return;
+            }
+            x0 += g ? g->tx : 0;
+            y0 += g ? g->ty : 0;
+            x1 += g ? g->tx : 0;
+            y1 += g ? g->ty : 0;
+            const std::uint32_t col = g ? static_cast<std::uint32_t>(g->color) : pack_rgba(0xFFFFFF);
+            int dx = std::abs(x1 - x0);
+            int dy = -std::abs(y1 - y0);
+            const int sx = (x0 < x1) ? 1 : -1;
+            const int sy = (y0 < y1) ? 1 : -1;
+            int err = dx + dy;
+            for (;;) {
+                plot(dst, x0, y0, col, g);
+                if ((x0 == x1) && (y0 == y1)) {
+                    break;
+                }
+                const int e2 = err * 2;
+                if (e2 >= dy) {
+                    err += dy;
+                    x0 += sx;
+                }
+                if (e2 <= dx) {
+                    err += dx;
+                    y0 += sy;
+                }
+            }
+        }
+
+        static int make_region_image(host_obj *src, int sx, int sy, int sw, int sh, int transform) {
+            if (!src || src->pixels.empty() || (sw <= 0) || (sh <= 0)) {
+                return 0;
+            }
+            const bool swap = (transform >= 4); // ROT90 / ROT270 family
+            const int dw = swap ? sh : sw;
+            const int dh = swap ? sw : sh;
+            const int r = alloc_obj(k_obj_image);
+            host_obj *im = obj(r);
+            im->w = dw;
+            im->h = dh;
+            im->pixels.assign(static_cast<unsigned>(dw * dh), pack_rgba(0));
+            for (int y = 0; y < sh; ++y) {
+                for (int x = 0; x < sw; ++x) {
+                    const int ssx = sx + x;
+                    const int ssy = sy + y;
+                    if ((ssx < 0) || (ssy < 0) || (ssx >= src->w) || (ssy >= src->h)) {
+                        continue;
+                    }
+                    const std::uint32_t px = src->pixels[static_cast<unsigned>(ssy * src->w + ssx)];
+                    int dx = x;
+                    int dy = y;
+                    switch (transform) {
+                    case 1: // MIRROR_ROT180
+                        dx = sw - 1 - x;
+                        dy = sh - 1 - y;
+                        break;
+                    case 2: // MIRROR
+                        dx = sw - 1 - x;
+                        break;
+                    case 3: // ROT180
+                        dx = sw - 1 - x;
+                        dy = sh - 1 - y;
+                        break;
+                    case 4: // MIRROR_ROT270
+                        dx = y;
+                        dy = sw - 1 - x;
+                        break;
+                    case 5: // ROT90
+                        dx = sh - 1 - y;
+                        dy = x;
+                        break;
+                    case 6: // ROT270
+                        dx = y;
+                        dy = sw - 1 - x;
+                        break;
+                    case 7: // MIRROR_ROT90
+                        dx = sh - 1 - y;
+                        dy = sw - 1 - x;
+                        break;
+                    default:
+                        break;
+                    }
+                    if ((dx >= 0) && (dy >= 0) && (dx < dw) && (dy < dh)) {
+                        im->pixels[static_cast<unsigned>(dy * dw + dx)] = px;
+                    }
+                }
+            }
+            return r;
         }
 
         static void fill_rect(host_obj *g, int x, int y, int w, int h) {
@@ -627,6 +844,153 @@ namespace eka2l1::hle {
             return out;
         }
 
+        // Chinese feature phones default new String(byte[]) to GBK/GB2312.
+        // Host MIDP keeps Java strings as UTF-8; mis-decoding leaves high bytes
+        // that draw as empty-glyph boxes in dialogue while constant-pool UTF-8
+        // names (杰拉德 / 跳过) still render.
+        static void utf8_append_cp(std::string &out, std::uint32_t cp) {
+            if (cp < 0x80u) {
+                out.push_back(static_cast<char>(cp));
+            } else if (cp < 0x800u) {
+                out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+                out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+            } else if (cp < 0x10000u) {
+                out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+                out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+            } else {
+                out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+                out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+                out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+            }
+        }
+
+        static bool is_valid_utf8(const std::uint8_t *p, int n) {
+            if (!p || (n <= 0)) {
+                return true;
+            }
+            int i = 0;
+            while (i < n) {
+                const unsigned c = p[i];
+                if (c < 0x80u) {
+                    ++i;
+                    continue;
+                }
+                int need = 0;
+                if ((c & 0xE0u) == 0xC0u) {
+                    need = 1;
+                    if (c < 0xC2u) {
+                        return false;
+                    }
+                } else if ((c & 0xF0u) == 0xE0u) {
+                    need = 2;
+                } else if ((c & 0xF8u) == 0xF0u) {
+                    need = 3;
+                    if (c > 0xF4u) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+                if (i + need >= n) {
+                    return false;
+                }
+                for (int k = 1; k <= need; ++k) {
+                    if ((p[i + k] & 0xC0u) != 0x80u) {
+                        return false;
+                    }
+                }
+                i += need + 1;
+            }
+            return true;
+        }
+
+        static std::uint32_t gbk_lookup(unsigned b0, unsigned b1) {
+            const std::uint32_t key = (b0 << 8) | b1;
+            std::size_t lo = 0;
+            std::size_t hi = k_j9_gbk_map_n;
+            while (lo < hi) {
+                const std::size_t mid = lo + (hi - lo) / 2u;
+                const std::uint32_t word = k_j9_gbk_map[mid];
+                const std::uint32_t mid_key = word >> 16;
+                if (mid_key < key) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if ((lo < k_j9_gbk_map_n) && ((k_j9_gbk_map[lo] >> 16) == key)) {
+                return k_j9_gbk_map[lo] & 0xFFFFu;
+            }
+            return 0;
+        }
+
+        static std::string gbk_to_utf8(const std::uint8_t *p, int n) {
+            std::string out;
+            out.reserve(static_cast<std::size_t>(n) * 2u);
+            for (int i = 0; i < n;) {
+                const unsigned b0 = p[i++];
+                if (b0 < 0x80u) {
+                    out.push_back(static_cast<char>(b0));
+                    continue;
+                }
+                if ((i >= n) || (b0 < 0x81u) || (b0 > 0xFEu)) {
+                    utf8_append_cp(out, 0x25A1u);
+                    continue;
+                }
+                const unsigned b1 = p[i++];
+                const std::uint32_t cp = gbk_lookup(b0, b1);
+                utf8_append_cp(out, cp ? cp : 0x25A1u);
+            }
+            return out;
+        }
+
+        static std::string bytes_to_java_string(const std::uint8_t *p, int n, const std::string &enc) {
+            if (!p || (n <= 0)) {
+                return {};
+            }
+            std::string enc_l = enc;
+            for (char &c : enc_l) {
+                if ((c >= 'A') && (c <= 'Z')) {
+                    c = static_cast<char>(c - 'A' + 'a');
+                }
+            }
+            const bool want_gb = (enc_l.find("gb") != std::string::npos)
+                || (enc_l.find("936") != std::string::npos);
+            if (want_gb) {
+                return gbk_to_utf8(p, n);
+            }
+            if ((enc_l == "iso-8859-1") || (enc_l == "8859_1") || (enc_l == "latin1")) {
+                std::string out;
+                out.reserve(static_cast<std::size_t>(n) * 2u);
+                for (int i = 0; i < n; ++i) {
+                    utf8_append_cp(out, p[i]);
+                }
+                return out;
+            }
+            if (!enc_l.empty() && (enc_l.find("utf") != std::string::npos)) {
+                return std::string(reinterpret_cast<const char *>(p), static_cast<std::size_t>(n));
+            }
+            // Platform default (Chinese MIDP): GBK unless bytes are valid UTF-8.
+            if (is_valid_utf8(p, n)) {
+                return std::string(reinterpret_cast<const char *>(p), static_cast<std::size_t>(n));
+            }
+            return gbk_to_utf8(p, n);
+        }
+
+        static std::string chars_to_java_string(const std::vector<std::int32_t> &arr, int off, int len) {
+            std::string out;
+            if ((off < 0) || (len <= 0) || (static_cast<unsigned>(off + len) > arr.size())) {
+                return out;
+            }
+            out.reserve(static_cast<std::size_t>(len) * 3u);
+            for (int i = 0; i < len; ++i) {
+                utf8_append_cp(out, static_cast<std::uint32_t>(arr[static_cast<unsigned>(off + i)] & 0xFFFFu));
+            }
+            return out;
+        }
+
         struct host_glyph {
             std::vector<std::uint8_t> bits;
             int w = 0;
@@ -649,9 +1013,11 @@ namespace eka2l1::hle {
             }
             if (g_ttf.empty()) {
                 static const char *k_paths[] = {
-                    ".//fonts//DroidSansFallback.ttf",
                     "fonts/DroidSansFallback.ttf",
                     "./fonts/DroidSansFallback.ttf",
+                    ".//fonts//DroidSansFallback.ttf",
+                    "/fonts/DroidSansFallback.ttf",
+                    "DroidSansFallback.ttf",
                 };
                 for (const char *path : k_paths) {
                     FILE *f = common::open_c_file(path, "rb");
@@ -809,7 +1175,7 @@ namespace eka2l1::hle {
                 rel.erase(rel.begin());
             }
             std::vector<std::uint8_t> buf;
-            if (!guest_read_any(g_pr, rel, buf) || buf.empty()) {
+            if ((!guest_read_any(g_pr, rel, buf) && !jar_read(g_pr, rel, buf)) || buf.empty()) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-image-miss '{}'", path);
                 const int r = alloc_obj(k_obj_image);
                 obj(r)->w = 16;
@@ -881,7 +1247,7 @@ namespace eka2l1::hle {
                 rel.erase(rel.begin());
             }
             std::vector<std::uint8_t> buf;
-            if (!guest_read_any(g_pr, rel, buf)) {
+            if (!guest_read_any(g_pr, rel, buf) && !jar_read(g_pr, rel, buf)) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-res-miss '{}'", path);
                 return 0;
             }
@@ -1017,30 +1383,74 @@ namespace eka2l1::hle {
             if (cls == "java/lang/String") {
                 host_obj *so = obj(this_ref);
                 if (name == "<init>") {
-                    if (so && (sig.find("[B") != std::string::npos)) {
+                    if (so && (sig.find("[C") != std::string::npos)) {
                         host_obj *arr = obj(arg_i(args, nargs, 0));
                         int off = 0;
-                        int len = 0;
+                        int len = arr ? static_cast<int>(arr->arr.size()) : 0;
                         if (sig.find("II") != std::string::npos) {
                             off = arg_i(args, nargs, 1);
                             len = arg_i(args, nargs, 2);
+                        }
+                        so->kind = k_obj_string;
+                        so->str = arr ? chars_to_java_string(arr->arr, off, len) : std::string();
+                    } else if (so && (sig.find("[B") != std::string::npos)) {
+                        host_obj *arr = obj(arg_i(args, nargs, 0));
+                        int off = 0;
+                        int len = 0;
+                        std::string enc;
+                        if (sig.find("II") != std::string::npos) {
+                            off = arg_i(args, nargs, 1);
+                            len = arg_i(args, nargs, 2);
+                            if (sig.find("Ljava/lang/String;") != std::string::npos) {
+                                enc = as_str(arg_i(args, nargs, 3));
+                            }
                         } else if (arr) {
                             len = static_cast<int>(arr->arr.size());
+                            if (sig.find("Ljava/lang/String;") != std::string::npos) {
+                                enc = as_str(arg_i(args, nargs, 1));
+                            }
                         }
-                        std::string s;
+                        std::vector<std::uint8_t> raw;
                         if (arr && (off >= 0) && (len > 0)
                             && (static_cast<unsigned>(off + len) <= arr->arr.size())) {
-                            s.resize(static_cast<unsigned>(len));
+                            raw.resize(static_cast<unsigned>(len));
                             for (int i = 0; i < len; ++i) {
-                                s[static_cast<unsigned>(i)] = static_cast<char>(arr->arr[static_cast<unsigned>(off + i)] & 255);
+                                raw[static_cast<unsigned>(i)] = static_cast<std::uint8_t>(
+                                    arr->arr[static_cast<unsigned>(off + i)] & 255);
                             }
                         }
                         so->kind = k_obj_string;
-                        so->str = s;
+                        so->str = bytes_to_java_string(raw.data(), static_cast<int>(raw.size()), enc);
                     } else if (so && (nargs >= 1)) {
                         so->kind = k_obj_string;
                         so->str = as_str(args[0]);
                     }
+                    return true;
+                }
+                if (name == "getBytes") {
+                    const std::string s = as_str(this_ref);
+                    const std::string enc = (sig.find("Ljava/lang/String;") != std::string::npos)
+                        ? as_str(arg_i(args, nargs, 0)) : std::string();
+                    std::string enc_l = enc;
+                    for (char &c : enc_l) {
+                        if ((c >= 'A') && (c <= 'Z')) {
+                            c = static_cast<char>(c - 'A' + 'a');
+                        }
+                    }
+                    const int r = alloc_obj(k_obj_array);
+                    host_obj *ao = obj(r);
+                    // Round-trip via UTF-8 bytes unless GBK requested.
+                    if ((enc_l.find("gb") != std::string::npos) || (enc_l.find("936") != std::string::npos)) {
+                        // Lossy: emit UTF-8; rare for games to re-encode dialogue.
+                        for (unsigned char c : s) {
+                            ao->arr.push_back(c);
+                        }
+                    } else {
+                        for (unsigned char c : s) {
+                            ao->arr.push_back(c);
+                        }
+                    }
+                    ret = r;
                     return true;
                 }
                 if (name == "length") {
@@ -1124,8 +1534,14 @@ namespace eka2l1::hle {
                     }
                     return true;
                 }
-                if (name == "gc" || name == "currentTimeMillis") {
-                    ret = 0;
+                if (name == "gc") {
+                    return true;
+                }
+                if (name == "currentTimeMillis") {
+                    ret = static_cast<std::int32_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
                     return true;
                 }
             }
@@ -1178,11 +1594,23 @@ namespace eka2l1::hle {
                 if (name == "<init>") {
                     if (th) {
                         th->kind = k_obj_thread;
-                        th->nested = arg_i(args, nargs, 0);
+                        // Thread(Runnable) stores target in nested; bare Thread() uses this.
+                        th->nested = (nargs >= 1) ? arg_i(args, nargs, 0) : this_ref;
                     }
                     return true;
                 }
-                if (name == "start" || name == "yield" || name == "sleep" || name == "interrupt"
+                if (name == "start") {
+                    // Queue only. Running run() here blocks the emscripten
+                    // thread for the whole game loop and the page never paints.
+                    const int target = (th && th->nested) ? th->nested : this_ref;
+                    if (target) {
+                        g_thread_queue.push_back(target);
+                        LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-thread-queue {}",
+                            (obj(target) && obj(target)->clazz) ? obj(target)->clazz->name : "?");
+                    }
+                    return true;
+                }
+                if (name == "yield" || name == "sleep" || name == "interrupt"
                     || name == "join" || name == "setPriority") {
                     return true;
                 }
@@ -1321,6 +1749,87 @@ namespace eka2l1::hle {
                     ret = n ? n : ((st->pos >= static_cast<int>(st->bytes.size())) ? -1 : 0);
                     return true;
                 }
+                auto read_exact = [&](int nbytes, std::uint8_t *out) -> bool {
+                    if (!out || (st->pos + nbytes > static_cast<int>(st->bytes.size()))) {
+                        return false;
+                    }
+                    for (int i = 0; i < nbytes; ++i) {
+                        out[i] = st->bytes[static_cast<unsigned>(st->pos++)];
+                    }
+                    return true;
+                };
+                if ((name == "readFully") || (name == "readBoolean") || (name == "readByte")
+                    || (name == "readUnsignedByte") || (name == "readShort")
+                    || (name == "readUnsignedShort") || (name == "readChar")
+                    || (name == "readInt") || (name == "readLong") || (name == "readUTF")) {
+                    if (name == "readFully") {
+                        host_obj *dst = obj(arg_i(args, nargs, 0));
+                        int off = 0;
+                        int len = dst ? static_cast<int>(dst->arr.size()) : 0;
+                        if (sig.find("II") != std::string::npos) {
+                            off = arg_i(args, nargs, 1);
+                            len = arg_i(args, nargs, 2);
+                        }
+                        int n = 0;
+                        if (dst && (len > 0)) {
+                            while ((n < len) && (st->pos < static_cast<int>(st->bytes.size()))
+                                && (static_cast<unsigned>(off + n) < dst->arr.size())) {
+                                dst->arr[static_cast<unsigned>(off + n)] = st->bytes[static_cast<unsigned>(st->pos++)];
+                                ++n;
+                            }
+                        }
+                        ret = (n == len) ? 0 : -1;
+                        return true;
+                    }
+                    std::uint8_t tmp[8] = {};
+                    if (name == "readBoolean" || name == "readByte" || name == "readUnsignedByte") {
+                        if (!read_exact(1, tmp)) {
+                            ret = -1;
+                            return true;
+                        }
+                        ret = (name == "readBoolean") ? (tmp[0] ? 1 : 0)
+                            : ((name == "readByte") ? static_cast<std::int8_t>(tmp[0]) : tmp[0]);
+                        return true;
+                    }
+                    if (name == "readShort" || name == "readUnsignedShort" || name == "readChar") {
+                        if (!read_exact(2, tmp)) {
+                            ret = -1;
+                            return true;
+                        }
+                        const int v = (tmp[0] << 8) | tmp[1];
+                        ret = (name == "readShort") ? static_cast<std::int16_t>(v) : (v & 0xFFFF);
+                        return true;
+                    }
+                    if (name == "readInt") {
+                        if (!read_exact(4, tmp)) {
+                            ret = -1;
+                            return true;
+                        }
+                        ret = static_cast<std::int32_t>(be32(tmp));
+                        return true;
+                    }
+                    if (name == "readLong") {
+                        if (!read_exact(8, tmp)) {
+                            ret = 0;
+                            return true;
+                        }
+                        ret = static_cast<std::int32_t>(be32(tmp + 4));
+                        return true;
+                    }
+                    if (name == "readUTF") {
+                        if (!read_exact(2, tmp)) {
+                            ret = intern("");
+                            return true;
+                        }
+                        const int ulen = (tmp[0] << 8) | tmp[1];
+                        std::vector<std::uint8_t> ubuf(static_cast<unsigned>(std::max(0, ulen)));
+                        if (ulen > 0) {
+                            read_exact(ulen, ubuf.data());
+                        }
+                        ret = intern(bytes_to_java_string(ubuf.data(), ulen, "utf-8"));
+                        return true;
+                    }
+                }
             }
             if ((cls == "java/io/OutputStream") || (cls == "java/io/DataOutputStream")
                 || (cls == "java/io/ByteArrayOutputStream")) {
@@ -1429,6 +1938,19 @@ namespace eka2l1::hle {
                     }
                     return true;
                 }
+                if (name == "clipRect") {
+                    if (nargs >= 4) {
+                        const int x1 = std::max(g->cx, args[0]);
+                        const int y1 = std::max(g->cy, args[1]);
+                        const int x2 = std::min(g->cx + g->cw, args[0] + args[2]);
+                        const int y2 = std::min(g->cy + g->ch, args[1] + args[3]);
+                        g->cx = x1;
+                        g->cy = y1;
+                        g->cw = std::max(0, x2 - x1);
+                        g->ch = std::max(0, y2 - y1);
+                    }
+                    return true;
+                }
                 if (name == "translate") {
                     if (nargs >= 2) {
                         g->tx += args[0];
@@ -1445,8 +1967,7 @@ namespace eka2l1::hle {
                 if ((name == "drawRect") || (name == "drawLine") || (name == "drawRoundRect")
                     || (name == "drawArc")) {
                     if ((name == "drawLine") && (nargs >= 4)) {
-                        fill_rect(g, args[0], args[1], 1, 1);
-                        fill_rect(g, args[2], args[3], 1, 1);
+                        draw_line(g, args[0], args[1], args[2], args[3]);
                     } else if (nargs >= 4) {
                         fill_rect(g, args[0], args[1], args[2], 1);
                         fill_rect(g, args[0], args[1] + args[3] - 1, args[2], 1);
@@ -1455,26 +1976,49 @@ namespace eka2l1::hle {
                     }
                     return true;
                 }
-                if (name == "drawImage") {
+                if ((name == "drawImage") || (name == "drawRegion")) {
                     host_obj *im = (nargs >= 1) ? obj(args[0]) : nullptr;
-                    int x = (nargs >= 2) ? args[1] : 0;
-                    int y = (nargs >= 3) ? args[2] : 0;
-                    const int anc = (nargs >= 4) ? args[3] : 0;
-                    if (im) {
+                    int sx = 0, sy = 0, sw = im ? im->w : 0, sh = im ? im->h : 0;
+                    int tf = 0, x = 0, y = 0, anc = 0;
+                    if (name == "drawRegion") {
+                        sx = arg_i(args, nargs, 1);
+                        sy = arg_i(args, nargs, 2);
+                        sw = arg_i(args, nargs, 3);
+                        sh = arg_i(args, nargs, 4);
+                        tf = arg_i(args, nargs, 5);
+                        x = arg_i(args, nargs, 6);
+                        y = arg_i(args, nargs, 7);
+                        anc = arg_i(args, nargs, 8);
+                    } else {
+                        x = (nargs >= 2) ? args[1] : 0;
+                        y = (nargs >= 3) ? args[2] : 0;
+                        anc = (nargs >= 4) ? args[3] : 0;
+                    }
+                    if (im && (sw > 0) && (sh > 0)) {
+                        int tmp = 0;
+                        host_obj *src = im;
+                        if (tf) {
+                            tmp = make_region_image(im, sx, sy, sw, sh, tf);
+                            src = obj(tmp);
+                            sx = 0;
+                            sy = 0;
+                            sw = src ? src->w : 0;
+                            sh = src ? src->h : 0;
+                        }
                         if (anc & 1) {
-                            x -= im->w / 2;
+                            x -= sw / 2;
                         }
                         if (anc & 8) {
-                            x -= im->w;
+                            x -= sw;
                         }
                         if (anc & 2) {
-                            y -= im->h / 2;
+                            y -= sh / 2;
                         }
                         if (anc & 32) {
-                            y -= im->h;
+                            y -= sh;
                         }
                         host_obj *dst = g->target ? obj(g->target) : fb();
-                        blit(dst, x + g->tx, y + g->ty, im, 0, 0, im->w, im->h);
+                        blit(dst, x + g->tx, y + g->ty, src, sx, sy, sw, sh, g);
                     }
                     return true;
                 }
@@ -1505,12 +2049,27 @@ namespace eka2l1::hle {
                     }
                     return true;
                 }
-                if ((name == "drawString") || (name == "drawSubstring")) {
-                    std::string text = as_str(arg_i(args, nargs, 0));
+                if ((name == "drawString") || (name == "drawSubstring") || (name == "drawChar")
+                    || (name == "drawChars")) {
+                    std::string text;
                     int x = 0;
                     int y = 0;
                     int anc = 0;
-                    if (name == "drawSubstring") {
+                    if (name == "drawChar") {
+                        utf8_append_cp(text, static_cast<std::uint32_t>(arg_i(args, nargs, 0) & 0xFFFF));
+                        x = arg_i(args, nargs, 1);
+                        y = arg_i(args, nargs, 2);
+                        anc = arg_i(args, nargs, 3);
+                    } else if (name == "drawChars") {
+                        host_obj *arr = obj(arg_i(args, nargs, 0));
+                        const int off = arg_i(args, nargs, 1);
+                        const int len = arg_i(args, nargs, 2);
+                        text = arr ? chars_to_java_string(arr->arr, off, len) : std::string();
+                        x = arg_i(args, nargs, 3);
+                        y = arg_i(args, nargs, 4);
+                        anc = arg_i(args, nargs, 5);
+                    } else if (name == "drawSubstring") {
+                        text = as_str(arg_i(args, nargs, 0));
                         const int off = arg_i(args, nargs, 1);
                         const int len = arg_i(args, nargs, 2);
                         text = utf8_substr(text, off, off + len);
@@ -1518,6 +2077,7 @@ namespace eka2l1::hle {
                         y = arg_i(args, nargs, 4);
                         anc = arg_i(args, nargs, 5);
                     } else {
+                        text = as_str(arg_i(args, nargs, 0));
                         x = arg_i(args, nargs, 1);
                         y = arg_i(args, nargs, 2);
                         anc = arg_i(args, nargs, 3);
@@ -1572,6 +2132,15 @@ namespace eka2l1::hle {
                                 ret = load_image("");
                             }
                         } else {
+                            ret = load_image("");
+                        }
+                        return true;
+                    }
+                    if ((sig.find("Ljavax/microedition/lcdui/Image;IIIII") != std::string::npos)
+                        && (nargs >= 6)) {
+                        host_obj *src = obj(args[0]);
+                        ret = make_region_image(src, args[1], args[2], args[3], args[4], args[5]);
+                        if (!ret) {
                             ret = load_image("");
                         }
                         return true;
@@ -1673,6 +2242,7 @@ namespace eka2l1::hle {
             };
             unsigned pc = 0;
             int steps = 0;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(g_slice_ms);
             auto u8 = [&](unsigned o) { return (pc + o < code.size()) ? code[pc + o] : 0; };
             auto i8 = [&](unsigned o) { return static_cast<std::int8_t>(u8(o)); };
             auto i16 = [&](unsigned o) -> std::int16_t {
@@ -1682,7 +2252,11 @@ namespace eka2l1::hle {
             auto i32at = [&](unsigned o) -> std::int32_t {
                 return static_cast<std::int32_t>((u8(o) << 24) | (u8(o + 1) << 16) | (u8(o + 2) << 8) | u8(o + 3));
             };
-            while ((pc < code.size()) && (steps++ < k_max_steps)) {
+            while ((pc < code.size()) && (steps++ < g_slice_steps)) {
+                if (((steps & 255) == 0)
+                    && (std::chrono::steady_clock::now() >= deadline)) {
+                    break;
+                }
                 const std::uint8_t op = code[pc];
                 switch (op) {
                 case 0x00:
@@ -2204,7 +2778,7 @@ namespace eka2l1::hle {
                     break;
                 }
             }
-            if (steps >= k_max_steps) {
+            if (steps >= g_slice_steps) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-step-limit {} pc={} stack={}", c->name, pc, st.size());
             }
             return st.empty() ? 0 : st.back();
@@ -2219,6 +2793,7 @@ namespace eka2l1::hle {
                 return;
             }
             LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-call {}.{}{}", c->name, name, sig);
+            boot_budget boot;
             run_java(c, m, this_ref, nullptr, 0, 0);
         }
 
@@ -2273,6 +2848,16 @@ namespace eka2l1::hle {
             if (cf_method *ms = find_method(cur->clazz, "MAIN_STATE", "()V")) {
                 run_java(cur->clazz, ms, g_current, nullptr, 0, 0);
             }
+            if (!g_thread_queue.empty()) {
+                const int target = g_thread_queue.front();
+                host_obj *to = obj(target);
+                cf_class *tc = to ? to->clazz : nullptr;
+                if (tc) {
+                    if (cf_method *run = find_method(tc, "run", "()V")) {
+                        run_java(tc, run, target, nullptr, 0, 0);
+                    }
+                }
+            }
             present();
         }
 
@@ -2318,10 +2903,79 @@ namespace eka2l1::hle {
         g_font = 0;
         g_event_ready = false;
         g_pr = nullptr;
+        g_glyphs.clear();
+        g_thread_queue.clear();
+        g_attach_started = false;
     }
 
     bool j9_host_midp_active() {
         return g_current != 0;
+    }
+
+    void j9_set_pending_midlet_class(const char *main_class) {
+        if (!main_class || !main_class[0]) {
+            g_pending_midlet_class.clear();
+            return;
+        }
+        g_pending_midlet_class = main_class;
+        for (char &c : g_pending_midlet_class) {
+            if (c == '.') {
+                c = '/';
+            }
+        }
+        g_attach_tries = 0;
+        g_attach_started = false;
+        g_jar.clear();
+        g_jar_tried = false;
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] pending-midlet '{}'", g_pending_midlet_class);
+    }
+
+    const char *j9_pending_midlet_class() {
+        return g_pending_midlet_class.empty() ? "" : g_pending_midlet_class.c_str();
+    }
+
+    bool j9_host_read_suite_class(kernel::process *pr, const char *name,
+        std::vector<std::uint8_t> &out) {
+        if (!pr || !name || !name[0]) {
+            return false;
+        }
+        std::string path = name;
+        for (char &c : path) {
+            if (c == '.') {
+                c = '/';
+            }
+        }
+        if ((path.size() < 6) || (path.compare(path.size() - 6, 6, ".class") != 0)) {
+            path += ".class";
+        }
+        out.clear();
+        return jar_read(pr, path, out) || guest_read_any(pr, path, out);
+    }
+
+    bool j9_host_read_suite_file(kernel::process *pr, const char *name,
+        std::vector<std::uint8_t> &out) {
+        if (!pr || !name || !name[0]) {
+            return false;
+        }
+        std::string path = name;
+        for (char &c : path) {
+            if (c == '\\') {
+                c = '/';
+            }
+        }
+        while (!path.empty() && path[0] == '/') {
+            path.erase(path.begin());
+        }
+        out.clear();
+        return jar_read(pr, path, out) || guest_read_any(pr, path, out);
+    }
+
+    bool j9_host_try_attach(kernel_system *kern) {
+        // Guest J9 owns LCDUI. Attaching here used to sleep j9midps60
+        // and publish a host-side Windowserver client that is not a
+        // CreateSession from the VM.
+        (void)kern;
+        return false;
     }
 
     void j9_host_tick_midp() {

@@ -73,6 +73,7 @@ namespace eka2l1::epoc {
     struct window;
     struct window_key_shipper;
     struct bitmap_backed_canvas;
+    struct window_group;
 
     struct event_mod_notifier {
         event_modifier what;
@@ -549,14 +550,21 @@ namespace eka2l1 {
         }
 
         bool host_bind_j9_surface(kernel::process *pr, kernel::thread *thr);
+        bool guest_bind_j9_surface(kernel::process *pr, kernel::thread *thr, std::uint32_t h);
         bool host_present_j9_rgba(const std::uint32_t *rgba, int width, int height);
         bool has_j9_host_surface() const {
             return j9_host_surface_;
         }
+        int j9_present_count() const {
+            return j9_present_n_;
+        }
         void pump_j9_host_redraws();
 
     private:
+        bool j9_blit_j9_to_screen();
         bool j9_host_surface_{ false };
         epoc::bitmap_backed_canvas *j9_host_canvas_{ nullptr };
+        epoc::window_group *j9_host_group_{ nullptr };
+        int j9_present_n_{ 0 };
     };
 }

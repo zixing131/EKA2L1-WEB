@@ -1014,6 +1014,17 @@ namespace eka2l1::j2me {
 
         if (safe.empty()) {
             safe = "midlet";
+        } else {
+            bool any_alnum = false;
+            for (const unsigned char c : safe) {
+                if (std::isalnum(c)) {
+                    any_alnum = true;
+                    break;
+                }
+            }
+            if (!any_alnum) {
+                safe = "midlet";
+            }
         }
         return safe;
     }
@@ -1759,6 +1770,8 @@ namespace eka2l1::j2me {
         std::u16string args = build_j9midps60_args(suite_uid, midlet_class);
         if (midlet_class.empty()) {
             LOG_WARN(J2ME, "JAD has no MIDlet-1 class; J9 will not startApp");
+        } else {
+            hle::j9_set_pending_midlet_class(common::ucs2_to_utf8(midlet_class).c_str());
         }
         LOG_WARN(EMULATED_STDOUT, "[j9-nf] args='{}'", common::ucs2_to_utf8(args));
 
@@ -1796,14 +1809,39 @@ namespace eka2l1::j2me {
 
     bool launch_through_midp2(system *sys, const app_entry &entry, std::function<void(kernel::process*)> exit_cb) {
         io_system *io = sys->get_io_system();
-        const std::u16string storage_dir = build_midp2_storage_dir(entry);
-        const std::string safe_name = make_safe_preinstall_name(entry.name_);
-        const std::u16string storage_name = common::utf8_to_ucs2(safe_name);
+        std::u16string storage_dir = build_midp2_storage_dir(entry);
+        std::string safe_name = make_safe_preinstall_name(entry.name_);
+        std::u16string storage_name = common::utf8_to_ucs2(safe_name);
 
-        const std::u16string storage_jar = storage_dir + storage_name + u".jar";
+        std::u16string storage_jar = storage_dir + storage_name + u".jar";
         if (!io->exist(storage_jar)) {
-            LOG_ERROR(J2ME, "MIDP2 launch: JAR not found at {}", common::ucs2_to_utf8(storage_jar));
-            return false;
+            const std::uint32_t uid = java_midlet_uid(entry.id_);
+            const std::u16string uid_hex = common::utf8_to_ucs2(fmt::format("{:08X}", uid));
+            const std::u16string fallbacks[] = {
+                u"E:\\system\\data\\midp2\\preinstall\\m.jar",
+                u"E:\\resource\\java\\preinstall\\m.jar",
+                u"C:\\j.jar",
+                u"C:\\private\\102033E6\\j.jar",
+                u"C:\\private\\102033E6\\MIDlets\\" + uid_hex + u"\\m.jar",
+                u"C:\\private\\102033E6\\MIDlets\\" + uid_hex + u"\\j.jar",
+            };
+            bool found = false;
+            for (const std::u16string &cand : fallbacks) {
+                if (io->exist(cand)) {
+                    storage_dir = eka2l1::file_directory(cand);
+                    storage_name = common::utf8_to_ucs2(eka2l1::replace_extension(
+                        eka2l1::filename(common::ucs2_to_utf8(cand)), ""));
+                    storage_jar = cand;
+                    found = true;
+                    LOG_WARN(J2ME, "MIDP2 launch: using fallback JAR {}",
+                        common::ucs2_to_utf8(cand));
+                    break;
+                }
+            }
+            if (!found) {
+                LOG_ERROR(J2ME, "MIDP2 launch: JAR not found at {}", common::ucs2_to_utf8(storage_jar));
+                return false;
+            }
         }
 
         prepare_midp2_environment(sys);
@@ -1813,6 +1851,12 @@ namespace eka2l1::j2me {
         std::u16string suite_dir;
         if (!restage_to_ams_suite(io, entry, storage_dir, storage_name, suite_jad, suite_jar, suite_dir)) {
             return false;
+        }
+        {
+            const std::u16string cls = midlet_class_from_guest_jad(io, suite_jad);
+            if (!cls.empty()) {
+                hle::j9_set_pending_midlet_class(common::ucs2_to_utf8(cls).c_str());
+            }
         }
 
         static constexpr char16_t J9_LAUNCHER[] = u"Z:\\sys\\bin\\j9midps60.exe";
@@ -2186,6 +2230,27 @@ namespace eka2l1::j2me {
                     }
                 } else {
                     LOG_WARN(J2ME, "Can't resolve host path for per-MIDlet storage JAR at {}", common::ucs2_to_utf8(storage_dir));
+                }
+                if (!io->exist(storage_dir + storage_name + u".jar")) {
+                    symfile src = io->open_file(common::utf8_to_ucs2(path), READ_MODE | BIN_MODE);
+                    if (!src) {
+                        // path is a host path; copy via raw bytes from fopen.
+                        if (FILE *hf = fopen(path.c_str(), "rb")) {
+                            fseek(hf, 0, SEEK_END);
+                            const long sz = ftell(hf);
+                            fseek(hf, 0, SEEK_SET);
+                            if (sz > 0) {
+                                std::vector<char> buf(static_cast<std::size_t>(sz));
+                                if (fread(buf.data(), 1, buf.size(), hf) == buf.size()) {
+                                    write_guest_bytes(io, storage_dir + storage_name + u".jar",
+                                        buf.data(), buf.size());
+                                }
+                            }
+                            fclose(hf);
+                        }
+                    } else {
+                        src->close();
+                    }
                 }
                 symfile storage_jad = io->open_file(storage_dir + storage_name + u".jad", WRITE_MODE | BIN_MODE);
                 if (storage_jad) {

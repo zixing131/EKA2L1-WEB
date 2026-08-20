@@ -826,6 +826,47 @@ Access violation reading address 0x8
 
 JCL 里只有一处该字面量（`0x819412F4`，`ldr r2,[pc,#0x38]`）。`rom.classes`（J99J，204612 字节）完整落在 codeseg 内。把 J99J 拷到独立 RW chunk，并把该字面量改成 RW 基址。不要覆盖 XIP（会砸毁 JCL），也不要改 JCL export 1（不是 `J9GetJXE`）。
 
+### 10.25 宿主 MIDP：对话方块 + 其它 JAR
+
+当前 WASM 真出画走的是 **host MIDP 解释器**（`j9_host_midp.cpp`），不是 guest J9 LCDUI。
+
+对话 `□ □ □` 常见原因：
+
+1. `new String(byte[])` 按拉丁 1 塞进 UTF-8 缓冲 → `drawString` 画到空字形再 `fill_rect` / 字体里的 `□`
+2. `System.currentTimeMillis()` 曾恒为 0 → 打字机/计时对话停在占位符
+
+已修：
+
+- `String([B…)` / `String([B…String enc)`：无效 UTF-8 时按 **GBK** 解码（`j9_gbk_map.inc`）
+- `String([C…)`、`drawChar` / `drawChars`、`DataInputStream.read*`
+- `currentTimeMillis` 用 steady_clock；`Thread.start` 会调 `Runnable.run()`
+- 启动时 `j9_set_pending_midlet_class(MIDlet-1)`，主循环 `j9_host_try_attach` 不再写死 `AlpsFarm`
+
+其它游戏（如 `生化惊悚` / `GloftMASS`）需重新安装 JAR 后强刷；若仍黑屏，看控制台 `[j9-nf] pending-midlet` / `host-try-attach` / `host-class-miss`。
+
+### 10.26 官方 J9 LCDUI：`Canvas._create` 与 NewGlobalRef / Execute
+
+出画必须走 **guest IBM J9 的官方 LCDUI Thumb native**（`Canvas._create` / `Toolkit.activate` / `Graphics._create` / `Buffer._flush`），不要再开 `j9_host_try_attach`。
+
+`Canvas._create`（`0x81AEE7F8`，`push {r4-r7,lr}`）开头：
+
+```
+ldr r0, [env]          ; JNINativeInterface*
+r5 = 0x380
+ldr r2, [r0, #0x388]   ; slot 226 = NewGlobalRef
+blx r2
+… 成功后再 blx 0x81AF38A4 → CJavaEventSource::Execute (0x81A61CC4)
+```
+
+Slot 226 的 BKPT 不能种在 `walk+0x310`：pairs 从 `+0x304` 往后长，会盖掉 stub，CPU 把 pair 数据当 ARM 跑，AV 在 `walk+0x750`（读 `0x0`/`0x4`）。NewGlobalRef / NewObjectArray / CallStatic / Main cp-stub 改种到 JNI 表之后（`+0x3870` 起）。
+
+`Execute` 是 `SendReceive([[this+8]+8], 1)`。对 `!Windowserver` 来说 function 1 = `ws_mess_shutdown`，不能真发。Toolkit._create / setCurrent 的 Execute 继续 skip。`Canvas._create` 的 callback `0x81AEE779` 目前也返回 0（本地跑 callback 会在 `[r0+0x5c]->vtable+0x68` 上 AV；真工厂要等官方 C++ peer 齐）。
+
+Java LCDUI 对象 `+8` 是 C++ peer，不要写成 RWsSession handle。Handle 只写进 peer 内部。Dummy vtable/peer 不能放在 `walk+0x6000`（adapters 从 `+0x5000` 往后长会盖掉）。
+
+`AlpsFarm` 不在 JCL。官方 `FindClass`（`0x818D93C8`）会拿 J9 锁并把 Main 停在 euser Wait。JAR classfile 种成合成 J9ROMClass（方法名/签名用宽松 UTF，`<init>` / `()V` 才能被 `j9_rom_method_named` 看到），`startApp` 是空 `return`，真正入口是 `AlpsFarmCanvas.<init>` + 官方 `setCurrent` / `Graphics._create`。`Graphics` 的 ROM 名 UTF 只出现在别人的 CP 里，找不到就回退到 Canvas/Object 再跑 `_create`。
+
+合成 ROM 没有可用的 J9 RAM CP，官方解释器在 `new`/`invoke`/`getfield` 上会读 `0x52A8xxxx` 然后 AV。套件字节码改由宿主解释器按 classfile CP 跑（数组/字段/`TEXT_LOAD` 读 JAR），`Graphics.setColor` / `fillRect` / `setFont` 再踢回官方 JCL 方法（`0x8190E968` 的 `new` resolve 仍种 BKPT 作兜底）。`AlpsFarmCanvas.<init>` 末尾的 `Thread.start` 不在这里拉循环，LCDUI 链 phase 12 显式跑 `paint` + `MAIN_STATE`。
 
 
 

@@ -44,6 +44,7 @@
 
 #include <kernel/chunk.h>
 #include <kernel/codeseg.h>
+#include <kernel/j9_gbk_map.inc>
 #include <kernel/j9_jni_table.h>
 #include <kernel/kernel.h>
 #include <kernel/process.h>
@@ -52,11 +53,16 @@
 
 #include <cpu/arm_interface.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <string>
+#include <vector>
+
+#define STBI_NO_STDIO
+#include <stb_image.h>
 
 // Defined in svc.cpp; debug probe toggled by the frontend.
 extern bool eka2l1_leave_probe;
@@ -2451,10 +2457,16 @@ namespace eka2l1::hle {
     static address g_j9_findclass_ret_bkpt = 0;
     static address g_j9_findclass_saved_lr = 0;
     static address g_j9_getmethod_bkpt = 0;
+    static address g_j9_getclass_bkpt = 0;
+    static unsigned g_j9_dummy_meth_n = 0;
     static address g_j9_newobjarr_bkpt = 0;
     static address g_j9_newglobal_bkpt = 0;
     static address g_j9_callstatic_bkpt = 0;
     static address g_j9_lcdui_chain_bkpt = 0;
+    static address g_j9_ws_connected_bkpt = 0;
+    static address g_j9_ws_desc = 0;
+    static address g_j9_ws_svc_pc = 0;
+    static address g_j9_eventsrc_this = 0;
     static address g_j9_cp_stub_bkpt = 0;
     static address g_j9_cp_stub_meth = 0;
     static address g_j9_main_cp = 0;
@@ -2481,6 +2493,11 @@ namespace eka2l1::hle {
     static address g_j9_toolkit_obj = 0;
     static address g_j9_canvas_obj = 0;
     static address g_j9_graphics_obj = 0;
+    static address g_j9_graphics_clazz = 0;
+    static address g_j9_buffer_obj = 0;
+    static address g_j9_hi_ret_obj = 0;
+    static std::int32_t g_j9_gcolor = 0;
+    static int g_j9_hi_stage = 0;
     static int g_j9_peer_n = 0;
     static address g_j9_vmthread = 0;
     static address g_j9_vt10_c = 0;
@@ -2668,6 +2685,86 @@ namespace eka2l1::hle {
     static bool g_j9_alps_started = false;
     static int g_j9_alps_phase = 0;
     static address g_j9_alps_clazz = 0;
+    static address g_j9_alps_canvas_clazz = 0;
+    static address g_j9_alps_canvas_obj = 0;
+    static constexpr int k_j9_plant_max = 16;
+    struct j9_planted_class {
+        char name[96];
+        address ram;
+        address rom;
+        address blob;
+        address statics;
+        unsigned inst_bytes;
+    };
+    static j9_planted_class g_j9_planted[k_j9_plant_max];
+    static int g_j9_nplanted = 0;
+    struct j9_plant_method {
+        std::string name;
+        std::string sig;
+        std::vector<std::uint8_t> code;
+        std::uint16_t maxs = 8;
+        std::uint16_t maxl = 8;
+    };
+    struct j9_plant_meta {
+        std::vector<std::uint8_t> tag;
+        std::vector<std::uint16_t> a;
+        std::vector<std::uint16_t> b;
+        std::vector<std::string> utf;
+        std::vector<std::uint32_t> chi;
+        std::vector<std::uint32_t> clo;
+        std::vector<std::string> fname;
+        std::vector<std::string> fsig;
+        std::vector<std::uint16_t> fflags;
+        std::vector<std::uint16_t> foff;
+        std::vector<j9_plant_method> methods;
+        bool clinit_done = false;
+    };
+    static j9_plant_meta g_j9_pmeta[k_j9_plant_max];
+    static address g_j9_host_ret_bkpt = 0;
+    struct j9_hi_frame {
+        int pidx = -1;
+        int midx = -1;
+        unsigned pc = 0;
+        int ret_slots = 0;
+        std::vector<std::int32_t> locals;
+        std::vector<std::int32_t> stack;
+    };
+    static j9_hi_frame g_j9_hi[16];
+    static int g_j9_hi_n = 0;
+    static bool g_j9_hi_yield = false;
+    static std::int32_t g_j9_hi_ret = 0;
+    struct j9_sbuf_ent {
+        address obj = 0;
+        std::string s;
+    };
+    static j9_sbuf_ent g_j9_sbuf[24];
+    struct j9_is_ent {
+        address obj = 0;
+        std::vector<std::uint8_t> data;
+        unsigned pos = 0;
+    };
+    static j9_is_ent g_j9_istream[24];
+    static constexpr int k_j9_lcd_w = 240;
+    static constexpr int k_j9_lcd_h = 320;
+    static constexpr int k_j9_img_max = 256;
+    struct j9_hi_img {
+        address obj = 0;
+        int w = 0;
+        int h = 0;
+        std::vector<std::uint32_t> pix;
+    };
+    static j9_hi_img g_j9_imgs[k_j9_img_max];
+    static std::vector<std::uint32_t> g_j9_fb;
+    static int g_j9_fb_w = k_j9_lcd_w;
+    static int g_j9_fb_h = k_j9_lcd_h;
+    static int g_j9_clipx = 0;
+    static int g_j9_clipy = 0;
+    static int g_j9_clipw = k_j9_lcd_w;
+    static int g_j9_cliph = k_j9_lcd_h;
+    static int g_j9_tx = 0;
+    static int g_j9_ty = 0;
+    static int g_j9_fb_dirty = 0;
+    static void j9_hi_fb_reset();
     static address g_j9_main_ret_sp = 0;
     static address g_j9_main_ret_lr = 0;
     static address g_j9_park_pc = 0;
@@ -3280,6 +3377,26 @@ namespace eka2l1::hle {
         return 0;
     }
 
+    static address j9_jni_deref_jobject(kernel::process *pr, const address raw) {
+        if (!pr || !raw) {
+            return 0;
+        }
+        if (j9_looks_heap(raw) && ((raw & 3u) == 0) && j9_mapped32(pr, raw)) {
+            return raw;
+        }
+        const address packed = j9_pack_obj(pr, raw);
+        if (packed) {
+            return packed << 2;
+        }
+        if (((raw & 3u) == 0) && j9_mapped32(pr, raw)) {
+            const address v = j9_read32(pr, raw);
+            if (j9_looks_heap(v) && j9_mapped32(pr, v)) {
+                return v;
+            }
+        }
+        return 0;
+    }
+
     static bool j9_obj_has_peer(kernel::process *pr, const address packed) {
         if (!packed) {
             return false;
@@ -3297,8 +3414,30 @@ namespace eka2l1::hle {
         }
     }
 
+    static address j9_dummy_jmethod(kernel::process *pr) {
+        if (!pr) {
+            return 0;
+        }
+        const address base = g_j9_walk_va ? (g_j9_walk_va + 0x3E80u) : 0;
+        if (!base || !j9_mapped32(pr, base + 16u)) {
+            return 0x710100u + (g_j9_dummy_meth_n * 16u);
+        }
+        const unsigned slot = (g_j9_dummy_meth_n < 8u) ? g_j9_dummy_meth_n++ : 7u;
+        const address m = base + slot * 16u;
+        j9_write32(pr, m, 0x81AA8138u);
+        j9_write32(pr, m + 4u, g_j9_valid_cp);
+        j9_write32(pr, m + 8u, 8u);
+        j9_write32(pr, m + 12u, 0);
+        return m;
+    }
+
     static address j9_alloc_java_obj(kernel::process *pr, const address clazz);
     static address j9_host_alloc_obj(kernel::process *pr, const address clazz, unsigned nbytes);
+    static address j9_find_rom_class_by_name(kernel::process *pr, const char *want);
+    static address j9_ram_class_for_rom(kernel::process *pr, const address rom);
+    static address j9_make_ram_class(kernel::process *pr, const address rom);
+    static address j9_plant_suite_class(kernel::process *pr, const char *want);
+    static address j9_planted_ram_named(const char *want);
     static void j9_mark_jcl_supers(kernel::process *pr, const address clazz);
     static void j9_plant_main_thread(kernel::process *pr, const address clazz);
     static address j9_find_valid_cp(kernel::process *pr, const address ptr) {
@@ -3344,8 +3483,9 @@ namespace eka2l1::hle {
     // Toolkit._create via CJavaEventSource; that path never ran before
     // Graphics._create, so [obj+8] is 0 and 0x81A61CC4 does
     // ldr [factory+8]; +8 → User path AV at address 8.
-    static constexpr std::uint32_t k_j9_vt_off = 0x6000;
-    static constexpr std::uint32_t k_j9_peer_off = 0x6080;
+    // Adapters occupy walk+0x5000.. and will smash 0x6000+.
+    static constexpr std::uint32_t k_j9_vt_off = 0x4300;
+    static constexpr std::uint32_t k_j9_peer_off = 0x4380;
     static constexpr std::uint32_t k_j9_peer_size = 80;
     static constexpr int k_j9_peer_max = 24;
 
@@ -3356,8 +3496,11 @@ namespace eka2l1::hle {
         auto *base = reinterpret_cast<std::uint8_t *>(g_j9_walk_ch->host_base());
         auto *vt = reinterpret_cast<std::uint32_t *>(base + k_j9_vt_off);
         if (vt[0] == 0) {
+            // Slots must be *addresses* of bx lr, not the encoding.
+            const address gadget = g_j9_walk_va + 0x38B0u;
+            *reinterpret_cast<std::uint32_t *>(base + 0x38B0u) = 0xE12FFF1Eu;
             for (int i = 0; i < 32; ++i) {
-                vt[i] = 0xE12FFF1Eu; // ARM bx lr
+                vt[i] = gadget;
             }
         }
         const int slot = g_j9_peer_n % k_j9_peer_max;
@@ -3373,6 +3516,7 @@ namespace eka2l1::hle {
             }
         }
         p[0] = g_j9_walk_va + k_j9_vt_off;
+        p[1] = g_j9_walk_va + k_j9_vt_off;
         p[2] = heap ? heap : peer;
         return peer;
     }
@@ -3407,7 +3551,9 @@ namespace eka2l1::hle {
                 seen[ns++] = cur;
             }
             if (cur == 0) {
-                j9_write32(pr, s, peer);
+                // Do not plant dummy factories / RThread* into midp2ams
+                // .data. That blocks the real LCDUI runtime from
+                // installing CJavaEventSource and RWsSession.
                 ++n;
             }
         }
@@ -3448,8 +3594,16 @@ namespace eka2l1::hle {
         case 0x81A61CC4u:
             return 0xB40F;
         case 0x81AF2C12u:
+        case 0x81AF2CA4u:
         case 0x819171F0u:
+        case 0x81AF044Au:
             return 0xB570;
+        case 0x81AF0394u:
+            return 0xB5F8;
+        case 0x81A61BF8u:
+            return 0xB570;
+        case 0x81AF0494u:
+            return 0xB5FF;
         default:
             return 0xB51C;
         }
@@ -3817,7 +3971,7 @@ namespace eka2l1::hle {
 
     static void j9_plant_one_bkpt(kernel::process *pr, const address site,
         const std::uint32_t expect) {
-        if (!pr || (g_j9_invoke_n >= 48)) {
+        if (!pr || (g_j9_invoke_n >= 120)) {
             return;
         }
         for (int i = 0; i < g_j9_invoke_n; ++i) {
@@ -3843,6 +3997,7 @@ namespace eka2l1::hle {
         if (!pr) {
             return;
         }
+        j9_plant_one_bkpt(pr, 0x81910EFCu, 0xE59C0004u);
         j9_plant_one_bkpt(pr, 0x81910F2Cu, 0xE593C004u);
         j9_plant_one_bkpt(pr, 0x81910F04u, 0xE797C10Au);
         j9_plant_one_bkpt(pr, 0x81910F48u, 0xE3E03007u);
@@ -4155,6 +4310,7 @@ namespace eka2l1::hle {
     static void j9_run_main_cp_stub(arm::core *core, kernel::process *pr);
     static bool j9_host_cms_run(arm::core *core, kernel::process *pr);
     static bool j9_host_kick_lcdui(arm::core *core, kernel::process *pr);
+    static bool j9_guest_toolkit_create(arm::core *core, kernel::process *pr);
     static bool j9_host_start_alps_init(arm::core *core, kernel::process *pr,
         const address clazz);
     static void j9_prepare_findclass_vt(kernel::process *pr);
@@ -4485,7 +4641,9 @@ namespace eka2l1::hle {
             || (g_j9_resume_at == 0x81961C74u)
             || ((g_j9_resume_at >= 0x81962300u) && (g_j9_resume_at < 0x81962340u))
             || (g_j9_resume_at == 0x81962D43u)
-            || ((g_j9_resume_at >= 0x81AA8000u) && (g_j9_resume_at < 0x81AA9000u))) {
+            || ((g_j9_resume_at >= 0x81AA8000u) && (g_j9_resume_at < 0x81AA9000u))
+            || ((g_j9_resume_at >= 0x81AA6D00u) && (g_j9_resume_at < 0x81AA6E00u))
+            || ((g_j9_resume_at >= 0x81A92F00u) && (g_j9_resume_at < 0x81A93C80u))) {
             ++logs;
             const address vm = j9_read32(pr, r8 + 4u);
             const address tab = j9_read32(pr, vm + 0xa18u);
@@ -4520,12 +4678,9 @@ namespace eka2l1::hle {
                 g_j9_saved_r6 = r6;
                 g_j9_java_sp = r7;
                 LOG_WARN(EMULATED_STDOUT,
-                    "[j9-nf] main-host astore_3 val=0x{:X} -> cms-run r6=0x{:X} r7=0x{:X}",
+                    "[j9-nf] main-guest astore_3 val=0x{:X} r6=0x{:X} r7=0x{:X}",
                     val, r6, r7);
-                if (j9_host_cms_run(core, pr)) {
-                    return;
-                }
-                g_j9_resume_at = 0x81AA8196u;
+                g_j9_resume_at = 0x81AA814Eu;
                 g_j9_resume_no_ac = true;
                 j9_jxe_resume_interp(core, pr, meth, 0u);
                 g_j9_resume_no_ac = false;
@@ -4549,14 +4704,17 @@ namespace eka2l1::hle {
             }
             const unsigned midx = static_cast<unsigned>(j9_read8(pr, fetch_pc + 1u))
                 | (static_cast<unsigned>(j9_read8(pr, fetch_pc + 2u)) << 8);
+            // Synth Main CP cannot official-resolve Runtime/Args/CMS.
+            // Stub those ops; CMS.run (#38) jumps into guest Toolkit._create.
             const bool host_op = ((op == 0xB2u) && (midx == 17u))
                 || ((op == 0xB4u) && ((midx == 33u) || (midx == 36u)))
                 || ((op == 0xB6u) && ((midx == 34u) || (midx == 38u)))
                 || ((op == 0xB7u) && (midx == 43u))
+                || ((op == 0xB8u) && (midx == 20u))
                 || ((op == 0xBBu) && (midx == 46u));
             if (host_op) {
                 LOG_WARN(EMULATED_STDOUT,
-                    "[j9-nf] main-host op=0x{:02X} #{} pc=0x{:X}",
+                    "[j9-nf] main-guest op=0x{:02X} #{} pc=0x{:X} (stub)",
                     op, midx, fetch_pc);
                 j9_run_main_cp_stub(core, pr);
                 return;
@@ -4720,6 +4878,29 @@ namespace eka2l1::hle {
         return (std::strchr(out, '/') != nullptr) || (std::strncmp(out, "java", 4) == 0)
             || ((ln == 1u) && (out[0] >= 0x20) && (out[0] <= 0x7E))
             || ((out[0] >= 'A') && (out[0] <= 'z') && (ln >= 2u) && (ln < 80u));
+    }
+
+    static bool j9_copy_utf8_sym(kernel::process *pr, const address p, char *out, const size_t n) {
+        if (!pr || !p || !out || (n < 2) || !pr->get_ptr_on_addr_space(p + 2u)) {
+            return false;
+        }
+        const auto *b = reinterpret_cast<const std::uint8_t *>(pr->get_ptr_on_addr_space(p));
+        if (!b) {
+            return false;
+        }
+        const unsigned ln = static_cast<unsigned>(b[0]) | (static_cast<unsigned>(b[1]) << 8);
+        if ((ln < 1u) || (ln >= n) || (ln > 180u) || !pr->get_ptr_on_addr_space(p + 1u + ln)) {
+            return false;
+        }
+        for (unsigned i = 0; i < ln; ++i) {
+            const std::uint8_t ch = b[2u + i];
+            if ((ch < 0x20u) || (ch > 0x7Eu)) {
+                return false;
+            }
+            out[i] = static_cast<char>(ch);
+        }
+        out[ln] = 0;
+        return true;
     }
 
     static void j9_class_name(kernel::process *pr, const address clazz, char *out, const size_t n) {
@@ -5720,6 +5901,29 @@ namespace eka2l1::hle {
         return obj;
     }
 
+    static address j9_host_alloc_blob(kernel::process *pr, unsigned nbytes) {
+        if (!pr) {
+            return 0;
+        }
+        if (nbytes < 0x20u) {
+            nbytes = 0x20u;
+        }
+        nbytes = (nbytes + 15u) & ~15u;
+        if (!j9_ensure_java_heap(pr)
+            || (g_j9_java_heap_off + nbytes > k_j9_java_heap_size)) {
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] plant-blob-fail need=0x{:X} off=0x{:X}",
+                nbytes, g_j9_java_heap_off);
+            return 0;
+        }
+        const address obj = g_j9_java_heap_va + g_j9_java_heap_off;
+        g_j9_java_heap_off += nbytes;
+        if (auto *p = pr->get_ptr_on_addr_space(obj)) {
+            std::memset(p, 0, nbytes);
+        }
+        return obj;
+    }
+
     static void j9_write16(kernel::process *pr, const address p, const std::uint16_t v) {
         if (!pr || !p) {
             return;
@@ -5806,6 +6010,124 @@ namespace eka2l1::hle {
         return str;
     }
 
+    static address j9_new_string_u16(kernel::process *pr, const std::uint16_t *u, unsigned n) {
+        if (!pr || !u || !g_j9_string_clazz || !j9_mapped32(pr, g_j9_string_clazz)) {
+            return 0;
+        }
+        address ac = g_j9_char_array_clazz;
+        if (!ac || !j9_mapped32(pr, ac)) {
+            ac = j9_steal_char_array_clazz(pr, g_j9_string_clazz);
+            g_j9_char_array_clazz = ac;
+        }
+        if (!ac) {
+            return 0;
+        }
+        if (n > 0x4000u) {
+            n = 0x4000u;
+        }
+        const address arr = j9_host_alloc_obj(pr, ac, 16u + n * 2u);
+        if (!arr) {
+            return 0;
+        }
+        j9_write32(pr, arr + 8u, n);
+        j9_write32(pr, arr + 12u, n);
+        for (unsigned i = 0; i < n; ++i) {
+            j9_write16(pr, arr + 16u + i * 2u, u[i]);
+        }
+        const address str = j9_host_alloc_obj(pr, g_j9_string_clazz, 0x20u);
+        if (!str) {
+            return 0;
+        }
+        j9_store_string_fields(pr, str, arr, n);
+        return str;
+    }
+
+    static std::uint32_t j9_gbk_cp(unsigned b0, unsigned b1) {
+        const std::uint32_t key = (b0 << 8) | b1;
+        std::size_t lo = 0;
+        std::size_t hi = k_j9_gbk_map_n;
+        while (lo < hi) {
+            const std::size_t mid = lo + (hi - lo) / 2u;
+            const std::uint32_t word = k_j9_gbk_map[mid];
+            const std::uint32_t mk = word >> 16;
+            if (mk < key) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if ((lo < k_j9_gbk_map_n) && ((k_j9_gbk_map[lo] >> 16) == key)) {
+            return k_j9_gbk_map[lo] & 0xFFFFu;
+        }
+        return 0x25A1u;
+    }
+
+    static address j9_new_string_bytes(kernel::process *pr, const address arr,
+        int off, int len, const char *enc) {
+        if (!pr || !arr || (off < 0) || (len <= 0)) {
+            return j9_new_string_utf(pr, "");
+        }
+        const unsigned cap = j9_read32(pr, arr + 8u);
+        if (static_cast<unsigned>(off) >= cap) {
+            return j9_new_string_utf(pr, "");
+        }
+        if (static_cast<unsigned>(off + len) > cap) {
+            len = static_cast<int>(cap - static_cast<unsigned>(off));
+        }
+        std::string enc_l;
+        if (enc) {
+            enc_l = enc;
+            for (char &c : enc_l) {
+                if ((c >= 'A') && (c <= 'Z')) {
+                    c = static_cast<char>(c - 'A' + 'a');
+                }
+            }
+        }
+        const bool want_gb = (enc_l.find("gb") != std::string::npos)
+            || (enc_l.find("936") != std::string::npos);
+        std::vector<std::uint16_t> out;
+        out.reserve(static_cast<unsigned>(len));
+        unsigned i = 0;
+        const unsigned n = static_cast<unsigned>(len);
+        auto rd = [&](unsigned k) -> std::uint8_t {
+            return j9_read8(pr, arr + 16u + static_cast<unsigned>(off) + k);
+        };
+        if (want_gb) {
+            while (i < n) {
+                const unsigned b0 = rd(i++);
+                if (b0 < 0x80u) {
+                    out.push_back(static_cast<std::uint16_t>(b0));
+                    continue;
+                }
+                if (i >= n) {
+                    out.push_back(0x25A1u);
+                    break;
+                }
+                const unsigned b1 = rd(i++);
+                out.push_back(static_cast<std::uint16_t>(j9_gbk_cp(b0, b1)));
+            }
+        } else {
+            while (i < n) {
+                const unsigned b0 = rd(i++);
+                if (b0 < 0x80u) {
+                    out.push_back(static_cast<std::uint16_t>(b0));
+                } else if ((b0 & 0xE0u) == 0xC0u) {
+                    const unsigned b1 = (i < n) ? rd(i++) : 0x80u;
+                    out.push_back(static_cast<std::uint16_t>(((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu)));
+                } else if ((b0 & 0xF0u) == 0xE0u) {
+                    const unsigned b1 = (i < n) ? rd(i++) : 0x80u;
+                    const unsigned b2 = (i < n) ? rd(i++) : 0x80u;
+                    out.push_back(static_cast<std::uint16_t>(
+                        ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu)));
+                } else {
+                    out.push_back(0x25A1u);
+                }
+            }
+        }
+        return out.empty() ? j9_new_string_utf(pr, "")
+            : j9_new_string_u16(pr, out.data(), static_cast<unsigned>(out.size()));
+    }
+
     static address j9_rom_class_from_utf(kernel::process *pr, const address utf,
         const address lo, const address hi) {
         if (!pr || !utf || (hi <= lo)) {
@@ -5865,7 +6187,28 @@ namespace eka2l1::hle {
         if ((nlen < 3u) || (nlen > 160u)) {
             return 0;
         }
+        // 5320 LCDUI JXE: Graphics UTF is not the first hit in the wide
+        // ROM window, so a single-UTF scan misses the real ROMClass.
+        if (std::strcmp(want, "javax/microedition/lcdui/Graphics") == 0) {
+            const address rom = 0x81B0EE10u;
+            const address sz = j9_readable(pr, rom) ? j9_read32(pr, rom) : 0;
+            if ((sz >= 0x40u) && (sz <= 0x80000u)) {
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] rom-graphics-fixed rom=0x{:X} sz=0x{:X}", rom, sz);
+                return rom;
+            }
+        }
         // midp2ams XIP: file UTF8 0xA956 / ROMClass 0x4C728, E32 hdr 0x78.
+        if (g_j9_midp2ams_run && (std::strcmp(want,
+                "com/symbian/j2me/midp/runtimeV2/CMS") == 0)) {
+            const address rom = g_j9_midp2ams_run + 0x4B458u;
+            const address sz = j9_readable(pr, rom) ? j9_read32(pr, rom) : 0;
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] rom-cms-peek rom=0x{:X} sz=0x{:X}", rom, sz);
+            if ((sz >= 0x40u) && (sz <= 0x8000u)) {
+                return rom;
+            }
+        }
         if (g_j9_midp2ams_run && (std::strcmp(want,
                 "com/symbian/j2me/midp/runtimeV2/Main") == 0)) {
             const address utf = g_j9_midp2ams_run + 0xA8DCu;
@@ -5883,6 +6226,8 @@ namespace eka2l1::hle {
             { g_j9_midp2ams_run,
                 g_j9_midp2ams_run ? (g_j9_midp2ams_run + g_j9_midp2ams_size) : 0 },
             { 0x70300000u, 0x70500000u },
+            { g_j9_jcl_jxe_va,
+                g_j9_jcl_jxe_va ? (g_j9_jcl_jxe_va + 0x80000u) : 0 },
             { 0x81940000u, 0x81B80000u },
             { 0x81AE0000u, 0x81B20000u },
             { 0x02D00000u, 0x03000000u },
@@ -5891,20 +6236,31 @@ namespace eka2l1::hle {
             if (!rg[0] || (rg[1] <= rg[0])) {
                 continue;
             }
-            const address utf = j9_find_utf8_in_range(pr, want, rg[0], rg[1]);
-            if (!utf) {
-                continue;
-            }
-            if (const address clazz = j9_rom_class_from_utf(pr, utf, rg[0], rg[1])) {
-                LOG_WARN(EMULATED_STDOUT,
-                    "[j9-nf] rom-class '{}' utf=0x{:X} rom=0x{:X}", want, utf, clazz);
-                return clazz;
+            int hits = 0;
+            for (address p = rg[0]; (p + nlen + 4u < rg[1]) && (hits < 12); p += 2u) {
+                const auto *s = reinterpret_cast<const char *>(pr->get_ptr_on_addr_space(p));
+                if (!s || (std::memcmp(s, want, nlen) != 0)) {
+                    continue;
+                }
+                const auto *lenp = reinterpret_cast<const std::uint8_t *>(
+                    pr->get_ptr_on_addr_space(p - 2u));
+                if (!lenp || (lenp[0] != static_cast<std::uint8_t>(nlen)) || (lenp[1] != 0)) {
+                    continue;
+                }
+                ++hits;
+                const address utf = p - 2u;
+                if (const address clazz = j9_rom_class_from_utf(pr, utf, rg[0], rg[1])) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] rom-class '{}' utf=0x{:X} rom=0x{:X}", want, utf, clazz);
+                    return clazz;
+                }
             }
         }
         return 0;
     }
 
     static address j9_find_class_by_name(kernel::process *pr, const char *want);
+    static address j9_string_array_clazz(kernel::process *pr);
 
     static address j9_dummy_jcl_obj(kernel::process *pr, const address prefer, unsigned nbytes) {
         const address oc = (prefer && j9_mapped32(pr, prefer + 0x38u))
@@ -5952,7 +6308,7 @@ namespace eka2l1::hle {
         }
         const address first = rom + 0x20u + j9_read32(pr, rom + 0x20u);
         address romm = first;
-        for (int i = 0; i < 48 && romm; ++i) {
+        for (int i = 0; i < 512 && romm; ++i) {
             if (!pr->get_ptr_on_addr_space(romm + 8u)) {
                 break;
             }
@@ -5962,8 +6318,8 @@ namespace eka2l1::hle {
             sbuf[0] = 0;
             const auto reln = static_cast<std::int32_t>(j9_read32(pr, romm));
             const auto rels = static_cast<std::int32_t>(j9_read32(pr, romm + 4u));
-            j9_copy_utf8(pr, romm + static_cast<address>(reln), nbuf, sizeof(nbuf));
-            j9_copy_utf8(pr, romm + 4u + static_cast<address>(rels), sbuf, sizeof(sbuf));
+            j9_copy_utf8_sym(pr, romm + static_cast<address>(reln), nbuf, sizeof(nbuf));
+            j9_copy_utf8_sym(pr, romm + 4u + static_cast<address>(rels), sbuf, sizeof(sbuf));
             if (nbuf[0] && (std::strcmp(nbuf, want) == 0)
                 && (!sig || (std::strcmp(sbuf, sig) == 0))) {
                 return romm;
@@ -5974,6 +6330,355 @@ namespace eka2l1::hle {
             }
         }
         return 0;
+    }
+
+    static address j9_planted_ram_named(const char *want) {
+        if (!want || !want[0]) {
+            return 0;
+        }
+        for (int i = 0; i < g_j9_nplanted; ++i) {
+            if (std::strcmp(g_j9_planted[i].name, want) == 0) {
+                return g_j9_planted[i].ram;
+            }
+        }
+        return 0;
+    }
+
+    static int j9_remember_planted(const char *name, const address ram, const address rom) {
+        if (!name || !name[0] || !ram) {
+            return -1;
+        }
+        for (int i = 0; i < g_j9_nplanted; ++i) {
+            if (std::strcmp(g_j9_planted[i].name, name) == 0) {
+                g_j9_planted[i].ram = ram;
+                g_j9_planted[i].rom = rom;
+                return i;
+            }
+        }
+        if (g_j9_nplanted >= k_j9_plant_max) {
+            return -1;
+        }
+        const int idx = g_j9_nplanted++;
+        auto &e = g_j9_planted[idx];
+        std::memset(e.name, 0, sizeof(e.name));
+        std::strncpy(e.name, name, sizeof(e.name) - 1u);
+        e.ram = ram;
+        e.rom = rom;
+        e.blob = 0;
+        e.statics = 0;
+        e.inst_bytes = 0x80u;
+        if (std::strstr(name, "AlpsFarmCanvas") && !std::strchr(name, '$')) {
+            g_j9_alps_canvas_clazz = ram;
+        } else if (std::strcmp(name, "AlpsFarm") == 0) {
+            g_j9_alps_clazz = ram;
+        }
+        return idx;
+    }
+
+    static address j9_plant_suite_class(kernel::process *pr, const char *want) {
+        if (!pr || !want || !want[0]) {
+            return 0;
+        }
+        if (const address hit = j9_planted_ram_named(want)) {
+            return hit;
+        }
+        if ((std::strncmp(want, "java/", 5) == 0) || (std::strncmp(want, "javax/", 6) == 0)
+            || (std::strncmp(want, "com/sun/", 8) == 0)) {
+            return 0;
+        }
+        std::vector<std::uint8_t> buf;
+        if (!j9_host_read_suite_class(pr, want, buf) || (buf.size() < 16)
+            || (buf[0] != 0xCA) || (buf[1] != 0xFE) || (buf[2] != 0xBA) || (buf[3] != 0xBE)) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] plant-class-miss '{}'", want);
+            return 0;
+        }
+        auto be16 = [&](std::size_t p) -> unsigned {
+            return (static_cast<unsigned>(buf[p]) << 8) | buf[p + 1];
+        };
+        auto be32 = [&](std::size_t p) -> unsigned {
+            return (static_cast<unsigned>(buf[p]) << 24) | (static_cast<unsigned>(buf[p + 1]) << 16)
+                | (static_cast<unsigned>(buf[p + 2]) << 8) | buf[p + 3];
+        };
+        const unsigned cpc = be16(8);
+        if ((cpc < 2u) || (cpc > 12000u) || (buf.size() < 10)) {
+            return 0;
+        }
+        std::vector<std::string> utf(cpc);
+        std::vector<std::uint8_t> cptag(cpc, 0);
+        std::vector<std::uint16_t> cpa(cpc, 0);
+        std::vector<std::uint16_t> cpb(cpc, 0);
+        std::vector<std::uint32_t> cphi(cpc, 0);
+        std::vector<std::uint32_t> cplo(cpc, 0);
+        std::size_t p = 10;
+        for (unsigned i = 1; i < cpc; ++i) {
+            if (p >= buf.size()) {
+                return 0;
+            }
+            const std::uint8_t tag = buf[p++];
+            cptag[i] = tag;
+            if (tag == 1) {
+                if ((p + 2) > buf.size()) {
+                    return 0;
+                }
+                const unsigned n = be16(p);
+                p += 2;
+                if ((p + n) > buf.size()) {
+                    return 0;
+                }
+                utf[i].assign(reinterpret_cast<const char *>(buf.data() + p), n);
+                p += n;
+            } else if ((tag == 7) || (tag == 8)) {
+                if ((p + 2) > buf.size()) {
+                    return 0;
+                }
+                cpa[i] = static_cast<std::uint16_t>(be16(p));
+                p += 2;
+            } else if ((tag == 3) || (tag == 4) || (tag == 9) || (tag == 10)
+                || (tag == 11) || (tag == 12)) {
+                if ((p + 4) > buf.size()) {
+                    return 0;
+                }
+                cpa[i] = static_cast<std::uint16_t>(be16(p));
+                cpb[i] = static_cast<std::uint16_t>(be16(p + 2));
+                p += 4;
+            } else if ((tag == 5) || (tag == 6)) {
+                if ((p + 8) > buf.size()) {
+                    return 0;
+                }
+                cphi[i] = (static_cast<std::uint32_t>(buf[p]) << 24)
+                    | (static_cast<std::uint32_t>(buf[p + 1]) << 16)
+                    | (static_cast<std::uint32_t>(buf[p + 2]) << 8)
+                    | buf[p + 3];
+                cplo[i] = (static_cast<std::uint32_t>(buf[p + 4]) << 24)
+                    | (static_cast<std::uint32_t>(buf[p + 5]) << 16)
+                    | (static_cast<std::uint32_t>(buf[p + 6]) << 8)
+                    | buf[p + 7];
+                p += 8;
+                ++i;
+            } else {
+                return 0;
+            }
+        }
+        if ((p + 8) > buf.size()) {
+            return 0;
+        }
+        p += 2;
+        p += 2; // this_class
+        p += 2; // super_class
+        const unsigned nif = be16(p);
+        p += 2 + static_cast<std::size_t>(nif) * 2u;
+        if ((p + 2) > buf.size()) {
+            return 0;
+        }
+        const unsigned nf = be16(p);
+        p += 2;
+        std::vector<std::string> fnames;
+        std::vector<std::string> fsigs;
+        std::vector<std::uint16_t> fflags;
+        std::vector<std::uint16_t> foffs;
+        unsigned inst_off = 8;
+        unsigned stat_off = 0;
+        fnames.reserve(nf);
+        fsigs.reserve(nf);
+        for (unsigned i = 0; i < nf; ++i) {
+            if ((p + 8) > buf.size()) {
+                return 0;
+            }
+            const unsigned flags = be16(p);
+            const unsigned name_i = be16(p + 2);
+            const unsigned desc_i = be16(p + 4);
+            const unsigned na = be16(p + 6);
+            p += 8;
+            std::string fn = (name_i < cpc) ? utf[name_i] : "";
+            std::string fs = (desc_i < cpc) ? utf[desc_i] : "";
+            const bool wide = (fs == "J") || (fs == "D");
+            const unsigned add = wide ? 8u : 4u;
+            const unsigned off = (flags & 0x8u) ? stat_off : inst_off;
+            if (flags & 0x8u) {
+                stat_off += add;
+            } else {
+                inst_off += add;
+            }
+            fnames.push_back(std::move(fn));
+            fsigs.push_back(std::move(fs));
+            fflags.push_back(static_cast<std::uint16_t>(flags));
+            foffs.push_back(static_cast<std::uint16_t>(off));
+            for (unsigned a = 0; a < na; ++a) {
+                if ((p + 6) > buf.size()) {
+                    return 0;
+                }
+                const unsigned alen = be32(p + 2);
+                p += 6 + alen;
+            }
+        }
+        if ((p + 2) > buf.size()) {
+            return 0;
+        }
+        const unsigned nm = be16(p);
+        p += 2;
+        struct cf_meth {
+            std::string name;
+            std::string sig;
+            std::vector<std::uint8_t> code;
+            std::uint16_t maxs = 8;
+            std::uint16_t maxl = 8;
+        };
+        std::vector<cf_meth> methods;
+        methods.reserve(nm);
+        for (unsigned i = 0; i < nm; ++i) {
+            if ((p + 8) > buf.size()) {
+                return 0;
+            }
+            const unsigned name_i = be16(p + 2);
+            const unsigned desc_i = be16(p + 4);
+            const unsigned na = be16(p + 6);
+            p += 8;
+            cf_meth m;
+            if (name_i < cpc) {
+                m.name = utf[name_i];
+            }
+            if (desc_i < cpc) {
+                m.sig = utf[desc_i];
+            }
+            for (unsigned a = 0; a < na; ++a) {
+                if ((p + 6) > buf.size()) {
+                    return 0;
+                }
+                const unsigned nidx = be16(p);
+                const unsigned alen = be32(p + 2);
+                p += 6;
+                if ((p + alen) > buf.size()) {
+                    return 0;
+                }
+                if ((nidx < cpc) && (utf[nidx] == "Code") && (alen >= 8)) {
+                    m.maxs = static_cast<std::uint16_t>(be16(p));
+                    m.maxl = static_cast<std::uint16_t>(be16(p + 2));
+                    const unsigned clen = be32(p + 4);
+                    if ((8u + clen) <= alen) {
+                        m.code.assign(buf.data() + p + 8, buf.data() + p + 8 + clen);
+                    }
+                }
+                p += alen;
+            }
+            if (!m.name.empty()) {
+                methods.push_back(std::move(m));
+            }
+        }
+        unsigned blob = 0x80u;
+        auto add_utf = [&](const std::string &s) {
+            blob = (blob + 1u) & ~1u;
+            blob += 2u + static_cast<unsigned>(s.size());
+        };
+        std::string cname = want;
+        add_utf(cname);
+        for (const auto &m : methods) {
+            add_utf(m.name);
+            add_utf(m.sig);
+            blob = (blob + 3u) & ~3u;
+            blob += 0x14u + ((static_cast<unsigned>(m.code.size()) + 3u) & ~3u);
+        }
+        blob = (blob + 15u) & ~15u;
+        if (blob < 0x100u) {
+            blob = 0x100u;
+        }
+        if (blob > 0x80000u) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] plant-class-huge '{}' bytes={}", want, blob);
+            return 0;
+        }
+        const address rom = j9_host_alloc_blob(pr, blob);
+        if (!rom) {
+            return 0;
+        }
+        for (unsigned i = 0; i < blob; i += 4u) {
+            j9_write32(pr, rom + i, 0);
+        }
+        auto write_utf = [&](address &at, const std::string &s) -> address {
+            at = (at + 1u) & ~1u;
+            const address u = at;
+            const unsigned n = static_cast<unsigned>(s.size());
+            j9_write16(pr, u, static_cast<std::uint16_t>(n));
+            if (auto *dst = reinterpret_cast<char *>(pr->get_ptr_on_addr_space(u + 2u))) {
+                std::memcpy(dst, s.data(), n);
+            }
+            at = u + 2u + n;
+            return u;
+        };
+        address cur = rom + 0x80u;
+        const address name_utf = write_utf(cur, cname);
+        std::vector<address> name_u(methods.size());
+        std::vector<address> sig_u(methods.size());
+        for (std::size_t i = 0; i < methods.size(); ++i) {
+            name_u[i] = write_utf(cur, methods[i].name);
+            sig_u[i] = write_utf(cur, methods[i].sig);
+        }
+        j9_write32(pr, rom, blob);
+        j9_write32(pr, rom + 8u, name_utf - (rom + 8u));
+        cur = (cur + 3u) & ~3u;
+        const address first_m = methods.empty() ? 0 : cur;
+        auto write_bytes = [&](const address at, const std::uint8_t *src, unsigned n) {
+            for (unsigned i = 0; i < n; ++i) {
+                j9_write8(pr, at + i, src[i]);
+            }
+        };
+        for (std::size_t i = 0; i < methods.size(); ++i) {
+            const address romm = cur;
+            const unsigned clen = static_cast<unsigned>(methods[i].code.size());
+            const unsigned extra = (clen + 3u) >> 2;
+            j9_write32(pr, romm, name_u[i] - romm);
+            j9_write32(pr, romm + 4u, sig_u[i] - (romm + 4u));
+            j9_write32(pr, romm + 8u, 1u);
+            j9_write16(pr, romm + 0xEu, static_cast<std::uint16_t>(extra));
+            if (clen) {
+                write_bytes(romm + 0x14u, methods[i].code.data(), clen);
+            }
+            cur = romm + 0x14u + (extra << 2);
+        }
+        if (first_m) {
+            j9_write32(pr, rom + 0x20u, first_m - (rom + 0x20u));
+        }
+        const address ram = j9_make_ram_class(pr, rom);
+        if (!ram) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] plant-class-ram-fail '{}' rom=0x{:X}", want, rom);
+            return 0;
+        }
+        const int idx = j9_remember_planted(want, ram, rom);
+        if (idx >= 0) {
+            auto &e = g_j9_planted[idx];
+            e.blob = blob;
+            e.inst_bytes = inst_off;
+            const unsigned stat_n = stat_off ? ((stat_off + 15u) & ~15u) : 16u;
+            e.statics = j9_host_alloc_blob(pr, stat_n);
+            if (e.statics) {
+                for (unsigned i = 0; i < stat_n; i += 4u) {
+                    j9_write32(pr, e.statics + i, 0);
+                }
+            }
+            auto &meta = g_j9_pmeta[idx];
+            meta = {};
+            meta.tag = std::move(cptag);
+            meta.a = std::move(cpa);
+            meta.b = std::move(cpb);
+            meta.utf = std::move(utf);
+            meta.chi = std::move(cphi);
+            meta.clo = std::move(cplo);
+            meta.fname = std::move(fnames);
+            meta.fsig = std::move(fsigs);
+            meta.fflags = std::move(fflags);
+            meta.foff = std::move(foffs);
+            meta.methods.resize(methods.size());
+            for (std::size_t i = 0; i < methods.size(); ++i) {
+                meta.methods[i].name = std::move(methods[i].name);
+                meta.methods[i].sig = std::move(methods[i].sig);
+                meta.methods[i].code = std::move(methods[i].code);
+                meta.methods[i].maxs = methods[i].maxs;
+                meta.methods[i].maxl = methods[i].maxl;
+            }
+        }
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] plant-class '{}' ram=0x{:X} rom=0x{:X} methods={} fields={} "
+            "inst={} blob=0x{:X}",
+            want, ram, rom, methods.size(), nf, inst_off, blob);
+        return ram;
     }
 
     static address j9_ram_method_for_romm(kernel::process *pr, const address clazz,
@@ -6098,6 +6803,7 @@ namespace eka2l1::hle {
     }
 
     static j9_ws_bind_fn g_j9_ws_bind = nullptr;
+    static j9_ws_guest_fn g_j9_ws_guest = nullptr;
 
     void j9_register_ws_bind(j9_ws_bind_fn fn) {
         g_j9_ws_bind = fn;
@@ -6107,13 +6813,2254 @@ namespace eka2l1::hle {
         return g_j9_ws_bind && pr && thr && g_j9_ws_bind(pr, thr);
     }
 
+    void j9_register_ws_guest(j9_ws_guest_fn fn) {
+        g_j9_ws_guest = fn;
+    }
+
+    bool j9_guest_bind_windowserver(kernel::process *pr, kernel::thread *thr, std::uint32_t handle) {
+        return g_j9_ws_guest && pr && thr && g_j9_ws_guest(pr, thr, handle);
+    }
+
+    static address j9_euser_session_create_pc(kernel::process *pr) {
+        // 5320 euser thunks: 0x8019E000 svc #0x7E, 0x8019E010 svc #0x80.
+        // epoc93 maps session_create to 0x7E; epoc94+ uses 0x80.
+        kernel_system *kern = pr ? pr->get_kernel_object_owner() : nullptr;
+        const epocver ver = kern ? kern->get_epoc_version() : epocver::epoc93fp2;
+        return (ver >= epocver::epoc94) ? 0x8019E010u : 0x8019E000u;
+    }
+
+    static bool j9_plant_ws_desc(kernel::process *pr) {
+        if (!pr || !g_j9_walk_va) {
+            return false;
+        }
+        const address desc = g_j9_walk_va + 0x3900u;
+        const address str = g_j9_walk_va + 0x3910u;
+        static const char name[] = "!Windowserver";
+        if (auto *p = reinterpret_cast<char *>(pr->get_ptr_on_addr_space(str))) {
+            std::memcpy(p, name, sizeof(name));
+        }
+        // TPtrC8: type=ptr_const (1), length=13
+        j9_write32(pr, desc, 0x1000000Du);
+        j9_write32(pr, desc + 4u, str);
+        g_j9_ws_desc = desc;
+        const address svc_pc = g_j9_walk_va + 0x3860u;
+        const std::uint32_t imm = (j9_euser_session_create_pc(pr) == 0x8019E010u) ? 0x80u : 0x7Eu;
+        j9_write32(pr, svc_pc, 0xEF000000u | imm);
+        j9_write32(pr, svc_pc + 4u, 0xE12FFF1Eu);
+        g_j9_ws_svc_pc = svc_pc;
+        return j9_mapped32(pr, desc + 4u) && j9_mapped32(pr, str) && j9_mapped32(pr, svc_pc);
+    }
+
+    static void j9_store_ws_handle(kernel::process *pr, const address obj, const std::uint32_t handle) {
+        if (!pr || !obj || (static_cast<std::int32_t>(handle) <= 0) || !j9_mapped32(pr, obj + 8u)) {
+            return;
+        }
+        // Java LCDUI objects keep a C++ peer at +8. Only write the
+        // RWsSession handle into that peer (or a dummy peer), never
+        // replace the peer pointer itself.
+        const address peer = j9_read32(pr, obj + 8u);
+        if (peer && (peer >= 0x400000u) && j9_mapped32(pr, peer + 8u)
+            && (!g_j9_walk_va || (peer < g_j9_walk_va) || (peer >= (g_j9_walk_va + 0x8000u))
+                || (peer >= (g_j9_walk_va + k_j9_peer_off)))) {
+            j9_write32(pr, peer + 8u, handle);
+            return;
+        }
+        const address vt = j9_read32(pr, obj);
+        if (g_j9_walk_va && (vt == (g_j9_walk_va + k_j9_vt_off)) && j9_mapped32(pr, obj + 8u)) {
+            j9_write32(pr, obj + 8u, handle);
+        }
+    }
+
+    static void j9_wire_lcdui_peer(kernel::process *pr, const address obj) {
+        if (!pr || !obj || !j9_mapped32(pr, obj + 0x80u)) {
+            return;
+        }
+        j9_write32(pr, obj + 4u, obj >> 2);
+        // Canvas._create callback does [r0+0x80]->vtable[2](factory, canvas, 9|10).
+        // That factory is a C++ widget peer, not CJavaEventSource (whose
+        // vtable[2] is an euser helper that `str r0, [r2]` with r2=10).
+        const address factory = j9_alloc_dummy_peer(pr, nullptr);
+        if (factory) {
+            j9_write32(pr, obj + 0x80u, factory);
+            if (g_j9_eventsrc_this && j9_mapped32(pr, g_j9_eventsrc_this + 0x80u)) {
+                j9_write32(pr, g_j9_eventsrc_this + 0x80u, factory);
+            }
+            if (g_j9_eventsrc_this && j9_mapped32(pr, g_j9_eventsrc_this + 0x5cu)) {
+                j9_write32(pr, g_j9_eventsrc_this + 0x5cu, factory);
+            }
+        }
+        if (g_j9_eventsrc_this) {
+            j9_write32(pr, obj + 8u, g_j9_eventsrc_this);
+        }
+    }
+
+    static address j9_lcdui_env() {
+        return g_j9_fake_env ? g_j9_fake_env
+            : (g_j9_vmthread ? g_j9_vmthread : 0x714E00u);
+    }
+
+    static void j9_kick_lcdui_native(arm::core *core, const address fn, const address self) {
+        if (!core || !fn) {
+            return;
+        }
+        const address env = j9_lcdui_env();
+        core->set_reg(0, env);
+        core->set_reg(1, self);
+        core->set_reg(2, self ? (self >> 2) : 0);
+        core->set_reg(3, 0);
+        if (g_j9_lcdui_chain_bkpt) {
+            core->set_lr(g_j9_lcdui_chain_bkpt | 1u);
+        }
+        j9_set_pc(core, fn | 1u);
+    }
+
+    static address j9_ensure_graphics_obj(kernel::process *pr) {
+        if (g_j9_graphics_obj && pr && j9_mapped32(pr, g_j9_graphics_obj)) {
+            return g_j9_graphics_obj;
+        }
+        address gc = j9_find_class_by_name(pr, "javax/microedition/lcdui/Graphics");
+        if (!gc) {
+            const address rom = j9_find_rom_class_by_name(pr, "javax/microedition/lcdui/Graphics");
+            gc = rom ? j9_ram_class_for_rom(pr, rom) : 0;
+            if (!gc && rom) {
+                gc = j9_make_ram_class(pr, rom);
+            }
+        }
+        if (!gc) {
+            gc = j9_find_class_by_name(pr, "javax/microedition/lcdui/Canvas");
+        }
+        if (!gc) {
+            gc = j9_mapped32(pr, 0x725538u + 0x38u) ? 0x725538u : g_j9_string_clazz;
+        }
+        if (!gc) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] graphics-class-miss");
+            return 0;
+        }
+        g_j9_graphics_clazz = gc;
+        const address g = j9_host_alloc_obj(pr, gc, 0xC0u);
+        if (!g) {
+            return 0;
+        }
+        g_j9_graphics_obj = g;
+        j9_hi_fb_reset();
+        if (kernel_system *kern = pr->get_kernel_object_owner()) {
+            j9_attach_dummy_peer(pr, kern->crr_thread(), g >> 2);
+        }
+        return g;
+    }
+
+    static bool j9_guest_invoke_named(arm::core *core, kernel::process *pr,
+        const address clazz, const address self, const char *name, const char *sig,
+        const address arg1 = 0, const address ret_lr = 0,
+        const std::int32_t *extra = nullptr, int nextra = 0) {
+        if (!core || !pr || !clazz || !self || !name) {
+            return false;
+        }
+        address rom = 0;
+        if (j9_mapped32(pr, clazz + 0x10u)) {
+            const address w = j9_read32(pr, clazz + 0x10u);
+            if (w && j9_readable(pr, w)) {
+                const address sz = j9_read32(pr, w);
+                if ((sz >= 0x40u) && (sz <= 0x800000u)) {
+                    rom = w;
+                }
+            }
+        }
+        const address romm = rom ? j9_rom_method_named(pr, rom, name, sig) : 0;
+        const address meth = romm ? j9_make_interp_method(pr, clazz, romm) : 0;
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] guest-invoke {}.{}{} clazz=0x{:X} rom=0x{:X} romm=0x{:X} "
+            "meth=0x{:X} self=0x{:X} a1=0x{:X}",
+            "", name, sig ? sig : "", clazz, rom, romm, meth, self, arg1);
+        if (!meth) {
+            return false;
+        }
+        address fp = g_j9_saved_r6 ? g_j9_saved_r6
+            : (g_j9_walk_va ? (g_j9_walk_va + 0x4100u) : 0);
+        if (fp && j9_mapped32(pr, fp + 16u)) {
+            j9_write32(pr, fp, self);
+            unsigned slot = 1;
+            if (arg1 || (nextra > 0)) {
+                j9_write32(pr, fp + 4u, arg1);
+                ++slot;
+            }
+            for (int i = 0; i < nextra; ++i) {
+                j9_write32(pr, fp + slot * 4u, static_cast<address>(extra[i]));
+                ++slot;
+            }
+            g_j9_saved_r6 = fp;
+            g_j9_java_sp = fp;
+            if (g_j9_vmthread && j9_mapped32(pr, g_j9_vmthread + 0x10u)) {
+                j9_write32(pr, g_j9_vmthread + 0x10u, fp);
+            }
+        }
+        g_j9_saved_r4 = clazz;
+        g_j9_saved_r5 = j9_read32(pr, meth);
+        g_j9_resume_at = g_j9_saved_r5;
+        g_j9_resume_no_ac = true;
+        const address lr = ret_lr ? ret_lr
+            : (g_j9_lcdui_chain_bkpt ? (g_j9_lcdui_chain_bkpt | 1u) : 0);
+        if (lr) {
+            core->set_lr(lr);
+        }
+        const unsigned argc = 1u + (arg1 || nextra ? 1u : 0u)
+            + static_cast<unsigned>(nextra > 0 ? nextra : 0);
+        j9_jxe_resume_interp(core, pr, meth, argc);
+        g_j9_resume_no_ac = false;
+        g_j9_resume_at = 0;
+        return true;
+    }
+
+    static int j9_plant_index(const char *name) {
+        if (!name || !name[0]) {
+            return -1;
+        }
+        for (int i = 0; i < g_j9_nplanted; ++i) {
+            if (std::strcmp(g_j9_planted[i].name, name) == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static int j9_plant_index_ram(const address ram) {
+        for (int i = 0; i < g_j9_nplanted; ++i) {
+            if (g_j9_planted[i].ram == ram) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static int j9_plant_meth_index(const int pidx, const char *name, const char *sig) {
+        if ((pidx < 0) || (pidx >= g_j9_nplanted) || !name) {
+            return -1;
+        }
+        const auto &ms = g_j9_pmeta[pidx].methods;
+        for (int i = 0; i < static_cast<int>(ms.size()); ++i) {
+            if ((ms[i].name == name) && (!sig || ms[i].sig == sig)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static const char *j9_cp_class(const j9_plant_meta &m, unsigned idx) {
+        if ((idx >= m.tag.size()) || (m.tag[idx] != 7) || (m.a[idx] >= m.utf.size())) {
+            return "";
+        }
+        return m.utf[m.a[idx]].c_str();
+    }
+
+    static void j9_cp_nat(const j9_plant_meta &m, unsigned idx, const char **name, const char **sig) {
+        *name = "";
+        *sig = "";
+        if ((idx >= m.tag.size()) || (m.tag[idx] != 12)) {
+            return;
+        }
+        if (m.a[idx] < m.utf.size()) {
+            *name = m.utf[m.a[idx]].c_str();
+        }
+        if (m.b[idx] < m.utf.size()) {
+            *sig = m.utf[m.b[idx]].c_str();
+        }
+    }
+
+    static bool j9_cp_ref(const j9_plant_meta &m, unsigned idx,
+        const char **cls, const char **name, const char **sig) {
+        *cls = "";
+        *name = "";
+        *sig = "";
+        if ((idx >= m.tag.size()) || ((m.tag[idx] < 9) || (m.tag[idx] > 11))) {
+            return false;
+        }
+        *cls = j9_cp_class(m, m.a[idx]);
+        j9_cp_nat(m, m.b[idx], name, sig);
+        return (*cls)[0] != 0;
+    }
+
+    static int j9_sig_argc(const char *sig, bool is_static) {
+        int n = is_static ? 0 : 1;
+        if (!sig) {
+            return n;
+        }
+        if (*sig == '(') {
+            ++sig;
+        }
+        while (*sig && (*sig != ')')) {
+            if (*sig == 'L') {
+                ++n;
+                while (*sig && (*sig != ';')) {
+                    ++sig;
+                }
+            } else if (*sig == '[') {
+                ++n;
+                while (*sig == '[') {
+                    ++sig;
+                }
+                if (*sig == 'L') {
+                    while (*sig && (*sig != ';')) {
+                        ++sig;
+                    }
+                }
+            } else if ((*sig == 'J') || (*sig == 'D')) {
+                n += 2;
+            } else {
+                ++n;
+            }
+            if (*sig) {
+                ++sig;
+            }
+        }
+        return n;
+    }
+
+    static bool j9_sig_returns(const char *sig) {
+        if (!sig) {
+            return false;
+        }
+        const char *r = std::strchr(sig, ')');
+        return r && r[1] && (r[1] != 'V');
+    }
+
+    static int j9_sig_ret_slots(const char *sig) {
+        if (!sig) {
+            return 0;
+        }
+        const char *r = std::strchr(sig, ')');
+        if (!r || !r[1] || (r[1] == 'V')) {
+            return 0;
+        }
+        if ((r[1] == 'J') || (r[1] == 'D')) {
+            return 2;
+        }
+        return 1;
+    }
+
+    static address j9_hi_new_array(kernel::process *pr, const address clazz, unsigned n, unsigned esz) {
+        if (n > 0x10000u) {
+            n = 0x10000u;
+        }
+        const address arr = j9_host_alloc_obj(pr, clazz, 16u + n * esz);
+        if (!arr) {
+            return 0;
+        }
+        j9_write32(pr, arr + 8u, n);
+        j9_write32(pr, arr + 12u, n);
+        return arr;
+    }
+
+    static address j9_hi_prim_array(kernel::process *pr, unsigned atype, unsigned n) {
+        unsigned esz = 4;
+        if ((atype == 4u) || (atype == 8u)) {
+            esz = 1;
+        } else if ((atype == 5u) || (atype == 9u)) {
+            esz = 2;
+        } else if ((atype == 7u) || (atype == 11u)) {
+            esz = 8;
+        }
+        const address ac = g_j9_char_array_clazz ? g_j9_char_array_clazz
+            : (j9_mapped32(pr, 0x725F58u + 0x38u) ? 0x725F58u : 0x725538u);
+        return j9_hi_new_array(pr, ac, n, esz);
+    }
+
+    static address j9_hi_obj_array(kernel::process *pr, const char *elem, unsigned n) {
+        address ac = 0;
+        if (elem && (std::strcmp(elem, "java/lang/String") == 0)) {
+            ac = j9_string_array_clazz(pr);
+        }
+        if (!ac) {
+            ac = j9_mapped32(pr, 0x7281C8u + 0x38u) ? 0x7281C8u
+                : (g_j9_string_array_clazz ? g_j9_string_array_clazz : 0x725538u);
+        }
+        return j9_hi_new_array(pr, ac, n, 4);
+    }
+
+    static std::string j9_hi_get_str(kernel::process *pr, const address str) {
+        std::string out;
+        if (!pr || !str) {
+            return out;
+        }
+        for (const auto &e : g_j9_sbuf) {
+            if (e.obj == str) {
+                return e.s;
+            }
+        }
+        const address a8 = j9_read32(pr, str + 8u);
+        const address a12 = j9_read32(pr, str + 12u);
+        const unsigned a16 = j9_read32(pr, str + 16u);
+        const unsigned a20 = j9_read32(pr, str + 20u);
+        address arr = 0;
+        unsigned off = 0;
+        unsigned n = 0;
+        if (a8 && j9_mapped32(pr, a8 + 16u) && (j9_read32(pr, a8 + 8u) < 0x8000u)) {
+            arr = a8;
+            off = 0;
+            n = a16 ? a16 : j9_read32(pr, a8 + 8u);
+        } else if (a12 && j9_mapped32(pr, a12 + 16u)) {
+            arr = a12;
+            off = a16;
+            n = a20;
+        }
+        if (!arr || (n > 0x4000u)) {
+            n = n > 0x4000u ? 0x4000u : n;
+        }
+        if (!arr) {
+            return out;
+        }
+        out.resize(n);
+        for (unsigned i = 0; i < n; ++i) {
+            out[i] = static_cast<char>(j9_read8(pr, arr + 16u + (off + i) * 2u));
+        }
+        return out;
+    }
+
+    static address j9_hi_sbuf_new(kernel::process *pr) {
+        const address o = j9_dummy_jcl_obj(pr, 0x7285B8u, 0x20u);
+        if (!o) {
+            return 0;
+        }
+        for (auto &e : g_j9_sbuf) {
+            if (!e.obj) {
+                e.obj = o;
+                e.s.clear();
+                return o;
+            }
+        }
+        g_j9_sbuf[0].obj = o;
+        g_j9_sbuf[0].s.clear();
+        return o;
+    }
+
+    static std::string *j9_hi_sbuf(const address obj) {
+        for (auto &e : g_j9_sbuf) {
+            if (e.obj == obj) {
+                return &e.s;
+            }
+        }
+        return nullptr;
+    }
+
+    static address j9_hi_istream(kernel::process *pr, const std::vector<std::uint8_t> &data) {
+        const address o = j9_dummy_jcl_obj(pr, 0x725538u, 0x20u);
+        if (!o) {
+            return 0;
+        }
+        for (auto &e : g_j9_istream) {
+            if (!e.obj) {
+                e.obj = o;
+                e.data = data;
+                e.pos = 0;
+                return o;
+            }
+        }
+        g_j9_istream[0].obj = o;
+        g_j9_istream[0].data = data;
+        g_j9_istream[0].pos = 0;
+        return o;
+    }
+
+    static void j9_hi_istream_bind(const address o, const std::vector<std::uint8_t> &data) {
+        if (!o) {
+            return;
+        }
+        for (auto &e : g_j9_istream) {
+            if (e.obj == o) {
+                e.data = data;
+                e.pos = 0;
+                return;
+            }
+        }
+        for (auto &e : g_j9_istream) {
+            if (!e.obj) {
+                e.obj = o;
+                e.data = data;
+                e.pos = 0;
+                return;
+            }
+        }
+        g_j9_istream[0].obj = o;
+        g_j9_istream[0].data = data;
+        g_j9_istream[0].pos = 0;
+    }
+
+    static j9_is_ent *j9_hi_istream_of(const address obj) {
+        for (auto &e : g_j9_istream) {
+            if (e.obj == obj) {
+                return &e;
+            }
+        }
+        return nullptr;
+    }
+
+    static int j9_hi_run(arm::core *core, kernel::process *pr, int pidx, int midx,
+        const std::int32_t *args, int nargs, const j9_hi_frame *resume = nullptr);
+
+    static bool j9_hi_kick_native(arm::core *core, kernel::process *pr,
+        const address fn, const address self, const std::int32_t *args, int nargs,
+        const char *tag) {
+        if (!core || !pr || !fn) {
+            return false;
+        }
+        const address ret = g_j9_host_ret_bkpt ? g_j9_host_ret_bkpt
+            : (g_j9_lcdui_chain_bkpt ? (g_j9_lcdui_chain_bkpt | 1u) : 0);
+        if (!ret) {
+            return false;
+        }
+        const address env = j9_lcdui_env();
+        address sp = core->get_reg(13) & ~7u;
+        auto pack_jobj = [&](address v) -> address {
+            if ((v >= 0x01000000u) && ((v & 3u) == 0) && j9_mapped32(pr, v)) {
+                return v >> 2;
+            }
+            return v;
+        };
+        const int stack_n = (nargs > 2) ? (nargs - 2) : 0;
+        if (stack_n > 0) {
+            sp -= static_cast<address>(stack_n) * 4u;
+            if (j9_mapped32(pr, sp + static_cast<address>(stack_n - 1) * 4u)) {
+                for (int i = 0; i < stack_n; ++i) {
+                    j9_write32(pr, sp + static_cast<address>(i) * 4u,
+                        pack_jobj(static_cast<address>(args[2 + i])));
+                }
+                core->set_reg(13, sp);
+            }
+        }
+        core->set_reg(0, env);
+        core->set_reg(1, self);
+        core->set_reg(2, (nargs > 0) ? pack_jobj(static_cast<address>(args[0]))
+            : (self ? (self >> 2) : 0));
+        core->set_reg(3, (nargs > 1) ? pack_jobj(static_cast<address>(args[1])) : 0);
+        core->set_lr(ret);
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] official-kick {} fn=0x{:X} self=0x{:X} n={} a0=0x{:X} a1=0x{:X} r2=0x{:X}",
+            tag ? tag : "", fn, self, nargs,
+            nargs > 0 ? args[0] : 0, nargs > 1 ? args[1] : 0,
+            core->get_reg(2));
+        j9_set_pc(core, fn | 1u);
+        g_j9_hi_yield = true;
+        return true;
+    }
+
+    static address j9_hi_lookup_lcdui_native(const char *cls, const char *name, const char *sig) {
+        if (!name) {
+            return 0;
+        }
+        struct Map {
+            const char *nm;
+            const char *exp;
+            address fallback;
+        };
+        static const Map k_map[] = {
+            { "createImage", "Java_javax_microedition_lcdui_Image__1createImmutable", 0x81AF1869u },
+            { "_create", "Java_javax_microedition_lcdui_Graphics__1create", 0x81AF1617u },
+            { "_flush", "Java_javax_microedition_lcdui_Buffer__1flush", 0x81AEE765u },
+            { "_open", "Java_javax_microedition_lcdui_Buffer__1open", 0x81AEE749u },
+        };
+        for (const auto &e : k_map) {
+            if (std::strcmp(name, e.nm) != 0) {
+                continue;
+            }
+            if (const address fn = j9_lookup_jni_export(e.exp)) {
+                return fn;
+            }
+            return e.fallback;
+        }
+        (void)cls;
+        (void)sig;
+        return 0;
+    }
+
+    static address j9_hi_bytes_copy(kernel::process *pr, const std::uint8_t *p, unsigned n) {
+        if (!pr) {
+            return 0;
+        }
+        if (n > 0x80000u) {
+            n = 0x80000u;
+        }
+        const address arr = j9_hi_prim_array(pr, 8u, n);
+        if (!arr || !p) {
+            return arr;
+        }
+        for (unsigned i = 0; i < n; ++i) {
+            j9_write8(pr, arr + 16u + i, p[i]);
+        }
+        return arr;
+    }
+
+    static bool j9_hi_official(arm::core *core, kernel::process *pr,
+        const address clazz, const address self, const char *name, const char *sig,
+        const std::int32_t *args, int nargs) {
+        if (!core || !pr || !name) {
+            return false;
+        }
+        const address fn = j9_hi_lookup_lcdui_native(
+            clazz ? "" : "", name, sig);
+        if (fn && self && j9_hi_kick_native(core, pr, fn, self, args, nargs, name)) {
+            return true;
+        }
+        const address ret = g_j9_host_ret_bkpt ? g_j9_host_ret_bkpt
+            : (g_j9_lcdui_chain_bkpt ? (g_j9_lcdui_chain_bkpt | 1u) : 0);
+        if (!ret || !clazz) {
+            return false;
+        }
+        const address a1 = (nargs > 0) ? static_cast<address>(args[0]) : 0;
+        const std::int32_t *rest = (nargs > 1) ? (args + 1) : nullptr;
+        const int nrest = (nargs > 1) ? (nargs - 1) : 0;
+        if (!j9_guest_invoke_named(core, pr, clazz, self, name, sig, a1, ret, rest, nrest)) {
+            return false;
+        }
+        g_j9_hi_yield = true;
+        return true;
+    }
+
+    static std::uint32_t j9_hi_pack_rgba(int rgb, int alpha = 255) {
+        const unsigned r = static_cast<unsigned>((rgb >> 16) & 255);
+        const unsigned g = static_cast<unsigned>((rgb >> 8) & 255);
+        const unsigned b = static_cast<unsigned>(rgb & 255);
+        const unsigned a = static_cast<unsigned>(alpha) & 255u;
+        return r | (g << 8) | (b << 16) | (a << 24);
+    }
+
+    static void j9_hi_fb_reset() {
+        g_j9_fb_w = k_j9_lcd_w;
+        g_j9_fb_h = k_j9_lcd_h;
+        g_j9_fb.assign(static_cast<unsigned>(g_j9_fb_w * g_j9_fb_h), 0xFF000000u);
+        g_j9_clipx = 0;
+        g_j9_clipy = 0;
+        g_j9_clipw = k_j9_lcd_w;
+        g_j9_cliph = k_j9_lcd_h;
+        g_j9_tx = 0;
+        g_j9_ty = 0;
+        g_j9_fb_dirty = 0;
+        for (auto &e : g_j9_imgs) {
+            e = {};
+        }
+    }
+
+    static void j9_hi_ensure_fb() {
+        const unsigned n = static_cast<unsigned>(g_j9_fb_w * g_j9_fb_h);
+        if (g_j9_fb.size() != n) {
+            g_j9_fb.assign(n, 0xFF000000u);
+        }
+    }
+
+    static j9_hi_img *j9_hi_img_of(const address obj, const bool create) {
+        if (!obj) {
+            return nullptr;
+        }
+        for (auto &e : g_j9_imgs) {
+            if (e.obj == obj) {
+                return &e;
+            }
+        }
+        if (!create) {
+            return nullptr;
+        }
+        for (auto &e : g_j9_imgs) {
+            if (!e.obj) {
+                e.obj = obj;
+                e.w = 0;
+                e.h = 0;
+                e.pix.clear();
+                return &e;
+            }
+        }
+        g_j9_imgs[0].obj = obj;
+        g_j9_imgs[0].w = 0;
+        g_j9_imgs[0].h = 0;
+        g_j9_imgs[0].pix.clear();
+        return &g_j9_imgs[0];
+    }
+
+    static void j9_hi_store_img(kernel::process *pr, const address img, int w, int h,
+        const std::uint8_t *rgba) {
+        if (!img || (w <= 0) || (h <= 0)) {
+            return;
+        }
+        j9_hi_img *slot = j9_hi_img_of(img, true);
+        if (!slot) {
+            return;
+        }
+        slot->w = w;
+        slot->h = h;
+        const unsigned n = static_cast<unsigned>(w * h);
+        slot->pix.resize(n);
+        if (rgba) {
+            for (unsigned i = 0; i < n; ++i) {
+                const unsigned o = i * 4u;
+                slot->pix[i] = rgba[o] | (static_cast<std::uint32_t>(rgba[o + 1]) << 8)
+                    | (static_cast<std::uint32_t>(rgba[o + 2]) << 16)
+                    | (static_cast<std::uint32_t>(rgba[o + 3]) << 24);
+            }
+        } else {
+            std::fill(slot->pix.begin(), slot->pix.end(), 0u);
+        }
+        if (pr && j9_mapped32(pr, img + 0x14u)) {
+            j9_write32(pr, img + 0x10u, static_cast<address>(w));
+            j9_write32(pr, img + 0x14u, static_cast<address>(h));
+        }
+    }
+
+    static const std::uint8_t *j9_hi_strip_mpng(const std::uint8_t *p, unsigned &n) {
+        if (p && (n >= 8u) && (p[2] == 0x89u) && (p[3] == 0x50u)
+            && (p[4] == 0x4Eu) && (p[5] == 0x47u)) {
+            p += 2;
+            n -= 2;
+        }
+        return p;
+    }
+
+    static bool j9_hi_decode_png(kernel::process *pr, const address img,
+        const std::uint8_t *p, unsigned n, const char *tag) {
+        p = j9_hi_strip_mpng(p, n);
+        int w = 0;
+        int h = 0;
+        int ch = 0;
+        stbi_uc *pix = (p && (n >= 8u))
+            ? stbi_load_from_memory(p, static_cast<int>(n), &w, &h, &ch, 4) : nullptr;
+        if (!pix || (w <= 0) || (h <= 0)) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] png-decode-fail '{}' n={}",
+                tag ? tag : "", n);
+            std::vector<std::uint8_t> fill(16u * 16u * 4u);
+            for (unsigned i = 0; i < 16u * 16u; ++i) {
+                fill[i * 4u] = 0xFF;
+                fill[i * 4u + 3u] = 0xFF;
+            }
+            j9_hi_store_img(pr, img, 16, 16, fill.data());
+            if (pix) {
+                stbi_image_free(pix);
+            }
+            return false;
+        }
+        j9_hi_store_img(pr, img, w, h, pix);
+        stbi_image_free(pix);
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] png-decode '{}' {}x{} n={}",
+            tag ? tag : "", w, h, n);
+        return true;
+    }
+
+    static bool j9_hi_read_arr_bytes(kernel::process *pr, const address arr,
+        unsigned off, unsigned len, std::vector<std::uint8_t> &out) {
+        if (!pr || !arr || !len) {
+            return false;
+        }
+        const unsigned cap = j9_read32(pr, arr + 8u);
+        if (off >= cap) {
+            return false;
+        }
+        if ((off + len) > cap) {
+            len = cap - off;
+        }
+        if (auto *p = reinterpret_cast<std::uint8_t *>(
+                pr->get_ptr_on_addr_space(arr + 16u + off))) {
+            out.assign(p, p + len);
+            return true;
+        }
+        out.resize(len);
+        for (unsigned i = 0; i < len; ++i) {
+            out[i] = j9_read8(pr, arr + 16u + off + i);
+        }
+        return true;
+    }
+
+    static void j9_hi_fill_rect(int x, int y, int w, int h) {
+        j9_hi_ensure_fb();
+        x += g_j9_tx;
+        y += g_j9_ty;
+        const int x0 = std::max(x, g_j9_clipx);
+        const int y0 = std::max(y, g_j9_clipy);
+        const int x1 = std::min(x + w, g_j9_clipx + g_j9_clipw);
+        const int y1 = std::min(y + h, g_j9_clipy + g_j9_cliph);
+        const std::uint32_t c = j9_hi_pack_rgba(g_j9_gcolor);
+        for (int yy = y0; yy < y1; ++yy) {
+            if ((yy < 0) || (yy >= g_j9_fb_h)) {
+                continue;
+            }
+            for (int xx = x0; xx < x1; ++xx) {
+                if ((xx < 0) || (xx >= g_j9_fb_w)) {
+                    continue;
+                }
+                g_j9_fb[static_cast<unsigned>(yy * g_j9_fb_w + xx)] = c;
+            }
+        }
+        g_j9_fb_dirty = 1;
+    }
+
+    static void j9_hi_blit(int dx, int dy, const j9_hi_img *src, int sx, int sy, int sw, int sh) {
+        if (!src || src->pix.empty()) {
+            return;
+        }
+        j9_hi_ensure_fb();
+        if (sw <= 0) {
+            sw = src->w;
+        }
+        if (sh <= 0) {
+            sh = src->h;
+        }
+        dx += g_j9_tx;
+        dy += g_j9_ty;
+        const int cx0 = g_j9_clipx;
+        const int cy0 = g_j9_clipy;
+        const int cx1 = g_j9_clipx + g_j9_clipw;
+        const int cy1 = g_j9_clipy + g_j9_cliph;
+        for (int y = 0; y < sh; ++y) {
+            const int dy2 = dy + y;
+            const int sy2 = sy + y;
+            if ((dy2 < 0) || (dy2 >= g_j9_fb_h) || (sy2 < 0) || (sy2 >= src->h)
+                || (dy2 < cy0) || (dy2 >= cy1)) {
+                continue;
+            }
+            for (int x = 0; x < sw; ++x) {
+                const int dx2 = dx + x;
+                const int sx2 = sx + x;
+                if ((dx2 < 0) || (dx2 >= g_j9_fb_w) || (sx2 < 0) || (sx2 >= src->w)
+                    || (dx2 < cx0) || (dx2 >= cx1)) {
+                    continue;
+                }
+                const std::uint32_t px = src->pix[static_cast<unsigned>(sy2 * src->w + sx2)];
+                if (((px >> 24) & 255u) == 0) {
+                    continue;
+                }
+                g_j9_fb[static_cast<unsigned>(dy2 * g_j9_fb_w + dx2)] = px;
+            }
+        }
+        g_j9_fb_dirty = 1;
+    }
+
+    static void j9_hi_draw_image(const address img, int x, int y, int anc) {
+        j9_hi_img *im = j9_hi_img_of(img, false);
+        if (!im) {
+            return;
+        }
+        const int sw = im->w;
+        const int sh = im->h;
+        if (anc & 1) {
+            x -= sw / 2;
+        }
+        if (anc & 8) {
+            x -= sw;
+        }
+        if (anc & 2) {
+            y -= sh / 2;
+        }
+        if (anc & 32) {
+            y -= sh;
+        }
+        j9_hi_blit(x, y, im, 0, 0, sw, sh);
+    }
+
+    static bool j9_hi_present() {
+        j9_hi_ensure_fb();
+        if (g_j9_fb.empty()) {
+            return false;
+        }
+        static std::vector<std::uint32_t> upload;
+        upload.resize(g_j9_fb.size());
+        for (std::size_t i = 0; i < g_j9_fb.size(); ++i) {
+            const std::uint32_t p = g_j9_fb[i];
+            upload[i] = (p & 0xFF00FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+        }
+        const bool ok = j9_present_surface(upload.data(), g_j9_fb_w, g_j9_fb_h);
+        static int n = 0;
+        if (n < 8) {
+            ++n;
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] official-present {}x{} dirty={} ok={}",
+                g_j9_fb_w, g_j9_fb_h, g_j9_fb_dirty, ok ? 1 : 0);
+        }
+        return ok;
+    }
+
+    static std::int32_t j9_hi_invoke(arm::core *core, kernel::process *pr,
+        const char *cls, const char *name, const char *sig,
+        const std::int32_t *args, int nargs, bool is_static) {
+        if (!name) {
+            name = "";
+        }
+        if (!sig) {
+            sig = "()V";
+        }
+        if (!cls) {
+            cls = "";
+        }
+        const address self = (!is_static && (nargs > 0)) ? static_cast<address>(args[0]) : 0;
+        if ((std::strcmp(name, "<init>") == 0)
+            && (std::strcmp(cls, "java/lang/String") == 0)) {
+            const address dst = self;
+            if ((nargs >= 5) && sig && std::strstr(sig, "[BIILjava/lang/String;")) {
+                const std::string enc = j9_hi_get_str(pr, static_cast<address>(args[4]));
+                const address s = j9_new_string_bytes(pr, static_cast<address>(args[1]),
+                    args[2], args[3], enc.c_str());
+                if (dst && s) {
+                    for (unsigned o = 8; o <= 20; o += 4) {
+                        j9_write32(pr, dst + o, j9_read32(pr, s + o));
+                    }
+                }
+                return 0;
+            }
+            if ((nargs >= 4) && sig && std::strstr(sig, "[BII)")) {
+                const address s = j9_new_string_bytes(pr, static_cast<address>(args[1]),
+                    args[2], args[3], "UTF-8");
+                if (dst && s) {
+                    for (unsigned o = 8; o <= 20; o += 4) {
+                        j9_write32(pr, dst + o, j9_read32(pr, s + o));
+                    }
+                }
+                return 0;
+            }
+            return 0;
+        }
+        if ((std::strcmp(name, "<init>") == 0)
+            && ((std::strncmp(cls, "java/", 5) == 0)
+                || (std::strcmp(cls, "com/nokia/mid/ui/FullCanvas") == 0)
+                || (std::strcmp(cls, "javax/microedition/lcdui/Canvas") == 0)
+                || (std::strcmp(cls, "javax/microedition/midlet/MIDlet") == 0))) {
+            return 0;
+        }
+        if ((std::strcmp(cls, "java/lang/StringBuffer") == 0)
+            || (std::strstr(cls, "StringBuffer") != nullptr)) {
+            if (std::strcmp(name, "<init>") == 0) {
+                if (self) {
+                    if (auto *s = j9_hi_sbuf(self)) {
+                        s->clear();
+                    }
+                }
+                return 0;
+            }
+            if (std::strcmp(name, "append") == 0) {
+                if (auto *s = j9_hi_sbuf(self)) {
+                    if (nargs >= 2) {
+                        if (sig && std::strstr(sig, "Ljava/lang/String;")) {
+                            *s += j9_hi_get_str(pr, static_cast<address>(args[1]));
+                        } else {
+                            *s += std::to_string(args[1]);
+                        }
+                    }
+                }
+                return static_cast<std::int32_t>(self);
+            }
+            if (std::strcmp(name, "toString") == 0) {
+                const char *txt = "";
+                if (auto *s = j9_hi_sbuf(self)) {
+                    txt = s->c_str();
+                }
+                return static_cast<std::int32_t>(j9_new_string_utf(pr, txt));
+            }
+        }
+        if ((std::strcmp(name, "<init>") == 0)
+            && (std::strstr(cls, "InputStream") || std::strstr(cls, "DataInput"))) {
+            if (std::strstr(cls, "ByteArrayInputStream") && (nargs >= 2) && args[1]) {
+                unsigned off = (nargs >= 4) ? static_cast<unsigned>(args[2]) : 0;
+                unsigned len = (nargs >= 4) ? static_cast<unsigned>(args[3]) : 0;
+                if (!len) {
+                    len = j9_read32(pr, static_cast<address>(args[1]) + 8u);
+                }
+                std::vector<std::uint8_t> file;
+                j9_hi_read_arr_bytes(pr, static_cast<address>(args[1]), off, len, file);
+                j9_hi_istream_bind(self, file);
+            } else if (nargs >= 2) {
+                if (auto *base = j9_hi_istream_of(static_cast<address>(args[1]))) {
+                    std::vector<std::uint8_t> rest;
+                    if (base->pos < base->data.size()) {
+                        rest.assign(base->data.begin() + static_cast<std::ptrdiff_t>(base->pos),
+                            base->data.end());
+                    }
+                    j9_hi_istream_bind(self, rest);
+                }
+            }
+            return 0;
+        }
+        if ((std::strcmp(name, "getClass") == 0) && self) {
+            const address cz = j9_read32(pr, self);
+            return static_cast<std::int32_t>(cz ? cz : self);
+        }
+        if (std::strcmp(name, "getResourceAsStream") == 0) {
+            std::string path;
+            if (nargs >= 2) {
+                path = j9_hi_get_str(pr, static_cast<address>(args[1]));
+            }
+            std::vector<std::uint8_t> file;
+            if (!path.empty() && j9_host_read_suite_file(pr, path.c_str(), file)) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] suite-stream '{}' n={}", path, file.size());
+                return static_cast<std::int32_t>(j9_hi_istream(pr, file));
+            }
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] suite-stream-miss '{}'", path);
+            return 0;
+        }
+        if (auto *is = j9_hi_istream_of(self)) {
+            if (std::strcmp(name, "available") == 0) {
+                return static_cast<std::int32_t>(is->data.size() > is->pos
+                    ? (is->data.size() - is->pos) : 0);
+            }
+            if (std::strcmp(name, "skip") == 0) {
+                std::int32_t n = 0;
+                if (nargs >= 3) {
+                    n = args[2];
+                } else if (nargs >= 2) {
+                    n = args[1];
+                }
+                if (n < 0) {
+                    n = 0;
+                }
+                const unsigned left = (is->data.size() > is->pos)
+                    ? static_cast<unsigned>(is->data.size() - is->pos) : 0;
+                const unsigned use = (static_cast<unsigned>(n) > left)
+                    ? left : static_cast<unsigned>(n);
+                is->pos += use;
+                return static_cast<std::int32_t>(use);
+            }
+            if (std::strcmp(name, "close") == 0) {
+                is->obj = 0;
+                is->data.clear();
+                is->pos = 0;
+                return 0;
+            }
+            if (std::strcmp(name, "read") == 0) {
+                if ((nargs >= 2) && args[1]) {
+                    const address arr = static_cast<address>(args[1]);
+                    const unsigned cap = j9_read32(pr, arr + 8u);
+                    unsigned off = (nargs >= 3) ? static_cast<unsigned>(args[2]) : 0;
+                    unsigned want = (nargs >= 4) ? static_cast<unsigned>(args[3]) : cap;
+                    if (off > cap) {
+                        off = cap;
+                    }
+                    if (want > (cap - off)) {
+                        want = cap - off;
+                    }
+                    unsigned n = static_cast<unsigned>(is->data.size() > is->pos
+                        ? (is->data.size() - is->pos) : 0);
+                    if (n > want) {
+                        n = want;
+                    }
+                    for (unsigned i = 0; i < n; ++i) {
+                        j9_write8(pr, arr + 16u + off + i, is->data[is->pos + i]);
+                    }
+                    is->pos += n;
+                    return static_cast<std::int32_t>(n);
+                }
+                if (is->pos >= is->data.size()) {
+                    return -1;
+                }
+                const std::uint8_t b = is->data[is->pos++];
+                return static_cast<std::int32_t>(b);
+            }
+        }
+        if ((std::strcmp(name, "gc") == 0)
+            || (std::strcmp(name, "yield") == 0)
+            || (std::strcmp(name, "sleep") == 0)
+            || (std::strcmp(name, "notifyDestroyed") == 0)) {
+            return 0;
+        }
+        if ((std::strcmp(name, "start") == 0)
+            && (std::strstr(cls, "Thread") || (self && (j9_plant_index_ram(j9_read32(pr, self)) >= 0)))) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-thread-start cls='{}' self=0x{:X}",
+                cls, self);
+            return 0;
+        }
+        const int pi = j9_plant_index(cls);
+        if (pi >= 0) {
+            const int mi = j9_plant_meth_index(pi, name, sig);
+            if (mi >= 0) {
+                return j9_hi_run(core, pr, pi, mi, args, nargs);
+            }
+        }
+        if ((std::strcmp(name, "getWidth") == 0)
+            || (std::strcmp(name, "getHeight") == 0)) {
+            if (j9_hi_img *im = j9_hi_img_of(self, false)) {
+                return (name[3] == 'W') ? im->w : im->h;
+            }
+            return (name[3] == 'W') ? k_j9_lcd_w : k_j9_lcd_h;
+        }
+        if ((std::strncmp(cls, "javax/microedition/lcdui/", 25) == 0)
+            || (std::strncmp(cls, "com/nokia/mid/ui/", 17) == 0)) {
+            if ((std::strcmp(name, "repaint") == 0)
+                || (std::strcmp(name, "serviceRepaints") == 0)) {
+                const int pi = j9_plant_index("AlpsFarmCanvas");
+                const int mi = j9_plant_meth_index(pi, "paint",
+                    "(Ljavax/microedition/lcdui/Graphics;)V");
+                if ((pi >= 0) && (mi >= 0) && g_j9_graphics_obj) {
+                    const std::int32_t av[2] = {
+                        static_cast<std::int32_t>(g_j9_alps_canvas_obj
+                            ? g_j9_alps_canvas_obj : self),
+                        static_cast<std::int32_t>(g_j9_graphics_obj)
+                    };
+                    return j9_hi_run(core, pr, pi, mi, av, 2);
+                }
+            }
+            if (std::strcmp(name, "setColor") == 0) {
+                if ((nargs >= 4) && !is_static) {
+                    g_j9_gcolor = ((args[1] & 255) << 16) | ((args[2] & 255) << 8)
+                        | (args[3] & 255);
+                } else if ((nargs >= 3) && is_static) {
+                    g_j9_gcolor = ((args[0] & 255) << 16) | ((args[1] & 255) << 8)
+                        | (args[2] & 255);
+                } else if (nargs >= 2) {
+                    g_j9_gcolor = is_static ? args[0] : args[1];
+                }
+                if (self && j9_mapped32(pr, self + 0x10u)) {
+                    j9_write32(pr, self + 0x10u, static_cast<address>(g_j9_gcolor));
+                }
+                return 0;
+            }
+            if ((std::strcmp(name, "getWidth") == 0)
+                || (std::strcmp(name, "getHeight") == 0)) {
+                if (j9_hi_img *im = j9_hi_img_of(self, false)) {
+                    return (name[3] == 'W') ? im->w : im->h;
+                }
+                return (name[3] == 'W') ? k_j9_lcd_w : k_j9_lcd_h;
+            }
+            if ((std::strcmp(name, "getClipX") == 0)) {
+                return g_j9_clipx;
+            }
+            if ((std::strcmp(name, "getClipY") == 0)) {
+                return g_j9_clipy;
+            }
+            if ((std::strcmp(name, "getClipWidth") == 0)) {
+                return g_j9_clipw;
+            }
+            if ((std::strcmp(name, "getClipHeight") == 0)) {
+                return g_j9_cliph;
+            }
+            if ((std::strcmp(name, "getTranslateX") == 0)) {
+                return g_j9_tx;
+            }
+            if ((std::strcmp(name, "getTranslateY") == 0)) {
+                return g_j9_ty;
+            }
+            if ((std::strcmp(name, "createImage") == 0) && pr) {
+                address ic = j9_find_class_by_name(pr, "javax/microedition/lcdui/Image");
+                if (!ic) {
+                    ic = g_j9_graphics_clazz ? g_j9_graphics_clazz
+                        : (g_j9_graphics_obj ? j9_read32(pr, g_j9_graphics_obj) : 0);
+                }
+                address img = ic ? j9_host_alloc_obj(pr, ic, 0x80u)
+                    : j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
+                if (!img) {
+                    return 0;
+                }
+                if (kernel_system *kern = pr->get_kernel_object_owner()) {
+                    j9_attach_dummy_peer(pr, kern->crr_thread(), img >> 2);
+                }
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                if (sig && std::strstr(sig, "(II)")) {
+                    const int w = std::max(1, (na > 0) ? av[0] : 1);
+                    const int h = std::max(1, (na > 1) ? av[1] : 1);
+                    std::vector<std::uint8_t> z(static_cast<unsigned>(w * h * 4));
+                    j9_hi_store_img(pr, img, w, h, z.data());
+                    return static_cast<std::int32_t>(img);
+                }
+                std::vector<std::uint8_t> file;
+                const char *tag = "bytes";
+                std::string path;
+                if (sig && std::strstr(sig, "Ljava/lang/String;")) {
+                    path = (na > 0) ? j9_hi_get_str(pr, static_cast<address>(av[0])) : "";
+                    tag = path.c_str();
+                    if (!path.empty()) {
+                        j9_host_read_suite_file(pr, path.c_str(), file);
+                    }
+                } else if (sig && std::strstr(sig, "InputStream") && (na > 0)) {
+                    if (auto *is = j9_hi_istream_of(static_cast<address>(av[0]))) {
+                        if (is->pos < is->data.size()) {
+                            file.assign(is->data.begin() + static_cast<std::ptrdiff_t>(is->pos),
+                                is->data.end());
+                        }
+                    }
+                    tag = "stream";
+                } else if ((na >= 1) && av[0]) {
+                    unsigned off = (na > 1 && av[1] >= 0) ? static_cast<unsigned>(av[1]) : 0;
+                    unsigned len = (na > 2 && av[2] > 0) ? static_cast<unsigned>(av[2]) : 0;
+                    const unsigned cap = j9_read32(pr, static_cast<address>(av[0]) + 8u);
+                    if (!len || (off + len > cap)) {
+                        if (off < cap) {
+                            len = cap - off;
+                        }
+                    }
+                    if (len) {
+                        j9_hi_read_arr_bytes(pr, static_cast<address>(av[0]), off, len, file);
+                    }
+                }
+                if (!file.empty()) {
+                    j9_hi_decode_png(pr, img, file.data(),
+                        static_cast<unsigned>(file.size()), tag);
+                } else {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] png-decode-empty '{}' sig={} na={} a0=0x{:X} a1={} a2={}",
+                        tag, sig ? sig : "", na,
+                        (na > 0) ? av[0] : 0, (na > 1) ? av[1] : 0, (na > 2) ? av[2] : 0);
+                    j9_hi_store_img(pr, img, 16, 16, nullptr);
+                }
+                return static_cast<std::int32_t>(img);
+            }
+            if (std::strcmp(name, "fillRect") == 0) {
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                const int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                if (na >= 4) {
+                    j9_hi_fill_rect(av[0], av[1], av[2], av[3]);
+                    static int fn = 0;
+                    if (fn < 8) {
+                        ++fn;
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] lcdui-fill {} {} {} {} c=0x{:X}",
+                            av[0], av[1], av[2], av[3], g_j9_gcolor);
+                    }
+                }
+                return 0;
+            }
+            if ((std::strcmp(name, "drawImage") == 0)
+                || (std::strcmp(name, "drawRegion") == 0)) {
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                const int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                address im = 0;
+                int x = 0;
+                int y = 0;
+                int anc = 0;
+                int sx = 0;
+                int sy = 0;
+                int sw = 0;
+                int sh = 0;
+                if (std::strcmp(name, "drawRegion") == 0) {
+                    im = (na > 0) ? static_cast<address>(av[0]) : 0;
+                    sx = (na > 1) ? av[1] : 0;
+                    sy = (na > 2) ? av[2] : 0;
+                    sw = (na > 3) ? av[3] : 0;
+                    sh = (na > 4) ? av[4] : 0;
+                    x = (na > 6) ? av[6] : 0;
+                    y = (na > 7) ? av[7] : 0;
+                    anc = (na > 8) ? av[8] : 0;
+                    if (anc & 1) {
+                        x -= sw / 2;
+                    }
+                    if (anc & 8) {
+                        x -= sw;
+                    }
+                    if (anc & 2) {
+                        y -= sh / 2;
+                    }
+                    if (anc & 32) {
+                        y -= sh;
+                    }
+                    j9_hi_blit(x, y, j9_hi_img_of(im, false), sx, sy, sw, sh);
+                } else {
+                    im = (na > 0) ? static_cast<address>(av[0]) : 0;
+                    x = (na > 1) ? av[1] : 0;
+                    y = (na > 2) ? av[2] : 0;
+                    anc = (na > 3) ? av[3] : 0;
+                    j9_hi_draw_image(im, x, y, anc);
+                }
+                static int dn = 0;
+                if (dn < 12) {
+                    ++dn;
+                    j9_hi_img *slot = j9_hi_img_of(im, false);
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] lcdui-blit {} img=0x{:X} {}x{} @{},{} anc={}",
+                        name, im, slot ? slot->w : 0, slot ? slot->h : 0, x, y, anc);
+                }
+                return 0;
+            }
+            if (std::strcmp(name, "setClip") == 0) {
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                const int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                if (na >= 4) {
+                    g_j9_clipx = av[0];
+                    g_j9_clipy = av[1];
+                    g_j9_clipw = av[2];
+                    g_j9_cliph = av[3];
+                }
+                return 0;
+            }
+            if (std::strcmp(name, "clipRect") == 0) {
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                const int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                if (na >= 4) {
+                    const int x1 = std::max(g_j9_clipx, av[0]);
+                    const int y1 = std::max(g_j9_clipy, av[1]);
+                    const int x2 = std::min(g_j9_clipx + g_j9_clipw, av[0] + av[2]);
+                    const int y2 = std::min(g_j9_clipy + g_j9_cliph, av[1] + av[3]);
+                    g_j9_clipx = x1;
+                    g_j9_clipy = y1;
+                    g_j9_clipw = std::max(0, x2 - x1);
+                    g_j9_cliph = std::max(0, y2 - y1);
+                }
+                return 0;
+            }
+            if (std::strcmp(name, "translate") == 0) {
+                const std::int32_t *av = is_static ? args : (args + (nargs ? 1 : 0));
+                const int na = is_static ? nargs : (nargs > 0 ? nargs - 1 : 0);
+                if (na >= 2) {
+                    g_j9_tx += av[0];
+                    g_j9_ty += av[1];
+                }
+                return 0;
+            }
+            if (std::strcmp(name, "drawString") == 0) {
+                return 0;
+            }
+            if ((std::strcmp(name, "getFont") == 0)
+                || (std::strcmp(name, "getGraphics") == 0)) {
+                return static_cast<std::int32_t>(g_j9_graphics_obj
+                    ? g_j9_graphics_obj : j9_dummy_jcl_obj(pr, 0x725538u, 0x40u));
+            }
+            if (std::strcmp(name, "setFont") == 0) {
+                return 0;
+            }
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] lcdui-invoke-skip {}.{}{}", cls, name, sig);
+            return 0;
+        }
+        static int skipn = 0;
+        if (skipn < 16) {
+            ++skipn;
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-invoke-skip {}.{}{}", cls, name, sig);
+        }
+        return 0;
+    }
+
+    static int j9_hi_run(arm::core *core, kernel::process *pr, int pidx, int midx,
+        const std::int32_t *args, int nargs, const j9_hi_frame *resume) {
+        if (!pr || (pidx < 0) || (midx < 0) || (pidx >= g_j9_nplanted)) {
+            return 0;
+        }
+        auto &meta = g_j9_pmeta[pidx];
+        if (midx >= static_cast<int>(meta.methods.size())) {
+            return 0;
+        }
+        if (!resume && !meta.clinit_done) {
+            meta.clinit_done = true;
+            const int ci = j9_plant_meth_index(pidx, "<clinit>", "()V");
+            if ((ci >= 0) && (ci != midx)) {
+                j9_hi_run(core, pr, pidx, ci, nullptr, 0);
+                if (g_j9_hi_yield) {
+                    return 0;
+                }
+            }
+        }
+        const auto &meth = meta.methods[midx];
+        if (meth.code.empty()) {
+            return 0;
+        }
+        if (!resume && (g_j9_hi_n >= 16)) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-overflow {}.{}", g_j9_planted[pidx].name,
+                meth.name);
+            return 0;
+        }
+        j9_hi_frame fr;
+        if (resume) {
+            fr = *resume;
+        } else {
+            fr.pidx = pidx;
+            fr.midx = midx;
+            fr.pc = 0;
+            fr.locals.assign((meth.maxl > 32u) ? meth.maxl : 32u, 0);
+            fr.stack.reserve(meth.maxs ? meth.maxs : 8u);
+            const int copy = (nargs < static_cast<int>(fr.locals.size()))
+                ? nargs : static_cast<int>(fr.locals.size());
+            for (int i = 0; i < copy; ++i) {
+                fr.locals[static_cast<unsigned>(i)] = args[i];
+            }
+        }
+        const auto &code = meth.code;
+        auto push = [&](std::int32_t v) { fr.stack.push_back(v); };
+        auto pop = [&]() -> std::int32_t {
+            if (fr.stack.empty()) {
+                return 0;
+            }
+            const std::int32_t v = fr.stack.back();
+            fr.stack.pop_back();
+            return v;
+        };
+        auto u8 = [&](unsigned at) -> std::uint8_t {
+            return (at < code.size()) ? code[at] : 0;
+        };
+        auto s16 = [&](unsigned at) -> std::int16_t {
+            return static_cast<std::int16_t>((u8(at) << 8) | u8(at + 1));
+        };
+        auto u16 = [&](unsigned at) -> unsigned {
+            return (static_cast<unsigned>(u8(at)) << 8) | u8(at + 1);
+        };
+        if (((meth.name == "<init>") && ((g_j9_planted[pidx].name == std::string("AlpsFarm"))
+                    || (g_j9_planted[pidx].name == std::string("AlpsFarmCanvas"))
+                    || (g_j9_planted[pidx].name == std::string("CDomain"))))
+            || (meth.name == "GameStart") || (meth.name == "MAIN_STATE")
+            || (meth.name == "paint") || (meth.name == "<clinit>")
+            || (meth.name == "TEXT_LOAD") || (meth.name == "BYTE_LOAD")
+            || (meth.name == "INT_LOAD") || (meth.name == "INIT_LOGO")) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-run {}.{}{} code={} locals={}",
+                g_j9_planted[pidx].name, meth.name, meth.sig, code.size(), fr.locals.size());
+        }
+        unsigned steps = 0;
+        while (fr.pc < code.size()) {
+            if (++steps > 400000u) {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-step-cap {}.{} pc={}",
+                    g_j9_planted[pidx].name, meth.name, fr.pc);
+                break;
+            }
+            const std::uint8_t op = u8(fr.pc);
+            if ((op >= 0x02u) && (op <= 0x08u)) {
+                push(static_cast<std::int32_t>(op) - 3);
+                fr.pc += 1;
+                continue;
+            }
+            switch (op) {
+            case 0x00:
+                fr.pc += 1;
+                break;
+            case 0x01:
+                push(0);
+                fr.pc += 1;
+                break;
+            case 0x09:
+            case 0x0A:
+            case 0x0B:
+            case 0x0E:
+            case 0x0F:
+                push(0);
+                push(0);
+                fr.pc += 1;
+                break;
+            case 0x0C:
+            case 0x0D:
+                push(0);
+                fr.pc += 1;
+                break;
+            case 0x10:
+                push(static_cast<std::int8_t>(u8(fr.pc + 1)));
+                fr.pc += 2;
+                break;
+            case 0x11:
+                push(s16(fr.pc + 1));
+                fr.pc += 3;
+                break;
+            case 0x12: {
+                const unsigned idx = u8(fr.pc + 1);
+                if ((idx < meta.tag.size()) && (meta.tag[idx] == 8)
+                    && (meta.a[idx] < meta.utf.size())) {
+                    push(static_cast<std::int32_t>(
+                        j9_new_string_utf(pr, meta.utf[meta.a[idx]].c_str())));
+                } else if ((idx < meta.tag.size()) && (meta.tag[idx] == 3)) {
+                    push((static_cast<std::int32_t>(meta.a[idx]) << 16)
+                        | meta.b[idx]);
+                } else {
+                    push(0);
+                }
+                fr.pc += 2;
+                break;
+            }
+            case 0x13: {
+                const unsigned idx = u16(fr.pc + 1);
+                if ((idx < meta.tag.size()) && (meta.tag[idx] == 8)
+                    && (meta.a[idx] < meta.utf.size())) {
+                    push(static_cast<std::int32_t>(
+                        j9_new_string_utf(pr, meta.utf[meta.a[idx]].c_str())));
+                } else if ((idx < meta.tag.size()) && (meta.tag[idx] == 3)) {
+                    push((static_cast<std::int32_t>(meta.a[idx]) << 16)
+                        | meta.b[idx]);
+                } else {
+                    push(0);
+                }
+                fr.pc += 3;
+                break;
+            }
+            case 0x14: {
+                const unsigned idx = u16(fr.pc + 1);
+                std::int32_t hi = 0;
+                std::int32_t lo = 0;
+                if ((idx < meta.chi.size()) && ((meta.tag[idx] == 5) || (meta.tag[idx] == 6))) {
+                    hi = static_cast<std::int32_t>(meta.chi[idx]);
+                    lo = static_cast<std::int32_t>(meta.clo[idx]);
+                }
+                push(hi);
+                push(lo);
+                fr.pc += 3;
+                break;
+            }
+            case 0x15:
+            case 0x17:
+            case 0x19:
+                push(fr.locals[u8(fr.pc + 1) % fr.locals.size()]);
+                fr.pc += 2;
+                break;
+            case 0x16:
+            case 0x18: {
+                const unsigned li = u8(fr.pc + 1) % fr.locals.size();
+                push(fr.locals[li]);
+                push(fr.locals[(li + 1) % fr.locals.size()]);
+                fr.pc += 2;
+                break;
+            }
+            case 0x1A:
+            case 0x1B:
+            case 0x1C:
+            case 0x1D:
+                push(fr.locals[(op - 0x1Au) % fr.locals.size()]);
+                fr.pc += 1;
+                break;
+            case 0x1E:
+            case 0x1F:
+            case 0x20:
+            case 0x21:
+            case 0x26:
+            case 0x27:
+            case 0x28:
+            case 0x29: {
+                const unsigned li = (op >= 0x26u) ? (op - 0x26u) : (op - 0x1Eu);
+                push(fr.locals[li % fr.locals.size()]);
+                push(fr.locals[(li + 1) % fr.locals.size()]);
+                fr.pc += 1;
+                break;
+            }
+            case 0x22:
+            case 0x23:
+            case 0x24:
+            case 0x25:
+                push(fr.locals[(op - 0x22u) % fr.locals.size()]);
+                fr.pc += 1;
+                break;
+            case 0x2A:
+            case 0x2B:
+            case 0x2C:
+            case 0x2D:
+                push(fr.locals[(op - 0x2Au) % fr.locals.size()]);
+                fr.pc += 1;
+                break;
+            case 0x2E:
+            case 0x33:
+            case 0x34: {
+                const unsigned i = static_cast<unsigned>(pop());
+                const address arr = static_cast<address>(pop());
+                std::int32_t v = 0;
+                if (arr) {
+                    if (op == 0x2E) {
+                        v = static_cast<std::int32_t>(j9_read32(pr, arr + 16u + i * 4u));
+                    } else {
+                        v = static_cast<std::int8_t>(j9_read8(pr, arr + 16u + i));
+                    }
+                }
+                push(v);
+                fr.pc += 1;
+                break;
+            }
+            case 0x32: {
+                const unsigned i = static_cast<unsigned>(pop());
+                const address arr = static_cast<address>(pop());
+                push(arr ? static_cast<std::int32_t>(j9_read32(pr, arr + 16u + i * 4u)) : 0);
+                fr.pc += 1;
+                break;
+            }
+            case 0x36:
+            case 0x38:
+            case 0x3A:
+                fr.locals[u8(fr.pc + 1) % fr.locals.size()] = pop();
+                fr.pc += 2;
+                break;
+            case 0x37:
+            case 0x39: {
+                const unsigned li = u8(fr.pc + 1) % fr.locals.size();
+                const std::int32_t lo = pop();
+                const std::int32_t hi = pop();
+                fr.locals[li] = hi;
+                fr.locals[(li + 1) % fr.locals.size()] = lo;
+                fr.pc += 2;
+                break;
+            }
+            case 0x3B:
+            case 0x3C:
+            case 0x3D:
+            case 0x3E:
+                fr.locals[(op - 0x3Bu) % fr.locals.size()] = pop();
+                fr.pc += 1;
+                break;
+            case 0x3F:
+            case 0x40:
+            case 0x41:
+            case 0x42:
+            case 0x47:
+            case 0x48:
+            case 0x49:
+            case 0x4A: {
+                const unsigned li = (op >= 0x47u) ? (op - 0x47u) : (op - 0x3Fu);
+                const std::int32_t lo = pop();
+                const std::int32_t hi = pop();
+                fr.locals[li % fr.locals.size()] = hi;
+                fr.locals[(li + 1) % fr.locals.size()] = lo;
+                fr.pc += 1;
+                break;
+            }
+            case 0x43:
+            case 0x44:
+            case 0x45:
+            case 0x46:
+                fr.locals[(op - 0x43u) % fr.locals.size()] = pop();
+                fr.pc += 1;
+                break;
+            case 0x4B:
+            case 0x4C:
+            case 0x4D:
+            case 0x4E:
+                fr.locals[(op - 0x4Bu) % fr.locals.size()] = pop();
+                fr.pc += 1;
+                break;
+            case 0x50:
+            case 0x52: {
+                pop();
+                pop();
+                pop();
+                pop();
+                fr.pc += 1;
+                break;
+            }
+            case 0x4F:
+            case 0x54:
+            case 0x55:
+            case 0x56: {
+                const std::int32_t v = pop();
+                const unsigned i = static_cast<unsigned>(pop());
+                const address arr = static_cast<address>(pop());
+                if (arr) {
+                    if (op == 0x4F) {
+                        j9_write32(pr, arr + 16u + i * 4u, static_cast<address>(v));
+                    } else if ((op == 0x55) || (op == 0x56)) {
+                        j9_write16(pr, arr + 16u + i * 2u, static_cast<std::uint16_t>(v));
+                    } else {
+                        j9_write8(pr, arr + 16u + i, static_cast<std::uint8_t>(v));
+                    }
+                }
+                fr.pc += 1;
+                break;
+            }
+            case 0x53: {
+                const std::int32_t v = pop();
+                const unsigned i = static_cast<unsigned>(pop());
+                const address arr = static_cast<address>(pop());
+                if (arr) {
+                    j9_write32(pr, arr + 16u + i * 4u, static_cast<address>(v));
+                }
+                fr.pc += 1;
+                break;
+            }
+            case 0x57:
+                pop();
+                fr.pc += 1;
+                break;
+            case 0x58:
+                pop();
+                pop();
+                fr.pc += 1;
+                break;
+            case 0x59: {
+                const std::int32_t v = pop();
+                push(v);
+                push(v);
+                fr.pc += 1;
+                break;
+            }
+            case 0x5A: {
+                const std::int32_t a = pop();
+                const std::int32_t b = pop();
+                push(a);
+                push(b);
+                push(a);
+                fr.pc += 1;
+                break;
+            }
+            case 0x5B: {
+                const std::int32_t a = pop();
+                const std::int32_t b = pop();
+                const std::int32_t c = pop();
+                push(a);
+                push(c);
+                push(b);
+                push(a);
+                fr.pc += 1;
+                break;
+            }
+            case 0x5C: {
+                const std::int32_t a = pop();
+                const std::int32_t b = pop();
+                push(b);
+                push(a);
+                push(b);
+                push(a);
+                fr.pc += 1;
+                break;
+            }
+            case 0x60: {
+                const std::int32_t b = pop();
+                push(pop() + b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x64: {
+                const std::int32_t b = pop();
+                push(pop() - b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x68: {
+                const std::int32_t b = pop();
+                push(pop() * b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x6C: {
+                const std::int32_t b = pop();
+                push(b ? (pop() / b) : 0);
+                fr.pc += 1;
+                break;
+            }
+            case 0x70: {
+                const std::int32_t b = pop();
+                push(b ? (pop() % b) : 0);
+                fr.pc += 1;
+                break;
+            }
+            case 0x74: {
+                push(-pop());
+                fr.pc += 1;
+                break;
+            }
+            case 0x75: {
+                const std::int32_t lo = pop();
+                const std::int32_t hi = pop();
+                const std::int64_t v = (static_cast<std::int64_t>(hi) << 32)
+                    | static_cast<std::uint32_t>(lo);
+                const std::int64_t n = -v;
+                push(static_cast<std::int32_t>(n >> 32));
+                push(static_cast<std::int32_t>(n));
+                fr.pc += 1;
+                break;
+            }
+            case 0x78:
+            case 0x79: {
+                const std::int32_t b = pop();
+                push(pop() << (b & 31));
+                fr.pc += 1;
+                break;
+            }
+            case 0x7A: {
+                const std::int32_t b = pop();
+                push(pop() >> (b & 31));
+                fr.pc += 1;
+                break;
+            }
+            case 0x7C:
+            case 0x7D: {
+                const std::int32_t b = pop();
+                const std::uint32_t u = static_cast<std::uint32_t>(pop());
+                push(static_cast<std::int32_t>(u >> (b & 31)));
+                fr.pc += 1;
+                break;
+            }
+            case 0x7E: {
+                const std::int32_t b = pop();
+                push(pop() & b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x80: {
+                const std::int32_t b = pop();
+                push(pop() | b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x82: {
+                const std::int32_t b = pop();
+                push(pop() ^ b);
+                fr.pc += 1;
+                break;
+            }
+            case 0x84: {
+                const unsigned li = u8(fr.pc + 1) % fr.locals.size();
+                fr.locals[li] += static_cast<std::int8_t>(u8(fr.pc + 2));
+                fr.pc += 3;
+                break;
+            }
+            case 0x85: {
+                const std::int32_t v = pop();
+                push(v < 0 ? -1 : 0);
+                push(v);
+                fr.pc += 1;
+                break;
+            }
+            case 0x86:
+            case 0x87:
+                fr.pc += 1;
+                break;
+            case 0x91:
+            case 0x92:
+            case 0x93:
+                push(static_cast<std::int8_t>(pop()));
+                fr.pc += 1;
+                break;
+            case 0x99:
+            case 0x9A:
+            case 0x9B:
+            case 0x9C:
+            case 0x9D:
+            case 0x9E:
+            case 0xC6:
+            case 0xC7: {
+                const std::int32_t v = pop();
+                bool t = false;
+                if (op == 0x99) t = (v == 0);
+                else if (op == 0x9A) t = (v != 0);
+                else if (op == 0x9B) t = (v < 0);
+                else if (op == 0x9C) t = (v >= 0);
+                else if (op == 0x9D) t = (v > 0);
+                else if (op == 0x9E) t = (v <= 0);
+                else if (op == 0xC6) t = (v == 0);
+                else t = (v != 0);
+                fr.pc = t ? static_cast<unsigned>(static_cast<int>(fr.pc) + s16(fr.pc + 1))
+                    : (fr.pc + 3);
+                break;
+            }
+            case 0x9F:
+            case 0xA0:
+            case 0xA1:
+            case 0xA2:
+            case 0xA3:
+            case 0xA4:
+            case 0xA5:
+            case 0xA6: {
+                const std::int32_t b = pop();
+                const std::int32_t a = pop();
+                bool t = false;
+                if (op == 0x9F || op == 0xA5) t = (a == b);
+                else if (op == 0xA0 || op == 0xA6) t = (a != b);
+                else if (op == 0xA1) t = (a < b);
+                else if (op == 0xA2) t = (a >= b);
+                else if (op == 0xA3) t = (a > b);
+                else t = (a <= b);
+                fr.pc = t ? static_cast<unsigned>(static_cast<int>(fr.pc) + s16(fr.pc + 1))
+                    : (fr.pc + 3);
+                break;
+            }
+            case 0xA7:
+                fr.pc = static_cast<unsigned>(static_cast<int>(fr.pc) + s16(fr.pc + 1));
+                break;
+            case 0xAB: {
+                const unsigned base = fr.pc;
+                unsigned p = fr.pc + 1;
+                p = (p + 3u) & ~3u;
+                const auto def = static_cast<std::int32_t>((u8(p) << 24) | (u8(p + 1) << 16)
+                    | (u8(p + 2) << 8) | u8(p + 3));
+                const auto np = static_cast<std::int32_t>((u8(p + 4) << 24) | (u8(p + 5) << 16)
+                    | (u8(p + 6) << 8) | u8(p + 7));
+                const std::int32_t key = pop();
+                std::int32_t off = def;
+                for (std::int32_t i = 0; i < np; ++i) {
+                    const unsigned slot = p + 8u + static_cast<unsigned>(i) * 8u;
+                    const auto match = static_cast<std::int32_t>((u8(slot) << 24) | (u8(slot + 1) << 16)
+                        | (u8(slot + 2) << 8) | u8(slot + 3));
+                    if (match == key) {
+                        off = static_cast<std::int32_t>((u8(slot + 4) << 24) | (u8(slot + 5) << 16)
+                            | (u8(slot + 6) << 8) | u8(slot + 7));
+                        break;
+                    }
+                }
+                fr.pc = static_cast<unsigned>(static_cast<int>(base) + off);
+                break;
+            }
+            case 0xAA: {
+                const unsigned base = fr.pc;
+                unsigned p = fr.pc + 1;
+                p = (p + 3u) & ~3u;
+                const auto def = static_cast<std::int32_t>((u8(p) << 24) | (u8(p + 1) << 16)
+                    | (u8(p + 2) << 8) | u8(p + 3));
+                const auto lo = static_cast<std::int32_t>((u8(p + 4) << 24) | (u8(p + 5) << 16)
+                    | (u8(p + 6) << 8) | u8(p + 7));
+                const auto hi = static_cast<std::int32_t>((u8(p + 8) << 24) | (u8(p + 9) << 16)
+                    | (u8(p + 10) << 8) | u8(p + 11));
+                const std::int32_t key = pop();
+                std::int32_t off = def;
+                if ((key >= lo) && (key <= hi)) {
+                    const unsigned slot = p + 12u + static_cast<unsigned>(key - lo) * 4u;
+                    off = static_cast<std::int32_t>((u8(slot) << 24) | (u8(slot + 1) << 16)
+                        | (u8(slot + 2) << 8) | u8(slot + 3));
+                }
+                fr.pc = static_cast<unsigned>(static_cast<int>(base) + off);
+                break;
+            }
+            case 0xAC:
+            case 0xB0:
+                return pop();
+            case 0xB1:
+                return 0;
+            case 0xB2:
+            case 0xB3:
+            case 0xB4:
+            case 0xB5: {
+                const unsigned idx = u16(fr.pc + 1);
+                bool is_st = false;
+                unsigned off = 0;
+                int ti = pidx;
+                const char *cls = "";
+                const char *nm = "";
+                const char *sg = "";
+                j9_cp_ref(meta, idx, &cls, &nm, &sg);
+                const int found = j9_plant_index(cls);
+                if (found >= 0) {
+                    ti = found;
+                }
+                const auto &tm = g_j9_pmeta[ti];
+                bool hit = false;
+                for (std::size_t i = 0; i < tm.fname.size(); ++i) {
+                    if ((tm.fname[i] == nm) && (tm.fsig[i] == sg)) {
+                        is_st = (tm.fflags[i] & 0x8u) != 0;
+                        off = tm.foff[i];
+                        hit = true;
+                        break;
+                    }
+                }
+                if ((op == 0xB2) || (op == 0xB4)) {
+                    std::int32_t v = 0;
+                    if (hit && is_st && g_j9_planted[ti].statics) {
+                        v = static_cast<std::int32_t>(
+                            j9_read32(pr, g_j9_planted[ti].statics + off));
+                    } else if (hit && !is_st) {
+                        const address obj = static_cast<address>(pop());
+                        if (obj) {
+                            v = static_cast<std::int32_t>(j9_read32(pr, obj + off));
+                        }
+                        if (!v && nm && (std::strcmp(nm, "g") == 0) && g_j9_graphics_obj) {
+                            v = static_cast<std::int32_t>(g_j9_graphics_obj);
+                        }
+                    } else if (op == 0xB4) {
+                        pop();
+                    }
+                    push(v);
+                } else {
+                    const std::int32_t v = pop();
+                    if (hit && is_st && g_j9_planted[ti].statics) {
+                        j9_write32(pr, g_j9_planted[ti].statics + off, static_cast<address>(v));
+                    } else if (hit && !is_st) {
+                        const address obj = static_cast<address>(pop());
+                        if (obj) {
+                            j9_write32(pr, obj + off, static_cast<address>(v));
+                        }
+                    } else if (op == 0xB5) {
+                        pop();
+                    }
+                }
+                fr.pc += 3;
+                break;
+            }
+            case 0xB6:
+            case 0xB7:
+            case 0xB8:
+            case 0xB9: {
+                const unsigned idx = u16(fr.pc + 1);
+                const char *cls = "";
+                const char *nm = "";
+                const char *sg = "";
+                j9_cp_ref(meta, idx, &cls, &nm, &sg);
+                const bool is_st = (op == 0xB8);
+                const int argc = j9_sig_argc(sg, is_st);
+                std::vector<std::int32_t> av(static_cast<unsigned>(argc > 0 ? argc : 0));
+                for (int i = argc - 1; i >= 0; --i) {
+                    av[static_cast<unsigned>(i)] = pop();
+                }
+                const std::int32_t rv = j9_hi_invoke(core, pr, cls, nm, sg,
+                    av.empty() ? nullptr : av.data(), argc, is_st);
+                if (g_j9_hi_yield) {
+                    if (g_j9_hi_n >= 16) {
+                        LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-overflow-yield {}.{}",
+                            g_j9_planted[pidx].name, meth.name);
+                        return 0;
+                    }
+                    g_j9_hi[g_j9_hi_n] = std::move(fr);
+                    g_j9_hi[g_j9_hi_n].pc = fr.pc + ((op == 0xB9) ? 5u : 3u);
+                    const int slots = j9_sig_ret_slots(sg);
+                    g_j9_hi[g_j9_hi_n].ret_slots = slots;
+                    for (int s = 0; s < slots; ++s) {
+                        g_j9_hi[g_j9_hi_n].stack.push_back(0);
+                    }
+                    ++g_j9_hi_n;
+                    return 0;
+                }
+                {
+                    const int slots = j9_sig_ret_slots(sg);
+                    if (slots == 2) {
+                        push(0);
+                        push(rv);
+                    } else if (slots == 1) {
+                        push(rv);
+                    }
+                }
+                fr.pc += (op == 0xB9) ? 5u : 3u;
+                break;
+            }
+            case 0xBB: {
+                const char *cn = j9_cp_class(meta, u16(fr.pc + 1));
+                address obj = 0;
+                const int ti = j9_plant_index(cn);
+                if (ti >= 0) {
+                    unsigned nb = g_j9_planted[ti].inst_bytes;
+                    if (nb < 0x40u) {
+                        nb = 0x40u;
+                    }
+                    obj = j9_host_alloc_obj(pr, g_j9_planted[ti].ram, nb);
+                } else if (std::strstr(cn, "StringBuffer")) {
+                    obj = j9_hi_sbuf_new(pr);
+                } else {
+                    obj = j9_dummy_jcl_obj(pr, 0x725538u, 0x30u);
+                }
+                push(static_cast<std::int32_t>(obj));
+                fr.pc += 3;
+                break;
+            }
+            case 0xBC: {
+                const unsigned n = static_cast<unsigned>(pop());
+                push(static_cast<std::int32_t>(j9_hi_prim_array(pr, u8(fr.pc + 1), n)));
+                fr.pc += 2;
+                break;
+            }
+            case 0xBD: {
+                const unsigned n = static_cast<unsigned>(pop());
+                push(static_cast<std::int32_t>(
+                    j9_hi_obj_array(pr, j9_cp_class(meta, u16(fr.pc + 1)), n)));
+                fr.pc += 3;
+                break;
+            }
+            case 0xBE: {
+                const address arr = static_cast<address>(pop());
+                push(arr ? static_cast<std::int32_t>(j9_read32(pr, arr + 8u)) : 0);
+                fr.pc += 1;
+                break;
+            }
+            case 0xC0:
+            case 0xC1: {
+                const std::int32_t obj = pop();
+                if (op == 0xC1) {
+                    push(obj ? 1 : 0);
+                } else {
+                    push(obj);
+                }
+                fr.pc += 3;
+                break;
+            }
+            case 0xC2:
+            case 0xC3:
+                fr.pc += 1;
+                break;
+            case 0xC5: {
+                const unsigned dims = u8(fr.pc + 3);
+                std::vector<unsigned> ds(dims);
+                for (unsigned i = 0; i < dims; ++i) {
+                    ds[dims - 1 - i] = static_cast<unsigned>(pop());
+                }
+                const char *cn = j9_cp_class(meta, u16(fr.pc + 1));
+                address arr = 0;
+                if (dims >= 1) {
+                    arr = j9_hi_obj_array(pr, cn, ds[0]);
+                    if (arr && (dims >= 2)) {
+                        for (unsigned i = 0; i < ds[0]; ++i) {
+                            address inner = 0;
+                            if (cn && (std::strchr(cn, 'B') || std::strstr(cn, "[B"))) {
+                                inner = j9_hi_prim_array(pr, 8, ds[1]);
+                            } else if (cn && (std::strchr(cn, 'I') || std::strstr(cn, "[I"))) {
+                                inner = j9_hi_prim_array(pr, 10, ds[1]);
+                            } else if (cn && (std::strstr(cn, "[Z"))) {
+                                inner = j9_hi_prim_array(pr, 4, ds[1]);
+                            } else {
+                                inner = j9_hi_obj_array(pr, "java/lang/String", ds[1]);
+                            }
+                            j9_write32(pr, arr + 16u + i * 4u, inner);
+                        }
+                    }
+                }
+                push(static_cast<std::int32_t>(arr));
+                fr.pc += 4;
+                break;
+            }
+            default: {
+                static int hop = 0;
+                if (hop < 24) {
+                    ++hop;
+                    LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-op 0x{:02X} {}.{} pc={}",
+                        op, g_j9_planted[pidx].name, meth.name, fr.pc);
+                }
+                fr.pc += 1;
+                break;
+            }
+            }
+        }
+        return 0;
+    }
+
+    static bool j9_hi_start(arm::core *core, kernel::process *pr,
+        const address clazz, const address self, const char *name, const char *sig,
+        const address arg1 = 0) {
+        const int pidx = j9_plant_index_ram(clazz);
+        const int midx = j9_plant_meth_index(pidx, name, sig);
+        if ((pidx < 0) || (midx < 0)) {
+            return false;
+        }
+        g_j9_hi_n = 0;
+        g_j9_hi_yield = false;
+        std::int32_t av[2] = { static_cast<std::int32_t>(self), static_cast<std::int32_t>(arg1) };
+        const int na = arg1 ? 2 : 1;
+        j9_hi_run(core, pr, pidx, midx, av, self ? na : 0);
+        return !g_j9_hi_yield;
+    }
+
+    static bool j9_hi_resume(arm::core *core, kernel::process *pr, std::int32_t yielded_ret) {
+        if (!g_j9_hi_n) {
+            g_j9_hi_yield = false;
+            return false;
+        }
+        g_j9_hi_yield = false;
+        if (g_j9_hi_ret_obj) {
+            yielded_ret = static_cast<std::int32_t>(g_j9_hi_ret_obj);
+            g_j9_hi_ret_obj = 0;
+        }
+        while (g_j9_hi_n && !g_j9_hi_yield) {
+            auto fr = std::move(g_j9_hi[0]);
+            for (int i = 0; i < g_j9_hi_n - 1; ++i) {
+                g_j9_hi[i] = std::move(g_j9_hi[i + 1]);
+            }
+            --g_j9_hi_n;
+            if ((fr.ret_slots > 0) && !fr.stack.empty()) {
+                fr.stack.back() = yielded_ret;
+                if ((fr.ret_slots == 2) && (fr.stack.size() >= 2)) {
+                    fr.stack[fr.stack.size() - 2] = 0;
+                }
+            }
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] hi-resume {}.{} pc={} ret=0x{:X} depth={}",
+                g_j9_planted[fr.pidx].name, g_j9_pmeta[fr.pidx].methods[fr.midx].name,
+                fr.pc, yielded_ret, g_j9_hi_n);
+            const int before = g_j9_hi_n;
+            yielded_ret = j9_hi_run(core, pr, fr.pidx, fr.midx, nullptr, 0, &fr);
+            if (g_j9_hi_yield && (g_j9_hi_n > before)) {
+                const int added = g_j9_hi_n - before;
+                j9_hi_frame extra[16];
+                for (int i = 0; i < added; ++i) {
+                    extra[i] = std::move(g_j9_hi[before + i]);
+                }
+                for (int i = before - 1; i >= 0; --i) {
+                    g_j9_hi[i + added] = std::move(g_j9_hi[i]);
+                }
+                for (int i = 0; i < added; ++i) {
+                    g_j9_hi[i] = std::move(extra[i]);
+                }
+            }
+        }
+        if (!g_j9_hi_n && !g_j9_hi_yield && (g_j9_hi_stage == 1)) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-init-done cv=0x{:X} g=0x{:X}",
+                g_j9_alps_canvas_obj ? g_j9_alps_canvas_obj : g_j9_canvas_obj,
+                g_j9_graphics_obj);
+        }
+        return true;
+    }
+
+    static bool j9_hi_kick_flush(arm::core *core, kernel::process *pr) {
+        (void)core;
+        (void)pr;
+        const bool ok = j9_hi_present();
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] official-flush g=0x{:X} present={}",
+            g_j9_graphics_obj, ok ? 1 : 0);
+        return false;
+    }
+
+    static void j9_hi_run_alps_paint(arm::core *core, kernel::process *pr) {
+        const address cv = g_j9_alps_canvas_obj ? g_j9_alps_canvas_obj : g_j9_canvas_obj;
+        const int pi = j9_plant_index_ram(g_j9_alps_canvas_clazz);
+        const int paint = j9_plant_meth_index(pi, "paint",
+            "(Ljavax/microedition/lcdui/Graphics;)V");
+        if ((pi < 0) || (paint < 0) || !g_j9_graphics_obj || !cv) {
+            return;
+        }
+        const std::int32_t av[2] = {
+            static_cast<std::int32_t>(cv),
+            static_cast<std::int32_t>(g_j9_graphics_obj)
+        };
+        j9_hi_run(core, pr, pi, paint, av, 2);
+        if (g_j9_fb_dirty || !g_j9_fb.empty()) {
+            j9_hi_present();
+        }
+    }
+
+    static void j9_hi_run_alps_main(arm::core *core, kernel::process *pr) {
+        const address cv = g_j9_alps_canvas_obj ? g_j9_alps_canvas_obj : g_j9_canvas_obj;
+        const int pi = j9_plant_index_ram(g_j9_alps_canvas_clazz);
+        const int mainst = j9_plant_meth_index(pi, "MAIN_STATE", "()V");
+        if ((pi < 0) || (mainst < 0) || !cv) {
+            return;
+        }
+        const std::int32_t a0 = static_cast<std::int32_t>(cv);
+        j9_hi_run(core, pr, pi, mainst, &a0, 1);
+        if (!g_j9_hi_yield) {
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] hi-main-done cv=0x{:X} g=0x{:X}", cv, g_j9_graphics_obj);
+        }
+    }
+
+    static void j9_hi_continue_stages(arm::core *core, kernel::process *pr) {
+        while (core && pr && !g_j9_hi_yield && !g_j9_hi_n) {
+            if (g_j9_hi_stage == 1) {
+                g_j9_hi_stage = 2;
+                j9_hi_run_alps_paint(core, pr);
+            } else if (g_j9_hi_stage == 2) {
+                g_j9_hi_stage = 3;
+                j9_hi_run_alps_main(core, pr);
+            } else if (g_j9_hi_stage == 3) {
+                g_j9_hi_stage = 4;
+                if (!j9_hi_kick_flush(core, pr)) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    static bool j9_kick_findclass_name(arm::core *core, kernel::process *pr, const char *name) {
+        if (!core || !pr || !name || !g_j9_walk_va) {
+            return false;
+        }
+        const address str = g_j9_walk_va + 0x3930u;
+        if (auto *p = reinterpret_cast<char *>(pr->get_ptr_on_addr_space(str))) {
+            std::memset(p, 0, 32);
+            const unsigned nlen = static_cast<unsigned>(std::strlen(name));
+            std::memcpy(p, name, nlen > 31u ? 31u : nlen);
+        }
+        core->set_reg(0, j9_lcdui_env());
+        core->set_reg(1, str);
+        j9_prepare_findclass_vt(pr);
+        g_j9_findclass_saved_lr = g_j9_lcdui_chain_bkpt
+            ? (g_j9_lcdui_chain_bkpt | 1u) : core->get_lr();
+        if (g_j9_findclass_ret_bkpt) {
+            core->set_lr(g_j9_findclass_ret_bkpt);
+        } else if (g_j9_lcdui_chain_bkpt) {
+            core->set_lr(g_j9_lcdui_chain_bkpt | 1u);
+        }
+        LOG_WARN(EMULATED_STDOUT, "[j9-nf] guest-findclass '{}' name=0x{:X}", name, str);
+        if (g_j9_findclass_bkpt) {
+            j9_set_pc(core, g_j9_findclass_bkpt);
+        } else {
+            j9_set_pc(core, 0x818D93C8u);
+        }
+        return true;
+    }
+
     static bool j9_host_kick_lcdui(arm::core *core, kernel::process *pr) {
         if (!core || !pr) {
             return false;
         }
         j9_ensure_java_heap(pr);
+        j9_plant_suite_class(pr, "AlpsFarm");
+        j9_plant_suite_class(pr, "AlpsFarmCanvas");
+        j9_plant_suite_class(pr, "AlpsFarmCanvas$Sound");
+        j9_plant_suite_class(pr, "AlpsFarmCanvas$FARMOBJECTBONE");
+        j9_plant_suite_class(pr, "AlpsFarmCanvas$ANIMALOBJECTBONE");
+        j9_plant_suite_class(pr, "AlpsFarmCanvas$GROUNDOBJECTBONE");
+        j9_plant_suite_class(pr, "CDomain");
+        j9_plant_suite_class(pr, "CDomission");
         const address disp_c = j9_find_class_by_name(pr, "javax/microedition/lcdui/Display");
-        const address canvas_c = j9_find_class_by_name(pr, "javax/microedition/lcdui/Canvas");
+        address canvas_c = g_j9_alps_canvas_clazz
+            ? g_j9_alps_canvas_clazz
+            : j9_find_class_by_name(pr, "javax/microedition/lcdui/Canvas");
         address tk_c = j9_find_class_by_name(pr, "javax/microedition/lcdui/Toolkit");
         if (!tk_c) {
             tk_c = j9_find_class_by_name(pr, "com/nokia/mid/ui/Toolkit");
@@ -6123,15 +9070,29 @@ namespace eka2l1::hle {
         }
         address mid = g_j9_midlet_this;
         if (!mid) {
-            mid = j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
+            mid = g_j9_alps_clazz
+                ? j9_host_alloc_obj(pr, g_j9_alps_clazz, 0x80u)
+                : j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
             g_j9_midlet_this = mid;
         }
-        const address canvas = canvas_c ? j9_host_alloc_obj(pr, canvas_c, 0x80u)
-            : j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
-        const address display = disp_c ? j9_host_alloc_obj(pr, disp_c, 0x80u)
-            : j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
-        const address toolkit = tk_c ? j9_host_alloc_obj(pr, tk_c, 0x80u)
-            : j9_dummy_jcl_obj(pr, 0x725538u, 0x80u);
+        unsigned canvas_n = 0xC0u;
+        if (g_j9_alps_canvas_clazz) {
+            const int ci = j9_plant_index_ram(g_j9_alps_canvas_clazz);
+            canvas_n = ((ci >= 0) && (g_j9_planted[ci].inst_bytes > 0x80u))
+                ? g_j9_planted[ci].inst_bytes : 0x1000u;
+            if (canvas_n < 0x200u) {
+                canvas_n = 0x200u;
+            }
+        }
+        const address canvas = canvas_c ? j9_host_alloc_obj(pr, canvas_c, canvas_n)
+            : j9_dummy_jcl_obj(pr, 0x725538u, canvas_n);
+        if (canvas && g_j9_alps_canvas_clazz) {
+            g_j9_alps_canvas_obj = canvas;
+        }
+        const address display = disp_c ? j9_host_alloc_obj(pr, disp_c, 0xC0u)
+            : j9_dummy_jcl_obj(pr, 0x725538u, 0xC0u);
+        const address toolkit = tk_c ? j9_host_alloc_obj(pr, tk_c, 0xC0u)
+            : j9_dummy_jcl_obj(pr, 0x725538u, 0xC0u);
         if (display) {
             g_j9_display_obj = display;
         }
@@ -6173,70 +9134,84 @@ namespace eka2l1::hle {
             : (g_j9_lcdui_chain_bkpt ? g_j9_lcdui_chain_bkpt : 0);
         g_j9_alps_phase = 4;
         g_j9_alps_started = true;
-        // Toolkit._create (0x81AF2AAC) and CJavaEventSource::Execute
-        // (0x81A61CC4) both wait on the Java event thread / VM lock.
-        // Main.main still holds that lock here, so continue_real deadlocks
-        // in euser (pc=0x8019D8E4). Park the interpreter and attach a
-        // Windowserver client on this j9 thread instead.
-        core->set_reg(0, env);
-        core->set_reg(1, toolkit);
-        core->set_reg(2, 0);
-        core->set_reg(3, 0);
-        if (ret) {
-            core->set_lr(ret);
-        }
-        const bool ws = j9_bind_windowserver(pr, thr);
-        const bool game = j9_host_run_midlet(pr, "AlpsFarm");
+        // Do not bind a host Windowserver session or park j9midps60.
+        // Toolkit._create / CJavaEventSource::Execute must run in-guest
+        // so RWsSession::Connect is a real CreateSession from J9.
         LOG_WARN(EMULATED_STDOUT,
-            "[j9-nf] alps-lcdui-kick env=0x{:X} tk=0x{:X} disp=0x{:X} cv=0x{:X} "
-            "mid=0x{:X} dc=0x{:X} cc=0x{:X} tc=0x{:X} ret=0x{:X} jsp=0x{:X} ws={} game={}",
-            env, toolkit, display, canvas, mid, disp_c, canvas_c, tk_c, ret, jsp,
-            ws ? 1 : 0, game ? 1 : 0);
-        if (game && thr && thr->get_scheduler()) {
-            // Park trampoline at walk+0x3C0 sits inside the JNI name/fn pair
-            // table and AVs (pc=0x702003C8). Host MIDP owns drawing now, so
-            // take Main off the run queue instead of jumping there.
-            thr->get_scheduler()->sleep(thr, 1800000000u, true);
-            return true;
+            "[j9-nf] alps-lcdui-kick skipped (guest LCDUI) env=0x{:X} tk=0x{:X} "
+            "disp=0x{:X} cv=0x{:X} mid=0x{:X} ret=0x{:X} jsp=0x{:X}",
+            env, toolkit, display, canvas, mid, ret, jsp);
+        (void)thr;
+        (void)kern;
+        return false;
+    }
+
+    static bool j9_guest_toolkit_create(arm::core *core, kernel::process *pr) {
+        if (!core || !pr) {
+            return false;
         }
-        if (ret) {
-            j9_set_pc(core, ret);
-            if (kern) {
-                if (arm::core *cpu = kern->get_cpu()) {
-                    cpu->imb_range(ret & ~1u, 16);
+        j9_host_kick_lcdui(core, pr);
+        const address env = g_j9_fake_env ? g_j9_fake_env
+            : (g_j9_vmthread ? g_j9_vmthread : 0x714E00u);
+        const address tk = g_j9_toolkit_obj;
+        if (!tk || !env) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] guest-toolkit-create no toolkit/env");
+            return false;
+        }
+        const address vmth = g_j9_vmthread ? g_j9_vmthread : core->get_reg(8);
+        if (vmth && j9_mapped32(pr, env + 0xcu)) {
+            j9_write32(pr, env + 4u, vmth);
+            j9_write32(pr, env + 8u, vmth);
+            j9_write32(pr, env + 0xcu, vmth);
+        }
+        if (kernel_system *kern = pr->get_kernel_object_owner()) {
+            kernel::thread *cur = kern->crr_thread();
+            if (const address packed = j9_pack_obj(pr, tk)) {
+                j9_attach_dummy_peer(pr, cur, packed);
+            }
+            if (g_j9_display_obj) {
+                if (const address packed = j9_pack_obj(pr, g_j9_display_obj)) {
+                    j9_attach_dummy_peer(pr, cur, packed);
+                }
+            }
+            if (g_j9_canvas_obj) {
+                if (const address packed = j9_pack_obj(pr, g_j9_canvas_obj)) {
+                    j9_attach_dummy_peer(pr, cur, packed);
                 }
             }
         }
+        // AAPCS stack args for Toolkit._create(env, this, packed, ref, a4, a5, arr).
+        // arg6==0 skips GetArrayLength; leftover path still calls 0x81AF04D8.
+        address sp = core->get_reg(13) & ~7u;
+        sp -= 16u;
+        if (j9_mapped32(pr, sp + 12u)) {
+            j9_write32(pr, sp, 0);
+            j9_write32(pr, sp + 4u, 0);
+            j9_write32(pr, sp + 8u, 0);
+            j9_write32(pr, sp + 12u, 0);
+            core->set_reg(13, sp);
+        }
+        core->set_reg(0, env);
+        core->set_reg(1, tk);
+        core->set_reg(2, tk >> 2);
+        core->set_reg(3, 0);
+        address ret = g_j9_lcdui_chain_bkpt ? (g_j9_lcdui_chain_bkpt | 1u) : g_j9_park_pc;
+        if (ret) {
+            core->set_lr(ret);
+        }
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] guest-toolkit-create env=0x{:X} tk=0x{:X} disp=0x{:X} cv=0x{:X} "
+            "vmth=0x{:X} lr=0x{:X} sp=0x{:X}",
+            env, tk, g_j9_display_obj, g_j9_canvas_obj, vmth, core->get_lr(),
+            core->get_reg(13));
+        j9_set_pc(core, 0x81AF2AACu | 1u);
         return true;
     }
 
     static bool j9_host_cms_run(arm::core *core, kernel::process *pr) {
-        if (!pr) {
-            return false;
-        }
-        address clazz = j9_find_class_by_name(pr, "AlpsFarm");
-        address mid = 0;
-        if (clazz) {
-            mid = j9_host_alloc_obj(pr, clazz, 0x40u);
-        }
-        if (!mid) {
-            mid = j9_dummy_jcl_obj(pr, 0x725538u, 0x40u);
-        }
-        if (mid) {
-            g_j9_midlet_this = mid;
-        }
-        g_j9_alps_started = true;
-        j9_ensure_java_heap(pr);
-        LOG_WARN(EMULATED_STDOUT,
-            "[j9-nf] host-cms-run clazz=0x{:X} mid=0x{:X} fw=0x{:X} args=0x{:X} phase={}",
-            clazz, mid, g_j9_dummy_fw, g_j9_dummy_args, g_j9_alps_phase);
-        if (clazz && (g_j9_alps_phase < 2) && j9_host_start_alps_init(core, pr, clazz)) {
-            return true;
-        }
-        if (!core || (g_j9_alps_phase >= 4)) {
-            return false;
-        }
-        return j9_host_kick_lcdui(core, pr);
+        (void)core;
+        (void)pr;
+        return false;
     }
 
     static void j9_run_main_cp_stub(arm::core *core, kernel::process *pr) {
@@ -6256,7 +9231,13 @@ namespace eka2l1::hle {
             if (!g_j9_dummy_rt) {
                 g_j9_dummy_rt = j9_dummy_jcl_obj(pr, 0x727B48u, 0x20u);
             }
-            push = g_j9_dummy_rt;
+            if (bpc == 0x81AA814Eu) {
+                // aload_3; getfield #33; invokevirtual #34 official-resolve
+                // looks for Args.class and AVs. Skip to startEventProcessing.
+                next = 0x81AA8176u;
+            } else {
+                push = g_j9_dummy_rt;
+            }
         } else if (main_bc && (op == 0xB4u) && (idx == 33u)) {
             popn = 1;
             push = (g_j9_dummy_args && j9_mapped32(pr, g_j9_dummy_args + 8u))
@@ -6269,6 +9250,11 @@ namespace eka2l1::hle {
             popn = 2;
             next = 0x81AA8176u;
         } else if (main_bc && (op == 0xBBu) && (idx == 46u)) {
+            // Official `dup; getstatic Runtime; CMS.<init>` after `new`
+            // walks the synth CP and AVs at 0x819112FC. Kick LCDUI here.
+            if (j9_guest_toolkit_create(core, pr)) {
+                return;
+            }
             if (!g_j9_dummy_cms) {
                 g_j9_dummy_cms = j9_dummy_jcl_obj(pr, 0x725538u, 0x30u);
             }
@@ -6277,8 +9263,7 @@ namespace eka2l1::hle {
             popn = 3;
         } else if (main_bc && (op == 0xB6u) && (idx == 38u)) {
             popn = 2;
-            next = 0x81AA8196u;
-            if (j9_host_cms_run(core, pr)) {
+            if (j9_guest_toolkit_create(core, pr)) {
                 return;
             }
         } else if (idx == 10u) {
@@ -6592,6 +9577,9 @@ namespace eka2l1::hle {
     static address j9_find_class_by_name(kernel::process *pr, const char *want) {
         if (!pr || !want || !want[0]) {
             return 0;
+        }
+        if (const address planted = j9_planted_ram_named(want)) {
+            return planted;
         }
         char nbuf[96];
         const address ranges[][2] = {
@@ -8190,13 +11178,26 @@ namespace eka2l1::hle {
                     j9_write32(pr, used_table + 33u * 4u, g_j9_getmethod_bkpt);
                     j9_write32(pr, used_table + 113u * 4u, g_j9_getmethod_bkpt);
                 }
+                if (g_j9_getclass_bkpt) {
+                    j9_write32(pr, used_table + 31u * 4u, g_j9_getclass_bkpt);
+                }
+                if (g_j9_newglobal_bkpt) {
+                    j9_write32(pr, used_table + 226u * 4u, g_j9_newglobal_bkpt);
+                    j9_write32(pr, used_table + 21u * 4u, g_j9_newglobal_bkpt);
+                }
+                if (rel_fn) {
+                    j9_write32(pr, used_table + 227u * 4u, rel_fn);
+                }
+                if (zero_fn) {
+                    j9_write32(pr, used_table + 211u * 4u, zero_fn);
+                }
                 if (g_j9_newobjarr_bkpt) {
                     j9_write32(pr, used_table + 172u * 4u, g_j9_newobjarr_bkpt);
                 }
-                if (g_j9_newglobal_bkpt) {
-                    j9_write32(pr, used_table + 21u * 4u, g_j9_newglobal_bkpt);
-                }
                 if (g_j9_callstatic_bkpt) {
+                    j9_write32(pr, used_table + 61u * 4u, g_j9_callstatic_bkpt);
+                    j9_write32(pr, used_table + 62u * 4u, g_j9_callstatic_bkpt);
+                    j9_write32(pr, used_table + 63u * 4u, g_j9_callstatic_bkpt);
                     j9_write32(pr, used_table + 141u * 4u, g_j9_callstatic_bkpt);
                     j9_write32(pr, used_table + 116u * 4u, g_j9_callstatic_bkpt);
                 }
@@ -9327,7 +12328,8 @@ namespace eka2l1::hle {
         // the shared New/Execute helper at 0x81A61CC4.
         for (address site : { 0x81AF1616u, 0x81AF2AACu, 0x81AEE7F8u,
                  0x81A61CC4u, 0x81AF17F0u, 0x81AF106Au,
-                 0x81A61F5Cu, 0x81A61F6Eu, 0x81AF2C12u,
+                 0x81A61F5Cu, 0x81A61F6Eu, 0x81AF2C12u, 0x81AF2CA4u,
+                 0x81AF0394u, 0x81AF044Au, 0x81AF0494u, 0x81A61BF8u,
                  0x819171F0u, 0x818FCA82u, k_j9_alloc_memory, k_j9_alloc_object, k_j9_alloc_indexable }) {
             if (auto *th = reinterpret_cast<std::uint16_t *>(pr->get_ptr_on_addr_space(site))) {
                 const std::uint16_t orig = *th;
@@ -9353,6 +12355,64 @@ namespace eka2l1::hle {
                 }
             }
         }
+        }
+        // Official putstatic/getstatic resolve: `ldr r0, [r5, #-0xc]`.
+        // Leftover bytecode/PC in r5 AVs at 0xE5980058. Trap and skip.
+        if (auto *av = reinterpret_cast<std::uint32_t *>(
+                pr->get_ptr_on_addr_space(0x8190D1B8u))) {
+            if ((*av == 0xE515000Cu) || (*av == 0xE1200070u)) {
+                *av = 0xE1200070u;
+                if (arm::core *cpu = kern->get_cpu()) {
+                    cpu->imb_range(0x8190D1B8u, 4);
+                }
+                if (g_j9_invoke_n < 120) {
+                    g_j9_invoke_sites[g_j9_invoke_n++] = 0x8190D1B8u;
+                }
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] putstatic-av hooked");
+            }
+        }
+        if (auto *inv = reinterpret_cast<std::uint32_t *>(
+                pr->get_ptr_on_addr_space(0x81910EFCu))) {
+            if ((*inv == 0xE59C0004u) || (*inv == 0xE1200070u)) {
+                *inv = 0xE1200070u;
+                if (arm::core *cpu = kern->get_cpu()) {
+                    cpu->imb_range(0x81910EFCu, 4);
+                }
+                if (g_j9_invoke_n < 120) {
+                    g_j9_invoke_sites[g_j9_invoke_n++] = 0x81910EFCu;
+                }
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] invoke-cp-av hooked word=0x{:X}", *inv);
+            } else {
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] invoke-cp-av miss word=0x{:X}", *inv);
+            }
+        }
+        if (auto *nw = reinterpret_cast<std::uint32_t *>(
+                pr->get_ptr_on_addr_space(0x8190E968u))) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] new-cp-av word=0x{:X}", *nw);
+            *nw = 0xE1200070u;
+            if (arm::core *cpu = kern->get_cpu()) {
+                cpu->imb_range(0x8190E968u, 4);
+            }
+            if (g_j9_invoke_n < 120) {
+                g_j9_invoke_sites[g_j9_invoke_n++] = 0x8190E968u;
+            }
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] new-cp-av hooked");
+        } else {
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] new-cp-av unmapped");
+        }
+        // TJavaRef unwrap veneer. Official path AVs if the stacked ref is 0.
+        if (auto *refv = reinterpret_cast<std::uint32_t *>(
+                pr->get_ptr_on_addr_space(0x81AF35CCu))) {
+            if ((*refv == 0xE51FF004u) || (*refv == 0xE1200070u)) {
+                *refv = 0xE1200070u;
+                if (arm::core *cpu = kern->get_cpu()) {
+                    cpu->imb_range(0x81AF35CCu, 4);
+                }
+                if (g_j9_invoke_n < 120) {
+                    g_j9_invoke_sites[g_j9_invoke_n++] = 0x81AF35CCu;
+                }
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] TJavaRef-unwrap hooked");
+            }
         }
         // Interpreter native call: `mov lr,pc; bx sb`. sb is the compiled
         // wrapper or send. JXE compile fails and leaves sb=0 (Main pc=0,
@@ -9573,6 +12633,73 @@ namespace eka2l1::hle {
         }
         const address pc = addr & ~1u;
         kernel::process *pr = thr ? thr->owning_process() : nullptr;
+        if (pr && (pc == 0x8190D1B8u)) {
+            const address r5 = core->get_reg(5);
+            const address base = (r5 >= 0xCu) ? (r5 - 0xCu) : 0;
+            const bool ok = base && j9_mapped32(pr, base) && j9_mapped32(pr, r5)
+                && (j9_looks_heap(base)
+                    || ((base >= 0x00700000u) && (base < 0x00800000u))
+                    || ((base >= 0x81800000u) && (base < 0x82000000u)));
+            if (ok) {
+                core->set_reg(0, j9_read32(pr, base));
+                j9_set_pc(core, 0x8190D1BCu);
+                return;
+            }
+            address bpc = 0;
+            if (j9_looks_bytecode_pc(pr, g_j9_saved_r5)) {
+                bpc = g_j9_saved_r5;
+            } else if (j9_looks_bytecode_pc(pr, g_j9_live_r5)) {
+                bpc = g_j9_live_r5;
+            }
+            const std::uint8_t op = bpc ? j9_read8(pr, bpc) : 0;
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] putstatic-av-skip r4=0x{:X} r5=0x{:X} r6=0x{:X} r7=0x{:X} "
+                "bpc=0x{:X} op=0x{:02X} lr=0x{:X}",
+                core->get_reg(4), r5, core->get_reg(6), core->get_reg(7),
+                bpc, op, core->get_lr());
+            if (bpc && (j9_is_cp_op(op) || (op == 0xBBu))) {
+                g_j9_saved_r4 = g_j9_main_clazz ? g_j9_main_clazz : core->get_reg(4);
+                g_j9_saved_r5 = bpc + 3u;
+                g_j9_resume_at = g_j9_saved_r5;
+                if ((op == 0xB2u) || (op == 0xBBu)) {
+                    address r7 = core->get_reg(7);
+                    if (r7 >= 4u) {
+                        r7 -= 4u;
+                        if (j9_mapped32(pr, r7)) {
+                            j9_write32(pr, r7, 0);
+                        }
+                        core->set_reg(7, r7);
+                        g_j9_java_sp = r7;
+                    }
+                } else if ((op == 0xB3u) || (op == 0xB5u)) {
+                    address r7 = core->get_reg(7);
+                    r7 += 4u;
+                    core->set_reg(7, r7);
+                    g_j9_java_sp = r7;
+                }
+                g_j9_resume_no_ac = true;
+                j9_jxe_resume_interp(core, pr,
+                    g_j9_main_method ? g_j9_main_method : 0, 0u);
+                g_j9_resume_no_ac = false;
+                g_j9_resume_at = 0;
+                return;
+            }
+            if (g_j9_main_clazz && g_j9_saved_r5
+                && (g_j9_saved_r5 >= 0x81AA8138u) && (g_j9_saved_r5 < 0x81AA81A0u)) {
+                g_j9_saved_r4 = g_j9_main_clazz;
+                g_j9_resume_at = 0x81AA8179u;
+                g_j9_resume_no_ac = true;
+                j9_jxe_resume_interp(core, pr, g_j9_main_method ? g_j9_main_method : 0, 0u);
+                g_j9_resume_no_ac = false;
+                g_j9_resume_at = 0;
+                return;
+            }
+            if (g_j9_park_pc) {
+                j9_set_pc(core, g_j9_park_pc);
+                return;
+            }
+            return;
+        }
         if (pr && g_j9_proplist_bkpt && (pc == g_j9_proplist_bkpt)) {
             const address arr = j9_ensure_proplist(pr);
             LOG_WARN(EMULATED_STDOUT,
@@ -10694,6 +13821,23 @@ namespace eka2l1::hle {
             j9_run_main_cp_stub(core, pr);
             return;
         }
+        if (pr && g_j9_host_ret_bkpt && (pc == g_j9_host_ret_bkpt)) {
+            const std::int32_t rv = static_cast<std::int32_t>(core->get_reg(0));
+            LOG_WARN(EMULATED_STDOUT, "[j9-nf] hi-official-ret r0=0x{:X} depth={} stage={}",
+                core->get_reg(0), g_j9_hi_n, g_j9_hi_stage);
+            j9_hi_resume(core, pr, rv);
+            if (g_j9_hi_yield) {
+                return;
+            }
+            j9_hi_continue_stages(core, pr);
+            if (g_j9_hi_yield) {
+                return;
+            }
+            if (g_j9_park_pc) {
+                j9_set_pc(core, g_j9_park_pc);
+            }
+            return;
+        }
         if (pr && g_j9_lcdui_chain_bkpt && (pc == g_j9_lcdui_chain_bkpt)) {
             LOG_WARN(EMULATED_STDOUT,
                 "[j9-nf] lcdui-chain phase={} disp=0x{:X} cv=0x{:X} tk=0x{:X}",
@@ -10702,12 +13846,125 @@ namespace eka2l1::hle {
                 g_j9_alps_phase = 5;
                 const address env = g_j9_fake_env ? g_j9_fake_env
                     : (g_j9_vmthread ? g_j9_vmthread : 0x714E00u);
+                const address cv = g_j9_canvas_obj;
                 core->set_reg(0, env);
                 core->set_reg(1, g_j9_display_obj);
-                core->set_reg(2, g_j9_canvas_obj);
+                core->set_reg(2, cv ? (cv >> 2) : 0);
                 core->set_reg(3, 0);
-                core->set_lr(g_j9_park_pc);
+                core->set_lr(g_j9_lcdui_chain_bkpt | 1u);
                 j9_set_pc(core, 0x81AF2C12u | 1u);
+                return;
+            }
+            if (g_j9_alps_phase == 5) {
+                g_j9_alps_phase = 6;
+                if (j9_plant_ws_desc(pr) && g_j9_ws_desc && g_j9_ws_connected_bkpt && g_j9_ws_svc_pc) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] guest-ws-connect desc=0x{:X} svc=0x{:X} euser=0x{:X} lr=0x{:X}",
+                        g_j9_ws_desc, g_j9_ws_svc_pc, j9_euser_session_create_pc(pr),
+                        g_j9_ws_connected_bkpt);
+                    core->set_reg(0, g_j9_ws_desc);
+                    core->set_reg(1, static_cast<address>(-1));
+                    core->set_reg(2, 0);
+                    core->set_reg(3, 0);
+                    core->set_lr(g_j9_ws_connected_bkpt);
+                    j9_set_pc(core, g_j9_ws_svc_pc);
+                    return;
+                }
+                LOG_WARN(EMULATED_STDOUT, "[j9-nf] guest-ws-connect missing desc/bkpt");
+            }
+            if (g_j9_alps_phase == 7) {
+                g_j9_alps_phase = 8;
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] lcdui-activate tk=0x{:X}", g_j9_toolkit_obj);
+                j9_kick_lcdui_native(core, 0x81AF2CA4u, g_j9_toolkit_obj);
+                return;
+            }
+            if (g_j9_alps_phase == 8) {
+                g_j9_alps_phase = 9;
+                const address g = j9_ensure_graphics_obj(pr);
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] lcdui-graphics-create g=0x{:X}", g);
+                if (g) {
+                    j9_kick_lcdui_native(core, 0x81AF1616u, g);
+                    return;
+                }
+            }
+            if (g_j9_alps_phase == 9) {
+                g_j9_alps_phase = 10;
+                if (!g_j9_alps_clazz) {
+                    g_j9_alps_clazz = j9_plant_suite_class(pr, "AlpsFarm");
+                }
+                if (g_j9_alps_clazz) {
+                    g_j9_alps_phase = 11;
+                } else if (j9_kick_findclass_name(core, pr, "AlpsFarm")) {
+                    return;
+                }
+            }
+            if (g_j9_alps_phase == 11) {
+                g_j9_alps_phase = 12;
+                address self = g_j9_midlet_this;
+                if (!self && g_j9_alps_clazz) {
+                    self = j9_host_alloc_obj(pr, g_j9_alps_clazz, 0x80u);
+                    g_j9_midlet_this = self;
+                }
+                const address cv = g_j9_alps_canvas_obj ? g_j9_alps_canvas_obj
+                    : g_j9_canvas_obj;
+                g_j9_hi_stage = 1;
+                if (g_j9_alps_canvas_clazz && cv
+                    && j9_hi_start(core, pr, g_j9_alps_canvas_clazz, cv,
+                        "<init>", "(LAlpsFarm;)V", self)) {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] hi-init-done cv=0x{:X} g=0x{:X}", cv, g_j9_graphics_obj);
+                    j9_hi_continue_stages(core, pr);
+                    if (g_j9_hi_yield) {
+                        return;
+                    }
+                } else if (g_j9_hi_yield) {
+                    return;
+                } else {
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] guest-startApp miss clazz=0x{:X} self=0x{:X} cv=0x{:X}/0x{:X}",
+                        g_j9_alps_clazz, self, g_j9_alps_canvas_clazz, cv);
+                }
+            }
+            if (g_j9_park_pc) {
+                j9_set_pc(core, g_j9_park_pc);
+            }
+            return;
+        }
+        if (pr && g_j9_ws_connected_bkpt && (pc == g_j9_ws_connected_bkpt)) {
+            const std::int32_t handle = static_cast<std::int32_t>(core->get_reg(0));
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] guest-ws-connected handle={} (0x{:X}) tk=0x{:X} cv=0x{:X} es=0x{:X}",
+                handle, core->get_reg(0), g_j9_toolkit_obj, g_j9_canvas_obj,
+                g_j9_eventsrc_this);
+            if (handle > 0) {
+                const auto h = static_cast<std::uint32_t>(handle);
+                j9_store_ws_handle(pr, g_j9_toolkit_obj, h);
+                j9_store_ws_handle(pr, g_j9_display_obj, h);
+                j9_store_ws_handle(pr, g_j9_canvas_obj, h);
+                if (g_j9_eventsrc_this && j9_mapped32(pr, g_j9_eventsrc_this + 8u)) {
+                    const address slot = j9_read32(pr, g_j9_eventsrc_this + 8u);
+                    j9_store_ws_handle(pr, slot, h);
+                    if (slot && j9_mapped32(pr, slot + 8u)
+                        && (static_cast<std::int32_t>(j9_read32(pr, slot + 8u)) <= 0)) {
+                        j9_write32(pr, slot + 8u, h);
+                    }
+                }
+                j9_wire_lcdui_peer(pr, g_j9_canvas_obj);
+                j9_wire_lcdui_peer(pr, g_j9_display_obj);
+                j9_wire_lcdui_peer(pr, g_j9_toolkit_obj);
+                const bool bound = j9_guest_bind_windowserver(pr, thr, h);
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] guest-ws-bind ok={} es=0x{:X} es8=0x{:X} es80=0x{:X} cv8=0x{:X}",
+                    bound ? 1 : 0, g_j9_eventsrc_this,
+                    g_j9_eventsrc_this ? j9_read32(pr, g_j9_eventsrc_this + 8u) : 0,
+                    g_j9_eventsrc_this ? j9_read32(pr, g_j9_eventsrc_this + 0x80u) : 0,
+                    g_j9_canvas_obj ? j9_read32(pr, g_j9_canvas_obj + 8u) : 0);
+                g_j9_alps_phase = 7;
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] lcdui-canvas-create cv=0x{:X}", g_j9_canvas_obj);
+                j9_kick_lcdui_native(core, 0x81AEE7F8u, g_j9_canvas_obj);
                 return;
             }
             if (g_j9_park_pc) {
@@ -10770,6 +14027,21 @@ namespace eka2l1::hle {
             j9_set_pc(core, core->get_lr());
             return;
         }
+        if (pr && g_j9_getclass_bkpt && (pc == g_j9_getclass_bkpt)) {
+            const address raw = core->get_reg(1);
+            const address obj = j9_jni_deref_jobject(pr, raw);
+            address clazz = (obj && j9_mapped32(pr, obj)) ? j9_read32(pr, obj) : 0;
+            if (!clazz && g_j9_toolkit_obj && j9_mapped32(pr, g_j9_toolkit_obj)) {
+                clazz = j9_read32(pr, g_j9_toolkit_obj);
+            }
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] GetObjectClass raw=0x{:X} obj=0x{:X} -> 0x{:X}",
+                raw, obj, clazz);
+            j9_prepare_jni_vt(pr);
+            core->set_reg(0, clazz);
+            j9_set_pc(core, core->get_lr());
+            return;
+        }
         if (pr && g_j9_getmethod_bkpt && (pc == g_j9_getmethod_bkpt)) {
             const address clazz = core->get_reg(1);
             const address namep = core->get_reg(2);
@@ -10783,6 +14055,22 @@ namespace eka2l1::hle {
             address meth = 0;
             if (std::strcmp(nbuf, "main") == 0) {
                 meth = j9_make_main_method(pr);
+            } else if (std::strncmp(nbuf, "handle", 6) == 0) {
+                meth = j9_dummy_jmethod(pr);
+            } else if (nbuf[0] && clazz) {
+                address rom = 0;
+                if (j9_mapped32(pr, clazz + 0x10u)) {
+                    const address w = j9_read32(pr, clazz + 0x10u);
+                    if (w && j9_readable(pr, w)) {
+                        const address sz = j9_read32(pr, w);
+                        if ((sz >= 0x40u) && (sz <= 0x800000u)) {
+                            rom = w;
+                        }
+                    }
+                }
+                const address romm = rom ? j9_rom_method_named(pr, rom, nbuf,
+                    sbuf[0] ? sbuf : nullptr) : 0;
+                meth = romm ? j9_make_interp_method(pr, clazz, romm) : 0;
             }
             LOG_WARN(EMULATED_STDOUT,
                 "[j9-nf] GetMethodID clazz=0x{:X} '{}' '{}' -> 0x{:X} mainc=0x{:X}",
@@ -10852,28 +14140,23 @@ namespace eka2l1::hle {
                 "[j9-nf] FindClass-rom-ret 0x{:X} '{}' vt=0x{:X}/0x{:X}/0x{:X} lr=0x{:X} phase={}",
                 ret, nbuf, g_j9_vt10_c, g_j9_vt14_c, g_j9_vt18_c,
                 g_j9_findclass_saved_lr, g_j9_alps_phase);
-            if (g_j9_alps_phase == 1) {
+            if ((g_j9_alps_phase == 1) || (g_j9_alps_phase == 10)
+                || (nbuf[0] && std::strstr(nbuf, "AlpsFarm"))) {
                 g_j9_alps_clazz = ret;
-                if (ret && j9_host_start_alps_init(core, pr, ret)) {
-                    g_j9_findclass_saved_lr = 0;
-                    return;
-                }
-                g_j9_alps_phase = 3;
-                g_j9_saved_r4 = g_j9_main_clazz;
-                g_j9_resume_at = 0x81AA8196u;
-                g_j9_resume_no_ac = true;
-                address inner = g_j9_main_method;
-                if (inner && j9_mapped32(pr, inner)) {
-                    const address p = j9_read32(pr, inner);
-                    if (p && j9_mapped32(pr, p + 8u)) {
-                        inner = p;
+            }
+            if (g_j9_alps_phase == 10) {
+                g_j9_alps_phase = 11;
+                if (ret) {
+                    address self = j9_host_alloc_obj(pr, ret, 0x80u);
+                    if (self) {
+                        g_j9_midlet_this = self;
+                    }
+                    if (j9_guest_invoke_named(core, pr, ret, self ? self : g_j9_midlet_this,
+                            "<init>", "()V")) {
+                        g_j9_findclass_saved_lr = 0;
+                        return;
                     }
                 }
-                j9_jxe_resume_interp(core, pr, inner, 0u);
-                g_j9_resume_no_ac = false;
-                g_j9_resume_at = 0;
-                g_j9_findclass_saved_lr = 0;
-                return;
             }
             core->set_reg(0, ret);
             j9_set_pc(core, g_j9_findclass_saved_lr ? g_j9_findclass_saved_lr
@@ -10887,6 +14170,9 @@ namespace eka2l1::hle {
             nbuf[0] = 0;
             j9_read_cstr(pr, namep, nbuf, sizeof(nbuf));
             address clazz = nbuf[0] ? j9_find_class_by_name(pr, nbuf) : 0;
+            if (!clazz && nbuf[0]) {
+                clazz = j9_plant_suite_class(pr, nbuf);
+            }
             const address rom = (!clazz && nbuf[0]) ? j9_find_rom_class_by_name(pr, nbuf) : 0;
             if (!clazz && rom) {
                 clazz = j9_ram_class_for_rom(pr, rom);
@@ -10950,15 +14236,19 @@ namespace eka2l1::hle {
                 j9_set_pc(core, core->get_lr());
                 return;
             }
-            // Exploded suite .class files (AlpsFarm*) must not go through
-            // official classfile→ROM: a bad heap grow previously jumped to
-            // heap-end and AVd. Host LCDUI kick owns that path.
+            // Official FindClass (0x818D93C8) takes a J9 lock and parks
+            // Main in euser Wait (lr=0x818EE4AB). Keep AlpsFarm on the
+            // host tables; startApp still needs a RAM class from the JAR.
             if (nbuf[0] && std::strstr(nbuf, "AlpsFarm")) {
                 LOG_WARN(EMULATED_STDOUT,
-                    "[j9-nf] FindClass-skip-classfile '{}'", nbuf);
-                j9_prepare_jni_vt(pr);
-                core->set_reg(0, g_j9_alps_clazz);
-                j9_set_pc(core, core->get_lr());
+                    "[j9-nf] FindClass-alps-miss clazz=0x{:X} rom=0x{:X}", clazz, rom);
+                if (g_j9_alps_phase == 10) {
+                    g_j9_alps_phase = 11;
+                }
+                core->set_reg(0, 0);
+                j9_set_pc(core, g_j9_findclass_saved_lr ? g_j9_findclass_saved_lr
+                    : core->get_lr());
+                g_j9_findclass_saved_lr = 0;
                 return;
             }
             // Host miss: let ROM FindClass walk the loaded JXE tables.
@@ -12003,7 +15293,7 @@ namespace eka2l1::hle {
             const bool lcdui_create = (bare == 0x81AF1616u) || (bare == 0x81AF2AACu)
                 || (bare == 0x81AEE7F8u) || (bare == 0x81A61CC4u)
                 || (bare == 0x81AF17F0u) || (bare == 0x81AF106Au)
-                || (bare == 0x81AF2C12u);
+                || (bare == 0x81AF2C12u) || (bare == 0x81AF2CA4u);
             if (lcdui_create) {
                 const address r7 = core->get_reg(7);
                 address packed = j9_pack_obj(pr, j9_read32(pr, r7));
@@ -12022,7 +15312,6 @@ namespace eka2l1::hle {
                             j9_read32(pr, r7 + 4u));
                     }
                 } else {
-                const address peer = j9_attach_dummy_peer(pr, thr, packed);
                 if (bare == 0x81AF2AACu) {
                     g_j9_toolkit_obj = packed ? (packed << 2) : g_j9_toolkit_obj;
                 } else if (bare == 0x81AEE7F8u) {
@@ -12034,25 +15323,9 @@ namespace eka2l1::hle {
                 if (create_at_tramp < 16) {
                     ++create_at_tramp;
                     LOG_WARN(EMULATED_STDOUT,
-                        "[j9-nf] lcdui-tramp-stub thumb=0x{:X} meth=0x{:X} packed=0x{:X} peer=0x{:X} r6=0x{:X} r7=0x{:X}",
-                        thumb, method, packed, peer, core->get_reg(6), r7);
+                        "[j9-nf] lcdui-tramp-fwd thumb=0x{:X} meth=0x{:X} packed=0x{:X} r6=0x{:X} r7=0x{:X}",
+                        thumb, method, packed, core->get_reg(6), r7);
                 }
-                // _create is void. Leave a full-pointer `this` at the
-                // Java stack top so the following invokevirtual sees
-                // the object we just attached a peer to.
-                // Next opcode after Graphics._create is 0xAC (return).
-                // Pop the native's args so the return handler sees the
-                // caller's interpreter frame, not the invoke operands.
-                if (g_j9_alps_started
-                    && ((bare == 0x81AF1616u) || (bare == 0x81AEE7F8u)
-                        || (bare == 0x81AF2AACu) || (bare == 0x81AF2C12u)
-                        || (bare == 0x81A61CC4u))) {
-                    // Event-source Execute / JNI _create wait on the VM
-                    // lock held by this interpreter frame. Stub and resume.
-                }
-                const address tm = g_j9_tramp_method ? g_j9_tramp_method : method;
-                j9_jxe_resume_interp(core, pr, tm, j9_method_argc(pr, tm));
-                return;
                 }
             }
             // Same as the old `cmp r12,#0x80000000; movhs pc,r12`: ROM
@@ -12136,6 +15409,90 @@ namespace eka2l1::hle {
             }
             core->set_cpsr(core->get_cpsr() & ~0x20u);
             core->set_pc(0x8190F0A8u);
+            return;
+        }
+        if (is_invoke && ((pc == 0x81910EFCu) || (pc == 0x8190E968u))) {
+            const address r5 = core->get_reg(5);
+            const address r12 = core->get_reg(12);
+            const bool planted_pc = (g_j9_java_heap_va && (r5 >= g_j9_java_heap_va)
+                    && (r5 < (g_j9_java_heap_va + k_j9_java_heap_size)))
+                || ((r5 >= 0x02D00000u) && (r5 < 0x03000000u));
+            if (planted_pc) {
+                const std::uint8_t op = j9_read8(pr, r5);
+                unsigned skip = 3;
+                if (op == 0xB9u) {
+                    skip = 5;
+                }
+                static int skipn = 0;
+                if (skipn < 8) {
+                    ++skipn;
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] invoke-cp-skip r5=0x{:X} op=0x{:02X} r12=0x{:X} skip={}",
+                        r5, op, r12, skip);
+                }
+                if (op == 0xBBu) {
+                    const address dummy = j9_dummy_jcl_obj(pr, 0x725538u, 0x20u);
+                    address r7 = core->get_reg(7);
+                    if (dummy && r7 && j9_mapped32(pr, r7)) {
+                        r7 -= 4u;
+                        j9_write32(pr, r7, dummy);
+                        core->set_reg(7, r7);
+                        g_j9_java_sp = r7;
+                    }
+                }
+                core->set_reg(5, r5 + skip);
+                address meth = g_j9_tramp_method ? g_j9_tramp_method : core->get_reg(8);
+                g_j9_resume_no_ac = true;
+                j9_jxe_resume_interp(core, pr, meth, 0);
+                g_j9_resume_no_ac = false;
+                return;
+            }
+            // Official JCL/JXE: these sites are ARM snippets, not planted
+            // bytecode. 0x8190E968 is `ldr lr,[r10]`; 0x81910EFC is
+            // `ldr r0,[r12,#4]`. Treating a CP index (e.g. new #0x38) as a
+            // pointer and resuming without advancing wedges J9 startup.
+            if (pc == 0x8190E968u) {
+                const address sl = core->get_reg(10);
+                const address lr = (sl && j9_mapped32(pr, sl)) ? j9_read32(pr, sl) : 0;
+                static int ncont = 0;
+                if (ncont < 4) {
+                    ++ncont;
+                    LOG_WARN(EMULATED_STDOUT,
+                        "[j9-nf] new-cp-official r5=0x{:X} r10=0x{:X} lr=0x{:X}",
+                        r5, sl, lr);
+                }
+                core->set_reg(14, lr);
+                core->set_cpsr(core->get_cpsr() & ~0x20u);
+                core->set_pc(0x8190E96Cu);
+                return;
+            }
+            if (r12 && j9_mapped32(pr, r12 + 4u)) {
+                core->set_reg(0, j9_read32(pr, r12 + 4u));
+                core->set_cpsr(core->get_cpsr() & ~0x20u);
+                core->set_pc(0x81910F00u);
+                return;
+            }
+            static int nbad = 0;
+            if (nbad < 8) {
+                ++nbad;
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] invoke-cp-official-miss r5=0x{:X} r12=0x{:X} op=0x{:02X}",
+                    r5, r12, r5 ? j9_read8(pr, r5) : 0);
+            }
+            const std::uint8_t op = r5 ? j9_read8(pr, r5) : 0;
+            unsigned skip = 3;
+            if (op == 0xB9u) {
+                skip = 5;
+            } else if (op == 0x00) {
+                skip = 1;
+            }
+            if (r5) {
+                core->set_reg(5, r5 + skip);
+            }
+            address meth = g_j9_tramp_method ? g_j9_tramp_method : core->get_reg(8);
+            g_j9_resume_no_ac = true;
+            j9_jxe_resume_interp(core, pr, meth, 0);
+            g_j9_resume_no_ac = false;
             return;
         }
         if (is_invoke && (pc == 0x81910F2Cu)) {
@@ -12920,7 +16277,6 @@ namespace eka2l1::hle {
                     core->get_reg(3), j9_read32(pr, 0x3FFF0030u), core->get_lr(),
                     from_adapt ? 1 : 0);
             }
-            j9_seed_midp_bss_types(pr, thr);
             if (from_adapt) {
                 const address sp = core->get_reg(13);
                 address method = j9_read32(pr, sp);
@@ -12934,8 +16290,12 @@ namespace eka2l1::hle {
                 j9_jxe_resume_interp(core, pr, tm, j9_method_argc(pr, tm));
                 return;
             }
-            core->set_reg(0, 0);
-            j9_set_pc(core, core->get_lr());
+            // First insn is `ldr r0, [pc, #imm]`, not a push.
+            const address lit_pc = (pc + 4u) & ~3u;
+            const unsigned imm = (pc == 0x81A61F5Cu) ? 0x104u : 0xF4u;
+            core->set_reg(0, j9_read32(pr, lit_pc + imm));
+            core->set_cpsr(core->get_cpsr() | 0x20u);
+            core->set_pc(pc + 2u);
             return;
         }
         if (is_invoke && (pc == 0x819171F0u)) {
@@ -12970,6 +16330,84 @@ namespace eka2l1::hle {
             j9_set_pc(core, core->get_lr());
             return;
         }
+        if (is_invoke && (pc == 0x81A61CC4u)) {
+            const address thiz = core->get_reg(0);
+            const address fn = core->get_reg(1);
+            const address a1 = core->get_reg(2);
+            const address a2 = core->get_reg(3);
+            const address bare_fn = fn & ~1u;
+            // Official Execute is SendReceive([[this+8]+8], 1). Function 1
+            // on !Windowserver is shutdown. Toolkit._create / setCurrent
+            // also use Execute; those callbacks deref a C++ vtable that
+            // type=JXE never filled (AV at 0x81AF01BA). Only the
+            // Canvas._create callback (0x81AEE779) is invoked locally.
+            if (bare_fn == 0x81AF182Cu) {
+                // Image._createImmutable Execute callback. Dummy peers have
+                // no C++ image factory at this+0x8c; returning 0 would fall
+                // into _createImmutable's JNI wrap of an empty out-struct.
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] image-execute-skip this=0x{:X} a1=0x{:X} a2=0x{:X} lr=0x{:X}",
+                    thiz, a1, a2, core->get_lr());
+                core->set_reg(0, 1);
+                j9_set_pc(core, core->get_lr());
+                return;
+            }
+            if (bare_fn == 0x81AEE778u) {
+                // Canvas._create callback needs a live C++ widget factory
+                // at [r0+0x80] (vtable[2] creates the WS window). Dummy
+                // peers still trip later [r0+0x5c]->vtable+0x68. Return
+                // success so the official _create can DeleteGlobalRef and
+                // the LCDUI chain can reach activate / Graphics / startApp.
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] eventsrc-execute-canvas-ok this=0x{:X} fn=0x{:X} a1=0x{:X} a2=0x{:X} lr=0x{:X}",
+                    thiz, fn, a1, a2, core->get_lr());
+                core->set_reg(0, 0);
+                j9_set_pc(core, core->get_lr());
+                return;
+            }
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] eventsrc-execute-skip this=0x{:X} r1=0x{:X} r2=0x{:X} r3=0x{:X} lr=0x{:X}",
+                thiz, fn, a1, a2, core->get_lr());
+            core->set_reg(0, 0);
+            j9_set_pc(core, core->get_lr());
+            return;
+        }
+        if (is_invoke && (pc == 0x81A61BF8u)) {
+            const address thiz = core->get_reg(0);
+            const address obj = core->get_reg(2);
+            const address mtx = core->get_reg(3);
+            if (thiz && j9_mapped32(pr, thiz + 8u)) {
+                j9_write32(pr, thiz + 8u, mtx ? mtx : obj);
+                j9_write32(pr, thiz + 4u, obj ? obj : mtx);
+            }
+            g_j9_eventsrc_this = thiz;
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] eventsrc-skip-lock this=0x{:X} env=0x{:X} obj=0x{:X} r3=0x{:X}",
+                thiz, core->get_reg(1), obj, mtx);
+            core->set_reg(0, obj);
+            j9_set_pc(core, core->get_lr());
+            return;
+        }
+        if (is_invoke && (pc == 0x81AF35CCu)) {
+            const address ref = core->get_reg(0);
+            const address slot = (ref && j9_mapped32(pr, ref)) ? j9_read32(pr, ref) : 0;
+            const bool ok = slot && ((slot & 0xF0000000u) == 0)
+                && j9_mapped32(pr, slot);
+            if (!ok) {
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] TJavaRef-skip r0=0x{:X} [0]=0x{:X} lr=0x{:X}",
+                    ref, slot, core->get_lr());
+                core->set_reg(0, 0);
+                j9_set_pc(core, core->get_lr());
+                return;
+            }
+            LOG_WARN(EMULATED_STDOUT,
+                "[j9-nf] TJavaRef-unwrap r0=0x{:X} [0]=0x{:X} lr=0x{:X}",
+                ref, slot, core->get_lr());
+            core->set_cpsr(core->get_cpsr() | 0x20u);
+            core->set_pc(0x801B0AF1u);
+            return;
+        }
         if (is_invoke && (pc == 0x81AF2C12u)) {
             static int sc = 0;
             if (sc < 8) {
@@ -12988,14 +16426,19 @@ namespace eka2l1::hle {
             }
             if (packed) {
                 j9_attach_dummy_peer(pr, thr, packed);
-                g_j9_canvas_obj = packed << 2;
+                const address obj = packed << 2;
+                if (!g_j9_canvas_obj) {
+                    g_j9_canvas_obj = obj;
+                }
             }
             j9_seed_midp_bss_types(pr, thr);
             j9_thumb_continue_real(core, pr, pc);
             return;
         }
         if (is_invoke && ((pc == 0x81AF1616u) || (pc == 0x81AF2AACu) || (pc == 0x81AEE7F8u)
-                || (pc == 0x81A61CC4u) || (pc == 0x81AF17F0u) || (pc == 0x81AF106Au))) {
+                || (pc == 0x81A61CC4u) || (pc == 0x81AF17F0u) || (pc == 0x81AF106Au)
+                || (pc == 0x81AF0394u) || (pc == 0x81AF044Au) || (pc == 0x81AF0494u)
+                || (pc == 0x81AF2CA4u))) {
             const address r0_in = core->get_reg(0);
             const address r1_in = core->get_reg(1);
             const address r2_in = core->get_reg(2);
@@ -13024,8 +16467,6 @@ namespace eka2l1::hle {
                         pc, r0_in, r1_in, r2_in, r3_in, core->get_lr());
                 }
             }
-            j9_seed_midp_bss_types(pr, thr);
-            const address peer = packed ? j9_attach_dummy_peer(pr, thr, packed) : 0;
             if (pc == 0x81AF2AACu) {
                 g_j9_toolkit_obj = packed ? (packed << 2) : g_j9_toolkit_obj;
             } else if (pc == 0x81AEE7F8u) {
@@ -13033,48 +16474,14 @@ namespace eka2l1::hle {
             } else if ((pc == 0x81AF1616u) && packed) {
                 g_j9_graphics_obj = packed << 2;
             }
-            if (pc == 0x81A61CC4u) {
-                if (g_j9_alps_started) {
-                    LOG_WARN(EMULATED_STDOUT,
-                        "[j9-nf] lcdui-create-stub r0=0x{:X} r1=0x{:X} r2=0x{:X} r3=0x{:X} lr=0x{:X}",
-                        r0_in, r1_in, r2_in, r3_in, core->get_lr());
-                }
-                // Called from Thumb _create, not the interpreter.
-                if (r3_in && j9_mapped32(pr, r3_in)) {
-                    j9_write32(pr, r3_in, peer ? peer : j9_alloc_dummy_peer(pr, thr));
-                }
-                core->set_reg(0, 0);
-                j9_set_pc(core, core->get_lr());
-                return;
-            }
             static int create_logs = 0;
-            if (create_logs < 16) {
+            if (create_logs < 24) {
                 ++create_logs;
                 LOG_WARN(EMULATED_STDOUT,
-                    "[j9-nf] lcdui-stub pc=0x{:X} r0=0x{:X} r1=0x{:X} r2=0x{:X} r3=0x{:X} packed=0x{:X} peer=0x{:X} tk=0x{:X} cv=0x{:X}",
-                    pc, r0_in, r1_in, r2_in, r3_in, packed, peer,
-                    g_j9_toolkit_obj, g_j9_canvas_obj);
+                    "[j9-nf] lcdui-continue-real pc=0x{:X} r0=0x{:X} r1=0x{:X} r2=0x{:X} r3=0x{:X} packed=0x{:X} lr=0x{:X}",
+                    pc, r0_in, r1_in, r2_in, r3_in, packed, core->get_lr());
             }
-            if (g_j9_alps_started
-                && ((pc == 0x81AF1616u) || (pc == 0x81AEE7F8u)
-                    || (pc == 0x81AF2AACu))) {
-                j9_set_pc(core, core->get_lr());
-                return;
-            }
-            const address ret = core->get_lr() & ~1u;
-            const bool from_adapt = g_j9_walk_va
-                && (ret >= (g_j9_walk_va + k_j9_adapt_off))
-                && (ret < (g_j9_walk_va + 0x8000u));
-            address method = 0;
-            if (from_adapt) {
-                const address sp = core->get_reg(13);
-                method = j9_read32(pr, sp);
-                core->set_reg(13, sp + 8u);
-            } else if (r0_in && (r0_in != g_j9_fake_env) && j9_mapped32(pr, r0_in)) {
-                method = r0_in;
-            }
-            const address tm = g_j9_tramp_method ? g_j9_tramp_method : method;
-            j9_jxe_resume_interp(core, pr, tm, j9_method_argc(pr, tm));
+            j9_thumb_continue_real(core, pr, pc);
             return;
         }
         if (is_invoke) {
@@ -13725,7 +17132,7 @@ namespace eka2l1::hle {
                 g_j9_jnienv_table);
         }
         if (pr) {
-            collect_j9_jni_rom_table(pr, 0x81B1A300u, 180, "nokialcdui");
+            collect_j9_jni_rom_table(pr, 0x81B1A080u, 220, "nokialcdui");
             // jclcldc11 sl_lookup: 169 names @ 0x8194F9E0, fns @ 0x8194FC84.
             collect_j9_jni_name_fn_lists(pr, 0x8194F9E0u, 0x8194FC84u, 169, "jcl-sl");
         }
@@ -13848,42 +17255,9 @@ namespace eka2l1::hle {
                     walk[0x2FE] = 0x2F;
                     walk[0x2FF] = 0xE1; // bx lr
                     g_j9_getmethod_bkpt = walk_va + 0x2F8u;
-                    walk[0x300] = 0x70;
-                    walk[0x301] = 0x00;
-                    walk[0x302] = 0x20;
-                    walk[0x303] = 0xE1; // bkpt
-                    walk[0x304] = 0x1E;
-                    walk[0x305] = 0xFF;
-                    walk[0x306] = 0x2F;
-                    walk[0x307] = 0xE1; // bx lr
-                    g_j9_newobjarr_bkpt = walk_va + 0x300u;
-                    walk[0x310] = 0x70;
-                    walk[0x311] = 0x00;
-                    walk[0x312] = 0x20;
-                    walk[0x313] = 0xE1; // bkpt
-                    walk[0x314] = 0x1E;
-                    walk[0x315] = 0xFF;
-                    walk[0x316] = 0x2F;
-                    walk[0x317] = 0xE1; // bx lr
-                    g_j9_newglobal_bkpt = walk_va + 0x310u;
-                    walk[0x318] = 0x70;
-                    walk[0x319] = 0x00;
-                    walk[0x31A] = 0x20;
-                    walk[0x31B] = 0xE1; // bkpt
-                    walk[0x31C] = 0x1E;
-                    walk[0x31D] = 0xFF;
-                    walk[0x31E] = 0x2F;
-                    walk[0x31F] = 0xE1; // bx lr
-                    g_j9_callstatic_bkpt = walk_va + 0x318u;
-                    walk[0x320] = 0x70;
-                    walk[0x321] = 0x00;
-                    walk[0x322] = 0x20;
-                    walk[0x323] = 0xE1; // bkpt
-                    walk[0x324] = 0x1E;
-                    walk[0x325] = 0xFF;
-                    walk[0x326] = 0x2F;
-                    walk[0x327] = 0xE1; // bx lr
-                    g_j9_cp_stub_bkpt = walk_va + 0x320u;
+                    // +0x300.. is the JNI name/fn pair table. NewGlobalRef
+                    // (slot 226) used to live at +0x310 and Canvas._create
+                    // blx'd into pair data (AV at walk+0x750).
                     // ARM `b .` pad: kick parks here after host WS bind.
                     // A single word used to sit next to uninitialised
                     // bytes; Thumb fall-through then wrote 0x70643568.
@@ -13899,24 +17273,80 @@ namespace eka2l1::hle {
                         walk[po] = 0xFE;
                         walk[po + 1u] = 0xE7;
                     }
-                    g_j9_park_pc = (walk_va + 0x3C0u) | 1u;
-                    walk[0x340] = 0x70;
-                    walk[0x341] = 0x00;
-                    walk[0x342] = 0x20;
-                    walk[0x343] = 0xE1; // bkpt
-                    walk[0x344] = 0x1E;
-                    walk[0x345] = 0xFF;
-                    walk[0x346] = 0x2F;
-                    walk[0x347] = 0xE1; // bx lr
-                    g_j9_lcdui_chain_bkpt = walk_va + 0x340u;
+                    // Pairs live at +0x304 and grow past +0x600. Stubs that
+                    // must survive sl_lookup sync go after the JNI table
+                    // (+0x3400, 247 slots → +0x37DC).
+                    walk[0x3800] = 0x70;
+                    walk[0x3801] = 0x00;
+                    walk[0x3802] = 0x20;
+                    walk[0x3803] = 0xE1; // bkpt
+                    walk[0x3804] = 0x1E;
+                    walk[0x3805] = 0xFF;
+                    walk[0x3806] = 0x2F;
+                    walk[0x3807] = 0xE1; // bx lr
+                    g_j9_getclass_bkpt = walk_va + 0x3800u;
+                    walk[0x3810] = 0x00;
+                    walk[0x3811] = 0xBE; // Thumb bkpt
+                    walk[0x3812] = 0x70;
+                    walk[0x3813] = 0x47; // bx lr
+                    g_j9_lcdui_chain_bkpt = walk_va + 0x3810u;
+                    for (unsigned po = 0x3820u; po < 0x3830u; po += 2u) {
+                        walk[po] = 0xFE;
+                        walk[po + 1u] = 0xE7;
+                    }
+                    g_j9_park_pc = (walk_va + 0x3820u) | 1u;
+                    walk[0x3840] = 0x70;
+                    walk[0x3841] = 0x00;
+                    walk[0x3842] = 0x20;
+                    walk[0x3843] = 0xE1; // bkpt
+                    walk[0x3844] = 0x1E;
+                    walk[0x3845] = 0xFF;
+                    walk[0x3846] = 0x2F;
+                    walk[0x3847] = 0xE1; // bx lr
+                    g_j9_ws_connected_bkpt = walk_va + 0x3840u;
+                    {
+                        static const char wsname[] = "!Windowserver";
+                        std::memcpy(walk + 0x3910, wsname, sizeof(wsname));
+                        auto *desc = reinterpret_cast<std::uint32_t *>(walk + 0x3900);
+                        desc[0] = 0x1000000Du;
+                        desc[1] = walk_va + 0x3910u;
+                        g_j9_ws_desc = walk_va + 0x3900u;
+                        auto *svc = reinterpret_cast<std::uint32_t *>(walk + 0x3860);
+                        svc[0] = 0xEF00007Eu;
+                        svc[1] = 0xE12FFF1Eu;
+                        g_j9_ws_svc_pc = walk_va + 0x3860u;
+                    }
+                    auto plant_arm_bkpt = [&](const unsigned off, address &slot) {
+                        walk[off] = 0x70;
+                        walk[off + 1u] = 0x00;
+                        walk[off + 2u] = 0x20;
+                        walk[off + 3u] = 0xE1;
+                        walk[off + 4u] = 0x1E;
+                        walk[off + 5u] = 0xFF;
+                        walk[off + 6u] = 0x2F;
+                        walk[off + 7u] = 0xE1;
+                        slot = walk_va + off;
+                    };
+                    plant_arm_bkpt(0x3870u, g_j9_newglobal_bkpt);
+                    plant_arm_bkpt(0x3880u, g_j9_newobjarr_bkpt);
+                    plant_arm_bkpt(0x3890u, g_j9_callstatic_bkpt);
+                    plant_arm_bkpt(0x38A0u, g_j9_cp_stub_bkpt);
+                    plant_arm_bkpt(0x38C0u, g_j9_host_ret_bkpt);
                     tbl[6] = g_j9_findclass_bkpt; // FindClass
                     tbl[21] = g_j9_newglobal_bkpt; // NewGlobalRef
                     tbl[23] = zero_fn; // DeleteLocalRef / ExceptionOccurred
+                    tbl[31] = g_j9_getclass_bkpt; // GetObjectClass
                     tbl[33] = g_j9_getmethod_bkpt; // GetMethodID
                     tbl[113] = g_j9_getmethod_bkpt; // GetStaticMethodID
+                    tbl[211] = zero_fn; // Canvas._create tail (J9 lock / wait)
+                    tbl[226] = g_j9_newglobal_bkpt; // NewGlobalRef-like slot used by CJavaEventSource
+                    tbl[227] = rel_fn; // DeleteGlobalRef
                     tbl[168] = zero_fn; // GetStringUTFLength
                     tbl[169] = g_j9_getstrutf_bkpt; // GetStringUTFChars
                     tbl[170] = rel_fn; // ReleaseStringUTFChars
+                    tbl[61] = g_j9_callstatic_bkpt; // CallVoidMethod
+                    tbl[62] = g_j9_callstatic_bkpt; // CallVoidMethodV
+                    tbl[63] = g_j9_callstatic_bkpt; // CallVoidMethodA
                     tbl[141] = g_j9_callstatic_bkpt; // CallStaticVoidMethodA
                     tbl[172] = g_j9_newobjarr_bkpt; // NewObjectArray
                     usable_table = walk_va + k_jni_tbl_off;
@@ -14046,10 +17476,16 @@ namespace eka2l1::hle {
                 g_j9_findclass_ret_bkpt = 0;
                 g_j9_findclass_saved_lr = 0;
                 g_j9_getmethod_bkpt = 0;
+                g_j9_getclass_bkpt = 0;
+                g_j9_dummy_meth_n = 0;
                 g_j9_newobjarr_bkpt = 0;
                 g_j9_newglobal_bkpt = 0;
                 g_j9_callstatic_bkpt = 0;
                 g_j9_lcdui_chain_bkpt = 0;
+                g_j9_ws_connected_bkpt = 0;
+                g_j9_ws_desc = 0;
+                g_j9_ws_svc_pc = 0;
+                g_j9_eventsrc_this = 0;
                 g_j9_cp_stub_bkpt = 0;
                 g_j9_cp_stub_meth = 0;
                 g_j9_main_cp = 0;
@@ -14069,6 +17505,12 @@ namespace eka2l1::hle {
                 g_j9_toolkit_obj = 0;
                 g_j9_canvas_obj = 0;
                 g_j9_graphics_obj = 0;
+                g_j9_graphics_clazz = 0;
+                g_j9_buffer_obj = 0;
+                g_j9_hi_ret_obj = 0;
+                g_j9_gcolor = 0;
+                g_j9_hi_stage = 0;
+                j9_hi_fb_reset();
                 g_j9_peer_n = 0;
                 g_j9_vmthread = 0;
                 g_j9_vt10_c = 0;
@@ -14216,11 +17658,34 @@ namespace eka2l1::hle {
                 g_j9_alps_started = false;
                 g_j9_alps_phase = 0;
                 g_j9_alps_clazz = 0;
+                g_j9_alps_canvas_clazz = 0;
+                g_j9_alps_canvas_obj = 0;
+                g_j9_nplanted = 0;
+                std::memset(g_j9_planted, 0, sizeof(g_j9_planted));
+                for (int i = 0; i < k_j9_plant_max; ++i) {
+                    g_j9_pmeta[i] = {};
+                }
+                g_j9_hi_n = 0;
+                g_j9_hi_yield = false;
+                g_j9_hi_stage = 0;
+                g_j9_hi_ret_obj = 0;
+                g_j9_host_ret_bkpt = 0;
+                j9_hi_fb_reset();
+                for (auto &e : g_j9_sbuf) {
+                    e = {};
+                }
+                for (auto &e : g_j9_istream) {
+                    e = {};
+                }
                 j9_host_midp_reset();
                 g_j9_main_ret_sp = 0;
                 g_j9_main_ret_lr = 0;
                 g_j9_park_pc = 0;
                 g_j9_lcdui_chain_bkpt = 0;
+                g_j9_ws_connected_bkpt = 0;
+                g_j9_ws_desc = 0;
+                g_j9_ws_svc_pc = 0;
+                g_j9_eventsrc_this = 0;
                 g_j9_last_jxe_key = 0;
                 g_j9_last_jxe_r4 = 0;
                 g_j9_last_jxe_r5 = 0;

@@ -785,6 +785,14 @@
         return ccall('wasm_get_redraw_count', 'number');
     };
 
+    EKA2L1.j9PresentCount = function () {
+        try {
+            return ccall('wasm_get_j9_present_count', 'number');
+        } catch (e) {
+            return 0;
+        }
+    };
+
     /**
      * Most recent launched-app exit info, or null if the app is still alive.
      * {exited, type, reason, uid, category, name}

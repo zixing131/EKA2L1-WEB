@@ -1070,6 +1070,8 @@ static void main_loop() {
         return;
     }
 
+    // Host MIDP attach parks j9midps60 and binds a fake Windowserver
+    // session. Guest J9 must reach RWsSession::Connect itself.
     if (eka2l1::hle::j9_host_midp_active()) {
         eka2l1::hle::j9_host_tick_midp();
     }
@@ -1773,6 +1775,12 @@ const char *wasm_probe_java_runtime() {
     g_java_runtime += has_server("!Windowserver") ? "1" : "0";
     g_java_runtime += " redraw=";
     g_java_runtime += std::to_string(s_redraw_cb_count.load());
+    if (g_state.winserv) {
+        g_java_runtime += " j9surf=";
+        g_java_runtime += g_state.winserv->has_j9_host_surface() ? "1" : "0";
+        g_java_runtime += " j9present=";
+        g_java_runtime += std::to_string(g_state.winserv->j9_present_count());
+    }
     g_java_runtime += "\n";
 
     g_java_runtime += "=== processes ===\n";
@@ -3313,6 +3321,14 @@ void wasm_send_key(int scancode, int pressed) {
 EMSCRIPTEN_KEEPALIVE
 double wasm_get_redraw_count() {
     return static_cast<double>(s_redraw_cb_count.load());
+}
+
+EMSCRIPTEN_KEEPALIVE
+double wasm_get_j9_present_count() {
+    if (g_state.winserv) {
+        return static_cast<double>(g_state.winserv->j9_present_count());
+    }
+    return 0.0;
 }
 
 /**

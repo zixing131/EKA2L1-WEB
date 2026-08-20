@@ -403,7 +403,12 @@
                 );
                 return;
             }
-            if (EKA2L1.redrawCount() > 0) {
+            var j9n = 0;
+            if (isJ2me) {
+                try { j9n = EKA2L1.j9PresentCount ? EKA2L1.j9PresentCount() : 0; } catch (e) { j9n = 0; }
+            }
+            var ready = isJ2me ? (j9n > 0) : (EKA2L1.redrawCount() > 0);
+            if (ready) {
                 clearInterval(poll);
                 started = true;
                 hideOverlay();

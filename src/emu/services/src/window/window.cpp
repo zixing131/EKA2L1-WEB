@@ -419,7 +419,13 @@ namespace eka2l1::epoc {
             return;
         }
 
-        ctx.complete(add_object(win));
+        const std::uint32_t wid = add_object(win);
+        if (ctx.msg && ctx.msg->own_thr && ctx.msg->own_thr->owning_process()) {
+            LOG_WARN(SERVICE_WINDOW, "create_window type={} handle={} from {}",
+                static_cast<int>(header->win_type), wid,
+                ctx.msg->own_thr->owning_process()->name());
+        }
+        ctx.complete(wid);
     }
 
     void window_server_client::create_graphic_context(service::ipc_context &ctx, ws_cmd &cmd) {
@@ -1669,6 +1675,22 @@ namespace eka2l1 {
             }
             return ws->host_bind_j9_surface(pr, thr);
         });
+        hle::j9_register_ws_guest([](kernel::process *pr, kernel::thread *thr, std::uint32_t handle) -> bool {
+            if (!pr || !thr) {
+                return false;
+            }
+            kernel_system *kern = pr->get_kernel_object_owner();
+            if (!kern) {
+                return false;
+            }
+            auto *ws = reinterpret_cast<window_server *>(
+                kern->get_by_name<service::server>(
+                    get_winserv_name_by_epocver(kern->get_epoc_version())));
+            if (!ws) {
+                return false;
+            }
+            return ws->guest_bind_j9_surface(pr, thr, handle);
+        });
         hle::j9_register_ws_present([](const std::uint32_t *rgba, int width, int height) -> bool {
             return g_j9_present_ws && g_j9_present_ws->host_present_j9_rgba(rgba, width, height);
         });
@@ -2306,7 +2328,7 @@ namespace eka2l1 {
             return false;
         }
         session_and_handle.second->set_associated_handle(session_and_handle.first);
-        LOG_WARN(KERNEL, "CreateSession: '!Windowserver' -> {} from {}",
+        LOG_WARN(KERNEL, "host-bind Windowserver session -> {} from {} (not guest CreateSession)",
             session_and_handle.first, pr->name());
 
         epoc::version ver{};
@@ -2344,8 +2366,8 @@ namespace eka2l1 {
         canvas->set_extent(eka2l1::vec2(0, 0), scr->size());
         canvas->flags |= epoc::window::flags_active;
         canvas->flags |= epoc::window::flags_visible;
-        canvas->clear_color = 0xFF000000;
-        canvas->clear_color_enable = true;
+        canvas->clear_color = 0xFFFFFFFF;
+        canvas->clear_color_enable = false;
         canvas->visible_region.make_empty();
         canvas->visible_region.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), scr->size()));
         if (get_graphics_driver()) {
@@ -2353,8 +2375,10 @@ namespace eka2l1 {
         }
         const std::uint32_t cid = cli->add_object(canvas_obj);
         j9_host_canvas_ = canvas;
+        j9_host_group_ = group;
+        group->set_position(0);
 
-        scr->need_update_visible_regions(true);
+        scr->need_update_visible_regions(false);
         scr->flags_ |= epoc::screen::FLAG_SERVER_REDRAW_PENDING;
         if (drivers::graphics_driver *drv = get_graphics_driver()) {
             get_anim_scheduler()->schedule(drv, scr, get_ntimer()->microseconds());
@@ -2366,6 +2390,133 @@ namespace eka2l1 {
         LOG_WARN(SERVICE_WINDOW,
             "[j9-nf] host-ws-bound session={} group={} canvas={} from {}",
             session_and_handle.first, gid, cid, pr->name());
+        return true;
+    }
+
+    bool window_server::guest_bind_j9_surface(kernel::process *pr, kernel::thread *thr, std::uint32_t h) {
+        if (!pr || !thr || (h == 0) || (static_cast<std::int32_t>(h) < 0)) {
+            return false;
+        }
+        if (j9_host_surface_) {
+            return true;
+        }
+
+        kernel_system *kern = get_kernel_system();
+        service::session *ss = kern ? kern->get<service::session>(h) : nullptr;
+        if (!ss) {
+            LOG_WARN(SERVICE_WINDOW, "guest-ws-session handle {} not found from {}", h, pr->name());
+            return false;
+        }
+        ss->set_associated_handle(h);
+
+        epoc::version ver{};
+        ver.u32 = 0;
+        const std::uint64_t sid = ss->unique_id();
+        if (!get_client(sid)) {
+            clients.emplace(sid, std::make_unique<epoc::window_server_client>(ss, thr, ver));
+        }
+        epoc::window_server_client *cli = get_client(sid);
+        if (!cli) {
+            return false;
+        }
+
+        epoc::screen *scr = get_current_focus_screen();
+        if (!scr) {
+            scr = get_screens();
+        }
+        if (!scr || !scr->root) {
+            LOG_WARN(SERVICE_WINDOW, "guest-ws-session has no screen from {}", pr->name());
+            return false;
+        }
+
+        epoc::window *parent = scr->root.get();
+        epoc::window_client_obj_ptr group_obj = std::make_unique<epoc::window_group>(
+            cli, scr, parent, 0x4A395747u);
+        epoc::window_group *group = reinterpret_cast<epoc::window_group *>(group_obj.get());
+        group->set_receive_focus(true);
+        group->name = common::utf8_to_ucs2("AlpsFarm");
+        const std::uint32_t gid = cli->add_object(group_obj);
+        scr->update_focus(this, nullptr);
+
+        epoc::window *canvas_parent = group->child ? group->child : group;
+        epoc::window_client_obj_ptr canvas_obj = std::make_unique<epoc::bitmap_backed_canvas>(
+            cli, scr, canvas_parent, scr->disp_mode, 0x4A395743u);
+        auto *canvas = reinterpret_cast<epoc::bitmap_backed_canvas *>(canvas_obj.get());
+        canvas->set_extent(eka2l1::vec2(0, 0), scr->size());
+        canvas->flags |= epoc::window::flags_active;
+        canvas->flags |= epoc::window::flags_visible;
+        canvas->clear_color = 0xFFFFFFFF;
+        canvas->clear_color_enable = false;
+        canvas->visible_region.make_empty();
+        canvas->visible_region.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), scr->size()));
+        if (get_graphics_driver()) {
+            canvas->prepare_for_draw();
+        }
+        const std::uint32_t cid = cli->add_object(canvas_obj);
+        j9_host_canvas_ = canvas;
+        j9_host_group_ = group;
+        group->set_position(0);
+
+        scr->need_update_visible_regions(false);
+        scr->flags_ |= epoc::screen::FLAG_SERVER_REDRAW_PENDING;
+        if (drivers::graphics_driver *drv = get_graphics_driver()) {
+            get_anim_scheduler()->schedule(drv, scr, get_ntimer()->microseconds());
+        }
+
+        j9_host_surface_ = true;
+        LOG_WARN(SERVICE_WINDOW, "create_window_group handle={} focus=1 from {}",
+            gid, pr->name());
+        LOG_WARN(SERVICE_WINDOW,
+            "[j9-nf] guest-ws-bound session={} group={} canvas={} from {}",
+            h, gid, cid, pr->name());
+        return true;
+    }
+
+    bool window_server::j9_blit_j9_to_screen() {
+        if (!j9_host_canvas_ || !j9_host_canvas_->driver_win_id) {
+            return false;
+        }
+        drivers::graphics_driver *drv = get_graphics_driver();
+        epoc::screen *scr = get_current_focus_screen();
+        if (!scr) {
+            scr = get_screens();
+        }
+        if (!drv || !scr) {
+            return false;
+        }
+        if (!scr->screen_texture) {
+            scr->resize(drv, scr->size());
+        }
+        if (!scr->screen_texture) {
+            return false;
+        }
+        if (j9_host_group_) {
+            j9_host_group_->set_receive_focus(true);
+            j9_host_group_->set_position(0);
+        }
+        j9_host_canvas_->flags |= epoc::window::flags_active;
+        j9_host_canvas_->flags |= epoc::window::flags_visible;
+        j9_host_canvas_->visible_region.make_empty();
+        j9_host_canvas_->visible_region.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), scr->size()));
+        scr->need_update_visible_regions(false);
+
+        const float scale = (scr->display_scale_factor > 0.0f) ? scr->display_scale_factor : 1.0f;
+        const eka2l1::vec2 tex = scr->current_mode().size * scale;
+        eka2l1::vec2 src_sz = j9_host_canvas_->size();
+        if ((src_sz.x <= 0) || (src_sz.y <= 0)) {
+            src_sz = scr->size();
+        }
+        drivers::graphics_command_builder builder;
+        builder.bind_bitmap(scr->screen_texture);
+        builder.set_feature(drivers::graphics_feature::blend, false);
+        builder.set_feature(drivers::graphics_feature::clipping, false);
+        builder.draw_bitmap(j9_host_canvas_->driver_win_id, 0,
+            eka2l1::rect(eka2l1::vec2(0, 0), tex),
+            eka2l1::rect(eka2l1::vec2(0, 0), src_sz));
+        builder.bind_bitmap(0);
+        drivers::command_list retrieved = builder.retrieve_command_list();
+        drv->submit_command_list(retrieved);
+        scr->fire_screen_redraw_callbacks(false);
         return true;
     }
 
@@ -2390,31 +2541,20 @@ namespace eka2l1 {
         drivers::command_list retrieved = builder.retrieve_command_list();
         drv->submit_command_list(retrieved);
         j9_host_canvas_->content_changed(true);
-        epoc::screen *scr = get_current_focus_screen();
-        if (!scr) {
-            scr = get_screens();
+        const bool shown = j9_blit_j9_to_screen();
+        ++j9_present_n_;
+        if (j9_present_n_ <= 8) {
+            LOG_WARN(SERVICE_WINDOW, "[j9-nf] host-present-blit {}x{} shown={} n={}",
+                width, height, shown ? 1 : 0, j9_present_n_);
         }
-        if (scr) {
-            scr->flags_ |= epoc::screen::FLAG_SERVER_REDRAW_PENDING;
-            get_anim_scheduler()->schedule(drv, scr, get_ntimer()->microseconds());
-        }
-        return true;
+        return shown;
     }
 
     void window_server::pump_j9_host_redraws() {
-        if (!j9_host_surface_) {
+        if (!j9_host_surface_ || (j9_present_n_ <= 0)) {
             return;
         }
-        epoc::screen *scr = get_current_focus_screen();
-        if (!scr) {
-            scr = get_screens();
-        }
-        drivers::graphics_driver *drv = get_graphics_driver();
-        if (!scr || !drv) {
-            return;
-        }
-        scr->flags_ |= epoc::screen::FLAG_SERVER_REDRAW_PENDING;
-        get_anim_scheduler()->schedule(drv, scr, get_ntimer()->microseconds());
+        j9_blit_j9_to_screen();
     }
 
     void window_server::init(service::ipc_context &ctx) {

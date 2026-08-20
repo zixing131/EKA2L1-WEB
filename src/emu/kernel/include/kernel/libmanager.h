@@ -31,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace YAML {
     class Node;
@@ -195,9 +196,12 @@ namespace eka2l1 {
         };
 
         using j9_ws_bind_fn = bool (*)(kernel::process *pr, kernel::thread *thr);
+        using j9_ws_guest_fn = bool (*)(kernel::process *pr, kernel::thread *thr, std::uint32_t handle);
         using j9_ws_present_fn = bool (*)(const std::uint32_t *rgba, int width, int height);
         void j9_register_ws_bind(j9_ws_bind_fn fn);
         bool j9_bind_windowserver(kernel::process *pr, kernel::thread *thr);
+        void j9_register_ws_guest(j9_ws_guest_fn fn);
+        bool j9_guest_bind_windowserver(kernel::process *pr, kernel::thread *thr, std::uint32_t handle);
         void j9_register_ws_present(j9_ws_present_fn fn);
         bool j9_present_surface(const std::uint32_t *rgba, int width, int height);
         bool j9_host_run_midlet(kernel::process *pr, const char *main_class);
@@ -205,6 +209,16 @@ namespace eka2l1 {
         bool j9_host_midp_active();
         void j9_host_tick_midp();
         bool j9_host_key_event(int scancode, int pressed);
+        // Remember MIDlet-1 class from the current suite so host MIDP does not
+        // hardcode AlpsFarm. try_attach boots the host interpreter once a
+        // j9midps60 process exists and the suite has been exploded.
+        void j9_set_pending_midlet_class(const char *main_class);
+        const char *j9_pending_midlet_class();
+        bool j9_host_try_attach(kernel_system *kern);
+        bool j9_host_read_suite_class(kernel::process *pr, const char *name,
+            std::vector<std::uint8_t> &out);
+        bool j9_host_read_suite_file(kernel::process *pr, const char *name,
+            std::vector<std::uint8_t> &out);
     }
 
     namespace epoc {
