@@ -868,7 +868,68 @@ Java LCDUI 对象 `+8` 是 C++ peer，不要写成 RWsSession handle。Handle �
 
 合成 ROM 没有可用的 J9 RAM CP，官方解释器在 `new`/`invoke`/`getfield` 上会读 `0x52A8xxxx` 然后 AV。套件字节码改由宿主解释器按 classfile CP 跑（数组/字段/`TEXT_LOAD` 读 JAR），`Graphics.setColor` / `fillRect` / `setFont` 再踢回官方 JCL 方法（`0x8190E968` 的 `new` resolve 仍种 BKPT 作兜底）。`AlpsFarmCanvas.<init>` 末尾的 `Thread.start` 不在这里拉循环，LCDUI 链 phase 12 显式跑 `paint` + `MAIN_STATE`。
 
+### 10.27 BUILD `7d45c32bf491`：恢复通用 host MIDP 回退
 
+上一版把 `j9_host_try_attach()` 固定为 `false`，而官方 LCDUI 链仍把入口和 Canvas
+写死成 `AlpsFarm` / `AlpsFarmCanvas`。直接后果是：牧场只能显示一次启动画面，
+`GloftMASS` 等其它 `MIDlet-1` 类根本没有进入解释器。
 
+本轮改动：
+
+1. 主循环在 host MIDP 未激活时持续探测 `j9midps60`；确认当前 `C:\j.jar` 中能读到
+   `MIDlet-1` 主类后，绑定 Windowserver surface 并以实际类名启动 host 解释器。
+2. 切换套件时清空 class/object/JAR/线程缓存；class 和资源读取以当前 `C:\j.jar`
+   为权威来源，避免命中上一个游戏遗留的 exploded class。
+3. `run()` / `MAIN_STATE()` 到达 6ms slice 后保存 `pc + locals + operand stack`，下一帧
+   从断点继续，不再每 80ms 从方法开头重跑，所以长游戏循环可以越过首屏。
+4. 多个 `Thread`/`callSerially` target 使用去重后的 round-robin；音频线程不再永久
+   挡住主游戏线程。
+5. 补齐 Gameloft JAR 实际使用的 `wide/iinc_w`、long 常量/字段/数组/算术/比较/移位，
+   以及 Wild West 使用的基础 double 运算；补充 String/StringBuffer/Hashtable 常用方法。
+6. 修复中文名 storage 的历史兼容：既接受当前全下划线目录，也回退旧版 `midlet`
+   目录，并可从目标目录选择实际存在的 JAR。
+
+离线核对的目标：
+
+- `/Users/zixing/Downloads/mu.jar`：`MIDlet-1 = AlpsFarm`，96 种实际字节码；
+- `/Users/zixing/Downloads/生化惊悚完整汉化版.jar`：`MIDlet-1 = GloftMASS`，包含
+  `iinc_w` 和完整 long 运算；
+- `/Users/zixing/Downloads/hanhua/狂野西部汉化版.jar`：`MIDlet-1 = GloftWWGU`，
+  额外使用 `i2d/d2i/dmul/dcmp*`。
+
+WASM Release 全量链接通过，产物 build id：`7d45c32bf491`。当前 Mac 锁屏导致本轮
+无法自动操作文件选择器做最终画面回归；解锁后优先按上面三个 JAR 顺序复测，并看：
+
+```
+[j9-nf] host-attach started class='...'
+[j9-nf] host-thread-queue ...
+[j9-nf] host-midlet '...' current=...
+```
+
+### 10.28 BUILD `e50731d98722`：FullCanvas 不是套件缺文件
+
+`com/nokia/mid/ui/FullCanvas` 属于 Nokia UI 平台 API，正常情况下不会打包进游戏 JAR。
+host MIDP 旧逻辑只把 `java/`、`javax/`、`com/sun/` 视为 JCL 类，误把 `com/nokia/`
+当套件类反复从 `C:\j.jar` 查找，因此持续打印 `host-class-miss`。现为这些平台类建立
+缓存的最小继承链：`FullCanvas -> Canvas -> Displayable -> Object`；实际 API 仍由
+`native_invoke()` 实现。WASM Release 构建通过。
+
+### 10.29 BUILD `a83306ecd835`：线程状态在变，但 repaint 从未调用 paint
+
+`歪歪歪传战国风云_N70.jar` 的启动类是 `War.CatMID`，Canvas 是 `War.c`。首屏状态：
+
+- `else = 23`、`t = 60`、图片 `/mt.png`；
+- `War.c.run()` 每轮调用 `case()`，进而在 `int()` 中递减 `t`；
+- 每次递减后调用 `byte()`，其内容只有 `repaint()` + `serviceRepaints()`；
+- `t == 0` 后才切换 `/st.png` 并进入后续加载。
+
+host MIDP 之前把 `repaint()` / `serviceRepaints()` 当作空 native，游戏线程虽在推进，
+却从未再次调用 Canvas `paint(Graphics)`，所以屏幕永久保留第一次绘制的运营商 Logo。
+现增加 repaint pending 与可恢复 paint frame：线程时间片结束后执行实际 `paint()`，超出
+6ms 时保存 paint 的 `pc/locals/stack` 到下一帧继续。诊断日志为：
+
+```
+[j9-nf] host-repaint War/c graphics=... resume=...
+```
 
 

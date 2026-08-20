@@ -17,11 +17,10 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <j2me/applist.h>
 #include <j2me/interface.h>
 #include <j2me/kmidrun.h>
-#include <j2me/applist.h>
 
-#include <system/epoc.h>
 #include <common/algorithm.h>
 #include <common/cvt.h>
 #include <common/fileutils.h>
@@ -31,6 +30,7 @@
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
 #include <kernel/server.h>
+#include <system/epoc.h>
 #include <utils/apacmd.h>
 #include <utils/err.h>
 #include <vfs/vfs.h>
@@ -40,8 +40,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
-#include <miniz.h>
 #include <memory>
+#include <miniz.h>
 #include <vector>
 
 namespace eka2l1::j2me {
@@ -176,7 +176,8 @@ namespace eka2l1::j2me {
             rel.reserve(name.size());
             for (unsigned char c : name) {
                 rel.push_back((c == static_cast<unsigned char>('/'))
-                    ? u'\\' : static_cast<char16_t>(c));
+                        ? u'\\'
+                        : static_cast<char16_t>(c));
             }
             std::vector<char> out(static_cast<std::size_t>(stat.m_uncomp_size));
             if (stat.m_uncomp_size
@@ -476,8 +477,7 @@ namespace eka2l1::j2me {
 
         // JCL is a plain JXE file. midp2ams stays ROM type=JXESL so
         // J9GetJXE + J9VMDllMain still bind JNI natives.
-        static const char JCL_ODC[] =
-            "[container]\n"
+        static const char JCL_ODC[] = "[container]\n"
             "name=jcl.jxe\n"
             "type=JXE\n"
             "\n"
@@ -977,8 +977,7 @@ namespace eka2l1::j2me {
 
         // Previous DirOpen fallback created an empty nokiaextcldc that
         // hid the JXESL in j9_23_midp2ams.dll. Remove it if still there.
-        static constexpr char16_t PHANTOM_NOKIAEXT[] =
-            u"C:\\resource\\ive\\lib\\jclCldc11\\nokiaextcldc\\";
+        static constexpr char16_t PHANTOM_NOKIAEXT[] = u"C:\\resource\\ive\\lib\\jclCldc11\\nokiaextcldc\\";
         if (io->exist(PHANTOM_NOKIAEXT)) {
             io->delete_entry(PHANTOM_NOKIAEXT);
             LOG_WARN(J2ME, "Removed empty phantom nokiaextcldc");
@@ -1014,17 +1013,6 @@ namespace eka2l1::j2me {
 
         if (safe.empty()) {
             safe = "midlet";
-        } else {
-            bool any_alnum = false;
-            for (const unsigned char c : safe) {
-                if (std::isalnum(c)) {
-                    any_alnum = true;
-                    break;
-                }
-            }
-            if (!any_alnum) {
-                safe = "midlet";
-            }
         }
         return safe;
     }
@@ -1153,7 +1141,8 @@ namespace eka2l1::j2me {
             return false;
         }
         const bool ok = (out->write_file(manifest.data(), 1,
-            static_cast<std::uint32_t>(manifest.size())) == manifest.size());
+                             static_cast<std::uint32_t>(manifest.size()))
+            == manifest.size());
         out->close();
         if (ok) {
             LOG_INFO(J2ME, "Synthesized suite JAD from JAR manifest at {}",
@@ -1233,7 +1222,8 @@ namespace eka2l1::j2me {
             return false;
         }
         const bool ok = (out->write_file(body.data(), 1,
-            static_cast<std::uint32_t>(body.size())) == body.size());
+                             static_cast<std::uint32_t>(body.size()))
+            == body.size());
         out->close();
         LOG_WARN(EMULATED_STDOUT, "[j9-nf] wrote ASCII JAD {} ({} bytes) class='{}'",
             common::ucs2_to_utf8(jad_path), body.size(), cls);
@@ -1807,14 +1797,85 @@ namespace eka2l1::j2me {
         return pr;
     }
 
-    bool launch_through_midp2(system *sys, const app_entry &entry, std::function<void(kernel::process*)> exit_cb) {
-        io_system *io = sys->get_io_system();
-        std::u16string storage_dir = build_midp2_storage_dir(entry);
-        std::string safe_name = make_safe_preinstall_name(entry.name_);
-        std::u16string storage_name = common::utf8_to_ucs2(safe_name);
+    static std::string midp_storage_name_alt(const std::string &safe) {
+        for (const unsigned char c : safe) {
+            if (std::isalnum(c)) {
+                return safe;
+            }
+        }
+        return "midlet";
+    }
 
-        std::u16string storage_jar = storage_dir + storage_name + u".jar";
-        if (!io->exist(storage_jar)) {
+    static bool first_jar_in_dir(io_system *io, const std::u16string &dir, std::u16string &found) {
+        auto listing = io->open_dir(dir + u"*", {}, io_attrib_include_file);
+        if (!listing) {
+            return false;
+        }
+        while (auto ent = listing->get_next_entry()) {
+            if (ent->type != io_component_type::file) {
+                continue;
+            }
+            std::string low = ent->name;
+            std::transform(low.begin(), low.end(), low.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if ((low.size() >= 4) && (low.compare(low.size() - 4, 4, ".jar") == 0)) {
+                found = dir + common::utf8_to_ucs2(ent->name);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool resolve_midp2_storage_jar(io_system *io, const app_entry &entry,
+        std::u16string &storage_dir, std::u16string &storage_name, std::u16string &storage_jar) {
+        storage_dir = build_midp2_storage_dir(entry);
+        const std::string safe_name = make_safe_preinstall_name(entry.name_);
+        storage_name = common::utf8_to_ucs2(safe_name);
+        storage_jar = storage_dir + storage_name + u".jar";
+        if (io->exist(storage_jar)) {
+            return true;
+        }
+
+        auto accept = [&](const std::u16string &cand) -> bool {
+            if (!io->exist(cand)) {
+                return false;
+            }
+            storage_dir = eka2l1::file_directory(cand);
+            storage_name = common::utf8_to_ucs2(eka2l1::replace_extension(
+                eka2l1::filename(common::ucs2_to_utf8(cand)), ""));
+            storage_jar = cand;
+            LOG_WARN(J2ME, "MIDP2 launch: using JAR {}", common::ucs2_to_utf8(cand));
+            return true;
+        };
+
+        if (accept(storage_dir + u"midlet.jar")) {
+            return true;
+        }
+        std::u16string found;
+        if (first_jar_in_dir(io, storage_dir, found) && accept(found)) {
+            return true;
+        }
+
+        // A previous build mapped all-underscore Chinese names to "midlet".
+        const std::string alt_vendor = midp_storage_name_alt(make_safe_preinstall_name(entry.author_));
+        const std::string alt_name = midp_storage_name_alt(safe_name);
+        const std::string alt_ver = midp_storage_name_alt(make_safe_preinstall_name(entry.version_));
+        const std::u16string alt_dir = u"E:\\system\\midp\\"
+            + common::utf8_to_ucs2(alt_vendor) + u"\\"
+            + common::utf8_to_ucs2(alt_name) + u"\\"
+            + common::utf8_to_ucs2(alt_ver) + u"\\";
+        if (alt_dir != storage_dir) {
+            if (accept(alt_dir + common::utf8_to_ucs2(alt_name) + u".jar")) {
+                return true;
+            }
+            if (accept(alt_dir + u"midlet.jar")) {
+                return true;
+            }
+            if (first_jar_in_dir(io, alt_dir, found) && accept(found)) {
+                return true;
+            }
+        }
+
             const std::uint32_t uid = java_midlet_uid(entry.id_);
             const std::u16string uid_hex = common::utf8_to_ucs2(fmt::format("{:08X}", uid));
             const std::u16string fallbacks[] = {
@@ -1825,23 +1886,23 @@ namespace eka2l1::j2me {
                 u"C:\\private\\102033E6\\MIDlets\\" + uid_hex + u"\\m.jar",
                 u"C:\\private\\102033E6\\MIDlets\\" + uid_hex + u"\\j.jar",
             };
-            bool found = false;
             for (const std::u16string &cand : fallbacks) {
-                if (io->exist(cand)) {
-                    storage_dir = eka2l1::file_directory(cand);
-                    storage_name = common::utf8_to_ucs2(eka2l1::replace_extension(
-                        eka2l1::filename(common::ucs2_to_utf8(cand)), ""));
-                    storage_jar = cand;
-                    found = true;
-                    LOG_WARN(J2ME, "MIDP2 launch: using fallback JAR {}",
-                        common::ucs2_to_utf8(cand));
-                    break;
+            if (accept(cand)) {
+                return true;
                 }
             }
-            if (!found) {
-                LOG_ERROR(J2ME, "MIDP2 launch: JAR not found at {}", common::ucs2_to_utf8(storage_jar));
                 return false;
             }
+
+    bool launch_through_midp2(system *sys, const app_entry &entry, std::function<void(kernel::process *)> exit_cb) {
+        io_system *io = sys->get_io_system();
+        std::u16string storage_dir;
+        std::u16string storage_name;
+        std::u16string storage_jar;
+        if (!resolve_midp2_storage_jar(io, entry, storage_dir, storage_name, storage_jar)) {
+            LOG_ERROR(J2ME, "MIDP2 launch: JAR not found for '{}' (looked under {})",
+                entry.name_, common::ucs2_to_utf8(build_midp2_storage_dir(entry)));
+            return false;
         }
 
         prepare_midp2_environment(sys);
@@ -2026,7 +2087,8 @@ namespace eka2l1::j2me {
     bool reregister_midlet(system *sys, const std::uint32_t app_id,
         std::function<void(kernel::process*)> exit_cb) {
         app_list *applist = sys->get_j2me_applist();
-        if (!applist) return false;
+        if (!applist)
+            return false;
 
         std::optional<app_entry> entry_opt = applist->get_entry(app_id);
         if (!entry_opt.has_value()) {
@@ -2064,7 +2126,8 @@ namespace eka2l1::j2me {
 
         creator->add_child_process(installer);
         installer->logon([exit_cb = std::move(exit_cb)](kernel::process *finished) {
-            if (exit_cb) exit_cb(finished);
+            if (exit_cb)
+                exit_cb(finished);
         });
 
         if (!installer->run()) {

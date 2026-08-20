@@ -1070,10 +1070,13 @@ static void main_loop() {
         return;
     }
 
-    // Host MIDP attach parks j9midps60 and binds a fake Windowserver
-    // session. Guest J9 must reach RWsSession::Connect itself.
     if (eka2l1::hle::j9_host_midp_active()) {
         eka2l1::hle::j9_host_tick_midp();
+    } else {
+        // The guest J9 path is still responsible for VM/bootstrap services,
+        // while the bounded host interpreter provides a generic MIDP/LCDUI
+        // fallback for suites that the ROM cannot execute to first frame yet.
+        eka2l1::hle::j9_host_try_attach(g_state.symsys->get_kernel_system());
     }
 
     // (Previously pulsed LSK/OK here during MIDlet install. That raced with ifeui

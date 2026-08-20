@@ -29,8 +29,8 @@
 
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
-#include <stb_truetype.h>
 #include <miniz.h>
+#include <stb_truetype.h>
 
 #include <kernel/j9_gbk_map.inc>
 
@@ -75,7 +75,8 @@ namespace eka2l1::hle {
             k_obj_vector = 9,
             k_obj_random = 10,
             k_obj_rms = 11,
-            k_obj_thread = 12
+            k_obj_thread = 12,
+            k_obj_hashtable = 13
         };
 
         struct cf_cp {
@@ -109,8 +110,11 @@ namespace eka2l1::hle {
             cf_class *clazz = nullptr;
             std::string str;
             std::unordered_map<std::string, std::int32_t> fields;
+            std::unordered_map<std::string, std::int64_t> fields64;
+            std::unordered_map<std::int32_t, std::int32_t> map;
             std::vector<std::int32_t> arr;
             int arr_is_ref = 0;
+            int arr_is_long = 0;
             std::vector<std::uint32_t> pixels;
             int w = 0;
             int h = 0;
@@ -135,6 +139,7 @@ namespace eka2l1::hle {
             std::vector<cf_field> fields;
             std::vector<cf_method> methods;
             std::unordered_map<std::string, std::int32_t> statics;
+            std::unordered_map<std::string, std::int64_t> statics64;
         };
 
         static std::unordered_map<std::string, std::unique_ptr<cf_class>> g_classes;
@@ -145,17 +150,32 @@ namespace eka2l1::hle {
         static int g_fb = 0;
         static int g_font = 0;
         static bool g_event_ready = false;
+        static bool g_repaint_pending = false;
         static kernel::process *g_pr = nullptr;
         static std::string g_pending_midlet_class;
         static int g_attach_tries = 0;
         static bool g_attach_started = false;
         static std::vector<int> g_thread_queue;
+        static std::size_t g_thread_cursor = 0;
+        struct host_resume_frame {
+            cf_class *clazz = nullptr;
+            cf_method *method = nullptr;
+            int this_ref = 0;
+            unsigned pc = 0;
+            std::vector<std::int32_t> locals;
+            std::vector<std::int32_t> stack;
+            bool active = false;
+        };
+        static host_resume_frame g_main_frame;
+        static host_resume_frame g_paint_frame;
+        static std::unordered_map<int, host_resume_frame> g_thread_frames;
         static int g_slice_ms = k_slice_ms;
         static int g_slice_steps = k_max_steps;
         static std::vector<std::uint8_t> g_jar;
         static bool g_jar_tried = false;
 
-        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref, const std::int32_t *args, int nargs, int depth);
+        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref,
+            const std::int32_t *args, int nargs, int depth, host_resume_frame *resume = nullptr);
         static cf_method *find_method(cf_class *c, const std::string &name, const std::string &sig);
 
         static std::uint16_t be16(const std::uint8_t *p) {
@@ -483,12 +503,32 @@ namespace eka2l1::hle {
                 return it->second.get();
             }
             if (name.rfind("java/", 0) == 0 || name.rfind("javax/", 0) == 0
-                || name.rfind("com/sun/", 0) == 0) {
-                return nullptr;
+                || name.rfind("com/sun/", 0) == 0 || name.rfind("com/nokia/", 0) == 0) {
+                // CLDC/MIDP and vendor APIs live in the phone's JCL/JXE, not
+                // inside the suite JAR.  Host MIDP implements their methods in
+                // native_invoke(); keep a tiny cached class hierarchy here so
+                // inherited lookup does not repeatedly probe the suite and so
+                // FullCanvas -> Canvas -> Displayable remains visible.
+                auto c = std::make_unique<cf_class>();
+                c->name = name;
+                if (name == "com/nokia/mid/ui/FullCanvas"
+                    || name == "javax/microedition/lcdui/game/GameCanvas") {
+                    c->super = "javax/microedition/lcdui/Canvas";
+                } else if (name == "javax/microedition/lcdui/Canvas") {
+                    c->super = "javax/microedition/lcdui/Displayable";
+                } else if (name != "java/lang/Object") {
+                    c->super = "java/lang/Object";
+                }
+                cf_class *raw = c.get();
+                g_classes.emplace(name, std::move(c));
+                return raw;
             }
             std::vector<std::uint8_t> buf;
             std::string path = name + ".class";
-            if (!guest_read_any(pr, path, buf) && !jar_read(pr, path, buf)) {
+            // The short C:\\j.jar staging path is authoritative for the suite
+            // being launched.  Exploded class files may be leftovers from the
+            // previous MIDlet because all suites share the same J9 home.
+            if (!jar_read(pr, path, buf) && !guest_read_any(pr, path, buf)) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-class-miss '{}'", name);
                 return nullptr;
             }
@@ -1322,7 +1362,8 @@ namespace eka2l1::hle {
             return nullptr;
         }
 
-        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref, const std::int32_t *args, int nargs, int depth);
+        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref,
+            const std::int32_t *args, int nargs, int depth, host_resume_frame *resume);
 
         static int arg_i(std::int32_t *args, int nargs, int i) {
             return ((i >= 0) && (i < nargs) && args) ? args[i] : 0;
@@ -1346,10 +1387,7 @@ namespace eka2l1::hle {
             int this_ref, std::int32_t *args, int nargs, std::int32_t &ret, int depth) {
             (void)depth;
             ret = 0;
-            if ((name == "<init>") && ((cls == "java/lang/Object")
-                    || (cls.rfind("javax/microedition/", 0) == 0)
-                    || (cls == "com/nokia/mid/ui/FullCanvas")
-                    || (cls.rfind("com/nokia/mid/ui/", 0) == 0))) {
+            if ((name == "<init>") && ((cls == "java/lang/Object") || (cls.rfind("javax/microedition/", 0) == 0) || (cls == "com/nokia/mid/ui/FullCanvas") || (cls.rfind("com/nokia/mid/ui/", 0) == 0))) {
                 return true;
             }
             if ((cls == "java/lang/StringBuffer") || (cls == "java/lang/StringBuilder")) {
@@ -1359,7 +1397,8 @@ namespace eka2l1::hle {
                 }
                 if (name == "<init>") {
                     o->kind = k_obj_sb;
-                    o->str.clear();
+                    o->str = (nargs >= 1 && sig.find("Ljava/lang/String;") != std::string::npos)
+                        ? as_str(args[0]) : std::string();
                     return true;
                 }
                 if (name == "append") {
@@ -1368,6 +1407,10 @@ namespace eka2l1::hle {
                             o->str += as_str(args[0]);
                         } else if (sig.find("Ljava/lang/Object;") != std::string::npos) {
                             o->str += as_str(args[0]);
+                        } else if (sig.find("(C)") != std::string::npos) {
+                            utf8_append_cp(o->str, static_cast<std::uint32_t>(args[0] & 0xFFFF));
+                        } else if (sig.find("(Z)") != std::string::npos) {
+                            o->str += args[0] ? "true" : "false";
                         } else {
                             o->str += std::to_string(args[0]);
                         }
@@ -1377,6 +1420,24 @@ namespace eka2l1::hle {
                 }
                 if (name == "toString") {
                     ret = intern(o->str);
+                    return true;
+                }
+                if (name == "length") {
+                    ret = utf8_len(o->str);
+                    return true;
+                }
+                if (name == "charAt") {
+                    ret = static_cast<std::int32_t>(utf8_at(o->str, arg_i(args, nargs, 0)));
+                    return true;
+                }
+                if (name == "setCharAt") {
+                    const int at = arg_i(args, nargs, 0);
+                    const int n = utf8_len(o->str);
+                    if ((at >= 0) && (at < n)) {
+                        std::string repl;
+                        utf8_append_cp(repl, static_cast<std::uint32_t>(arg_i(args, nargs, 1) & 0xFFFF));
+                        o->str = utf8_substr(o->str, 0, at) + repl + utf8_substr(o->str, at + 1, n);
+                    }
                     return true;
                 }
             }
@@ -1430,7 +1491,8 @@ namespace eka2l1::hle {
                 if (name == "getBytes") {
                     const std::string s = as_str(this_ref);
                     const std::string enc = (sig.find("Ljava/lang/String;") != std::string::npos)
-                        ? as_str(arg_i(args, nargs, 0)) : std::string();
+                        ? as_str(arg_i(args, nargs, 0))
+                        : std::string();
                     std::string enc_l = enc;
                     for (char &c : enc_l) {
                         if ((c >= 'A') && (c <= 'Z')) {
@@ -1459,6 +1521,49 @@ namespace eka2l1::hle {
                 }
                 if (name == "equals") {
                     ret = (as_str(this_ref) == as_str(arg_i(args, nargs, 0))) ? 1 : 0;
+                    return true;
+                }
+                if (name == "compareTo") {
+                    const std::string a = as_str(this_ref);
+                    const std::string b = as_str(arg_i(args, nargs, 0));
+                    ret = (a < b) ? -1 : ((a == b) ? 0 : 1);
+                    return true;
+                }
+                if (name == "startsWith") {
+                    const std::string a = as_str(this_ref);
+                    const std::string b = as_str(arg_i(args, nargs, 0));
+                    ret = (a.size() >= b.size() && a.compare(0, b.size(), b) == 0) ? 1 : 0;
+                    return true;
+                }
+                if (name == "indexOf") {
+                    const std::string a = as_str(this_ref);
+                    const int from = (nargs >= 2) ? std::max(0, arg_i(args, nargs, 1)) : 0;
+                    std::size_t found = std::string::npos;
+                    if (sig.find("Ljava/lang/String;") != std::string::npos) {
+                        found = a.find(as_str(arg_i(args, nargs, 0)), static_cast<std::size_t>(from));
+                    } else {
+                        found = a.find(static_cast<char>(arg_i(args, nargs, 0)), static_cast<std::size_t>(from));
+                    }
+                    ret = (found == std::string::npos) ? -1 : static_cast<int>(found);
+                    return true;
+                }
+                if ((name == "toLowerCase") || (name == "toUpperCase")) {
+                    std::string s = as_str(this_ref);
+                    for (char &ch : s) {
+                        const unsigned char c = static_cast<unsigned char>(ch);
+                        ch = static_cast<char>((name == "toLowerCase") ? std::tolower(c) : std::toupper(c));
+                    }
+                    ret = intern(s);
+                    return true;
+                }
+                if (name == "toCharArray") {
+                    const std::string s = as_str(this_ref);
+                    const int r = alloc_obj(k_obj_array);
+                    host_obj *a = obj(r);
+                    for (std::size_t pos = 0; pos < s.size();) {
+                        a->arr.push_back(static_cast<std::int32_t>(utf8_next(s, pos)));
+                    }
+                    ret = r;
                     return true;
                 }
                 if (name == "valueOf") {
@@ -1491,13 +1596,55 @@ namespace eka2l1::hle {
                     return true;
                 }
             }
-            if ((cls == "java/lang/Integer") && (name == "parseInt")) {
-                try {
-                    ret = std::stoi(as_str(arg_i(args, nargs, 0)));
-                } catch (...) {
-                    ret = 0;
+            if (cls == "java/lang/Integer") {
+                if (name == "parseInt") {
+                    try {
+                        ret = std::stoi(as_str(arg_i(args, nargs, 0)));
+                    } catch (...) {
+                        ret = 0;
+                    }
+                    return true;
                 }
-                return true;
+                host_obj *o = obj(this_ref);
+                if (name == "<init>") {
+                    if (o) {
+                        o->fields["value"] = arg_i(args, nargs, 0);
+                    }
+                    return true;
+                }
+                if (name == "byteValue") {
+                    ret = o ? static_cast<std::int8_t>(o->fields["value"]) : 0;
+                    return true;
+                }
+            }
+            if (cls == "java/util/Hashtable") {
+                host_obj *o = obj(this_ref);
+                if (name == "<init>") {
+                    if (o) {
+                        o->kind = k_obj_hashtable;
+                        o->map.clear();
+                    }
+                    return true;
+                }
+                if (!o) {
+                    return true;
+                }
+                const int key = arg_i(args, nargs, 0);
+                if (name == "put") {
+                    const int old = o->map.count(key) ? o->map[key] : 0;
+                    o->map[key] = arg_i(args, nargs, 1);
+                    ret = old;
+                    return true;
+                }
+                if (name == "get") {
+                    ret = o->map.count(key) ? o->map[key] : 0;
+                    return true;
+                }
+                if (name == "remove") {
+                    ret = o->map.count(key) ? o->map[key] : 0;
+                    o->map.erase(key);
+                    return true;
+                }
             }
             if (cls == "java/lang/Math") {
                 if (name == "abs") {
@@ -1603,7 +1750,8 @@ namespace eka2l1::hle {
                     // Queue only. Running run() here blocks the emscripten
                     // thread for the whole game loop and the page never paints.
                     const int target = (th && th->nested) ? th->nested : this_ref;
-                    if (target) {
+                    if (target && (std::find(g_thread_queue.begin(), g_thread_queue.end(), target)
+                            == g_thread_queue.end())) {
                         g_thread_queue.push_back(target);
                         LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-thread-queue {}",
                             (obj(target) && obj(target)->clazz) ? obj(target)->clazz->name : "?");
@@ -1665,7 +1813,8 @@ namespace eka2l1::hle {
                 if (name == "elementAt") {
                     const int i = arg_i(args, nargs, 0);
                     ret = ((i >= 0) && (static_cast<unsigned>(i) < o->arr.size()))
-                        ? o->arr[static_cast<unsigned>(i)] : 0;
+                        ? o->arr[static_cast<unsigned>(i)]
+                        : 0;
                     return true;
                 }
                 if (name == "size") {
@@ -1873,6 +2022,7 @@ namespace eka2l1::hle {
                 }
                 if (name == "setCurrent") {
                     g_current = nargs ? args[0] : 0;
+                    g_repaint_pending = true;
                     LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-setCurrent 0x{:X}", g_current);
                     return true;
                 }
@@ -1881,6 +2031,11 @@ namespace eka2l1::hle {
                     return true;
                 }
                 if (name == "callSerially") {
+                    const int target = arg_i(args, nargs, 0);
+                    if (target && (std::find(g_thread_queue.begin(), g_thread_queue.end(), target)
+                            == g_thread_queue.end())) {
+                        g_thread_queue.push_back(target);
+                    }
                     return true;
                 }
                 if (name == "isColor" || name == "numColors") {
@@ -1898,6 +2053,9 @@ namespace eka2l1::hle {
                 }
                 if (name == "repaint" || name == "serviceRepaints" || name == "setFullScreenMode"
                     || name == "setTitle") {
+                    if ((name == "repaint") || (name == "serviceRepaints")) {
+                        g_repaint_pending = true;
+                    }
                     return true;
                 }
                 if (name == "getGraphics") {
@@ -2090,12 +2248,18 @@ namespace eka2l1::hle {
                 }
                 if ((name == "getClipX") || (name == "getClipY") || (name == "getClipWidth")
                     || (name == "getClipHeight") || (name == "getTranslateX") || (name == "getTranslateY")) {
-                    if (name == "getClipX") ret = g->cx;
-                    else if (name == "getClipY") ret = g->cy;
-                    else if (name == "getClipWidth") ret = g->cw;
-                    else if (name == "getClipHeight") ret = g->ch;
-                    else if (name == "getTranslateX") ret = g->tx;
-                    else ret = g->ty;
+                    if (name == "getClipX")
+                        ret = g->cx;
+                    else if (name == "getClipY")
+                        ret = g->cy;
+                    else if (name == "getClipWidth")
+                        ret = g->cw;
+                    else if (name == "getClipHeight")
+                        ret = g->ch;
+                    else if (name == "getTranslateX")
+                        ret = g->tx;
+                    else
+                        ret = g->ty;
                     return true;
                 }
             }
@@ -2213,13 +2377,23 @@ namespace eka2l1::hle {
             return false;
         }
 
-        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref, const std::int32_t *args, int nargs, int depth) {
+        static std::int32_t run_java(cf_class *c, cf_method *m, int this_ref,
+            const std::int32_t *args, int nargs, int depth, host_resume_frame *resume) {
             if (!c || !m || m->code.empty() || (depth > k_max_depth)) {
                 return 0;
             }
             const std::vector<std::uint8_t> &code = m->code;
-            std::vector<std::int32_t> loc(std::max<unsigned>(m->max_locals, 16u), 0);
+            std::vector<std::int32_t> loc;
             std::vector<std::int32_t> st;
+            unsigned pc = 0;
+            if (resume && resume->active && (resume->clazz == c)
+                && (resume->method == m) && (resume->this_ref == this_ref)) {
+                loc = std::move(resume->locals);
+                st = std::move(resume->stack);
+                pc = resume->pc;
+                resume->active = false;
+            } else {
+                loc.assign(std::max<unsigned>(m->max_locals, 16u), 0);
             st.reserve(std::max<unsigned>(m->max_stack, 8u) + 8u);
             int ai = 0;
             unsigned li = 0;
@@ -2231,6 +2405,7 @@ namespace eka2l1::hle {
             while ((ai < nargs) && (li < loc.size())) {
                 loc[li++] = args[ai++];
             }
+            }
             auto push = [&](std::int32_t v) { st.push_back(v); };
             auto pop = [&]() -> std::int32_t {
                 if (st.empty()) {
@@ -2240,7 +2415,26 @@ namespace eka2l1::hle {
                 st.pop_back();
                 return v;
             };
-            unsigned pc = 0;
+            auto push64 = [&](std::int64_t v) {
+                push(static_cast<std::int32_t>(static_cast<std::uint64_t>(v) >> 32));
+                push(static_cast<std::int32_t>(v));
+            };
+            auto pop64 = [&]() -> std::int64_t {
+                const std::uint32_t lo = static_cast<std::uint32_t>(pop());
+                const std::uint64_t hi = static_cast<std::uint32_t>(pop());
+                return static_cast<std::int64_t>((hi << 32) | lo);
+            };
+            auto push_double = [&](double v) {
+                std::uint64_t bits = 0;
+                std::memcpy(&bits, &v, sizeof(bits));
+                push64(static_cast<std::int64_t>(bits));
+            };
+            auto pop_double = [&]() -> double {
+                const std::uint64_t bits = static_cast<std::uint64_t>(pop64());
+                double v = 0.0;
+                std::memcpy(&v, &bits, sizeof(v));
+                return v;
+            };
             int steps = 0;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(g_slice_ms);
             auto u8 = [&](unsigned o) { return (pc + o < code.size()) ? code[pc + o] : 0; };
@@ -2266,18 +2460,33 @@ namespace eka2l1::hle {
                     push(0);
                     pc += 1;
                     break;
-                case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08:
+                case 0x02:
+                case 0x03:
+                case 0x04:
+                case 0x05:
+                case 0x06:
+                case 0x07:
+                case 0x08:
                     push(static_cast<std::int32_t>(op) - 3);
                     pc += 1;
                     break;
                 case 0x09:
-                    push(0);
-                    push(0);
+                    push64(0);
                     pc += 1;
                     break;
                 case 0x0A:
-                    push(0);
-                    push(1);
+                    push64(1);
+                    pc += 1;
+                    break;
+                case 0x0B:
+                case 0x0C:
+                case 0x0D:
+                    push(static_cast<std::int32_t>(op - 0x0B));
+                    pc += 1;
+                    break;
+                case 0x0E:
+                case 0x0F:
+                    push_double(static_cast<double>(op - 0x0E));
                     pc += 1;
                     break;
                 case 0x10:
@@ -2325,39 +2534,56 @@ namespace eka2l1::hle {
                     pc += 3;
                     break;
                 }
-                case 0x15: case 0x17: case 0x19:
+                case 0x15:
+                case 0x17:
+                case 0x19:
                     push((u8(1) < loc.size()) ? loc[u8(1)] : 0);
                     pc += 2;
                     break;
-                case 0x16: case 0x18: {
+                case 0x16:
+                case 0x18: {
                     const unsigned i = u8(1);
                     push((i < loc.size()) ? loc[i] : 0);
                     push(((i + 1) < loc.size()) ? loc[i + 1] : 0);
                     pc += 2;
                     break;
                 }
-                case 0x1A: case 0x1B: case 0x1C: case 0x1D:
+                case 0x1A:
+                case 0x1B:
+                case 0x1C:
+                case 0x1D:
                     push(loc[op - 0x1A]);
                     pc += 1;
                     break;
-                case 0x1E: case 0x1F: case 0x20: case 0x21: {
+                case 0x1E:
+                case 0x1F:
+                case 0x20:
+                case 0x21: {
                     const unsigned i = static_cast<unsigned>(op - 0x1E);
                     push((i < loc.size()) ? loc[i] : 0);
                     push(((i + 1) < loc.size()) ? loc[i + 1] : 0);
                     pc += 1;
                     break;
                 }
-                case 0x2A: case 0x2B: case 0x2C: case 0x2D:
+                case 0x2A:
+                case 0x2B:
+                case 0x2C:
+                case 0x2D:
                     push(loc[op - 0x2A]);
                     pc += 1;
                     break;
-                case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: {
+                case 0x36:
+                case 0x37:
+                case 0x38:
+                case 0x39:
+                case 0x3A: {
                     const unsigned i = u8(1);
-                    if (op == 0x37) {
+                    if ((op == 0x37) || (op == 0x39)) {
                         const std::int32_t lo = pop();
-                        pop();
-                        if (i < loc.size()) {
-                            loc[i] = lo;
+                        const std::int32_t hi = pop();
+                        if ((i + 1) < loc.size()) {
+                            loc[i] = hi;
+                            loc[i + 1] = lo;
                         }
                     } else if (i < loc.size()) {
                         loc[i] = pop();
@@ -2367,19 +2593,48 @@ namespace eka2l1::hle {
                     pc += 2;
                     break;
                 }
-                case 0x3B: case 0x3C: case 0x3D: case 0x3E:
+                case 0x3B:
+                case 0x3C:
+                case 0x3D:
+                case 0x3E:
                     loc[op - 0x3B] = pop();
                     pc += 1;
                     break;
-                case 0x4B: case 0x4C: case 0x4D: case 0x4E:
+                case 0x3F:
+                case 0x40:
+                case 0x41:
+                case 0x42:
+                case 0x47:
+                case 0x48:
+                case 0x49:
+                case 0x4A: {
+                    const unsigned i = (op >= 0x47) ? (op - 0x47) : (op - 0x3F);
+                    const std::int32_t lo = pop();
+                    const std::int32_t hi = pop();
+                    if ((i + 1) < loc.size()) {
+                        loc[i] = hi;
+                        loc[i + 1] = lo;
+                    }
+                    pc += 1;
+                    break;
+                }
+                case 0x4B:
+                case 0x4C:
+                case 0x4D:
+                case 0x4E:
                     loc[op - 0x4B] = pop();
                     pc += 1;
                     break;
-                case 0x2E: case 0x32: case 0x33: case 0x34: case 0x35: {
+                case 0x2E:
+                case 0x32:
+                case 0x33:
+                case 0x34:
+                case 0x35: {
                     const int idx = pop();
                     host_obj *a = obj(pop());
                     std::int32_t v = (a && (idx >= 0) && (static_cast<unsigned>(idx) < a->arr.size()))
-                        ? a->arr[static_cast<unsigned>(idx)] : 0;
+                        ? a->arr[static_cast<unsigned>(idx)]
+                        : 0;
                     if (op == 0x33) {
                         v = static_cast<std::int8_t>(v & 255);
                     } else if (op == 0x34) {
@@ -2391,12 +2646,47 @@ namespace eka2l1::hle {
                     pc += 1;
                     break;
                 }
-                case 0x4F: case 0x53: case 0x54: case 0x55: case 0x56: {
+                case 0x2F:
+                case 0x31: {
+                    const int idx = pop();
+                    host_obj *a = obj(pop());
+                    std::int64_t v = 0;
+                    if (a && (idx >= 0)) {
+                        const unsigned at = static_cast<unsigned>(idx) * 2u;
+                        if ((at + 1u) < a->arr.size()) {
+                            v = (static_cast<std::int64_t>(a->arr[at]) << 32)
+                                | static_cast<std::uint32_t>(a->arr[at + 1u]);
+                        }
+                    }
+                    push64(v);
+                    pc += 1;
+                    break;
+                }
+                case 0x4F:
+                case 0x53:
+                case 0x54:
+                case 0x55:
+                case 0x56: {
                     const int v = pop();
                     const int idx = pop();
                     host_obj *a = obj(pop());
                     if (a && (idx >= 0) && (static_cast<unsigned>(idx) < a->arr.size())) {
                         a->arr[static_cast<unsigned>(idx)] = v;
+                    }
+                    pc += 1;
+                    break;
+                }
+                case 0x50:
+                case 0x52: {
+                    const std::int64_t v = pop64();
+                    const int idx = pop();
+                    host_obj *a = obj(pop());
+                    if (a && (idx >= 0)) {
+                        const unsigned at = static_cast<unsigned>(idx) * 2u;
+                        if ((at + 1u) < a->arr.size()) {
+                            a->arr[at] = static_cast<std::int32_t>(v >> 32);
+                            a->arr[at + 1u] = static_cast<std::int32_t>(v);
+                        }
                     }
                     pc += 1;
                     break;
@@ -2466,10 +2756,33 @@ namespace eka2l1::hle {
                     pc += 1;
                     break;
                 }
-                case 0x60: case 0x64: {
+                case 0x60:
+                case 0x64: {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
                     push((op == 0x60) ? (a + b) : (a - b));
+                    pc += 1;
+                    break;
+                }
+                case 0x61:
+                case 0x65:
+                case 0x69:
+                case 0x6D:
+                case 0x71: {
+                    const std::int64_t b = pop64();
+                    const std::int64_t a = pop64();
+                    std::int64_t v = 0;
+                    if (op == 0x61)
+                        v = a + b;
+                    else if (op == 0x65)
+                        v = a - b;
+                    else if (op == 0x69)
+                        v = a * b;
+                    else if (op == 0x6D)
+                        v = b ? (a / b) : 0;
+                    else
+                        v = b ? (a % b) : 0;
+                    push64(v);
                     pc += 1;
                     break;
                 }
@@ -2480,7 +2793,15 @@ namespace eka2l1::hle {
                     pc += 1;
                     break;
                 }
-                case 0x6C: case 0x70: {
+                case 0x6B: {
+                    const double b = pop_double();
+                    const double a = pop_double();
+                    push_double(a * b);
+                    pc += 1;
+                    break;
+                }
+                case 0x6C:
+                case 0x70: {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
                     push(b ? ((op == 0x6C) ? (a / b) : (a % b)) : 0);
@@ -2491,21 +2812,64 @@ namespace eka2l1::hle {
                     push(-pop());
                     pc += 1;
                     break;
-                case 0x78: case 0x7A: case 0x7C: {
+                case 0x75:
+                    push64(-pop64());
+                    pc += 1;
+                    break;
+                case 0x78:
+                case 0x7A:
+                case 0x7C: {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
-                    if (op == 0x78) push(a << (b & 31));
-                    else if (op == 0x7A) push(a >> (b & 31));
-                    else push(static_cast<std::int32_t>(static_cast<std::uint32_t>(a) >> (b & 31)));
+                    if (op == 0x78)
+                        push(a << (b & 31));
+                    else if (op == 0x7A)
+                        push(a >> (b & 31));
+                    else
+                        push(static_cast<std::int32_t>(static_cast<std::uint32_t>(a) >> (b & 31)));
                     pc += 1;
                     break;
                 }
-                case 0x7E: case 0x80: case 0x82: {
+                case 0x79:
+                case 0x7B:
+                case 0x7D: {
+                    const std::int32_t b = pop();
+                    const std::int64_t a = pop64();
+                    if (op == 0x79)
+                        push64(a << (b & 63));
+                    else if (op == 0x7B)
+                        push64(a >> (b & 63));
+                    else
+                        push64(static_cast<std::int64_t>(
+                            static_cast<std::uint64_t>(a) >> (b & 63)));
+                    pc += 1;
+                    break;
+                }
+                case 0x7E:
+                case 0x80:
+                case 0x82: {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
-                    if (op == 0x7E) push(a & b);
-                    else if (op == 0x80) push(a | b);
-                    else push(a ^ b);
+                    if (op == 0x7E)
+                        push(a & b);
+                    else if (op == 0x80)
+                        push(a | b);
+                    else
+                        push(a ^ b);
+                    pc += 1;
+                    break;
+                }
+                case 0x7F:
+                case 0x81:
+                case 0x83: {
+                    const std::int64_t b = pop64();
+                    const std::int64_t a = pop64();
+                    if (op == 0x7F)
+                        push64(a & b);
+                    else if (op == 0x81)
+                        push64(a | b);
+                    else
+                        push64(a ^ b);
                     pc += 1;
                     break;
                 }
@@ -2524,13 +2888,19 @@ namespace eka2l1::hle {
                     pc += 1;
                     break;
                 }
+                case 0x87:
+                    push_double(static_cast<double>(pop()));
+                    pc += 1;
+                    break;
                 case 0x88: {
-                    const std::int32_t lo = pop();
-                    pop();
-                    push(lo);
+                    push(static_cast<std::int32_t>(pop64()));
                     pc += 1;
                     break;
                 }
+                case 0x8E:
+                    push(static_cast<std::int32_t>(pop_double()));
+                    pc += 1;
+                    break;
                 case 0x91:
                     push(static_cast<std::int8_t>(pop() & 255));
                     pc += 1;
@@ -2543,37 +2913,77 @@ namespace eka2l1::hle {
                     push(static_cast<std::int16_t>(pop() & 0xffff));
                     pc += 1;
                     break;
-                case 0x94: case 0x95: case 0x96: case 0x97: case 0x98: {
+                case 0x94:
+                case 0x95:
+                case 0x96:
+                case 0x97:
+                case 0x98: {
+                    if (op == 0x94) {
+                        const std::int64_t b = pop64();
+                        const std::int64_t a = pop64();
+                        push((a < b) ? -1 : ((a == b) ? 0 : 1));
+                    } else if ((op == 0x97) || (op == 0x98)) {
+                        const double b = pop_double();
+                        const double a = pop_double();
+                        push((a < b) ? -1 : ((a == b) ? 0 : 1));
+                    } else {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
                     push((a < b) ? -1 : ((a == b) ? 0 : 1));
+                    }
                     pc += 1;
                     break;
                 }
-                case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: {
+                case 0x99:
+                case 0x9A:
+                case 0x9B:
+                case 0x9C:
+                case 0x9D:
+                case 0x9E: {
                     const std::int32_t v = pop();
                     bool t = false;
-                    if (op == 0x99) t = (v == 0);
-                    else if (op == 0x9A) t = (v != 0);
-                    else if (op == 0x9B) t = (v < 0);
-                    else if (op == 0x9C) t = (v >= 0);
-                    else if (op == 0x9D) t = (v > 0);
-                    else t = (v <= 0);
+                    if (op == 0x99)
+                        t = (v == 0);
+                    else if (op == 0x9A)
+                        t = (v != 0);
+                    else if (op == 0x9B)
+                        t = (v < 0);
+                    else if (op == 0x9C)
+                        t = (v >= 0);
+                    else if (op == 0x9D)
+                        t = (v > 0);
+                    else
+                        t = (v <= 0);
                     pc = t ? static_cast<unsigned>(static_cast<int>(pc) + i16(1)) : (pc + 3);
                     break;
                 }
-                case 0x9F: case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: {
+                case 0x9F:
+                case 0xA0:
+                case 0xA1:
+                case 0xA2:
+                case 0xA3:
+                case 0xA4:
+                case 0xA5:
+                case 0xA6: {
                     const std::int32_t b = pop();
                     const std::int32_t a = pop();
                     bool t = false;
-                    if (op == 0x9F) t = (a == b);
-                    else if (op == 0xA0) t = (a != b);
-                    else if (op == 0xA1) t = (a < b);
-                    else if (op == 0xA2) t = (a >= b);
-                    else if (op == 0xA3) t = (a > b);
-                    else if (op == 0xA4) t = (a <= b);
-                    else if (op == 0xA5) t = (a == b);
-                    else t = (a != b);
+                    if (op == 0x9F)
+                        t = (a == b);
+                    else if (op == 0xA0)
+                        t = (a != b);
+                    else if (op == 0xA1)
+                        t = (a < b);
+                    else if (op == 0xA2)
+                        t = (a >= b);
+                    else if (op == 0xA3)
+                        t = (a > b);
+                    else if (op == 0xA4)
+                        t = (a <= b);
+                    else if (op == 0xA5)
+                        t = (a == b);
+                    else
+                        t = (a != b);
                     pc = t ? static_cast<unsigned>(static_cast<int>(pc) + i16(1)) : (pc + 3);
                     break;
                 }
@@ -2618,15 +3028,38 @@ namespace eka2l1::hle {
                     pc = static_cast<unsigned>(static_cast<int>(origin) + off);
                     break;
                 }
-                case 0xAC: case 0xB0:
+                case 0xAC:
+                case 0xB0:
+                    if (resume) {
+                        resume->active = false;
+                    }
                     return pop();
+                case 0xAD:
+                case 0xAF: {
+                    const std::int64_t rv = pop64();
+                    if (resume) {
+                        resume->active = false;
+                    }
+                    return static_cast<std::int32_t>(rv);
+                }
                 case 0xB1:
+                    if (resume) {
+                        resume->active = false;
+                    }
                     return 0;
-                case 0xB2: case 0xB3: {
+                case 0xB2:
+                case 0xB3: {
                     std::string cls, name, sig;
                     cp_method(c, u16(1), cls, name, sig);
                     cf_class *oc = load_class(g_pr, cls);
+                    const bool wide = (sig.find('J') != std::string::npos)
+                        || (sig.find('D') != std::string::npos);
                     if (op == 0xB2) {
+                        if (wide) {
+                            push64(oc ? oc->statics64[name] : 0);
+                            pc += 3;
+                            break;
+                        }
                         std::int32_t v = 0;
                         if (oc) {
                             auto it = oc->statics.find(name);
@@ -2635,6 +3068,12 @@ namespace eka2l1::hle {
                             }
                         }
                         push(v);
+                    } else if (wide) {
+                        if (oc) {
+                            oc->statics64[name] = pop64();
+                        } else {
+                            pop64();
+                        }
                     } else {
                         const std::int32_t v = pop();
                         if (oc) {
@@ -2644,15 +3083,27 @@ namespace eka2l1::hle {
                     pc += 3;
                     break;
                 }
-                case 0xB4: case 0xB5: {
+                case 0xB4:
+                case 0xB5: {
                     std::string cls, name, sig;
                     cp_method(c, u16(1), cls, name, sig);
-                    if (op == 0xB5) {
+                    const bool wide = (sig.find('J') != std::string::npos)
+                        || (sig.find('D') != std::string::npos);
+                    if ((op == 0xB5) && wide) {
+                        const std::int64_t v = pop64();
+                        host_obj *o = obj(pop());
+                        if (o) {
+                            o->fields64[name] = v;
+                        }
+                    } else if (op == 0xB5) {
                         const std::int32_t v = pop();
                         host_obj *o = obj(pop());
                         if (o) {
                             o->fields[name] = v;
                         }
+                    } else if (wide) {
+                        host_obj *o = obj(pop());
+                        push64(o ? o->fields64[name] : 0);
                     } else {
                         host_obj *o = obj(pop());
                         push(o ? o->fields[name] : 0);
@@ -2660,7 +3111,10 @@ namespace eka2l1::hle {
                     pc += 3;
                     break;
                 }
-                case 0xB6: case 0xB7: case 0xB8: case 0xB9: {
+                case 0xB6:
+                case 0xB7:
+                case 0xB8:
+                case 0xB9: {
                     std::string cls, name, sig;
                     cp_method(c, u16(1), cls, name, sig);
                     const int n = argc_of(sig);
@@ -2691,7 +3145,15 @@ namespace eka2l1::hle {
                         }
                     }
                     if (!is_void(sig)) {
+                        const auto rp = sig.rfind(')');
+                        const char rt = ((rp != std::string::npos) && (rp + 1 < sig.size()))
+                            ? sig[rp + 1]
+                            : 'I';
+                        if ((rt == 'J') || (rt == 'D')) {
+                            push64(static_cast<std::int64_t>(rv));
+                        } else {
                         push(rv);
+                        }
                     }
                     pc += (op == 0xB9) ? 5 : 3;
                     break;
@@ -2715,7 +3177,11 @@ namespace eka2l1::hle {
                 case 0xBC: {
                     const int n = pop();
                     const int r = alloc_obj(k_obj_array);
-                    obj(r)->arr.assign(static_cast<unsigned>(std::max(n, 0)), 0);
+                    const bool is_long = (u8(1) == 7) || (u8(1) == 11);
+                    obj(r)->arr_is_long = is_long ? 1 : 0;
+                    obj(r)->arr.assign(static_cast<unsigned>(std::max(n, 0))
+                            * (is_long ? 2u : 1u),
+                        0);
                     push(r);
                     pc += 2;
                     break;
@@ -2731,20 +3197,24 @@ namespace eka2l1::hle {
                 }
                 case 0xBE: {
                     host_obj *a = obj(pop());
-                    push(a ? static_cast<std::int32_t>(a->arr.size()) : 0);
+                    push(a ? static_cast<std::int32_t>(a->arr.size()
+                                 / (a->arr_is_long ? 2u : 1u))
+                           : 0);
                     pc += 1;
                     break;
                 }
                 case 0xBF:
                     LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-athrow in {}", c->name);
                     return 0;
-                case 0xC0: case 0xC1:
+                case 0xC0:
+                case 0xC1:
                     if (op == 0xC1) {
                         push(pop() ? 1 : 0);
                     }
                     pc += 3;
                     break;
-                case 0xC2: case 0xC3:
+                case 0xC2:
+                case 0xC3:
                     if (op == 0xC2) {
                         pop();
                     } else {
@@ -2752,6 +3222,41 @@ namespace eka2l1::hle {
                     }
                     pc += 1;
                     break;
+                case 0xC4: {
+                    const std::uint8_t sub = u8(1);
+                    const unsigned i = u16(2);
+                    if (sub == 0x84) {
+                        const std::int16_t add = static_cast<std::int16_t>(u16(4));
+                        if (i < loc.size()) {
+                            loc[i] += add;
+                        }
+                        pc += 6;
+                    } else if ((sub == 0x15) || (sub == 0x17) || (sub == 0x19)) {
+                        push((i < loc.size()) ? loc[i] : 0);
+                        pc += 4;
+                    } else if ((sub == 0x16) || (sub == 0x18)) {
+                        push((i < loc.size()) ? loc[i] : 0);
+                        push(((i + 1) < loc.size()) ? loc[i + 1] : 0);
+                        pc += 4;
+                    } else if ((sub == 0x36) || (sub == 0x38) || (sub == 0x3A)) {
+                        if (i < loc.size())
+                            loc[i] = pop();
+                        else
+                            pop();
+                        pc += 4;
+                    } else if ((sub == 0x37) || (sub == 0x39)) {
+                        const std::int32_t lo = pop();
+                        const std::int32_t hi = pop();
+                        if ((i + 1) < loc.size()) {
+                            loc[i] = hi;
+                            loc[i + 1] = lo;
+                        }
+                        pc += 4;
+                    } else {
+                        pc += 4;
+                    }
+                    break;
+                }
                 case 0xC5: {
                     const unsigned dims = u8(3);
                     std::vector<int> ds(dims);
@@ -2762,7 +3267,8 @@ namespace eka2l1::hle {
                     pc += 4;
                     break;
                 }
-                case 0xC6: case 0xC7: {
+                case 0xC6:
+                case 0xC7: {
                     const std::int32_t v = pop();
                     const bool t = (op == 0xC6) ? (v == 0) : (v != 0);
                     pc = t ? static_cast<unsigned>(static_cast<int>(pc) + i16(1)) : (pc + 3);
@@ -2780,6 +3286,19 @@ namespace eka2l1::hle {
             }
             if (steps >= g_slice_steps) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-step-limit {} pc={} stack={}", c->name, pc, st.size());
+            }
+            if (resume && (pc < code.size())) {
+                const std::int32_t last = st.empty() ? 0 : st.back();
+                resume->clazz = c;
+                resume->method = m;
+                resume->this_ref = this_ref;
+                resume->pc = pc;
+                resume->locals = std::move(loc);
+                resume->stack = std::move(st);
+                resume->active = true;
+                return last;
+            } else if (resume) {
+                resume->active = false;
             }
             return st.empty() ? 0 : st.back();
         }
@@ -2815,6 +3334,7 @@ namespace eka2l1::hle {
             }
             if (m) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-paint {}", cur->clazz->name);
+                g_repaint_pending = false;
                 run_java(cur->clazz, m, g_current, &arg, 1, 0);
             } else {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] host-paint-miss {}", cur->clazz->name);
@@ -2846,16 +3366,41 @@ namespace eka2l1::hle {
                 cur->fields["g"] = g;
             }
             if (cf_method *ms = find_method(cur->clazz, "MAIN_STATE", "()V")) {
-                run_java(cur->clazz, ms, g_current, nullptr, 0, 0);
+                run_java(cur->clazz, ms, g_current, nullptr, 0, 0, &g_main_frame);
             }
             if (!g_thread_queue.empty()) {
-                const int target = g_thread_queue.front();
+                if (g_thread_cursor >= g_thread_queue.size()) {
+                    g_thread_cursor = 0;
+                }
+                const int target = g_thread_queue[g_thread_cursor++];
                 host_obj *to = obj(target);
                 cf_class *tc = to ? to->clazz : nullptr;
                 if (tc) {
                     if (cf_method *run = find_method(tc, "run", "()V")) {
-                        run_java(tc, run, target, nullptr, 0, 0);
+                        run_java(tc, run, target, nullptr, 0, 0,
+                            &g_thread_frames[target]);
                     }
+                }
+            }
+            if (g_repaint_pending || g_paint_frame.active) {
+                cf_method *paint = find_method(cur->clazz, "paint",
+                    "(Ljavax/microedition/lcdui/Graphics;)V");
+                const int graphics = cur->fields["g"];
+                if (paint && graphics) {
+                    std::int32_t arg = graphics;
+                    if (g_repaint_pending) {
+                        g_paint_frame = {};
+                        g_repaint_pending = false;
+                    }
+                    static int repaint_notes = 0;
+                    if (repaint_notes < 12) {
+                        ++repaint_notes;
+                        LOG_WARN(EMULATED_STDOUT,
+                            "[j9-nf] host-repaint {} graphics={} resume={}",
+                            cur->clazz->name, graphics, g_paint_frame.active ? 1 : 0);
+                    }
+                    run_java(cur->clazz, paint, g_current, &arg, 1, 0,
+                        &g_paint_frame);
                 }
             }
             present();
@@ -2863,16 +3408,28 @@ namespace eka2l1::hle {
 
         static int map_scancode(int scancode) {
             switch (scancode) {
-            case 0x10: return -1;  // up
-            case 0x11: return -2;  // down
-            case 0x0e: return -3;  // left
-            case 0x0f: return -4;  // right
-            case 0xa7: case 0xc4: return -5; // fire / call
-            case 0xa4: return -6;  // left soft
-            case 0xa5: case 0xc5: return -7; // right soft / end
-            case 0x85: return 42;  // star
-            case 0x7f: return 35;  // hash
-            case 0x01: return 8;   // clear as fire-alt
+            case 0x10:
+                return -1; // up
+            case 0x11:
+                return -2; // down
+            case 0x0e:
+                return -3; // left
+            case 0x0f:
+                return -4; // right
+            case 0xa7:
+            case 0xc4:
+                return -5; // fire / call
+            case 0xa4:
+                return -6; // left soft
+            case 0xa5:
+            case 0xc5:
+                return -7; // right soft / end
+            case 0x85:
+                return 42; // star
+            case 0x7f:
+                return 35; // hash
+            case 0x01:
+                return 8; // clear as fire-alt
             default:
                 if ((scancode >= 0x30) && (scancode <= 0x39)) {
                     return scancode;
@@ -2902,9 +3459,14 @@ namespace eka2l1::hle {
         g_fb = 0;
         g_font = 0;
         g_event_ready = false;
+        g_repaint_pending = false;
         g_pr = nullptr;
         g_glyphs.clear();
         g_thread_queue.clear();
+        g_thread_cursor = 0;
+        g_main_frame = {};
+        g_paint_frame = {};
+        g_thread_frames.clear();
         g_attach_started = false;
     }
 
@@ -2925,6 +3487,24 @@ namespace eka2l1::hle {
         }
         g_attach_tries = 0;
         g_attach_started = false;
+        // A run page can launch another MIDlet without destroying the module.
+        // Never let the new suite inherit cached classes, objects or a paused
+        // interpreter frame from the old C:\\j.jar.
+        g_classes.clear();
+        g_objs.clear();
+        g_intern.clear();
+        g_display = 0;
+        g_current = 0;
+        g_fb = 0;
+        g_font = 0;
+        g_event_ready = false;
+        g_repaint_pending = false;
+        g_pr = nullptr;
+        g_thread_queue.clear();
+        g_thread_cursor = 0;
+        g_main_frame = {};
+        g_paint_frame = {};
+        g_thread_frames.clear();
         g_jar.clear();
         g_jar_tried = false;
         LOG_WARN(EMULATED_STDOUT, "[j9-nf] pending-midlet '{}'", g_pending_midlet_class);
@@ -2971,11 +3551,61 @@ namespace eka2l1::hle {
     }
 
     bool j9_host_try_attach(kernel_system *kern) {
-        // Guest J9 owns LCDUI. Attaching here used to sleep j9midps60
-        // and publish a host-side Windowserver client that is not a
-        // CreateSession from the VM.
-        (void)kern;
+        if (!kern || g_pending_midlet_class.empty() || g_current || g_attach_started) {
+            return g_current != 0;
+        }
+        // Startup on the 5320 ROM can take several seconds.  Keep this probe
+        // cheap and bounded, but do not give up after only a handful of RAFs.
+        if (++g_attach_tries > 3600) {
         return false;
+        }
+        kernel::process *j9 = nullptr;
+        for (auto &raw : kern->get_process_list()) {
+            auto *pr = reinterpret_cast<kernel::process *>(raw.get());
+            if (!pr || (pr->get_exit_type() != kernel::entity_exit_type::pending)) {
+                continue;
+            }
+            std::string name = pr->raw_name();
+            std::transform(name.begin(), name.end(), name.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.find("j9midps60") != std::string::npos) {
+                j9 = pr;
+                break;
+            }
+        }
+        if (!j9) {
+            return false;
+        }
+
+        // Do not expose a black host surface while C:\\j.jar is still being
+        // staged.  Proving the main class is readable also avoids hiding the
+        // loading overlay on a failed launch.
+        std::vector<std::uint8_t> main_bytes;
+        g_jar_tried = false;
+        g_jar.clear();
+        if (!j9_host_read_suite_class(j9, g_pending_midlet_class.c_str(), main_bytes)) {
+            if ((g_attach_tries % 120) == 0) {
+                LOG_WARN(EMULATED_STDOUT,
+                    "[j9-nf] host-attach waiting class='{}' process={}",
+                    g_pending_midlet_class, j9->name());
+            }
+            return false;
+        }
+
+        kernel::thread *thr = j9->get_primary_thread();
+        if (!thr || !j9_bind_windowserver(j9, thr)) {
+            return false;
+        }
+        g_attach_started = true;
+        const bool ok = j9_host_run_midlet(j9, g_pending_midlet_class.c_str());
+        if (!ok) {
+            g_attach_started = false;
+            return false;
+        }
+        LOG_WARN(EMULATED_STDOUT,
+            "[j9-nf] host-attach started class='{}' process={} bytes={}",
+            g_pending_midlet_class, j9->name(), main_bytes.size());
+        return true;
     }
 
     void j9_host_tick_midp() {
@@ -3043,8 +3673,7 @@ namespace eka2l1::hle {
         if (!g_current) {
             for (std::size_t i = 0; i < g_objs.size(); ++i) {
                 host_obj *o = g_objs[i].get();
-                if (o && o->clazz && (o->clazz->super.find("Canvas") != std::string::npos
-                        || find_method(o->clazz, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"))) {
+                if (o && o->clazz && (o->clazz->super.find("Canvas") != std::string::npos || find_method(o->clazz, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"))) {
                     g_current = static_cast<int>(i + 1);
                     break;
                 }
