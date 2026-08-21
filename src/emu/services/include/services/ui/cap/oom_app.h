@@ -155,6 +155,7 @@ namespace eka2l1 {
     class oom_ui_app_session : public service::typical_session {
         std::int32_t blank_count;
         bool old_layout;
+        bool system_faded;
 
     public:
         explicit oom_ui_app_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_version, const bool is_old_layout = false);

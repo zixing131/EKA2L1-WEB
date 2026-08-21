@@ -444,10 +444,22 @@ namespace eka2l1::epoc {
                 drivers::channel_swizzle::blue, drivers::channel_swizzle::red);
         }
 
+        // BitBlt/DrawBitmap samples a finite Symbian bitmap; it must never
+        // wrap to the opposite edge.  The graphics backend defaults to
+        // repeat addressing, which turns the last row/column of adjacent skin
+        // panes into a one-pixel black seam when their texture reaches UV 1.0.
+        builder_.set_texture_addressing_mode(source_bitmap_drv,
+            drivers::addressing_direction::s, drivers::addressing_option::clamp_to_edge);
+        builder_.set_texture_addressing_mode(source_bitmap_drv,
+            drivers::addressing_direction::t, drivers::addressing_option::clamp_to_edge);
         builder_.set_texture_filter(source_bitmap_drv, false, texture_filter_);
         builder_.set_texture_filter(source_bitmap_drv, true, texture_filter_);
 
         if (mask_bitmap_drv) {
+            builder_.set_texture_addressing_mode(mask_bitmap_drv,
+                drivers::addressing_direction::s, drivers::addressing_option::clamp_to_edge);
+            builder_.set_texture_addressing_mode(mask_bitmap_drv,
+                drivers::addressing_direction::t, drivers::addressing_option::clamp_to_edge);
             builder_.set_texture_filter(mask_bitmap_drv, false, texture_filter_);
             builder_.set_texture_filter(mask_bitmap_drv, true, texture_filter_);
         }

@@ -324,13 +324,21 @@ namespace eka2l1 {
         }
 
         void scale(const float factor) {
-            size *= factor;
+            // Scale both endpoints, then derive the size. Scaling top and size
+            // independently loses a pixel whenever their fractional parts
+            // round in opposite directions. Adjacent Symbian panes then leave
+            // black seams after WindowServer's native-resolution upscale.
+            vec2 bottom = top + size;
             top *= factor;
+            bottom *= factor;
+            size = bottom - top;
         }
 
         void scale(const eka2l1::vec2f &factor) {
-            size *= factor;
+            vec2 bottom = top + size;
             top *= factor;
+            bottom *= factor;
+            size = bottom - top;
         }
 
         /**

@@ -195,6 +195,13 @@ namespace eka2l1 {
                 create_accessory_single_connection_subsession(ctx);
                 return;
 
+            case epoc::acc::opcode_s60v3_set_value_bool:
+                // The emulator has no physical accessory state to update.
+                // Accept the setting so Phone settings can continue without
+                // treating the absent accessory hardware as a fatal error.
+                ctx->complete(epoc::error_none);
+                return;
+
             default:
                 break;
             }

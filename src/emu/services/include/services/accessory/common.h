@@ -36,7 +36,10 @@ namespace eka2l1::epoc::acc {
         opcode_s60v3_create_accessory_connection_subsession = 7,
         opcode_s60v3_get_accessory_connection_status = 9,
         opcode_s60v3_notify_new_accessory_connected = 11,
-        opcode_s60v3_cancel_notify_new_accessory_connected = 12
+        opcode_s60v3_cancel_notify_new_accessory_connected = 12,
+        // Seen from the 5320 FP2 Phone settings accessory view. This aligns
+        // with EAccSrvSetValueTBool in the published Accessory Server enum.
+        opcode_s60v3_set_value_bool = 0x25
     };
 
     enum opcode_modern {

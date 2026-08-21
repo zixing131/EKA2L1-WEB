@@ -157,6 +157,14 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void etel_phone_subsession::get_nitz_info(eka2l1::service::ipc_context *ctx) {
+        // No modem/network clock is attached to the emulator.  KErrNotFound
+        // is one of the documented GetNITZInfo results and lets the clock
+        // model fall back to the system time instead of blocking forever.
+        LOG_TRACE(SERVICE_ETEL, "Get NITZ info: no network time available");
+        ctx->complete(epoc::error_not_found);
+    }
+
     static const std::u16string EXAMPLE_VALID_IMI_CODE = u"540806859904945";
     static const std::u16string EXAMPLE_VALID_REVISION = u"1.0.0";
 
@@ -206,7 +214,10 @@ namespace eka2l1 {
     void etel_phone_subsession::get_current_network(eka2l1::service::ipc_context *ctx) {
         LOG_TRACE(SERVICE_ETEL, "Get current network hardcoded");
         std::optional<epoc::etel_phone_network_info> network_info = ctx->get_argument_data_from_descriptor<epoc::etel_phone_network_info>(0);
-        epoc::etel_phone_location_area *phone_location_area = reinterpret_cast<epoc::etel_phone_location_area *>(ctx->get_descriptor_argument_ptr(2));
+        if (!network_info.has_value()) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
 
         network_info->mode_ = phone_->network_info_.mode_;
         network_info->status_ = phone_->network_info_.status_;
@@ -305,6 +316,24 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void etel_phone_subsession::notify_nitz_info_change(eka2l1::service::ipc_context *ctx) {
+        nitz_info_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+    }
+
+    void etel_phone_subsession::notify_nitz_info_change_cancel(eka2l1::service::ipc_context *ctx) {
+        nitz_info_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
+    void etel_phone_subsession::notify_current_network_no_location_change(eka2l1::service::ipc_context *ctx) {
+        current_network_no_location_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+    }
+
+    void etel_phone_subsession::notify_current_network_no_location_change_cancel(eka2l1::service::ipc_context *ctx) {
+        current_network_no_location_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
     void etel_phone_subsession::dispatch(service::ipc_context *ctx) {
         if (legacy_level_ == ETEL_LEGACY_LEVEL_LEGACY) {
             switch (ctx->msg->function) {
@@ -334,6 +363,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else if (legacy_level_ == ETEL_LEGACY_LEVEL_TRANSITION) {
@@ -368,6 +398,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else {
@@ -440,6 +471,10 @@ namespace eka2l1 {
                 get_home_network(ctx);
                 break;
 
+            case epoc::etel_mobile_phone_get_nitz_info:
+                get_nitz_info(ctx);
+                break;
+
             case epoc::etel_mobile_phone_get_subscriber_id:
                 get_subscriber_id(ctx);
                 break;
@@ -449,7 +484,24 @@ namespace eka2l1 {
                 break;
 
             case epoc::etel_mobile_phone_get_current_network:
+            case epoc::etel_mobile_phone_get_current_network_no_location:
                 get_current_network(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_nitz_info_change:
+                notify_nitz_info_change(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_nitz_info_change_cancel:
+                notify_nitz_info_change_cancel(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_current_network_no_location_change:
+                notify_current_network_no_location_change(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_notify_current_network_no_location_change_cancel:
+                notify_current_network_no_location_change_cancel(ctx);
                 break;
 
             case epoc::etel_mobile_phone_notify_current_network_change:
@@ -486,6 +538,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         }

@@ -684,6 +684,12 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
             : eka2l1::drivers::filter_option::linear;
         builder.set_texture_filter(scr->screen_texture, true, screen_filter);
         builder.set_texture_filter(scr->screen_texture, false, screen_filter);
+        builder.set_texture_addressing_mode(scr->screen_texture,
+            eka2l1::drivers::addressing_direction::s,
+            eka2l1::drivers::addressing_option::clamp_to_edge);
+        builder.set_texture_addressing_mode(scr->screen_texture,
+            eka2l1::drivers::addressing_direction::t,
+            eka2l1::drivers::addressing_option::clamp_to_edge);
         builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
             static_cast<float>(scr->ui_rotation), 0);
     }

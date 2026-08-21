@@ -62,7 +62,8 @@ namespace eka2l1 {
     oom_ui_app_session::oom_ui_app_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_version, const bool is_old_layout)
         : service::typical_session(svr, client_ss_uid, client_version)
         , blank_count(0)
-        , old_layout(is_old_layout) {
+        , old_layout(is_old_layout)
+        , system_faded(false) {
     }
 
     void oom_ui_app_session::redraw_status_pane(service::ipc_context *ctx) {
@@ -130,6 +131,18 @@ namespace eka2l1 {
             redraw_status_pane(ctx);
             break;
         }
+
+        case akn_eik_app_ui_set_system_faded: {
+            const std::optional<std::int32_t> faded = ctx->get_argument_value<std::int32_t>(0);
+            system_faded = faded.value_or(0) != 0;
+            ctx->complete(epoc::error_none);
+            break;
+        }
+
+        case akn_eik_app_ui_is_system_faded:
+            ctx->write_arg(0, system_faded ? 1 : 0);
+            ctx->complete(epoc::error_none);
+            break;
 
         case akns_update_key_block_mode:
             server<oom_ui_app_server>()->update_key_block_mode(*ctx);

@@ -433,6 +433,7 @@ namespace eka2l1 {
                 }
 
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented ETel server opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else {
@@ -473,6 +474,14 @@ namespace eka2l1 {
                 query_tsy_functionality(ctx);
                 break;
 
+            case epoc::etel_set_extended_error_granularity:
+                // This only selects whether later ETel errors are returned as
+                // basic or extended codes.  The emulator currently exposes
+                // basic errors, but the synchronous request must still finish
+                // or the application's UI thread remains blocked forever.
+                ctx->complete(epoc::error_none);
+                break;
+
             case epoc::etel_line_enumerate_call:
                 line_enumerate_call(ctx);
                 break;
@@ -488,6 +497,7 @@ namespace eka2l1 {
                 }
 
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented ETel server opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         }

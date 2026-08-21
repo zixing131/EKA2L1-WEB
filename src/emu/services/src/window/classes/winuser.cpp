@@ -1661,6 +1661,10 @@ namespace eka2l1::epoc {
 
         builder.set_texture_filter(driver_win_id, false, filter);
         builder.set_texture_filter(driver_win_id, true, filter);
+        builder.set_texture_addressing_mode(driver_win_id,
+            drivers::addressing_direction::s, drivers::addressing_option::clamp_to_edge);
+        builder.set_texture_addressing_mode(driver_win_id,
+            drivers::addressing_direction::t, drivers::addressing_option::clamp_to_edge);
         builder.draw_bitmap(driver_win_id, 0, draw_dest_rect, eka2l1::rect({ 0, 0 }, { 0, 0 }), eka2l1::vec2(0, 0), 0.0f, 0);
 
         return true;
