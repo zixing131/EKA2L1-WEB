@@ -66,6 +66,13 @@
     // saved devices, even when both pages share an origin. Mount only MEMFS.
     const factory = window.createEKA2L1Module;
     window.createEKA2L1Module = async options => {
+        // The regression page is routinely rebuilt while its local server is
+        // running. Give its WASM fetch a one-run URL so a previously installed
+        // service worker cannot pair fresh JS glue with a stale binary.
+        const originalLocateFile = options.locateFile;
+        options = { ...options, locateFile: (path, prefix) => path === 'eka2l1.wasm'
+            ? path + '?regression=' + Date.now()
+            : (originalLocateFile ? originalLocateFile(path, prefix) : prefix + path) };
         const mod = await factory(options);
         const mount = mod.FS.mount;
         mod.FS.mount = (type, settings, mountpoint) => mount(
