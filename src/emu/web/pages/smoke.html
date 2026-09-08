@@ -17,7 +17,7 @@
 <label>测试游戏（可选 SIS / SISX）<input id="package" type="file" accept=".sis,.sisx"></label>
 <button id="diagnose" disabled>诊断状态</button>
 <label>画面方向<select id="rotation" disabled><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
-<div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><label>帧率上限<select id="max-fps"><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option></select></label><button id="start">运行回归</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
+<div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><label>帧率上限<select id="max-fps"><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option></select></label><button id="start">运行回归</button><button id="start-phone" disabled>启动手机系统</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
 </section>
 <div class="layout">
 <div class="screen"><canvas id="canvas" width="240" height="320" tabindex="0" aria-label="模拟器画面"></canvas>
@@ -87,6 +87,12 @@
         note('启动 ' + app.name + ' (0x' + Number(app.uid).toString(16) + ') = ' + result);
         byId('summary').textContent = result === 0 ? '运行中 · ' + app.name : '启动失败 · ' + result;
     }
+    function bootPhone() {
+        if (!ready) return;
+        const result = EKA2L1.bootPhone();
+        note('启动 ROM 手机系统 = ' + result);
+        byId('summary').textContent = (result === 0 || result === 1) ? '运行中 · 手机系统' : '启动失败 · ' + result;
+    }
     for (const button of document.querySelectorAll('[data-key]')) {
         button.addEventListener('click', () => {
             if (!ready) return;
@@ -111,6 +117,7 @@
         note('帧率上限 = ' + byId('max-fps').value);
     };
     byId('restart').onclick = () => location.reload();
+    byId('start-phone').onclick = bootPhone;
     byId('diagnose').onclick = () => EKA2L1.module.ccall('wasm_debug_dump', null, [], []);
     byId('rotation').onchange = () => EKA2L1.setRotation(Number(byId('rotation').value));
     byId('export').onclick = () => {
@@ -170,6 +177,7 @@
             byId('diagnose').disabled = false;
             byId('rotation').disabled = false;
             byId('max-fps').disabled = false;
+            byId('start-phone').disabled = false;
             for (const button of document.querySelectorAll('[data-key]')) button.disabled = false;
             for (const app of apps) {
                 const button = document.createElement('button');
@@ -179,7 +187,8 @@
             byId('summary').textContent = '设备就绪';
             const calculator = apps.find(app => Number(app.uid) === 0x10005902 || /calculator|计算器/i.test(app.name));
             const initialApp = pkg ? apps.find(app => !previousAppUids.has(Number(app.uid))) : calculator;
-            if (initialApp) launch(initialApp);
+            if (new URLSearchParams(location.search).get('phone') === '1') bootPhone();
+            else if (initialApp) launch(initialApp);
             setTimeout(() => note('启动后已运行 25 秒，请检查画面与按键。'), 25000);
         } catch (error) {
             byId('summary').textContent = '测试中断，请重新开始';

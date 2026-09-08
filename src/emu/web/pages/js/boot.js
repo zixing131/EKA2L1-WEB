@@ -546,6 +546,11 @@
         return ccall('wasm_launch_midlet', 'number', ['number'], [uid]);
     };
 
+    /** Start the ROM's System Starter / phone shell boot sequence. */
+    EKA2L1.bootPhone = function () {
+        return ccall('wasm_boot_phone', 'number');
+    };
+
     /**
      * Check whether the ROM has a Java MIDlet launcher. Returns a diagnostic
      * string ending with "LAUNCHER: available" or "LAUNCHER: missing".

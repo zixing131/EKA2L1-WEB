@@ -2178,6 +2178,62 @@ int wasm_probe_boot_exe(const char *utf8_path) {
 }
 
 /**
+ * Start the ROM-provided Symbian boot sequence. EKA2L1 normally creates its
+ * own services and deliberately skips EStart.exe; phone mode opts into the
+ * ROM's System Starter, shell and idle-screen launch chain.
+ */
+EMSCRIPTEN_KEEPALIVE
+int wasm_boot_phone() {
+    if (!g_state.symsys) return -1;
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) return -2;
+
+    // Startup.exe is the boot animation application. EStart.exe is the
+    // System Starter which launches SysAp, AknCapServer and active idle.
+    static const std::u16string startup_path = u"z:\\sys\\bin\\estart.exe";
+    if (!g_state.symsys->get_io_system()->exist(startup_path)) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] ROM does not contain {}",
+            eka2l1::common::ucs2_to_utf8(startup_path));
+        return -3;
+    }
+
+    for (const auto &process_obj : kern->get_process_list()) {
+        const eka2l1::kernel::process *process =
+            reinterpret_cast<const eka2l1::kernel::process *>(process_obj.get());
+        if ((process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending)
+            && (eka2l1::common::compare_ignore_case(
+                    eka2l1::filename(process->get_exe_path(), true), u"estart.exe") == 0)) {
+            LOG_INFO(FRONTEND_CMDLINE, "[phone] ROM startup process is already running");
+            return 1;
+        }
+    }
+
+    eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
+    if (!startup) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not create ROM startup process");
+        return -4;
+    }
+
+    startup->logon([](eka2l1::kernel::process *process) {
+        LOG_WARN(FRONTEND_CMDLINE,
+            "[phone] ROM startup exited: name={} type={} reason={} category={}",
+            process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
+            eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
+    });
+
+    if (!startup->run()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM startup process");
+        return -5;
+    }
+
+    g_state.paused = false;
+    LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
+        eka2l1::common::ucs2_to_utf8(startup_path));
+    return 0;
+}
+
+/**
  * Start SystemAMSCore + midp2silentmidletinstall the same way host JAR install
  * does, without restaging files. Used to test ROM-provided preinstall packages.
  *

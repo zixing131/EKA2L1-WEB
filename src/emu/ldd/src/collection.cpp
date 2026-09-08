@@ -22,6 +22,7 @@
 #include <ldd/ekeyb/ekeyb.h>
 #include <ldd/hal/hal.h>
 #include <ldd/mmcif/mmcif.h>
+#include <ldd/nokiaisc/nokiaisc.h>
 #include <ldd/oldcamera/oldcamera.h>
 #include <ldd/videodriver/videodriver.h>
 
@@ -47,6 +48,7 @@ namespace eka2l1::ldd {
     FACTORY_DECLARE(display_driver_factory)
     FACTORY_DECLARE(ekeyb_factory)
     FACTORY_DECLARE(old_camera_factory)
+    FACTORY_DECLARE(nokiaisc_factory)
 
     static std::unordered_map<std::string, factory_instantiate_func> insts_map = {
         FACTORY_REGISTER("gd1drv", mmcif_factory),
@@ -58,6 +60,7 @@ namespace eka2l1::ldd {
         FACTORY_REGISTER("displaydriver", display_driver_factory),
         FACTORY_REGISTER("ekeyb", ekeyb_factory),
         FACTORY_REGISTER("cameraldd", old_camera_factory),
+        FACTORY_REGISTER("nokiaiscdriver", nokiaisc_factory),
     };
 
     factory_instantiate_func get_factory_func(const char *name) {

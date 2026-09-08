@@ -12,13 +12,14 @@
     var appUid = parseInt(params.get('uid'), 10);
     var appName = params.get('name') || '';
     var isJ2me = params.get('j2me') === '1';
+    var phoneMode = params.get('phone') === '1';
 
     var paused = false;
     var started = false;     // first emulated frame presented
     var autosaveTimer = null;
 
-    document.getElementById('playerTitle').textContent = appName || 'EKA2L1';
-    document.title = (appName ? appName + ' — ' : '') + 'EKA2L1';
+    document.getElementById('playerTitle').textContent = appName || (phoneMode ? 'Symbian 手机' : 'EKA2L1');
+    document.title = (appName ? appName + ' — ' : (phoneMode ? 'Symbian 手机 — ' : '')) + 'EKA2L1';
 
     // ---- overlay -----------------------------------------------------------
 
@@ -231,7 +232,7 @@
 
     // ---- boot & launch ---------------------------------------------------------
 
-    if (!appUid || isNaN(appUid)) {
+    if (!phoneMode && (!appUid || isNaN(appUid))) {
         overlayError(EKA2L1.t('overlay.missingAppTitle'), EKA2L1.t('overlay.missingAppText'));
         return;
     }
@@ -258,7 +259,20 @@
             return;
         }
 
-        overlay(EKA2L1.t('overlay.launchingApp', { name: appName || EKA2L1.t('overlay.defaultAppName') }), EKA2L1.t('overlay.launchingHint'), 97);
+        overlay(phoneMode ? EKA2L1.t('overlay.startingPhone') : EKA2L1.t('overlay.launchingApp', {
+            name: appName || EKA2L1.t('overlay.defaultAppName')
+        }), phoneMode ? EKA2L1.t('overlay.startingPhoneHint') : EKA2L1.t('overlay.launchingHint'), 97);
+
+        if (phoneMode) {
+            var phoneLaunch = EKA2L1.bootPhone();
+            if (phoneLaunch !== 0 && phoneLaunch !== 1) {
+                overlayError(EKA2L1.t('overlay.launchFailedTitle'),
+                    EKA2L1.t('overlay.launchFailedText', { code: phoneLaunch }));
+                return;
+            }
+            beginFramePoll();
+            return;
+        }
 
         if (isJ2me) {
             // Pre-check: does the ROM ship a Java MIDlet launcher or runtime?

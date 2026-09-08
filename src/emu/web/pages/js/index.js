@@ -270,6 +270,10 @@
         location.href = 'run.html?uid=' + app.uid + '&name=' + encodeURIComponent(app.name || '') + extra;
     }
 
+    window.openPhoneMode = function () {
+        location.href = 'run.html?phone=1&name=' + encodeURIComponent(EKA2L1.t('phone.title'));
+    };
+
     function refreshApps() {
         if (!coreReady || !deviceReady) return;
         apps = EKA2L1.appList();
