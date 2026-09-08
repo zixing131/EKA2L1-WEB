@@ -1233,7 +1233,8 @@ static void main_loop() {
                         load_info.handle = kern->open_handle_with_thread(msg->own_thr, child,
                             static_cast<kernel::owner_type>(load_info.owner_type));
                         if (load_info.handle == kernel::INVALID_HANDLE
-                            || load_info_des->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info)) != 0) {
+                            || load_info_des->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info)) != 0
+                            || !child->run()) {
                             result = epoc::error_general;
                         }
                     }
@@ -1283,11 +1284,9 @@ static void main_loop() {
             msg->msg_status = eka2l1::ipc_message_status::completed;
             status->set(result, kern->is_eka1());
             msg->own_thr->signal_request();
-            // Mirror ipc_context destruction after a normal HLE completion:
-            // remove the accepted request from the session and release its IPC
-            // reference. Leaving it accepted leaks the client request slot and
-            // can later re-awaken a scheduler with no active object.
-            msg->unref();
+            // Native ROM servers release their accepted IPC reference while
+            // receiving it. Do not unref here: unlike an HLE ipc_context this
+            // compatibility completion does not own that reference.
             ++completed;
         });
         if (completed) {
