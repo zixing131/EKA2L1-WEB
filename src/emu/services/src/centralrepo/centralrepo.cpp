@@ -798,6 +798,7 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_int, "CenRep::GetInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_real, "CenRep::GetReal");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_string, "CenRep::GetString");
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_meta, "CenRep::GetMeta");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_notify_req_check, "CenRep::NofReqCheck");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_find_eq_int, "CenRep::FindEqInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_find_neq_int, "CenRep::FindNeqInt");
@@ -1207,6 +1208,21 @@ namespace eka2l1 {
         case cen_rep_get_string:
             get_value(ctx);
             break;
+
+        case cen_rep_get_meta: {
+            const std::optional<std::uint32_t> key = ctx->get_argument_value<std::uint32_t>(0);
+            if (!key || !attach_repo) {
+                ctx->complete(epoc::error_argument);
+                break;
+            }
+
+            central_repo_entry *entry = get_entry(*key, 0);
+            const std::uint32_t meta = entry ? entry->metadata_val
+                                             : attach_repo->get_default_meta_for_new_key(*key);
+            ctx->write_data_to_descriptor_argument<std::uint32_t>(1, meta);
+            ctx->complete(epoc::error_none);
+            break;
+        }
 
         case cen_rep_set_int:
         case cen_rep_set_string:

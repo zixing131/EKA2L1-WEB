@@ -253,6 +253,51 @@ namespace eka2l1::epoc {
         DEFINE_INT_PROP(sys, epoc::SYS_CATEGORY, epoc::SOFTWARE_INSTALL_KEY, 0);
         DEFINE_INT_PROP(sys, epoc::SYS_CATEGORY, epoc::SOFTWARE_LASTEST_UID_INSTALLATION, 0);
 
+        // Published during the native S60 boot sequence. Startup.exe reads a
+        // small group of consecutive state slots before it starts SysAp and
+        // AknCapServer; without them the ROM sees KErrNotFound and abandons
+        // each transition in turn.
+        for (std::uint32_t key = 0x41; key <= 0x4F; ++key) {
+            property_ptr boot_state = sys->get_kernel_system()->create<service::property>();
+            boot_state->first = 0x101F8766;
+            boot_state->second = key;
+            boot_state->define(service::property_type::int_data, 0);
+            boot_state->set_int(0);
+        }
+
+        // Avkon's shell and Menu read these state slots while registering their
+        // window groups. They are published by the device's UI bootstrap on a
+        // phone, before either executable runs.
+        DEFINE_INT_PROP(sys, 0x101F8773, 0x10, 0);
+        DEFINE_INT_PROP(sys, 0x10207218, 0x7, 0);
+
+        // SysAp is normally preceded by several device-resident daemons. Its
+        // early boot reads their published integer state; provide their reset
+        // values until those daemons themselves are emulated.
+        static const std::pair<std::uint32_t, std::uint32_t> sysap_boot_props[] = {
+            { 0x101F75B6, 0x100052CD }, { 0x101F75B6, 0x100052CE },
+            { 0x101F75B6, 0x100052D1 }, { 0x101F75B6, 0x100052DB },
+            { 0x101F75B6, 0x100052FF }, { 0x101F75B6, 0x100052FA },
+            { 0x101F8766, 0x32 }, { 0x101F8766, 0x401 },
+            { 0x101F8767, 0x102 }, { 0x101F8767, 0x103 }, { 0x101F8767, 0x104 },
+            { 0x101F8767, 0x106 }, { 0x101F8767, 0x107 }, { 0x101F8767, 0x108 },
+            { 0x101F8767, 0x109 }, { 0x101F8767, 0x110 }, { 0x101F8767, 0x112 },
+            { 0x101F8767, 0x113 }, { 0x101F8767, 0x114 }, { 0x101F8767, 0x115 },
+            { 0x101F8767, 0x116 }, { 0x101F8767, 0x117 }, { 0x101F8767, 0x201 },
+            { 0x101F8767, 0x202 }, { 0x101F8767, 0x203 }, { 0x101F8767, 0x204 },
+            { 0x101F8767, 0x501 }, { 0x101F8EC5, 0x2 }, { 0x102029AC, 0x1 },
+            { 0x10202999, 0x1 }, { 0x10202999, 0x2 }, { 0x10205047, 0x102 },
+            { 0x101F9A0B, 0x1 }, { 0x101F7989, 0x10282FAF },
+            { 0x101F8771, 0x3 }, { 0x101F97B2, 0x2 }
+        };
+        for (const auto &[category, key] : sysap_boot_props) {
+            property_ptr state = sys->get_kernel_system()->create<service::property>();
+            state->first = category;
+            state->second = key;
+            state->define(service::property_type::int_data, 0);
+            state->set_int(0);
+        }
+
         // Published by the secure backup engine on a real device. Clients that watch the
         // backup state (File manager's backup engine for one) read it while constructing and
         // leave with KErrNotFound if it was never defined, taking the whole app down.

@@ -6974,6 +6974,10 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x4D, dll_tls),
         BRIDGE_REGISTER(0x4E, hal_function),
         BRIDGE_REGISTER(0x51, process_command_line_length),
+        // Some S60 3.2 ROM components use the 9.4 slot for this otherwise
+        // unchanged executive call. Keep the 9.3 slot and accept that ABI
+        // compatible alias so SysAp can read its launch command line.
+        BRIDGE_REGISTER(0x52, process_command_line_length),
         BRIDGE_REGISTER(0x54, clear_inactivity_time),
         BRIDGE_REGISTER(0x55, debug_print),
         BRIDGE_REGISTER(0x59, exception_handler),

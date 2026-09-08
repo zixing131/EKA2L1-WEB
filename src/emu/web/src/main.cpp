@@ -92,6 +92,7 @@
 #include <kernel/server.h>
 #include <kernel/thread.h>
 #include <mem/ptr.h>
+#include <utils/reqsts.h>
 
 #include <j2me/applist.h>
 #include <j2me/interface.h>
@@ -136,6 +137,9 @@ namespace eka2l1::web {
         bool initialized = false;
         bool running = false;
         bool paused = false;
+        // Enables the small compatibility hand-off needed when the ROM's
+        // EStart process talks directly to its native Loader server.
+        bool phone_boot_active = false;
 
         int window_width = 360;
         int window_height = 640;
@@ -1148,6 +1152,43 @@ static void main_loop() {
         if ((emscripten_get_now() - frame_start) >= FRAME_CPU_BUDGET_MS) {
             hit_budget = true;
             break;
+        }
+    }
+
+    // EStart owns a native !Loader server in the ROM. Unlike the HLE Loader,
+    // that server has no guest-side dispatch loop in a browser build, so the
+    // synchronous ELoadLogicalDevice request remains accepted forever. Complete
+    // only that bootstrap request, using the same request-status and reference
+    // accounting as RMessage2::Complete; all later system applications still
+    // execute from the ROM normally.
+    if (g_state.phone_boot_active) {
+        auto *kern = g_state.symsys->get_kernel_system();
+        int completed = 0;
+        kern->for_each_inflight_ipc_message([&](eka2l1::ipc_msg *msg) {
+            eka2l1::service::server *target = msg->msg_session ? msg->msg_session->get_server() : nullptr;
+            const std::string &target_name = target ? target->name() : msg->debug_server_name;
+            const bool is_native_loader = (target_name == "!Loader") && (!target || !target->is_hle());
+            const bool is_estart = msg->own_thr && msg->own_thr->owning_process()
+                && (eka2l1::common::lowercase_string(msg->own_thr->owning_process()->raw_name()).find("estart") == 0);
+            if (!is_native_loader || !is_estart || (msg->function != 3) || !msg->request_sts) {
+                return;
+            }
+
+            epoc::request_status *status = msg->request_sts.get(msg->own_thr->owning_process());
+            if (!status) {
+                return;
+            }
+
+            msg->msg_status = eka2l1::ipc_message_status::completed;
+            status->set(epoc::error_none, kern->is_eka1());
+            msg->own_thr->signal_request();
+            // This is the thread-owned synchronous message. Its reference was
+            // already released when the native server accepted it; completing
+            // it must not release that slot again.
+            ++completed;
+        });
+        if (completed) {
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] completed {} native Loader bootstrap request(s)", completed);
         }
     }
     // Exiting on the slice cap is also a work-capped (CPU-bound) frame; without
@@ -2189,12 +2230,31 @@ int wasm_boot_phone() {
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (!kern) return -2;
 
-    // Startup.exe is the boot animation application. EStart.exe is the
-    // System Starter which launches SysAp, AknCapServer and active idle.
-    static const std::u16string startup_path = u"z:\\sys\\bin\\estart.exe";
-    if (!g_state.symsys->get_io_system()->exist(startup_path)) {
+    // AknCapServer owns the active-idle plug-in. Record an actual exit while
+    // bringing up the ROM shell, since an early exit otherwise resembles a
+    // benign wait in the browser log.
+    kern->register_process_exit_callback([](eka2l1::kernel::process *process) {
+        if (!process) {
+            return;
+        }
+        const std::string raw_name = eka2l1::common::lowercase_string(process->raw_name());
+        if ((raw_name.find("akncap") == std::string::npos) && (raw_name.find("sysap") == std::string::npos)
+            && (raw_name.find("startup") == std::string::npos) && (raw_name.find("menu") == std::string::npos)) {
+            return;
+        }
+        LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM shell process exited: name={} type={} reason={} category={}",
+            process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
+            eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
+    });
+
+    // EStart is the system starter; Startup is its ROM boot companion. On a
+    // physical phone the two form the hand-off to SysAp, AknCapServer and the
+    // active idle application.
+    static const std::u16string estart_path = u"z:\\sys\\bin\\estart.exe";
+    static const std::u16string startup_path = u"z:\\sys\\bin\\startup.exe";
+    if (!g_state.symsys->get_io_system()->exist(estart_path)) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] ROM does not contain {}",
-            eka2l1::common::ucs2_to_utf8(startup_path));
+            eka2l1::common::ucs2_to_utf8(estart_path));
         return -3;
     }
 
@@ -2209,27 +2269,64 @@ int wasm_boot_phone() {
         }
     }
 
-    eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
-    if (!startup) {
+    eka2l1::kernel::process *estart = kern->spawn_new_process(estart_path, u"");
+    if (!estart) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not create ROM startup process");
         return -4;
     }
 
-    startup->logon([](eka2l1::kernel::process *process) {
+    estart->logon([](eka2l1::kernel::process *process) {
         LOG_WARN(FRONTEND_CMDLINE,
             "[phone] ROM startup exited: name={} type={} reason={} category={}",
             process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
             eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
     });
 
-    if (!startup->run()) {
+    if (!estart->run()) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM startup process");
         return -5;
     }
 
+    if (g_state.symsys->get_io_system()->exist(startup_path)) {
+        eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
+        if (startup && startup->run()) {
+            startup->logon([](eka2l1::kernel::process *process) {
+                LOG_WARN(FRONTEND_CMDLINE,
+                    "[phone] ROM boot companion exited: name={} type={} reason={} category={}",
+                    process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
+                    eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
+            });
+        } else {
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] Could not run ROM boot companion: {}",
+                eka2l1::common::ucs2_to_utf8(startup_path));
+        }
+    } else {
+        LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot companion is absent: {}",
+            eka2l1::common::ucs2_to_utf8(startup_path));
+    }
+
+    // The desktop build deliberately omits Symbian's System Starter service.
+    // Recreate only the shell portion of this ROM's Starter_Arm.rsc plan, in
+    // its ROM-defined order. Each item below is a genuine ROM executable; the
+    // active-idle UI is still loaded by AknCapServer from its ECom plug-in.
+    for (const std::u16string &shell_path : {
+             std::u16string(u"z:\\sys\\bin\\akncapserver.exe"),
+             std::u16string(u"z:\\sys\\bin\\eshell.exe"),
+             std::u16string(u"z:\\sys\\bin\\sysap.exe") }) {
+        if (!g_state.symsys->get_io_system()->exist(shell_path)) {
+            continue;
+        }
+        eka2l1::kernel::process *component = kern->spawn_new_process(shell_path, u"");
+        if (!component || !component->run()) {
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] Could not run ROM shell component: {}",
+                eka2l1::common::ucs2_to_utf8(shell_path));
+        }
+    }
+
     g_state.paused = false;
+    g_state.phone_boot_active = true;
     LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
-        eka2l1::common::ucs2_to_utf8(startup_path));
+        eka2l1::common::ucs2_to_utf8(estart_path));
     return 0;
 }
 
@@ -3639,6 +3736,16 @@ void wasm_debug_dump() {
         return;
     }
 
+    for (auto &obj : kern->get_process_list()) {
+        auto *pr = reinterpret_cast<eka2l1::kernel::process *>(obj.get());
+        if (!pr) {
+            continue;
+        }
+        std::printf("[dump] process='%s' exit=%d reason=%d category='%s' threads=%d\n",
+            pr->name().c_str(), static_cast<int>(pr->get_exit_type()), pr->get_exit_reason(),
+            eka2l1::common::ucs2_to_utf8(pr->get_exit_category()).c_str(), pr->get_thread_count());
+    }
+
     eka2l1::arm::core *cpu = kern->get_cpu();
     eka2l1::kernel::thread *crr = kern->crr_thread();
 
@@ -3745,6 +3852,20 @@ void wasm_debug_dump() {
 
     // Window-server focus: a "frozen" app with a healthy event loop usually
     // means key events route to whatever window group really holds focus.
+    for (auto &obj : kern->get_thread_list()) {
+        auto *thr = reinterpret_cast<eka2l1::kernel::thread *>(obj.get());
+        auto *pr = thr ? thr->owning_process() : nullptr;
+        if (!pr) {
+            continue;
+        }
+        const std::string name = eka2l1::common::lowercase_string(pr->raw_name());
+        if ((name.find("sysap") == std::string::npos) && (name.find("akncap") == std::string::npos)
+            && (name.find("idle") == std::string::npos) && (name.find("menu") == std::string::npos)) {
+            continue;
+        }
+        std::printf("[dump] phone-thread='%s' proc='%s' state=%s pc=0x%08X\\n", thr->name().c_str(),
+            pr->name().c_str(), thread_state_to_str(thr->current_state()), thr->get_thread_context().cpu_registers[15]);
+    }
     if (g_state.winserv) {
         epoc::screen *scr = g_state.winserv->get_screens();
         while (scr) {

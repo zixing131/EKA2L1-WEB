@@ -260,6 +260,21 @@ namespace eka2l1 {
             get_default_glyph_bitmap_type(ctx);
             break;
 
+        // S60's AknCapServer installs a logical typeface alias while it
+        // creates the system shell. The font store already resolves the ROM's
+        // canonical names, so there is no extra mapping to retain here; it is
+        // nevertheless a synchronous request and must complete.
+        case fbs_font_name_alias:
+            ctx->complete(epoc::error_none);
+            break;
+
+        // The S60 shell selects its default typeface after registering aliases.
+        // The active font store already owns the ROM default, so this is only a
+        // server-side acknowledgement on the supported firmware generations.
+        case fbs_set_system_default_typeface_name:
+            ctx->complete(epoc::error_none);
+            break;
+
         case fbs_has_character:
             has_character(ctx);
             break;
