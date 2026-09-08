@@ -274,7 +274,7 @@
             setTimeout(function () {
                 var handoff = EKA2L1.finishPhoneStartup();
                 console.log('[EKA2L1] ROM startup hand-off: ' + handoff);
-            }, 3000);
+            }, 12000);
             beginFramePoll();
             return;
         }

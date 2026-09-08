@@ -2378,12 +2378,12 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
 static constexpr std::array<std::u16string_view, 13> PHONE_BOOT_PLAN = {
     u"z:\\sys\\bin\\ecomserver.exe", u"z:\\sys\\bin\\cdlserver.exe",
     u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\ailaunch.exe",
-    u"z:\\sys\\bin\\menu2.exe",
     u"z:\\sys\\bin\\phone.exe",
     u"z:\\sys\\bin\\akncapserver.exe",
     u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
     u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
-    u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe"
+    u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe",
+    u"z:\\sys\\bin\\menu2.exe"
 };
 
 static void advance_phone_boot_plan(const double now_ms) {
@@ -2403,7 +2403,7 @@ static void advance_phone_boot_plan(const double now_ms) {
     ++g_state.phone_boot_component_index;
     // Let the server execute one guest scheduling slice and publish its name
     // before launching the next dependent component.
-    g_state.phone_boot_next_component_ms = now_ms + 180.0;
+    g_state.phone_boot_next_component_ms = now_ms + 700.0;
 }
 
 /**
