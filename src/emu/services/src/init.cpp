@@ -253,17 +253,27 @@ namespace eka2l1::epoc {
         DEFINE_INT_PROP(sys, epoc::SYS_CATEGORY, epoc::SOFTWARE_INSTALL_KEY, 0);
         DEFINE_INT_PROP(sys, epoc::SYS_CATEGORY, epoc::SOFTWARE_LASTEST_UID_INSTALLATION, 0);
 
-        // Published during the native S60 boot sequence. Startup.exe reads a
-        // small group of consecutive state slots before it starts SysAp and
-        // AknCapServer; without them the ROM sees KErrNotFound and abandons
-        // each transition in turn.
+        // Published during the native S60 boot sequence. These enum-based
+        // properties use 100 as their defined "uninitialised" value; zero is
+        // outside every public startup-state enum and makes the ROM starter
+        // reject its first transition.
         for (std::uint32_t key = 0x41; key <= 0x4F; ++key) {
             property_ptr boot_state = sys->get_kernel_system()->create<service::property>();
             boot_state->first = 0x101F8766;
             boot_state->second = key;
             boot_state->define(service::property_type::int_data, 0);
-            boot_state->set_int(0);
+            boot_state->set_int(100);
         }
+
+        // Starter asks SplashScreen to close through this separate startup
+        // property after the active-idle phase is ready.  Defining it here
+        // lets the ROM complete the screen's outstanding subscription instead
+        // of having the frontend terminate the process.
+        property_ptr splash_shutdown = sys->get_kernel_system()->create<service::property>();
+        splash_shutdown->first = 0x101F8766;
+        splash_shutdown->second = 0x301;
+        splash_shutdown->define(service::property_type::int_data, 0);
+        splash_shutdown->set_int(100);
 
         // Avkon's shell and Menu read these state slots while registering their
         // window groups. They are published by the device's UI bootstrap on a
@@ -444,14 +454,20 @@ namespace eka2l1 {
                 CREATE_SERVER(sys, timezone_server);
             }
 
+            // S60 3rd FP2's ROM System Starter already uses the Domain
+            // Manager to drive its boot-resource states.  Starting this
+            // service only at 9.5 leaves a 5320's SysStart waiting forever
+            // before it can parse Starter_Arm.rsc.
+            if (sys->get_symbian_version_use() >= epocver::epoc93fp2) {
+                CREATE_SERVER(sys, dm_domain_server);
+            }
+
             if (sys->get_symbian_version_use() <= epocver::eka2) {
                 CREATE_SERVER(sys, redir_server);
                 CREATE_SERVER(sys, backup_old_server);
             } else {
                 CREATE_SERVER(sys, goom_monitor_server);
                 CREATE_SERVER(sys, alf_streamer_server);
-                CREATE_SERVER(sys, dm_domain_server);
-
                 // MMF server family
                 {
                     std::unique_ptr<service::server> dev_serv = std::make_unique<mmf_dev_server>(sys);

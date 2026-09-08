@@ -103,6 +103,7 @@
 #include <services/window/screen.h>
 #include <services/window/keys.h>
 #include <services/window/classes/wingroup.h>
+#include <services/window/classes/winuser.h>
 #include <services/window/classes/config.h>
 #include <services/init.h>
 
@@ -739,6 +740,31 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
     builder.load_backup_state();
 }
 
+// WebGL's default backbuffer is invalidated after every swap.  The window
+// server only recomposes when guest content changes, so presenting from its
+// retained screen texture must happen every RAF; otherwise the next empty
+// SDL_GL_SwapWindow replaces a perfectly valid ROM frame with black.
+static void present_emulated_screen() {
+    if (!g_state.graphics_driver || !g_state.winserv) {
+        return;
+    }
+
+    epoc::screen *scr = g_state.winserv->get_current_focus_screen();
+    if (!scr) {
+        scr = g_state.winserv->get_screens();
+    }
+    if (!scr || !scr->screen_texture) {
+        return;
+    }
+
+    eka2l1::drivers::graphics_command_builder builder;
+    draw_emulated_screen(builder, scr,
+        static_cast<std::uint32_t>(g_state.window_width),
+        static_cast<std::uint32_t>(g_state.window_height));
+    eka2l1::drivers::command_list list = builder.retrieve_command_list();
+    g_state.graphics_driver->submit_command_list(list);
+}
+
 // Create the build-info watermark texture once, on the main thread. Safe to
 // call repeatedly; it returns early once the texture exists.
 static void ensure_watermark_texture() {
@@ -766,10 +792,9 @@ static void ensure_watermark_texture() {
     g_state.watermark_h = h;
 }
 
-// Counterpart of the Android frontend's register_draw_callback(): whenever the
-// window server finishes composing a screen, queue a command list that presents
-// it to the backbuffer. The callback may fire on the timer thread; it only
-// builds commands (no GL) — the actual GL work happens in main_loop's pump().
+// Counterpart of the Android frontend's register_draw_callback().  The actual
+// presentation occurs every RAF from the retained screen texture; a WebGL
+// backbuffer cannot retain the single callback frame across later swaps.
 static void register_screen_draw_callbacks() {
     if (!g_state.winserv) {
         return;
@@ -788,20 +813,6 @@ static void register_screen_draw_callbacks() {
             // the first redraw (see FRAME_CPU_BUDGET_MS).
             ++s_redraw_cb_count;
 
-            eka2l1::drivers::graphics_command_builder builder;
-            draw_emulated_screen(builder, scr,
-                static_cast<std::uint32_t>(g_state.window_width),
-                static_cast<std::uint32_t>(g_state.window_height));
-
-            eka2l1::drivers::command_list draw_list = builder.retrieve_command_list();
-            g_state.graphics_driver->submit_command_list(draw_list);
-
-            // Present as a separate list. No status tracking: this callback may
-            // run on the timer thread and must never block.
-            eka2l1::drivers::graphics_command_builder present_builder;
-            present_builder.present(nullptr);
-            eka2l1::drivers::command_list present_list = present_builder.retrieve_command_list();
-            g_state.graphics_driver->submit_command_list(present_list);
         });
 
         screens = screens->next;
@@ -1326,6 +1337,11 @@ static void main_loop() {
     if (g_state.graphics_driver) {
         g_state.graphics_driver->pump();
     }
+
+    // Keep the ROM-composed screen texture in the default framebuffer for the
+    // upcoming swap.  This is intentionally after the command-queue pump, so
+    // a screen::redraw submitted this tick is immediately visible.
+    present_emulated_screen();
 
     // Feed Web Audio: pull PCM from playing guest streams and schedule it.
     if (g_state.audio_driver) {
@@ -2320,6 +2336,19 @@ int wasm_probe_boot_exe(const char *utf8_path) {
     return 0;
 }
 
+static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u16string &path) {
+    for (const auto &process_obj : kern->get_process_list()) {
+        const auto *process = reinterpret_cast<const eka2l1::kernel::process *>(process_obj.get());
+        if ((process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending)
+            && (eka2l1::common::compare_ignore_case(process->get_exe_path(), path) == 0)) {
+            return true;
+        }
+    }
+
+    eka2l1::kernel::process *process = kern->spawn_new_process(path, u"");
+    return process && process->run();
+}
+
 /**
  * Start the ROM-provided Symbian boot sequence. EKA2L1 normally creates its
  * own services and deliberately skips EStart.exe; phone mode opts into the
@@ -2350,9 +2379,10 @@ int wasm_boot_phone() {
             eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
     });
 
-    // EStart is the system starter; Startup is its ROM boot companion. On a
-    // physical phone the two form the hand-off to SysAp, AknCapServer and the
-    // active idle application.
+    // EStart owns the complete ROM hand-off to System Starter.  In
+    // particular, it creates the Starter child itself and waits for the
+    // child’s normal completion notifications; creating Startup.exe here a
+    // second time bypasses that parent/child protocol.
     static const std::u16string estart_path = u"z:\\sys\\bin\\estart.exe";
     if (!g_state.symsys->get_io_system()->exist(estart_path)) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] ROM does not contain {}",
@@ -2390,16 +2420,41 @@ int wasm_boot_phone() {
         return -5;
     }
 
-    // This ROM exposes the System Starter as Startup.exe. EStart installs the
-    // native Loader server, then the actual Starter process builds the remaining
-    // system graph. Do not start AknCapServer or SysAp directly: they are
-    // singleton services owned by Startup's ROM plan.
-    static const std::u16string startup_path = u"z:\\sys\\bin\\startup.exe";
-    eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
-    if (!startup || !startup->run()) {
-        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM System Starter: {}",
-            eka2l1::common::ucs2_to_utf8(startup_path));
+    // The Web kernel has no implementation for the ROM's RProcess::Create
+    // route used by EStart.  Keep the compatibility bridge at that exact
+    // hand-off: create the documented System Starter child, then leave all
+    // subsequent plan parsing, application launch and window ownership to the
+    // ROM processes themselves.
+    static const std::u16string sysstart_path = u"z:\\sys\\bin\\sysstart.exe";
+    eka2l1::kernel::process *sysstart = kern->spawn_new_process(sysstart_path, u"");
+    if (!sysstart) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not create ROM System Starter");
         return -6;
+    }
+    estart->add_child_process(sysstart);
+    if (!sysstart->run()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM System Starter");
+        return -7;
+    }
+
+    // SysStart reads its platform-specific process plan from the writable
+    // device image. Web's transient device starts without that generated file,
+    // so bridge only this missing plan by launching the same ROM programs from
+    // Starter_Arm.rsc. FBSERV and EWSRV are deliberately absent: their roles
+    // are already supplied by EKA2L1's window and font servers.
+    static const std::u16string boot_plan[] = {
+        u"z:\\sys\\bin\\accserver.exe", u"z:\\sys\\bin\\akncapserver.exe",
+        u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\hwrmserver.exe",
+        u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
+        u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
+        u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe",
+        u"z:\\sys\\bin\\menu2.exe"
+    };
+    for (const std::u16string &component : boot_plan) {
+        if (!start_phone_boot_component(kern, component)) {
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot component did not start: {}",
+                eka2l1::common::ucs2_to_utf8(component));
+        }
     }
 
     g_state.paused = false;
@@ -2417,7 +2472,26 @@ int wasm_phone_finish_startup() {
     if (!g_state.symsys || !g_state.phone_boot_active) {
         return -1;
     }
-    LOG_INFO(FRONTEND_CMDLINE, "[phone] ROM System Starter remains in control of startup hand-off");
+    // These are the published terminal values of the ROM's own S60 startup
+    // protocol: normal RF-on, normal boot mode, Phone/Idle phase 1 ready and
+    // every startup UI phase complete.  They release the real SplashScreen
+    // window group so AknCap can foreground the ROM idle/menu application.
+    // No UI is synthesized here; this is the device-service notification that
+    // a full handset would provide after its radio/SIM bootstrap.
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        return -2;
+    }
+    static constexpr std::pair<int, int> terminal_states[] = {
+        { 0x41, 109 }, { 0x42, 100 }, { 0x43, 101 },
+        { 0x44, 101 }, { 0x46, 104 }, { 0x301, 101 }
+    };
+    for (const auto &[key, value] : terminal_states) {
+        if (eka2l1::property_ptr state = kern->get_prop(0x101F8766, key)) {
+            state->set_int(value);
+        }
+    }
+    LOG_INFO(FRONTEND_CMDLINE, "[phone] published ROM startup completion state");
     return 0;
 }
 
@@ -3989,6 +4063,7 @@ void wasm_debug_dump() {
                     id, common::ucs2_to_utf8(group->name).c_str(), owner.c_str(), group->priority,
                     group->can_receive_focus() ? 1 : 0, (scr->focus == group) ? 1 : 0);
             }
+
             scr = scr->next;
         }
     }
@@ -4015,6 +4090,7 @@ void wasm_debug_dump() {
             static_cast<int>(msg->msg_status),
             queued ? 1 : 0,
             msg->own_thr ? msg->own_thr->name().c_str() : "?");
+
     });
 
     std::printf("[dump] =====================================================\n");

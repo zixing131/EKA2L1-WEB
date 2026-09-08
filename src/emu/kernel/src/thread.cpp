@@ -41,25 +41,6 @@
 
 namespace eka2l1 {
     namespace kernel {
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_FAST_SVC = 0xEF800000;
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_SVC = 0xEF000003;
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_PATCHED_SVC = 0xEF000012;
-        static constexpr std::uint32_t ARM_BX_LR = 0xE12FFF1E;
-
-        static bool is_direct_wait_for_any_request(memory_system *mem, kernel::process *owner,
-            const arm::core::thread_context &ctx) {
-            const std::uint32_t *svc_instruction = (ctx.get_pc() >= 4)
-                ? eka2l1::ptr<std::uint32_t>(ctx.get_pc() - 4).get(mem) : nullptr;
-            const std::uint32_t *return_instruction = eka2l1::ptr<std::uint32_t>(ctx.get_pc()).get(mem);
-            const std::uint32_t svc_value = svc_instruction ? *svc_instruction : 0;
-            return svc_instruction && return_instruction && (*return_instruction == ARM_BX_LR)
-                && ((svc_value == WAIT_ANY_REQUEST_SVC) || (svc_value == WAIT_ANY_REQUEST_PATCHED_SVC)
-                    // ECom's active scheduler uses the fast stub with r0 left
-                    // over from its previous callback, so it is not a reliable
-                    // WaitForRequest-wrapper discriminator here.
-                    || (svc_value == WAIT_ANY_REQUEST_FAST_SVC));
-        }
-
         int map_thread_priority_to_calc(thread_priority pri) {
             switch (pri) {
             case thread_priority::priority_much_less:
@@ -769,41 +750,7 @@ namespace eka2l1 {
         }
 
         void thread::wait_for_any_request() {
-            kernel::process *owner = owning_process();
-            const bool is_ecom = owner
-                && (common::lowercase_string(owner->raw_name()).find("ecomserver") != std::string::npos);
-            if (!is_ecom) {
-                request_sema->wait(0);
-                return;
-            }
-
-            // Native S60 ECom's CActiveScheduler can consume a request signal
-            // after its Receive active object has already re-armed. Treat that
-            // exact direct WaitForAnyRequest shape as a stale wake-up and wait
-            // again; do not change regular threads or WaitForRequest wrappers.
-            if (kern->crr_thread() == this) {
-                kern->get_cpu()->save_context(ctx);
-            }
-            do {
-                utils::active_scheduler *scheduler = ldata
-                    ? ldata->scheduler.cast<utils::active_scheduler>().get(owner) : nullptr;
-                const bool has_ready_request = scheduler && !scheduler->check_stray(owner);
-                const bool direct_wait = is_direct_wait_for_any_request(mem, owner, ctx);
-                if ((request_sema->count() <= 0) && has_ready_request && direct_wait) {
-                    break;
-                }
-
-                request_sema->wait(0);
-                if (state != thread_state::run) {
-                    break;
-                }
-
-                scheduler = ldata ? ldata->scheduler.cast<utils::active_scheduler>().get(owner) : nullptr;
-                if (!scheduler || !direct_wait || !scheduler->check_stray(owner)) {
-                    break;
-                }
-                LOG_WARN(KERNEL, "[phone] absorbed stale ECom active-scheduler wake-up");
-            } while (true);
+            request_sema->wait(0);
         }
 
         void thread::signal_request(int count) {

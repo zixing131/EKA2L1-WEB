@@ -270,6 +270,7 @@ namespace eka2l1::epoc {
         builder.set_feature(eka2l1::drivers::graphics_feature::depth_test, false);
         builder.set_feature(eka2l1::drivers::graphics_feature::blend, false);
         builder.set_feature(eka2l1::drivers::graphics_feature::clipping, false);
+        builder.set_feature(eka2l1::drivers::graphics_feature::stencil_test, false);
 
         builder.clear(eka2l1::vecx<float, 6>({ 0.0, 0.0, 0.0, 0.0, 1.0, 0.0 }), drivers::draw_buffer_bit_depth_buffer
             | drivers::draw_buffer_bit_stencil_buffer | ((flags_ & FLAG_SERVER_REDRAW_PENDING) ? drivers::draw_buffer_bit_color_buffer : 0));
@@ -282,7 +283,7 @@ namespace eka2l1::epoc {
         // We dont care about visible regions. Nowadays, detect visible region to reduce pixel plotting is
         // just not really worth the time, since GPU draws so fast. Symbian code still has it though.
         window_drawer_walker adrawwalker(builder);
-        root->walk_tree(&adrawwalker, window_tree_walk_style::bonjour_children);
+        root->walk_tree_back_to_front(&adrawwalker);
 
         // Done! Unbind and submit this to the driver
         builder.bind_bitmap(0);
@@ -760,7 +761,7 @@ namespace eka2l1::epoc {
                     winuser->report_visiblity_change();
 
                     if (trigger_redraw_) {
-                        winuser->flags |= screen::FLAG_SERVER_REDRAW_PENDING;
+                        winuser->scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
                     }
                 }
             }
