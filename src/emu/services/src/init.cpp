@@ -407,9 +407,24 @@ namespace eka2l1 {
                 CREATE_SERVER(sys, drm_helper_server);
 
             // These needed to be HLEd
-            CREATE_SERVER(sys, applist_server);
-            CREATE_SERVER(sys, oom_ui_app_server);
-            CREATE_SERVER(sys, hwrm_server);
+            // The ROM's APSEXE, AknCap, accessory, HWRM and SystemAgent
+            // processes publish the same public services.  They must own
+            // them during a handset boot; otherwise native clients silently
+            // connect to the HLE implementation instead of their ROM peer.
+            const bool native_phone_boot = cfg->native_phone_boot;
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, applist_server);
+            }
+            // A complete S60 startup brings up AknCapServer itself.  Its
+            // server name is the same one used by the app-launch HLE below,
+            // so pre-registering the HLE makes the ROM server fail its
+            // RServer2::Create and prevents Active Standby from loading.
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, oom_ui_app_server);
+            }
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, hwrm_server);
+            }
             CREATE_SERVER(sys, view_server);
             CREATE_SERVER(sys, remcon_server);
             CREATE_SERVER(sys, etel_server);
@@ -427,12 +442,16 @@ namespace eka2l1 {
             CREATE_SERVER(sys, comm_server);
             CREATE_SERVER(sys, bt_server);
             CREATE_SERVER(sys, btman_server);
-            CREATE_SERVER(sys, accessory_server);
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, accessory_server);
+            }
 
             // Not really sure about this one
             CREATE_SERVER(sys, keysound_server);
 
-            CREATE_SERVER(sys, eikappui_server);
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, eikappui_server);
+            }
             // The AknIconServer HLE renders icons itself (lunasvg / mbm) instead of the guest
             // ROM server. It exists to work around N95-class S60v3 FP1 ROMs, whose guest icon
             // server rasterises scalable NVG menu icons through software OpenVG -- the emulator
@@ -447,7 +466,9 @@ namespace eka2l1 {
             }
             CREATE_SERVER(sys, akn_skin_server);
 
-            CREATE_SERVER(sys, system_agent_server);
+            if (!native_phone_boot) {
+                CREATE_SERVER(sys, system_agent_server);
+            }
             CREATE_SERVER(sys, unipertar_server);
 
             if (sys->get_symbian_version_use() >= epocver::epoc95) {

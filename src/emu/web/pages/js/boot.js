@@ -513,6 +513,13 @@
             [romPath || '', rpkgPath || '']);
     };
 
+    // This must precede initDevice(): ROM phone startup supplies AknCap and
+    // EikAppUi itself, while normal individual app launches keep their HLE
+    // counterparts.
+    EKA2L1.setPhoneBootMode = function (enabled) {
+        return ccall('wasm_set_phone_boot_mode', 'number', ['number'], [enabled ? 1 : 0]);
+    };
+
     EKA2L1.installPackage = function (vfsPath) {
         return ccall('wasm_install_package', 'number', ['string'], [vfsPath]);
     };

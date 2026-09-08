@@ -251,6 +251,7 @@
         var lowPower = EKA2L1.applyPerfPrefs();
         if (lowPower) console.log('[EKA2L1] low-power mode active (30fps cap)');
 
+        if (phoneMode) EKA2L1.setPhoneBootMode(true);
         var result = EKA2L1.initDevice('', '');
         if (result !== 0) {
             overlayError(EKA2L1.t('overlay.noFirmwareTitle'), EKA2L1.t('overlay.noFirmwareText', {

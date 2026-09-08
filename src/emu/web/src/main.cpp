@@ -1486,6 +1486,20 @@ static void wasm_save_config() {
     chdir("/");
 }
 
+// Must be called after the Web core exists but before wasm_init_with_rom().
+// The choice controls which UI servers init_services registers while loading
+// the selected device, so changing it after set_device() would be too late.
+EMSCRIPTEN_KEEPALIVE
+int wasm_set_phone_boot_mode(int enabled) {
+    if (!g_state.initialized || !g_state.symsys) {
+        return -1;
+    }
+    g_state.conf.native_phone_boot = (enabled != 0);
+    LOG_INFO(FRONTEND_CMDLINE, "[phone] native ROM UI services {} for next device init",
+        enabled ? "enabled" : "disabled");
+    return 0;
+}
+
 EMSCRIPTEN_KEEPALIVE
 std::uint8_t *wasm_rpkg_stream_buffer(int size) {
     if (size <= 0) {

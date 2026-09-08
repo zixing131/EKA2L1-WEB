@@ -149,6 +149,9 @@
             note('RPKG 流式安装完成；ROM 路径 ' + target);
             const rom = await readInput('rom', 'rom/SYM.ROM');
             mod.FS.writeFile(target, new Uint8Array(await rom.arrayBuffer()));
+            if (new URLSearchParams(location.search).get('phone') === '1') {
+                note('启用原生 ROM 手机服务 = ' + EKA2L1.setPhoneBootMode(true));
+            }
             const result = EKA2L1.initDevice('', '');
             note('设备初始化 = ' + result);
             if (result !== 0) throw new Error('设备初始化失败：' + result);

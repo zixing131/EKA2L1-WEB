@@ -49,6 +49,12 @@ namespace eka2l1 {
 
     sa_server::sa_server(eka2l1::system *sys)
         : service::server(sys->get_kernel_system(), sys, nullptr, "SAServer", true) {
+        // S60 FP2's startup services use these lightweight capability/setup
+        // requests before the documented 1001 operation.  They do not carry
+        // a payload that the HLE needs to retain, but returning
+        // KErrNotSupported makes the native shell abort its initialization.
+        REGISTER_IPC(sa_server, unk_op1, 1, "SaServer::Setup");
+        REGISTER_IPC(sa_server, unk_op1, static_cast<int>(0x2000000AU), "SaServer::Capability");
         REGISTER_IPC(sa_server, unk_op1, 1001, "SaServer::UnkOp1");
     }
 }

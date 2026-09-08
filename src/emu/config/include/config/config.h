@@ -114,6 +114,12 @@ namespace eka2l1::config {
         bool enable_srv_sa{ true };
         bool enable_srv_drm{ true };
 
+        // Set by a frontend before set_device(). Full ROM startup owns these
+        // UI services, whereas the usual app-launch path needs the HLE forms.
+        // This is deliberately transient: it describes the current session,
+        // not a user preference that should be persisted in config.yml.
+        bool native_phone_boot{ false };
+
         bool fbs_enable_compression_queue{ false };
         bool enable_btrace{ false };
 
