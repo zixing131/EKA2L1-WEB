@@ -94,6 +94,7 @@
 #include <kernel/thread.h>
 #include <mem/ptr.h>
 #include <utils/reqsts.h>
+#include <utils/dll.h>
 
 #include <j2me/applist.h>
 #include <j2me/interface.h>
@@ -120,6 +121,11 @@ extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
 static SDL_Window *g_window = nullptr;
 static SDL_GLContext g_gl_context = nullptr;
 static SDL_AudioDeviceID g_audio_device = 0;
+
+// Native ROM servers can accept an IPC before the caller has finished setting
+// its active request. Defer browser-side completion by one RAF turn so a
+// CActiveScheduler cannot observe a stray completion (E32USER-CBase 46).
+static std::set<std::uint32_t> s_phone_native_ipc_deferred;
 
 class sdl_web_window;
 
@@ -1169,23 +1175,119 @@ static void main_loop() {
             eka2l1::service::server *target = msg->msg_session ? msg->msg_session->get_server() : nullptr;
             const std::string &target_name = target ? target->name() : msg->debug_server_name;
             const bool is_native_loader = (target_name == "!Loader") && (!target || !target->is_hle());
+            const bool is_native_domain = (target_name == "!DmDomainServer") && (!target || !target->is_hle());
             const bool is_estart = msg->own_thr && msg->own_thr->owning_process()
                 && (eka2l1::common::lowercase_string(msg->own_thr->owning_process()->raw_name()).find("estart") == 0);
-            if (!is_native_loader || !is_estart || (msg->function != 3) || !msg->request_sts) {
+            if ((!is_native_loader && !is_native_domain) || !msg->request_sts) {
                 return;
             }
 
-            epoc::request_status *status = msg->request_sts.get(msg->own_thr->owning_process());
-            if (!status) {
+            const bool is_loader_bootstrap = is_native_loader && is_estart && (msg->function == 3);
+            const bool is_loader_get_info = is_native_loader && (msg->function == 7);
+            const bool is_loader_load_process = is_native_loader && (msg->function == 1);
+            // The ROM's domain server likewise owns the public server name, but
+            // has no web dispatch loop. Opcode 3 only cancels a pending domain
+            // transition notification; it has no result payload and completing
+            // it mirrors the HLE domain service's steady-state behavior.
+            const bool is_domain_cancel_notification = is_native_domain && (msg->function == 3);
+            if (!is_loader_bootstrap && !is_loader_get_info && !is_loader_load_process && !is_domain_cancel_notification) {
                 return;
+            }
+
+            if ((is_loader_get_info || is_loader_load_process || is_domain_cancel_notification)
+                && s_phone_native_ipc_deferred.insert(msg->id).second) {
+                return;
+            }
+
+            kernel::process *requester = msg->own_thr->owning_process();
+            epoc::request_status *status = msg->request_sts.get(requester);
+            if (!requester || !status) {
+                return;
+            }
+
+            std::int32_t result = epoc::error_none;
+            if (is_loader_load_process) {
+                // AknCap starts the native UI shell through RLoader::LoadProcess.
+                // Complete the actual kernel operation, including the process
+                // handle returned in TLoaderInfo, rather than pretending that a
+                // process exists.
+                epoc::des8 *load_info_des = eka2l1::ptr<epoc::des8>(msg->args.args[0]).get(requester);
+                epoc::desc16 *path_des = eka2l1::ptr<epoc::desc16>(msg->args.args[1]).get(requester);
+                epoc::desc16 *args_des = eka2l1::ptr<epoc::desc16>(msg->args.args[2]).get(requester);
+                if (!load_info_des || !path_des || !args_des || load_info_des->get_length() < sizeof(epoc::ldr_info)) {
+                    result = epoc::error_argument;
+                } else {
+                    epoc::ldr_info load_info{};
+                    std::memcpy(&load_info, load_info_des->get_pointer_raw(requester), sizeof(load_info));
+                    std::u16string process_path = path_des->to_std_string(requester);
+                    const std::u16string process_args = args_des->to_std_string(requester);
+                    if (path_extension(process_path).empty()) {
+                        process_path += u".exe";
+                    }
+                    process_ptr child = kern->spawn_new_process(process_path, process_args, load_info.uid3,
+                        kern->get_epoc_version() == epocver::epoc91 ? 0 : load_info.min_stack_size);
+                    if (!child) {
+                        result = epoc::error_not_found;
+                    } else {
+                        requester->add_child_process(child);
+                        load_info.handle = kern->open_handle_with_thread(msg->own_thr, child,
+                            static_cast<kernel::owner_type>(load_info.owner_type));
+                        if (load_info.handle == kernel::INVALID_HANDLE
+                            || load_info_des->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info)) != 0) {
+                            result = epoc::error_general;
+                        }
+                    }
+                    LOG_WARN(FRONTEND_CMDLINE, "[phone] native Loader LoadProcess {} -> {}", common::ucs2_to_utf8(process_path), result);
+                }
+            } else if (is_loader_get_info) {
+                // ECom queries a plug-in's E32 metadata through !Loader before it
+                // can instantiate the active-idle implementation. The ROM Loader
+                // server is live but has no browser-side service loop, so reproduce
+                // the EGetInfo contract directly against the emulator's lib manager.
+                epoc::desc16 *name = eka2l1::ptr<epoc::desc16>(msg->args.args[1]).get(requester);
+                epoc::des8 *info_out = eka2l1::ptr<epoc::des8>(msg->args.args[0]).get(requester);
+                epoc::des8 *image_out = eka2l1::ptr<epoc::des8>(msg->args.args[2]).get(requester);
+                if (!name || !info_out || !image_out) {
+                    result = epoc::error_argument;
+                } else {
+                    epoc::lib_info image_info{};
+                    const std::u16string image_name = name->to_std_string(requester);
+                    if (!epoc::get_image_info(g_state.symsys->get_lib_manager(), image_name, image_info)) {
+                        result = epoc::error_not_found;
+                    } else if (info_out->get_max_length(requester) < sizeof(epoc::ldr_info)
+                        || image_out->get_max_length(requester) < sizeof(epoc::lib_info)) {
+                        result = epoc::error_no_memory;
+                    } else {
+                        epoc::ldr_info load_info{};
+                        load_info.uid1 = image_info.uid1;
+                        load_info.uid2 = image_info.uid2;
+                        load_info.uid3 = image_info.uid3;
+                        load_info.secure_id = image_info.secure_id;
+                        info_out->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info));
+
+                        if (image_out->get_max_length(requester) >= sizeof(epoc::lib_info2)) {
+                            epoc::lib_info2 image_info2{};
+                            static_cast<epoc::lib_info &>(image_info2) = image_info;
+                            image_info2.debug_attrib = 1;
+                            image_out->assign(requester, reinterpret_cast<const std::uint8_t *>(&image_info2), sizeof(image_info2));
+                        } else {
+                            image_out->assign(requester, reinterpret_cast<const std::uint8_t *>(&image_info), sizeof(image_info));
+                        }
+                    }
+                }
+                LOG_WARN(FRONTEND_CMDLINE, "[phone] native Loader GetInfo {} -> {}", common::ucs2_to_utf8(name ? name->to_std_string(requester) : u""), result);
+            } else if (is_domain_cancel_notification) {
+                LOG_WARN(FRONTEND_CMDLINE, "[phone] completed native domain notification cancellation from {}", requester->name());
             }
 
             msg->msg_status = eka2l1::ipc_message_status::completed;
-            status->set(epoc::error_none, kern->is_eka1());
+            status->set(result, kern->is_eka1());
             msg->own_thr->signal_request();
-            // This is the thread-owned synchronous message. Its reference was
-            // already released when the native server accepted it; completing
-            // it must not release that slot again.
+            // Mirror ipc_context destruction after a normal HLE completion:
+            // remove the accepted request from the session and release its IPC
+            // reference. Leaving it accepted leaks the client request slot and
+            // can later re-awaken a scheduler with no active object.
+            msg->unref();
             ++completed;
         });
         if (completed) {
@@ -2227,6 +2329,7 @@ int wasm_probe_boot_exe(const char *utf8_path) {
 EMSCRIPTEN_KEEPALIVE
 int wasm_boot_phone() {
     if (!g_state.symsys) return -1;
+    s_phone_native_ipc_deferred.clear();
 
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (!kern) return -2;
@@ -2252,7 +2355,6 @@ int wasm_boot_phone() {
     // physical phone the two form the hand-off to SysAp, AknCapServer and the
     // active idle application.
     static const std::u16string estart_path = u"z:\\sys\\bin\\estart.exe";
-    static const std::u16string startup_path = u"z:\\sys\\bin\\startup.exe";
     if (!g_state.symsys->get_io_system()->exist(estart_path)) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] ROM does not contain {}",
             eka2l1::common::ucs2_to_utf8(estart_path));
@@ -2283,106 +2385,41 @@ int wasm_boot_phone() {
             eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
     });
 
+    g_state.phone_boot_active = true;
     if (!estart->run()) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM startup process");
         return -5;
     }
 
-    if (g_state.symsys->get_io_system()->exist(startup_path)) {
-        eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
-        if (startup && startup->run()) {
-            startup->logon([](eka2l1::kernel::process *process) {
-                LOG_WARN(FRONTEND_CMDLINE,
-                    "[phone] ROM boot companion exited: name={} type={} reason={} category={}",
-                    process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
-                    eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
-            });
-        } else {
-            LOG_WARN(FRONTEND_CMDLINE, "[phone] Could not run ROM boot companion: {}",
-                eka2l1::common::ucs2_to_utf8(startup_path));
-        }
-    } else {
-        LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot companion is absent: {}",
+    // This ROM exposes the System Starter as Startup.exe. EStart installs the
+    // native Loader server, then the actual Starter process builds the remaining
+    // system graph. Do not start AknCapServer or SysAp directly: they are
+    // singleton services owned by Startup's ROM plan.
+    static const std::u16string startup_path = u"z:\\sys\\bin\\startup.exe";
+    eka2l1::kernel::process *startup = kern->spawn_new_process(startup_path, u"");
+    if (!startup || !startup->run()) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM System Starter: {}",
             eka2l1::common::ucs2_to_utf8(startup_path));
-    }
-
-    // The desktop build deliberately omits Symbian's System Starter service.
-    // Recreate only the shell portion of this ROM's Starter_Arm.rsc plan, in
-    // its ROM-defined order. Each item below is a genuine ROM executable; the
-    // active-idle UI is still loaded by AknCapServer from its ECom plug-in.
-    for (const std::u16string &shell_path : {
-             std::u16string(u"z:\\sys\\bin\\akncapserver.exe"),
-             std::u16string(u"z:\\sys\\bin\\eshell.exe"),
-             std::u16string(u"z:\\sys\\bin\\sysap.exe") }) {
-        if (!g_state.symsys->get_io_system()->exist(shell_path)) {
-            continue;
-        }
-        eka2l1::kernel::process *component = kern->spawn_new_process(shell_path, u"");
-        if (!component || !component->run()) {
-            LOG_WARN(FRONTEND_CMDLINE, "[phone] Could not run ROM shell component: {}",
-                eka2l1::common::ucs2_to_utf8(shell_path));
-        }
+        return -6;
     }
 
     g_state.paused = false;
-    g_state.phone_boot_active = true;
     LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
         eka2l1::common::ucs2_to_utf8(estart_path));
     return 0;
 }
 
-// The device's System Starter terminates Startup.exe after it has published
-// the terminal P&S boot state and launched the shell. Web builds supply the
-// starter shell components themselves, so publish that same terminal state
-// before handing focus from Startup to the ROM's SysAp process. In particular,
-// KPSStartupUiPhase=AllDone is SysAp's documented trigger for constructing
-// the real active-idle plug-in.
+// EStart's ROM System Starter owns the state publication and process hand-off.
+// The frontend retains this exported hook for the regression page, but it must
+// not publish synthetic boot state or terminate a live Starter process: doing
+// so can race the real AknCap/active-idle launch chain.
 EMSCRIPTEN_KEEPALIVE
 int wasm_phone_finish_startup() {
     if (!g_state.symsys || !g_state.phone_boot_active) {
         return -1;
     }
-    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
-    if (!kern) {
-        return -2;
-    }
-
-    auto set_boot_property = [kern](const int key, const int value) {
-        eka2l1::property_ptr property = kern->get_prop(0x101F8766, key);
-        if (!property) {
-            property = kern->create<eka2l1::service::property>();
-            property->first = 0x101F8766;
-            property->second = key;
-            property->define(eka2l1::service::property_type::int_data, 0);
-        }
-        return property->set_int(value);
-    };
-
-    // Values are the public TPSGlobalSystemState/TPSStartupUiPhase enums in
-    // startupdomainpskeys.h. Setting the values through property::set_int
-    // wakes real ROM subscribers rather than drawing or simulating a shell.
-    const bool published =
-        set_boot_property(0x41, 109) && // ESwStateNormalRfOn
-        set_boot_property(0x42, 100) && // EStartupModeNormal
-        set_boot_property(0x43, 101) && // EIdlePhase1Ok
-        set_boot_property(0x44, 101) && // EPhonePhase1Ok
-        set_boot_property(0x46, 104);   // EStartupUiPhaseAllDone
-    if (!published) {
-        LOG_ERROR(FRONTEND_CMDLINE, "[phone] could not publish terminal ROM boot state");
-        return -3;
-    }
-
-    for (const auto &process_obj : kern->get_process_list()) {
-        auto *process = reinterpret_cast<eka2l1::kernel::process *>(process_obj.get());
-        if (!process || (process->get_exit_type() != eka2l1::kernel::entity_exit_type::pending)
-            || (eka2l1::common::lowercase_string(process->raw_name()).find("startup") == std::string::npos)) {
-            continue;
-        }
-        process->kill(eka2l1::kernel::entity_exit_type::kill, u"SystemStarter", epoc::error_none);
-        LOG_INFO(FRONTEND_CMDLINE, "[phone] published terminal boot state and completed ROM Startup hand-off");
-        return 0;
-    }
-    return 1;
+    LOG_INFO(FRONTEND_CMDLINE, "[phone] ROM System Starter remains in control of startup hand-off");
+    return 0;
 }
 
 /**
