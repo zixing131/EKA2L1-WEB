@@ -658,7 +658,11 @@ namespace eka2l1 {
         template <typename F>
         void for_each_inflight_ipc_message(F callback) {
             for (auto &msg : msgs_) {
-                if (!msg || msg->is_free()) {
+                // Session and synchronous IPC slots are retained for reuse
+                // after completion. Their historical status/function fields
+                // are intentionally left intact, so ref_count is the source
+                // of truth for whether an exchange is still in flight.
+                if (!msg || (msg->ref_count == 0)) {
                     continue;
                 }
 
