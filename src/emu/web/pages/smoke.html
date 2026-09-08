@@ -14,7 +14,7 @@
 <section class="setup">
 <div class="files"><label>ROM 文件<input id="rom" type="file" accept=".rom"></label><label>RPKG 文件<input id="rpkg" type="file" accept=".rpkg"></label></div>
 <p class="hint">不选择文件时，使用测试服务器的 rom/SYM.ROM 和 rom/SYM.RPKG（当前为 Nokia 5320）。文件只在本机浏览器中读取。设备语言须由固件支持，否则使用固件默认语言。</p>
-<div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><button id="start">运行回归</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
+<div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><label>帧率上限<select id="max-fps"><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option></select></label><button id="start">运行回归</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
 </section>
 <div class="layout">
 <div class="screen"><canvas id="canvas" width="240" height="320" tabindex="0" aria-label="模拟器画面"></canvas>
@@ -99,6 +99,11 @@
         if (!response.ok) throw new Error('找不到 ' + fallback + '，请先选择 ROM 和 RPKG 文件。');
         return response.blob();
     }
+    byId('max-fps').onchange = () => {
+        if (!ready) return;
+        EKA2L1.setMaxFps(Number(byId('max-fps').value));
+        note('帧率上限 = ' + byId('max-fps').value);
+    };
     byId('restart').onclick = () => location.reload();
     byId('export').onclick = () => {
         const url = URL.createObjectURL(new Blob([lines.join('\n')], {type:'text/plain;charset=utf-8'}));
@@ -108,13 +113,14 @@
     };
     byId('start').onclick = async () => {
         byId('start').disabled = true;
-        for (const id of ['rom', 'rpkg', 'language', 'cpu']) byId(id).disabled = true;
+        for (const id of ['rom', 'rpkg', 'language', 'cpu', 'max-fps']) byId(id).disabled = true;
         try {
             note('Build ' + (window.EKA2L1_BUILD_ID || 'dev') + '；语言 ' + byId('language').value + '；JIT ' + byId('cpu').value);
             const mod = await EKA2L1.boot({canvas:byId('canvas'), onProgress:(percent, message) => {
                 byId('summary').textContent = percent + '% · ' + message;
             }});
-            note('WebAssembly 核心已就绪');
+            EKA2L1.setMaxFps(Number(byId('max-fps').value));
+            note('WebAssembly 核心已就绪；帧率上限 ' + byId('max-fps').value);
             const rpkg = await readInput('rpkg', 'rom/SYM.RPKG');
             const target = await EKA2L1.streamInstallRpkg(rpkg, (done, total) => {
                 byId('summary').textContent = '安装 RPKG · ' + Math.round(done / total * 100) + '%';
@@ -132,6 +138,7 @@
             note('找到 ' + apps.length + ' 个应用');
             byId('apps').textContent = '';
             ready = true;
+            byId('max-fps').disabled = false;
             for (const button of document.querySelectorAll('[data-key]')) button.disabled = false;
             for (const app of apps) {
                 const button = document.createElement('button');

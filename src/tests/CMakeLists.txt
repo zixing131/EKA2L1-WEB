@@ -6,6 +6,7 @@ add_subdirectory(common)
 add_executable(ekatests 
 	tests.cpp
     platform.cpp
+    web_frame_pacer.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 

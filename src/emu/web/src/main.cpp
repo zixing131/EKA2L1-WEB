@@ -64,6 +64,7 @@
 #include <drivers/itc.h>
 
 #include "web_audio.h"
+#include "frame_pacer.h"
 
 #include <system/epoc.h>
 #include <system/devices.h>
@@ -595,12 +596,9 @@ static std::atomic<std::uint64_t> s_redraw_cb_count{ 0 };
 // still run each frame.
 static double g_frame_cpu_budget_ms = 15.5;
 
-// Frame gate (ms) between executed main-loop ticks. 15.5 = 60fps. Low-power
-// mode raises it to ~32.3 (30fps): every skipped tick costs near-zero host
-// CPU, halving the total main-thread burn on weak devices (thermal headroom,
-// responsive UI) at the price of presenting half the frames.
-// Runtime-tunable via wasm_set_max_fps().
-static double g_frame_gate_ms = 15.5;
+// Default 60 Hz, or 30 Hz in low-power mode. Preserve cadence across RAF
+// callbacks on displays whose refresh rate is not a multiple of the limit.
+static eka2l1::web::frame_pacer g_frame_pacer;
 
 // Screen upscale filter: linear (default, smooth) or nearest. Nearest is the
 // cheaper sample on weak GPUs and gives crisp integer-ish pixels; toggled by
@@ -1041,21 +1039,18 @@ static void main_loop() {
         }
     }
 
-    // Cap at 60fps (30fps in low-power mode, see g_frame_gate_ms). The loop
+    // Cap at 60fps (30fps in low-power mode). The loop
     // runs on requestAnimationFrame, which fires at display refresh — 120Hz on
     // ProMotion phones/laptops would double the per-second CPU burn for no
     // visible benefit. Skipped ticks still polled events above and keep the
     // audio queue fed below.
-    static double s_last_frame_ms = 0.0;
     const double now_ms = emscripten_get_now();
-    if ((now_ms - s_last_frame_ms) < g_frame_gate_ms) {
+    if (!g_frame_pacer.due(now_ms)) {
         if (g_state.audio_driver) {
             static_cast<eka2l1::drivers::web_audio_driver *>(g_state.audio_driver.get())->pump();
         }
         return;
     }
-    const double raf_interval_ms = (s_last_frame_ms > 0.0) ? (now_ms - s_last_frame_ms) : 16.6;
-    s_last_frame_ms = now_ms;
 
     // Execute screen redraws deferred by the animation scheduler. They must
     // run here on the main thread: redraw performs synchronous GPU calls
@@ -1109,8 +1104,8 @@ static void main_loop() {
     // budget (budget_hit == raf_frames, early_exit ~0) and the guest wanted
     // ~14-15ms, so FPS was pinned well below the game's 40 target. Raise the
     // post-boot budget toward the observed demand. It's a *time* cap, not a work
-    // cap, and the loop still breaks the instant the guest is caught up
-    // (loop()==0), so this only lengthens genuinely CPU-hungry frames and never
+    // cap, and the loop breaks when the guest has no runnable threads,
+    // so this only lengthens genuinely CPU-hungry frames and never
     // wastes time when idle. Kept below the full 16.6ms RAF interval so present /
     // GL submit / audio still get a slice each frame (over-budget would starve
     // present and stutter). Runtime-tunable via wasm_set_cpu_budget for live
@@ -1119,17 +1114,34 @@ static void main_loop() {
     const double FRAME_CPU_BUDGET_MS = boot_phase ? 16.0 : g_frame_cpu_budget_ms;
     const int MAX_SLICES_PER_FRAME = boot_phase ? 96 : 64;
 
-    (void)raf_interval_ms;
-
     const double frame_start = emscripten_get_now();
     int slices = 0;
     bool hit_budget = false;
+    bool finished_guest_work = false;
     while (slices < MAX_SLICES_PER_FRAME) {
         const int loop_result = g_state.symsys->loop();
         ++slices;
 
         if (loop_result == 0) {
+            finished_guest_work = true;
             break;
+        }
+
+        // loop()==0 means shutdown, not idle. Once reschedule() has no runnable
+        // guest thread, another 63 calls only poll the same empty scheduler.
+        // Check under its lock because timer callbacks can wake guest threads.
+        // Input, timers, graphics and audio still run on the following RAF tick.
+        auto *kernel = g_state.symsys->get_kernel_system();
+        if (!kernel) {
+            finished_guest_work = true;
+            break;
+        }
+        {
+            const std::lock_guard<eka2l1::kernel_system> guard(*kernel);
+            if (!kernel->crr_thread()) {
+                finished_guest_work = true;
+                break;
+            }
         }
 
         if ((emscripten_get_now() - frame_start) >= FRAME_CPU_BUDGET_MS) {
@@ -1140,7 +1152,7 @@ static void main_loop() {
     // Exiting on the slice cap is also a work-capped (CPU-bound) frame; without
     // this it would be counted as "early exit" and skew the probe toward
     // present-bound.
-    if (slices >= MAX_SLICES_PER_FRAME) {
+    if (slices >= MAX_SLICES_PER_FRAME && !finished_guest_work) {
         hit_budget = true;
     }
 
@@ -1148,7 +1160,7 @@ static void main_loop() {
     // Accumulate per-RAF-frame stats and dump once a second next to the FPS
     // counter. cpu_ms = guest execution time this frame; budget_frames = frames
     // that exhausted FRAME_CPU_BUDGET_MS (CPU-bound); early_frames = frames that
-    // finished all guest work (loop()==0) with budget to spare (present/RAF
+    // finished all runnable guest work with budget to spare (present/RAF
     // -bound). If FPS is below target AND budget_frames is high -> CPU is the
     // limiter; if early_frames dominate -> the limiter is elsewhere (vsync /
     // RAF / guest-side pacing), so CPU opts can't raise FPS.
@@ -1204,7 +1216,7 @@ static void main_loop() {
         if (s_probe_raf_frames > 0) {
             const double avg_cpu_ms = s_probe_cpu_ms_acc / s_probe_raf_frames;
             LOG_WARN(FRONTEND_CMDLINE,
-                "[perf] fps={} raf_frames={} avg_guest_cpu={:.1f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.0f}ms jit={} compiled={} rejected={} jit_instrs={} ({:.0f}%)",
+                "[perf] fps={} raf_frames={} avg_guest_cpu={:.3f}ms budget_hit={} early_exit={} avg_slices={} budget_cap={:.1f}ms jit={} compiled={} rejected={} jit_instrs={} ({:.0f}%)",
                 g_state.current_fps, s_probe_raf_frames, avg_cpu_ms,
                 s_probe_budget_frames, s_probe_early_frames,
                 (s_probe_raf_frames ? (s_probe_slices_acc / s_probe_raf_frames) : 0),
@@ -3762,11 +3774,8 @@ void wasm_set_max_fps(int fps) {
     } else if (fps > 120) {
         fps = 120;
     }
-    // Gate slightly under the ideal interval so a RAF tick arriving a hair
-    // early (timer jitter) isn't skipped, which would drop to the next tick
-    // and halve the effective rate.
-    g_frame_gate_ms = (1000.0 / fps) - 1.1;
-    LOG_WARN(FRONTEND_CMDLINE, "[perf] max fps set to {} (frame gate {:.1f}ms)", fps, g_frame_gate_ms);
+    g_frame_pacer.set_max_fps(fps);
+    LOG_WARN(FRONTEND_CMDLINE, "[perf] max fps set to {}", fps);
 }
 
 /**
