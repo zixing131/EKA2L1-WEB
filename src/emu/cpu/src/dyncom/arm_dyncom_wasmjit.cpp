@@ -606,8 +606,31 @@ namespace eka2l1::arm::dyncom_jit {
                 }
             }
 
-            void push_cin_zero() { w_.const_i32(0); }
-            void push_cin_one() { w_.const_i32(1); }
+            // Ordinary ADD/SUB need no widened carry-in calculation. Capture
+            // both inputs before writing T0, including the reversed RSB pair.
+            // ARM subtraction carry means no borrow (unsigned lhs >= rhs).
+            void emit_add_sub_flags(std::uint8_t lhs, std::uint8_t rhs, bool subtract) {
+                w_.local_get(lhs); w_.local_set(L_T2);
+                w_.local_get(rhs); w_.local_set(L_ADDR);
+                w_.local_get(L_T2); w_.local_get(L_ADDR);
+                w_.u8(subtract ? op::I32_SUB : op::I32_ADD); w_.local_set(L_T0);
+
+                if (subtract) {
+                    w_.local_get(L_T2); w_.local_get(L_ADDR); w_.u8(op::I32_LT_U);
+                    w_.u8(op::I32_EQZ);
+                } else {
+                    w_.local_get(L_T0); w_.local_get(L_T2); w_.u8(op::I32_LT_U);
+                }
+                w_.local_set(L_C);
+
+                // ADD: ((lhs ^ result) & (rhs ^ result)) >> 31
+                // SUB: ((lhs ^ result) & (lhs ^ rhs)) >> 31
+                w_.local_get(L_T2); w_.local_get(L_T0); w_.u8(op::I32_XOR);
+                w_.local_get(L_ADDR); w_.local_get(subtract ? L_T2 : L_T0); w_.u8(op::I32_XOR);
+                w_.u8(op::I32_AND); w_.const_i32(31); w_.u8(op::I32_SHR_U);
+                w_.local_set(L_V);
+            }
+
             void push_cin_c() { w_.local_get(L_C); }
 
             void emit_nz_from_t0() {
@@ -778,16 +801,16 @@ namespace eka2l1::arm::dyncom_jit {
                 break;
             case alu_kind::ADD:
             case alu_kind::CMN:
-                if (S) emit_awc(L_T0, false, L_T1, false, &block_compiler::push_cin_zero, true);
+                if (S) emit_add_sub_flags(L_T0, L_T1, false);
                 else { w_.local_get(L_T0); w_.local_get(L_T1); w_.u8(op::I32_ADD); w_.local_set(L_T0); }
                 break;
             case alu_kind::SUB:
             case alu_kind::CMP:
-                if (S) emit_awc(L_T0, false, L_T1, true, &block_compiler::push_cin_one, true);
+                if (S) emit_add_sub_flags(L_T0, L_T1, true);
                 else { w_.local_get(L_T0); w_.local_get(L_T1); w_.u8(op::I32_SUB); w_.local_set(L_T0); }
                 break;
             case alu_kind::RSB:
-                if (S) emit_awc(L_T1, false, L_T0, true, &block_compiler::push_cin_one, true);
+                if (S) emit_add_sub_flags(L_T1, L_T0, true);
                 else { w_.local_get(L_T1); w_.local_get(L_T0); w_.u8(op::I32_SUB); w_.local_set(L_T0); }
                 break;
             case alu_kind::ADC:

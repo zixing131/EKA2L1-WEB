@@ -133,3 +133,22 @@ if (EKA2L1_BUILD_DYNCOM_DIFFTEST)
     add_executable(dyncom_difftest src/dyncom/tests/dyncom_difftest.cpp)
     target_link_libraries(dyncom_difftest PRIVATE cpu common)
 endif()
+
+# Runs actual runtime-generated WASM against the interpreter and golden model.
+# Explicit target only: it does not add test fixtures to the browser frontend.
+if (EMSCRIPTEN)
+    add_executable(wasmjit_difftest EXCLUDE_FROM_ALL src/dyncom/tests/wasmjit_difftest.cpp)
+    target_link_libraries(wasmjit_difftest PRIVATE cpu common)
+    target_link_options(wasmjit_difftest PRIVATE
+        -O3 -pthread
+        "SHELL:-s ENVIRONMENT=node,web"
+        "SHELL:-s ALLOW_TABLE_GROWTH=1"
+        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        "SHELL:-s INITIAL_MEMORY=134217728"
+        "SHELL:-s MAXIMUM_MEMORY=1073741824"
+        "SHELL:-s STACK_SIZE=8388608"
+        "SHELL:-s DISABLE_EXCEPTION_CATCHING=0"
+        "SHELL:-s EXIT_RUNTIME=1")
+    set_target_properties(wasmjit_difftest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/jit-tests")
+endif()

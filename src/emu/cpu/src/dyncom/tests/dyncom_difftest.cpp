@@ -20,6 +20,9 @@
  *
  * Build:  cmake -DEKA2L1_BUILD_DYNCOM_DIFFTEST=ON -DEKA2L1_CPU_DYNCOM_ONLY=ON ...
  * Run:    scripts/cpu_difftest.sh   (exits non-zero on the first divergence)
+ *
+ * EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY lets the WASM harness reuse the fixture
+ * and golden model without the host VFP fast-path tests or this file's main.
  */
 
 #include <cpu/dyncom/arm_dyncom.h>
@@ -368,6 +371,7 @@ struct rng {
     bool flip() { return e() & 1; }
 };
 
+#ifndef EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY
 std::uint32_t random_normal_f32(rng &r) {
     // Keep most products away from overflow/underflow so the host envelope is
     // exercised heavily, while still varying signs and every significand bit.
@@ -508,6 +512,8 @@ std::uint32_t benchmark_vfp_mac(diff_env &env_a, diff_env &env_b,
         slow_ms, fast_ms, slow_ms / fast_ms);
     return 0;
 }
+
+#endif
 
 // A random data-processing instruction. cond is AL most of the time but
 // sometimes a real condition (to exercise the conditional path). Operand
@@ -842,6 +848,7 @@ bool report_mismatch(const char *what, std::uint32_t inst, std::uint32_t seed,
 
 } // namespace
 
+#ifndef EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY
 int main(int argc, char **argv) {
     std::uint32_t base_seed = 1;
     std::uint32_t count = 200000;
@@ -968,3 +975,5 @@ int main(int argc, char **argv) {
     std::printf("dyncom_difftest: FAIL (%u divergences)\n", failures);
     return 1;
 }
+
+#endif
