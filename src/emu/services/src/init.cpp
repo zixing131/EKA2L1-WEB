@@ -298,7 +298,8 @@ namespace eka2l1::epoc {
             { 0x101F8767, 0x501 }, { 0x101F8EC5, 0x2 }, { 0x102029AC, 0x1 },
             { 0x10202999, 0x1 }, { 0x10202999, 0x2 }, { 0x10205047, 0x102 },
             { 0x101F9A0B, 0x1 }, { 0x101F7989, 0x10282FAF },
-            { 0x101F8771, 0x3 }, { 0x101F97B2, 0x2 }
+            { 0x101F8771, 0x3 }, { 0x101F97B2, 0x2 },
+            { 0x101F877C, 0x8 }, { 0x101F84EB, 0x1 }
         };
         for (const auto &[category, key] : sysap_boot_props) {
             property_ptr state = sys->get_kernel_system()->create<service::property>();
@@ -407,7 +408,7 @@ namespace eka2l1 {
                 CREATE_SERVER(sys, drm_helper_server);
 
             // These needed to be HLEd
-            // The ROM's APSEXE, AknCap, accessory, HWRM and SystemAgent
+            // The ROM's APSEXE, AknCap, HWRM and SystemAgent
             // processes publish the same public services.  They must own
             // them during a handset boot; otherwise native clients silently
             // connect to the HLE implementation instead of their ROM peer.
@@ -422,9 +423,10 @@ namespace eka2l1 {
             if (!native_phone_boot) {
                 CREATE_SERVER(sys, oom_ui_app_server);
             }
-            if (!native_phone_boot) {
-                CREATE_SERVER(sys, hwrm_server);
-            }
+            // The host owns lighting, vibration and power state. The ROM HWRM
+            // worker busy-waits when those hardware backends are unavailable,
+            // so preserve the existing HLE hardware service during phone boot.
+            CREATE_SERVER(sys, hwrm_server);
             CREATE_SERVER(sys, view_server);
             CREATE_SERVER(sys, remcon_server);
             CREATE_SERVER(sys, etel_server);
@@ -442,9 +444,11 @@ namespace eka2l1 {
             CREATE_SERVER(sys, comm_server);
             CREATE_SERVER(sys, bt_server);
             CREATE_SERVER(sys, btman_server);
-            if (!native_phone_boot) {
-                CREATE_SERVER(sys, accessory_server);
-            }
+            // Accessory state is host hardware. Keep this server in-process
+            // during a ROM phone boot: the S60v3 AccServer ASY proxy repeatedly
+            // self-signals while no physical accessory backend is present and
+            // starves the ROM UI startup threads.
+            CREATE_SERVER(sys, accessory_server);
 
             // Not really sure about this one
             CREATE_SERVER(sys, keysound_server);

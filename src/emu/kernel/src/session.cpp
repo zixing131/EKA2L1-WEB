@@ -167,6 +167,16 @@ namespace eka2l1 {
                 return epoc::error_permission_denied;
             }
 
+            // A client may call User::WaitForRequest immediately after this
+            // SVC returns.  Publish the pending state before handing the
+            // message to the server so native server clients cannot observe
+            // an old completion and spin past their wait.
+            if (msg->request_sts && msg->own_thr) {
+                if (epoc::request_status *status = msg->request_sts.get(msg->own_thr->owning_process())) {
+                    status->set(epoc::request_status::pending_status, kern->is_eka1());
+                }
+            }
+
             msg->debug_server_name = svr ? svr->name() : std::string();
             msg->debug_session_name = name();
             msg->msg_session = (headless_) ? nullptr : this;

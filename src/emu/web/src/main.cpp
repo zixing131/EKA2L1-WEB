@@ -2375,10 +2375,12 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
     return process && process->run();
 }
 
-static constexpr std::array<std::u16string_view, 12> PHONE_BOOT_PLAN = {
+static constexpr std::array<std::u16string_view, 13> PHONE_BOOT_PLAN = {
     u"z:\\sys\\bin\\ecomserver.exe", u"z:\\sys\\bin\\cdlserver.exe",
-    u"z:\\sys\\bin\\accserver.exe", u"z:\\sys\\bin\\apsexe.exe",
-    u"z:\\sys\\bin\\akncapserver.exe", u"z:\\sys\\bin\\hwrmserver.exe",
+    u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\ailaunch.exe",
+    u"z:\\sys\\bin\\menu2.exe",
+    u"z:\\sys\\bin\\phone.exe",
+    u"z:\\sys\\bin\\akncapserver.exe",
     u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
     u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
     u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe"
@@ -2517,24 +2519,16 @@ int wasm_phone_finish_startup() {
     if (!g_state.symsys || !g_state.phone_boot_active) {
         return -1;
     }
-    // These are the published terminal values of the ROM's own S60 startup
-    // protocol: normal RF-on, normal boot mode, Phone/Idle phase 1 ready and
-    // every startup UI phase complete.  They release the real SplashScreen
-    // window group so AknCap can foreground the ROM idle/menu application.
-    // No UI is synthesized here; this is the device-service notification that
-    // a full handset would provide after its radio/SIM bootstrap.
+    // The device bootstrap owns the individual startup-state transitions.
+    // The browser only supplies the final SplashScreen-close notification;
+    // forcing the other terminal values races Startup, SysAp and AknCap while
+    // they are still registering their real window groups.
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     if (!kern) {
         return -2;
     }
-    static constexpr std::pair<int, int> terminal_states[] = {
-        { 0x41, 109 }, { 0x42, 100 }, { 0x43, 101 },
-        { 0x44, 101 }, { 0x46, 104 }, { 0x301, 101 }
-    };
-    for (const auto &[key, value] : terminal_states) {
-        if (eka2l1::property_ptr state = kern->get_prop(0x101F8766, key)) {
-            state->set_int(value);
-        }
+    if (eka2l1::property_ptr splash_state = kern->get_prop(0x101F8766, 0x301)) {
+        splash_state->set_int(101);
     }
     LOG_INFO(FRONTEND_CMDLINE, "[phone] published ROM startup completion state");
     return 0;
