@@ -26,6 +26,7 @@
 // ============================================================================
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -42,6 +43,7 @@
 #include <malloc.h>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <vector>
 
@@ -148,6 +150,12 @@ namespace eka2l1::web {
         // Enables the small compatibility hand-off needed when the ROM's
         // EStart process talks directly to its native Loader server.
         bool phone_boot_active = false;
+        // The device service plan must be staged: several ROM servers publish
+        // their public names during their first scheduler turn, and launching
+        // all consumers in the same turn lets each consumer create a duplicate
+        // server instance.
+        std::size_t phone_boot_component_index = 0;
+        double phone_boot_next_component_ms = 0.0;
 
         int window_width = 360;
         int window_height = 640;
@@ -183,6 +191,8 @@ namespace eka2l1::web {
 
 using namespace eka2l1::web;
 using namespace eka2l1;
+
+static void advance_phone_boot_plan(double now_ms);
 
 // ============================================================================
 // SDL2-based Emu Window for Web
@@ -1073,6 +1083,8 @@ static void main_loop() {
         }
         return;
     }
+
+    advance_phone_boot_plan(now_ms);
 
     // Execute screen redraws deferred by the animation scheduler. They must
     // run here on the main thread: redraw performs synchronous GPU calls
@@ -2349,6 +2361,35 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
     return process && process->run();
 }
 
+static constexpr std::array<std::u16string_view, 12> PHONE_BOOT_PLAN = {
+    u"z:\\sys\\bin\\ecomserver.exe", u"z:\\sys\\bin\\cdlserver.exe",
+    u"z:\\sys\\bin\\accserver.exe", u"z:\\sys\\bin\\apsexe.exe",
+    u"z:\\sys\\bin\\akncapserver.exe", u"z:\\sys\\bin\\hwrmserver.exe",
+    u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
+    u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
+    u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe"
+};
+
+static void advance_phone_boot_plan(const double now_ms) {
+    if (!g_state.phone_boot_active || !g_state.symsys
+        || (g_state.phone_boot_component_index >= PHONE_BOOT_PLAN.size())
+        || (now_ms < g_state.phone_boot_next_component_ms)) {
+        return;
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    const std::u16string component(PHONE_BOOT_PLAN[g_state.phone_boot_component_index]);
+    if (!start_phone_boot_component(kern, component)) {
+        LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot component did not start: {}",
+            eka2l1::common::ucs2_to_utf8(component));
+    }
+
+    ++g_state.phone_boot_component_index;
+    // Let the server execute one guest scheduling slice and publish its name
+    // before launching the next dependent component.
+    g_state.phone_boot_next_component_ms = now_ms + 180.0;
+}
+
 /**
  * Start the ROM-provided Symbian boot sequence. EKA2L1 normally creates its
  * own services and deliberately skips EStart.exe; phone mode opts into the
@@ -2441,21 +2482,11 @@ int wasm_boot_phone() {
     // device image. Web's transient device starts without that generated file,
     // so bridge only this missing plan by launching the same ROM programs from
     // Starter_Arm.rsc. FBSERV and EWSRV are deliberately absent: their roles
-    // are already supplied by EKA2L1's window and font servers.
-    static const std::u16string boot_plan[] = {
-        u"z:\\sys\\bin\\accserver.exe", u"z:\\sys\\bin\\akncapserver.exe",
-        u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\hwrmserver.exe",
-        u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
-        u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
-        u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe",
-        u"z:\\sys\\bin\\menu2.exe"
-    };
-    for (const std::u16string &component : boot_plan) {
-        if (!start_phone_boot_component(kern, component)) {
-            LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot component did not start: {}",
-                eka2l1::common::ucs2_to_utf8(component));
-        }
-    }
+    // are already supplied by EKA2L1's window and font servers. The plan is
+    // advanced from the frame loop so native servers can publish before a
+    // consumer attempts its first session.
+    g_state.phone_boot_component_index = 0;
+    g_state.phone_boot_next_component_ms = emscripten_get_now();
 
     g_state.paused = false;
     LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
