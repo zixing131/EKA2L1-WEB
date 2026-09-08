@@ -1322,6 +1322,16 @@ namespace eka2l1::epoc {
             }
         }
 
+        // RServer::Create has a global namespace.  Letting a second server
+        // with the same name in creates two viable-looking endpoints, while
+        // client lookup always resolves the first one.  During ROM boot that
+        // strands requests (notably ECom plug-in discovery) on a server that
+        // never receives them.  Native starters expect KErrAlreadyExists and
+        // either retain the first service or take their normal fallback.
+        if (!server_name.empty() && kern->get_by_name<service::server>(server_name)) {
+            return epoc::error_already_exists;
+        }
+
         kernel::owner_type handle_mode = (server_name.empty()) ? kernel::owner_type::process : kernel::owner_type::thread;
         auto handle = kern->create_and_add<service::server>(handle_mode, kern->get_system(), kern->crr_thread(), server_name,
                               false, false, static_cast<service::share_mode>(mode))
