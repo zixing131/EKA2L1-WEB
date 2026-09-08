@@ -551,6 +551,11 @@
         return ccall('wasm_boot_phone', 'number');
     };
 
+    /** Complete the System Starter hand-off from the temporary Startup UI to SysAp. */
+    EKA2L1.finishPhoneStartup = function () {
+        return ccall('wasm_phone_finish_startup', 'number');
+    };
+
     /**
      * Check whether the ROM has a Java MIDlet launcher. Returns a diagnostic
      * string ending with "LAUNCHER: available" or "LAUNCHER: missing".

@@ -88,6 +88,7 @@
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
+#include <kernel/property.h>
 #include <kernel/process.h>
 #include <kernel/server.h>
 #include <kernel/thread.h>
@@ -2330,6 +2331,60 @@ int wasm_boot_phone() {
     return 0;
 }
 
+// The device's System Starter terminates Startup.exe after it has published
+// the terminal P&S boot state and launched the shell. Web builds supply the
+// starter shell components themselves, so publish that same terminal state
+// before handing focus from Startup to the ROM's SysAp process. In particular,
+// KPSStartupUiPhase=AllDone is SysAp's documented trigger for constructing
+// the real active-idle plug-in.
+EMSCRIPTEN_KEEPALIVE
+int wasm_phone_finish_startup() {
+    if (!g_state.symsys || !g_state.phone_boot_active) {
+        return -1;
+    }
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        return -2;
+    }
+
+    auto set_boot_property = [kern](const int key, const int value) {
+        eka2l1::property_ptr property = kern->get_prop(0x101F8766, key);
+        if (!property) {
+            property = kern->create<eka2l1::service::property>();
+            property->first = 0x101F8766;
+            property->second = key;
+            property->define(eka2l1::service::property_type::int_data, 0);
+        }
+        return property->set_int(value);
+    };
+
+    // Values are the public TPSGlobalSystemState/TPSStartupUiPhase enums in
+    // startupdomainpskeys.h. Setting the values through property::set_int
+    // wakes real ROM subscribers rather than drawing or simulating a shell.
+    const bool published =
+        set_boot_property(0x41, 109) && // ESwStateNormalRfOn
+        set_boot_property(0x42, 100) && // EStartupModeNormal
+        set_boot_property(0x43, 101) && // EIdlePhase1Ok
+        set_boot_property(0x44, 101) && // EPhonePhase1Ok
+        set_boot_property(0x46, 104);   // EStartupUiPhaseAllDone
+    if (!published) {
+        LOG_ERROR(FRONTEND_CMDLINE, "[phone] could not publish terminal ROM boot state");
+        return -3;
+    }
+
+    for (const auto &process_obj : kern->get_process_list()) {
+        auto *process = reinterpret_cast<eka2l1::kernel::process *>(process_obj.get());
+        if (!process || (process->get_exit_type() != eka2l1::kernel::entity_exit_type::pending)
+            || (eka2l1::common::lowercase_string(process->raw_name()).find("startup") == std::string::npos)) {
+            continue;
+        }
+        process->kill(eka2l1::kernel::entity_exit_type::kill, u"SystemStarter", epoc::error_none);
+        LOG_INFO(FRONTEND_CMDLINE, "[phone] published terminal boot state and completed ROM Startup hand-off");
+        return 0;
+    }
+    return 1;
+}
+
 /**
  * Start SystemAMSCore + midp2silentmidletinstall the same way host JAR install
  * does, without restaging files. Used to test ROM-provided preinstall packages.
@@ -3879,6 +3934,25 @@ void wasm_debug_dump() {
             }
             std::printf("[dump] screen %d focus-group='%s' owner-thread='%s'\n", scr->number,
                 focus_name.c_str(), focus_proc.c_str());
+
+            const std::uint32_t total_groups = g_state.winserv->get_total_window_groups(-1, scr->number);
+            std::vector<std::uint32_t> group_ids(total_groups);
+            if (total_groups) {
+                g_state.winserv->get_window_group_list(group_ids.data(), total_groups, -1, scr->number);
+            }
+            for (const std::uint32_t id : group_ids) {
+                epoc::window_group *group = g_state.winserv->get_group_from_id(id);
+                if (!group) {
+                    continue;
+                }
+                std::string owner = "?";
+                if (group->client && group->client->get_client()) {
+                    owner = group->client->get_client()->name();
+                }
+                std::printf("[dump] window-group id=%u name='%s' owner='%s' priority=%d focusable=%d active=%d\n",
+                    id, common::ucs2_to_utf8(group->name).c_str(), owner.c_str(), group->priority,
+                    group->can_receive_focus() ? 1 : 0, (scr->focus == group) ? 1 : 0);
+            }
             scr = scr->next;
         }
     }

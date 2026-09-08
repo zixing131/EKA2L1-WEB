@@ -270,6 +270,10 @@
                     EKA2L1.t('overlay.launchFailedText', { code: phoneLaunch }));
                 return;
             }
+            setTimeout(function () {
+                var handoff = EKA2L1.finishPhoneStartup();
+                console.log('[EKA2L1] ROM startup hand-off: ' + handoff);
+            }, 3000);
             beginFramePoll();
             return;
         }
