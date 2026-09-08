@@ -1127,8 +1127,9 @@ static void main_loop() {
             break;
         }
 
-        // loop()==0 means shutdown, not idle. Once reschedule() has no runnable
-        // guest thread, another 63 calls only poll the same empty scheduler.
+        // loop()==0 means shutdown, not idle. A null current thread can also
+        // be a timeslice handoff with another thread still on the ready queue.
+        // Only stop polling when both the current thread and queue are empty.
         // Check under its lock because timer callbacks can wake guest threads.
         // Input, timers, graphics and audio still run on the following RAF tick.
         auto *kernel = g_state.symsys->get_kernel_system();
@@ -1138,7 +1139,7 @@ static void main_loop() {
         }
         {
             const std::lock_guard<eka2l1::kernel_system> guard(*kernel);
-            if (!kernel->crr_thread()) {
+            if (!kernel->crr_thread() && !kernel->get_thread_scheduler()->has_ready_threads()) {
                 finished_guest_work = true;
                 break;
             }

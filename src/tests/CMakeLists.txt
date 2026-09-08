@@ -7,6 +7,7 @@ add_executable(ekatests
 	tests.cpp
     platform.cpp
     web_frame_pacer.cpp
+    game_patches.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 

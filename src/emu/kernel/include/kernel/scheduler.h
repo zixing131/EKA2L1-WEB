@@ -105,6 +105,13 @@ namespace eka2l1 {
                 return crr_thread;
             }
 
+            // A nonblocking reschedule can leave current_thread null for one
+            // turn after requeueing the only ready thread's expired timeslice.
+            // Callers must hold the kernel lock when inspecting these queues.
+            bool has_ready_threads() const {
+                return ready_mask[0] != 0 || ready_mask[1] != 0;
+            }
+
             kernel::process *current_process() const {
                 return crr_process;
             }

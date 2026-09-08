@@ -15,6 +15,7 @@ add_library(epockern
         include/kernel/btrace.h
         include/kernel/codedump_collector.h
         include/kernel/guomen_process.h
+        include/kernel/game_patches.h
         include/kernel/change_notifier.h
         include/kernel/chunk.h
         include/kernel/codeseg.h

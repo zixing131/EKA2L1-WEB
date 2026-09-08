@@ -28,6 +28,7 @@
 
 #include <kernel/common.h>
 #include <kernel/libmanager.h>
+#include <kernel/game_patches.h>
 #include <kernel/reg.h>
 
 #include <common/configure.h>
@@ -263,6 +264,11 @@ namespace eka2l1::hle {
 
         info.constant_data = reinterpret_cast<std::uint8_t *>(&img->data[img->header.data_offset]);
         info.code_data = reinterpret_cast<std::uint8_t *>(&img->data[img->header.code_offset]);
+
+        if (kernel::apply_super_miners_bitmap_fallback(info.uids[2],
+                info.code_data, info.code_size)) {
+            LOG_INFO(KERNEL, "Super Miners: selected portable bitmap renderer");
+        }
 
         // Add relocation info in
         build_relocation_list(info.relocation_list, img);
