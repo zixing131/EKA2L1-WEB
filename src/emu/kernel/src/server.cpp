@@ -155,6 +155,15 @@ namespace eka2l1::service {
 
         request_own_thread->increase_access_count();
 
+        // RServer::Receive owns the asynchronous request exactly like every
+        // other kernel async API: when there is no queued client message, the
+        // caller must observe KRequestPending and block in WaitForRequest.
+        // Leaving the previous completion value in place makes native server
+        // loops spin at high priority, starving newly started UI processes.
+        if (epoc::request_status *status = request_status.get(request_own_thread->owning_process())) {
+            status->set(epoc::request_status::pending_status, kern->is_eka1());
+        }
+
         if (!pending_msg) {
             return;
         }
