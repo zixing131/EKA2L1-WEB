@@ -92,6 +92,7 @@ if (EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/mediaclientvideo/group" "${WASM_STAGE_DIR}/patch/"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/postingsurfacefactory/group" "${WASM_STAGE_DIR}/patch/"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/goommonitor/group" "${WASM_STAGE_DIR}/patch/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/patch/qjpeg/group" "${WASM_STAGE_DIR}/patch/"
         # Glyph-fallback fonts (CJK): fbs loads host-side "fonts/" after the ROM
         # scan, so Chinese text renders even on firmware without CJK glyphs.
         # Wipe first so swapping the fallback font doesn't leave a stale copy in

@@ -6,11 +6,14 @@ and replace them with calls to emulator.
 Because the implementation on Symbian OSS is licensed under EPL, this project reimplements all stuffs, hoping
 to be faster.
 
-Newer S60/Belle BitGDI clients request the premultiplied-alpha
-`EColor16MAP` mode and the screen `MSurfaceId` interface. The C++ source now
-implements both without depending on Symbian partner-only headers. The
-checked-in general DLL is a full GCCE build from the Nokia Symbian Belle SDK;
-its frozen DEF preserves the 31-entry export ABI used by ROM patch maps.
-`surface_stub.S` and `scripts/build_scdv_belle_patch.sh` retain the earlier
-ABI-preserving binary-patch path for historical and diagnostic use. Complete
-build notes and validation are in `docs/ios-asphalt6-x7.md`.
+Newer S60/Belle BitGDI clients ask the draw device for the premultiplied-alpha
+`EColor16MAP` mode and for the screen `MSurfaceId` interface, and give up when
+either is missing. Both are implemented here in C++, with the two partner-only
+declarations they need (`CDirectScreenBitmap`, `TSurfaceId`/`MSurfaceId`)
+restated locally, since the public Belle SDK does not ship those headers.
+
+The checked-in `group/scdv_general.dll` is a GCCE build of this source from the
+Nokia Symbian Belle SDK; its frozen DEF keeps the 31-entry export ABI that ROM
+patch maps rely on. Rebuilding it needs that SDK and its bundled CSL toolchain,
+so the binary is committed alongside the source the way the other patch DLLs in
+this tree are.

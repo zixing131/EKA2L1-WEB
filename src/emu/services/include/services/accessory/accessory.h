@@ -56,8 +56,8 @@ namespace eka2l1 {
         void get_accessory_connection_status(service::ipc_context *ctx);
     };
 
-    // RAccessoryMode. The emulator has no removable accessory, so the mode is always
-    // hand-portable and a mode-changed notification simply never fires.
+    // RAccessoryMode. Nothing plugs into the emulator, so the mode is always
+    // hand-portable and a mode-changed notification never fires.
     struct accessory_mode_subsession : public accessory_subsession {
     protected:
         epoc::notify_info mode_changed_nof_;

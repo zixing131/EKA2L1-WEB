@@ -84,6 +84,21 @@ int translate_protection(prot cprot) {
         tprot = -1;
     }
 
+#if EKA2L1_PLATFORM(DARWIN) && defined(__aarch64__)
+    // Apple Silicon enforces W^X: mprotect with PROT_EXEC on a page that was
+    // not mapped MAP_JIT silently strips PROT_WRITE, so the page ends up RX and
+    // the next guest write traps with SIGBUS. The host CPU never executes guest
+    // pages -- dynarmic manages its own executable buffers -- so PROT_EXEC is
+    // redundant here. Dropping it lets chunks that ask for RWX commit as RW.
+    if ((tprot != -1) && (tprot != PROT_NONE)) {
+        tprot &= ~PROT_EXEC;
+
+        if (tprot == 0) {
+            tprot = PROT_NONE;
+        }
+    }
+#endif
+
     return tprot;
 }
 
@@ -135,6 +150,9 @@ const char *epocver_to_string(const epocver ver) {
     case epocver::epoc80:
         return "epoc80";
 
+    case epocver::epoc91:
+        return "epoc91";
+
     case epocver::epoc93fp1:
         return "epoc93fp1";
 
@@ -182,6 +200,10 @@ const epocver string_to_epocver(const char *str) {
 
     if (str_std == "epoc81b") {
         return epocver::epoc81b;
+    }
+
+    if (str_std == "epoc91") {
+        return epocver::epoc91;
     }
 
     if (str_std == "epoc93fp1") {

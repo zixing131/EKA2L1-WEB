@@ -13,17 +13,15 @@ BUILD_DIR="$ROOT/build_wasm_test"
 JOBS="${JOBS:-4}"
 
 # Make emcmake / emcc available (sourced from emsdk if not already on PATH).
-if ! command -v emcmake >/dev/null 2>&1; then
-    if [ -n "${EMSDK:-}" ] && [ -f "$EMSDK/emsdk_env.sh" ]; then
-        # shellcheck disable=SC1091
-        source "$EMSDK/emsdk_env.sh"
-    elif [ -f "$HOME/emsdk/emsdk_env.sh" ]; then
-        # shellcheck disable=SC1091
-        source "$HOME/emsdk/emsdk_env.sh"
-    else
-        echo "error: emcmake not found and emsdk_env.sh not located. Activate emsdk first." >&2
-        exit 1
-    fi
+# Prefer one complete emsdk toolchain over a Homebrew wrapper on PATH. Mixing
+# its wrapper with an existing emsdk CMake cache gives clang and libc different versions.
+if [ -n "${EMSDK:-}" ] && [ -f "$EMSDK/emsdk_env.sh" ]; then
+    source "$EMSDK/emsdk_env.sh"
+elif [ -f "$HOME/emsdk/emsdk_env.sh" ]; then
+    source "$HOME/emsdk/emsdk_env.sh"
+elif ! command -v emcmake >/dev/null 2>&1; then
+    echo "error: emcmake not found. Activate emsdk first." >&2
+    exit 1
 fi
 
 emcmake cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \

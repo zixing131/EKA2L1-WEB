@@ -190,6 +190,10 @@ namespace eka2l1 {
     struct physical_file : public file {
         FILE *file;
 
+        bool is_open() const {
+            return file != nullptr;
+        }
+
         std::u16string input_name;
         std::u16string physical_path;
 
@@ -672,11 +676,19 @@ namespace eka2l1 {
             const std::string root = eka2l1::root_name(path_ucs8);
             std::u16string vert_path_copy = vert_path;
 
-            if (root == "" || !mappings[ascii_to_drive_number(static_cast<char>(std::towlower(root[0])))].second) {
+            if (root == "") {
                 return std::nullopt;
             }
 
-            drive &drv = mappings[ascii_to_drive_number(static_cast<char>(std::towlower(root[0])))].first;
+            const char root_letter = static_cast<char>(std::towlower(root[0]));
+
+            // root_name only looks for a ':', so this is not necessarily a drive letter. Anything
+            // else would index the mappings array out of bounds.
+            if ((root_letter < 'a') || (root_letter > 'z') || !mappings[ascii_to_drive_number(root_letter)].second) {
+                return std::nullopt;
+            }
+
+            drive &drv = mappings[ascii_to_drive_number(root_letter)].first;
             std::u16string map_path = common::utf8_to_ucs2(drv.real_path);
 
             if (!eka2l1::is_separator(static_cast<char>(map_path.back()))) {
@@ -700,94 +712,18 @@ namespace eka2l1 {
                 }
             }
 
-            std::u16string vert_path_no_root = vert_path_copy.substr(root.size());
-
-            if (!common::is_system_case_insensitive()) {
-                vert_path_no_root = common::lowercase_ucs2_string(vert_path_no_root);
+            const std::u16string vert_path_no_root = vert_path_copy.substr(root.size());
+            const std::u16string exact_path = eka2l1::add_path(map_path, vert_path_no_root);
+            if (common::exists(common::ucs2_to_utf8(exact_path))) {
+                return exact_path;
             }
 
-            std::u16string mapped = eka2l1::add_path(map_path, vert_path_no_root);
-
-            // On case-sensitive hosts the guest path is lowercased before the
-            // physical lookup. That misses mixed-case files that still exist on
-            // disk: web uploads keep the picked name, and some ROM trees keep
-            // Nokia's original casing (e.g. 5320 RPKG path Z:\System\data\Wsini.ini).
-            // When the lowercased path is absent, walk each component and match
-            // case-insensitively. Cost only hits the miss path.
-            if (!common::is_system_case_insensitive()) {
-                const std::string mapped_utf8 = common::ucs2_to_utf8(mapped);
-
-                if (!common::exists(mapped_utf8)) {
-                    const std::string base_utf8 = common::ucs2_to_utf8(map_path);
-                    std::string resolved = base_utf8;
-
-                    if (!resolved.empty() && !eka2l1::is_separator(resolved.back())) {
-                        resolved += eka2l1::get_separator();
-                    }
-
-                    if (common::exists(resolved)) {
-                        const std::string relative = common::ucs2_to_utf8(vert_path_no_root);
-                        std::size_t i = 0;
-                        bool ok = true;
-
-                        while (i < relative.size()) {
-                            while (i < relative.size() && eka2l1::is_separator(relative[i])) {
-                                ++i;
-                            }
-
-                            if (i >= relative.size()) {
-                                break;
-                            }
-
-                            std::size_t j = i;
-                            while (j < relative.size() && !eka2l1::is_separator(relative[j])) {
-                                ++j;
-                            }
-
-                            const std::string component = relative.substr(i, j - i);
-                            const std::string direct = resolved + component;
-
-                            if (common::exists(direct)) {
-                                resolved = direct;
-                            } else {
-                                auto it = common::make_directory_iterator(resolved, "*");
-                                if (!it || !it->is_valid()) {
-                                    ok = false;
-                                    break;
-                                }
-
-                                common::dir_entry entry;
-                                bool matched = false;
-
-                                while (it->next_entry(entry) == 0) {
-                                    if (common::compare_ignore_case(entry.name.c_str(), component.c_str()) == 0) {
-                                        resolved += entry.name;
-                                        matched = true;
-                                        break;
-                                    }
-                                }
-
-                                if (!matched) {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-
-                            if (j < relative.size()) {
-                                resolved += eka2l1::get_separator();
-                            }
-
-                            i = j;
-                        }
-
-                        if (ok) {
-                            mapped = common::utf8_to_ucs2(resolved);
-                        }
-                    }
-                }
-            }
-
-            return mapped;
+            // Symbian file systems are case-insensitive but case-preserving. Resolve from
+            // the real entries on hosts that distinguish case instead of lowercasing the
+            // guest path: directory enumeration must still return the spelling installed
+            // by the application.
+            return common::utf8_to_ucs2(common::resolve_case_insensitive_path(common::ucs2_to_utf8(map_path),
+                common::ucs2_to_utf8(vert_path_no_root)));
         }
 
     public:
@@ -938,10 +874,6 @@ namespace eka2l1 {
                 return std::unique_ptr<directory>(nullptr);
             }
 
-            if (!common::is_system_case_insensitive()) {
-                filter = common::lowercase_string(filter);
-            }
-
             return std::make_unique<physical_directory>(this, new_path_utf8,
                 common::ucs2_to_utf8(vir_path), filter, type, attrib);
         }
@@ -997,7 +929,7 @@ namespace eka2l1 {
                     return nullptr;
                 }
 
-                if ((mode & WRITE_MODE) && (mappings[static_cast<int>(drv)].first.attribute & io_attrib_write_protected)) {
+                if ((mode & (WRITE_MODE | APPEND_MODE)) && (mappings[static_cast<int>(drv)].first.attribute & io_attrib_write_protected)) {
                     LOG_ERROR(VFS, "Request to open {} with write mode, but the drive is write-protected!",
                         common::ucs2_to_utf8(path));
 
@@ -1017,7 +949,11 @@ namespace eka2l1 {
                 return nullptr;
             }
 
-            return std::make_unique<physical_file>(path, *real_path, mode);
+            auto opened = std::make_unique<physical_file>(path, *real_path, mode);
+            if (!opened->is_open()) {
+                return nullptr;
+            }
+            return opened;
         }
 
         std::int64_t watch_directory(const std::u16string &path, common::directory_watcher_callback callback,
@@ -1064,18 +1000,8 @@ namespace eka2l1 {
         }
 
         void validate_for_host() override {
-            if (common::is_platform_case_sensitive()) {
-                LOG_INFO(VFS, "Iterating through all emulated drive to lowercase all filesystem entities!");
-
-                for (auto &mapping : mappings) {
-                    if (!mapping.second) {
-                        continue;
-                    }
-
-                    common::copy_folder(mapping.first.real_path, mapping.first.real_path, common::FOLDER_COPY_FLAG_LOWERCASE_NAME,
-                        nullptr);
-                }
-            }
+            // Case-sensitive hosts are handled at lookup time. Rewriting a mounted tree
+            // loses the spelling that Symbian directory enumeration is required to keep.
         }
     };
 

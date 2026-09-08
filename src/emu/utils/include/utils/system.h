@@ -41,10 +41,10 @@ namespace eka2l1::epoc {
     // never backs up or restores, so it stays in EBURNormal | ENoBackup.
     const std::int32_t BACKUP_RESTORE_NORMAL_STATE = 0x00000001;
 
-    // KPSUidDiskLevel. SysUtil::DiskSpaceBelowCriticalLevelL() reads the critical
-    // free-space thresholds from patchable sysutil data first, then from these
-    // properties, then from central repository, and fails if none answers. Values are
-    // Symbian's own sysutil.iby defaults.
+    // KPSUidDiskLevel and its two keys, which the system state manager publishes at
+    // boot. SysUtil looks for a critical free-space threshold in patched sysutil data,
+    // then in these properties, then in central repository, and leaves if none answers.
+    // The values are Symbian's own patch defaults from sysutil.iby.
     const std::uint32_t DISK_LEVEL_CATEGORY = 0x10205065;
     const std::uint32_t RAM_DISK_CRITICAL_THRESHOLD_KEY = 0x00000001;
     const std::uint32_t OTHER_DISK_CRITICAL_THRESHOLD_KEY = 0x00000002;

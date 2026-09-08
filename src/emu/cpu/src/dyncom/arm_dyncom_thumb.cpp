@@ -258,10 +258,12 @@ ThumbDecodeStatus TranslateThumbInstruction(std::uint32_t addr, std::uint32_t in
                               : 0xE28DDF00) // ADD
                 | (tinstr & 0x007F); // off7
         } else if ((tinstr & 0x0F00) == 0x0e00) {
-            // BKPT
-            // Translate to the ARM BKPT form understood by the dyncom decoder.
-            // The old SVC encoding never reached the breakpoint callback.
-            *ainstr = 0xE1200070;
+            // BKPT. 0xEF000000 is SVC, not BKPT: a guest breakpoint was being
+            // translated into a system call, so it entered the SVC handler
+            // instead of ever reaching the breakpoint exception.
+            *ainstr = 0xE1200070 // BKPT
+                | BITS(tinstr, 0, 3) // imm4 field
+                | (BITS(tinstr, 4, 7) << 8); // beginning 4 bits of imm12
         } else if ((tinstr & 0x0F00) == 0x0200) {
             static const std::uint32_t subset[4] = {
                 0xE6BF0070, // SXTH

@@ -103,3 +103,12 @@
 [submodule "src/external/freetype"]
 	path = src/external/freetype
 	url = https://github.com/freetype/freetype
+[submodule "src/external/xz"]
+	path = src/external/xz
+	url = https://github.com/tukaani-project/xz
+[submodule "src/external/libarchive"]
+	path = src/external/libarchive
+	url = https://github.com/libarchive/libarchive
+[submodule "src/external/zlib"]
+	path = src/external/zlib
+	url = https://github.com/madler/zlib

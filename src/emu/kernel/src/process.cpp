@@ -623,10 +623,10 @@ namespace eka2l1::kernel {
             process_handles.reset();
         }
 
-        // Break parent/child links now (after logons, which may inspect the
-        // child list). A dead process must not linger in its parent's child
-        // list nor keep children pointing back at it: launch-exit callbacks
-        // walk those raw pointers long after this object is freed.
+        // Break the parent/child links now, after the logons that may inspect the
+        // child list. A dead process must not linger in its parent's child list, nor
+        // keep children pointing back at it: launch-exit callbacks walk those raw
+        // pointers long after this object is freed.
         while (!child_processes_.empty()) {
             kernel::process *child = child_processes_.back();
 
@@ -714,6 +714,12 @@ namespace eka2l1::kernel {
     }
 
     void process::finish_logons() {
+        // The thread that armed a Logon/Rendezvous lives in another process and may
+        // already have exited, leaving a dangling requester in the queues.
+        // notify_info::complete() dereferences that requester to translate the
+        // request status, so completing a stale entry faults on a half-torn thread.
+        // Signal only the requesters that are still alive; the queues are cleared
+        // below either way.
         for (auto &req : logon_requests) {
             req.complete(exit_reason);
         }

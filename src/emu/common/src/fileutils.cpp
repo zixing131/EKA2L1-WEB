@@ -28,12 +28,23 @@
 #include <re2/re2.h>
 
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <stack>
+#include <utility>
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
 #elif EKA2L1_PLATFORM(POSIX)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#if EKA2L1_PLATFORM(DARWIN)
+// Apple's off_t has always been 64-bit, so their SDKs never declared the
+// separate stat64 type the other POSIX targets use, and SDK 26 stopped
+// providing it entirely. Alias it so the shared POSIX path below still builds.
+#define stat64 stat
 #endif
 
 #if EKA2L1_PLATFORM(POSIX)
@@ -422,21 +433,73 @@ namespace eka2l1::common {
         return std::make_unique<standard_dir_iterator>(iterator_path);
     }
     
+    // A folded index of one host directory. Building it costs a full enumeration, so it
+    // is kept until the directory's modification stamp moves: guests probe the same ROM
+    // directories thousands of times while loading, and on a case-sensitive volume every
+    // spelling mismatch would otherwise re-walk the whole thing.
+    struct folded_directory_index {
+        std::uint64_t stamp;
+        std::map<std::string, std::string> entries;
+    };
+
+    static std::string fold_file_name(const std::string &name) {
+        return common::ucs2_to_utf8(common::lowercase_ucs2_string(common::utf8_to_ucs2(name)));
+    }
+
+    static std::uint64_t directory_change_stamp(const std::string &folder_path) {
+        return common::get_last_modifiy_since_ad(common::utf8_to_ucs2(folder_path));
+    }
+
+    static std::mutex folded_index_lock;
+    static std::map<std::string, folded_directory_index> folded_indexes;
+
+    void invalidate_folded_directory_indexes() {
+        const std::lock_guard<std::mutex> guard(folded_index_lock);
+        folded_indexes.clear();
+    }
+
     std::string find_case_sensitive_file_name(const std::string &folder_path, const std::string &insensitive_name, const file_type type) {
-        auto ite = make_directory_iterator(folder_path, "");
-        const std::u16string insensitive_name_u16 = common::utf8_to_ucs2(insensitive_name);
+        const std::uint64_t stamp = directory_change_stamp(folder_path);
+        const std::string folded_name = fold_file_name(insensitive_name);
 
-        common::dir_entry entry;
+        const std::lock_guard<std::mutex> guard(folded_index_lock);
+        auto cached = folded_indexes.find(folder_path);
 
-        while (ite->next_entry(entry) == 0) {
-            if (type == entry.type) {
-                if (common::compare_ignore_case(common::utf8_to_ucs2(entry.name), insensitive_name_u16) == 0) {
-                    return entry.name;
-                }
+        if ((cached == folded_indexes.end()) || (cached->second.stamp != stamp)) {
+            folded_directory_index index;
+            index.stamp = stamp;
+
+            auto ite = make_directory_iterator(folder_path, "");
+
+            // next_entry() only populates dir_entry::type when detail is enabled, which
+            // stats every entry on POSIX. The index is a name lookup; the one entry a
+            // caller cares about is cheaper to stat on its own below.
+            ite->detail = false;
+
+            common::dir_entry entry;
+
+            while (ite->next_entry(entry) == 0) {
+                index.entries.emplace(fold_file_name(entry.name), entry.name);
+            }
+
+            cached = folded_indexes.insert_or_assign(folder_path, std::move(index)).first;
+        }
+
+        auto found = cached->second.entries.find(folded_name);
+
+        if (found == cached->second.entries.end()) {
+            return "";
+        }
+
+        if (type != FILE_INVALID) {
+            const bool entry_is_directory = is_dir(add_path(folder_path, found->second));
+
+            if (entry_is_directory != (type == FILE_DIRECTORY)) {
+                return "";
             }
         }
 
-        return "";
+        return found->second;
     }
 
     int resize(const std::string &path, const std::uint64_t size) {
@@ -490,6 +553,8 @@ namespace eka2l1::common {
     }
 
     bool remove(const std::string &path) {
+        invalidate_folded_directory_indexes();
+
 #if EKA2L1_PLATFORM(WIN32)
         const std::wstring path_w = common::utf8_to_wstr(path);
 
@@ -509,6 +574,8 @@ namespace eka2l1::common {
     }
 
     bool move_file(const std::string &path, const std::string &new_path) {
+        invalidate_folded_directory_indexes();
+
 #if EKA2L1_PLATFORM(WIN32)
         const std::wstring path_s_w = common::utf8_to_wstr(path);
         const std::wstring path_d_w = common::utf8_to_wstr(new_path);
@@ -644,6 +711,8 @@ namespace eka2l1::common {
     }
 
     void create_directory(std::string path) {
+        invalidate_folded_directory_indexes();
+
 #if EKA2L1_PLATFORM(POSIX)
 #if EKA2L1_PLATFORM(ANDROID)
         if (is_content_uri(path)) {
@@ -713,6 +782,8 @@ namespace eka2l1::common {
     }
 
     void create_directories(std::string path) {
+        invalidate_folded_directory_indexes();
+
 #if EKA2L1_PLATFORM(ANDROID)
         if (is_content_uri(path)) {
             android::content_uri uri = android::content_uri(path);
@@ -734,6 +805,13 @@ namespace eka2l1::common {
         } else
 #endif
         {
+            // Most callers use this as an idempotent operation. Avoid walking and
+            // statting every path component when the complete directory already
+            // exists, which is especially costly for bulk file extraction.
+            if (get_file_type(path) == file_type::FILE_DIRECTORY) {
+                return;
+            }
+
             std::string crr_path;
 
             path_iterator ite;
@@ -782,12 +860,124 @@ namespace eka2l1::common {
         return true;
     }
 
-    bool is_system_case_insensitive() {
+    bool is_path_case_insensitive(const std::string &path) {
 #if EKA2L1_PLATFORM(WIN32)
+        (void)path;
         return true;
+#elif defined(_PC_CASE_SENSITIVE)
+        // Walk up to something that exists: the caller may be asking about a file it is
+        // about to create, and pathconf() needs a real path.
+        std::string probe = path;
+
+        while (!probe.empty() && !exists(probe)) {
+            // file_directory() keeps the trailing separator, so drop it before asking
+            // again or the walk stops on the first parent instead of climbing.
+            while (!probe.empty() && eka2l1::is_separator(probe.back())) {
+                probe.pop_back();
+            }
+
+            const std::string parent = eka2l1::file_directory(probe);
+
+            if (parent == probe) {
+                break;
+            }
+
+            probe = parent;
+        }
+
+        while (!probe.empty() && (probe.size() > 1) && eka2l1::is_separator(probe.back())) {
+            probe.pop_back();
+        }
+
+        if (probe.empty() || !exists(probe)) {
+            return false;
+        }
+
+        static std::mutex probe_lock;
+        static std::map<std::string, bool> probed;
+
+        const std::lock_guard<std::mutex> guard(probe_lock);
+        auto cached = probed.find(probe);
+
+        if (cached != probed.end()) {
+            return cached->second;
+        }
+
+        // 1 = case-sensitive, 0 = not. A negative return means the volume does not answer,
+        // in which case assume the stricter of the two and let the caller fold names.
+        const long sensitive = ::pathconf(probe.c_str(), _PC_CASE_SENSITIVE);
+        const bool insensitive = (sensitive == 0);
+
+        probed.emplace(probe, insensitive);
+        return insensitive;
 #else
+        (void)path;
         return false;
 #endif
+    }
+
+    std::string resolve_case_insensitive_path(const std::string &base, const std::string &relative) {
+        // A content URI is not a host path: only add_path() knows how to extend one.
+        if (is_content_uri(base) || !exists(base)) {
+            return add_path(base, relative);
+        }
+
+        const char separator = static_cast<char>(eka2l1::get_separator());
+        std::string resolved = base;
+
+        if (!resolved.empty() && !eka2l1::is_separator(resolved.back())) {
+            resolved += separator;
+        }
+
+        std::size_t pos = 0;
+
+        while (pos < relative.size()) {
+            while ((pos < relative.size()) && eka2l1::is_separator(relative[pos])) {
+                pos++;
+            }
+
+            std::size_t end = pos;
+
+            while ((end < relative.size()) && !eka2l1::is_separator(relative[end])) {
+                end++;
+            }
+
+            if (end == pos) {
+                break;
+            }
+
+            const std::string component = relative.substr(pos, end - pos);
+            const bool is_last = (end >= relative.size());
+
+            // A wildcard component is a pattern for a later directory lookup,
+            // not a literal host filename. Looking for it case-insensitively can
+            // never resolve the pattern and needlessly walks the whole directory.
+            // Once a pattern appears, neither it nor any suffix can name a concrete
+            // path yet, so keep the already-resolved prefix and append the rest.
+            if (component.find_first_of("*?") != std::string::npos) {
+                resolved += relative.substr(pos);
+                break;
+            }
+
+            if (exists(resolved + component)) {
+                resolved += component;
+            } else {
+                // Intermediate components have to be directories; the last one can be either,
+                // and may legitimately not be there yet if the caller is creating it.
+                const std::string real = find_case_sensitive_file_name(resolved, component,
+                    is_last ? FILE_INVALID : FILE_DIRECTORY);
+
+                resolved += real.empty() ? component : real;
+            }
+
+            if (!is_last) {
+                resolved += separator;
+            }
+
+            pos = end;
+        }
+
+        return resolved;
     }
 
     bool copy_folder(const std::string &target_folder, const std::string &dest_folder_to_reside, const std::uint32_t flags, progress_changed_callback progress_cb,
@@ -808,22 +998,29 @@ namespace eka2l1::common {
         std::uint64_t total_copied = 0;
 
         auto do_copy_stuffs = [&](const bool is_measuring) {
-            std::stack<std::string> folder_stacks;
+            // The source path stays relative to target_folder and keeps its real
+            // spelling; the destination is absolute and resolved against what is already
+            // on disk, so a dump spelling a folder "System" lands in an existing
+            // "system" instead of beside it. Two host directories differing only in case
+            // hide each other from every case-insensitive lookup done afterwards.
+            std::stack<std::pair<std::string, std::string>> folder_stacks;
             common::dir_entry entry;
 
-            folder_stacks.push(std::string(1, eka2l1::get_separator()));
+            const std::string root_path(1, eka2l1::get_separator());
+            folder_stacks.push({ root_path, eka2l1::add_path(dest_folder_to_reside, root_path) });
 
             while (!folder_stacks.empty()) {
                 if (cancel_cb && cancel_cb()) {
                     break;
                 }
                 if (!is_measuring)
-                    create_directories(eka2l1::add_path(dest_folder_to_reside, folder_stacks.top()));
+                    create_directories(folder_stacks.top().second);
 
-                const std::string top_path = folder_stacks.top();
+                const std::string source_top_path = folder_stacks.top().first;
+                const std::string dest_top_path = folder_stacks.top().second;
 
-                auto iterator = make_directory_iterator(add_path(target_folder, top_path), "");
-                if (!iterator) {
+                auto iterator = make_directory_iterator(add_path(target_folder, source_top_path), "");
+                if (!iterator || !iterator->is_valid()) {
                     return false;
                 }
                 iterator->detail = true;
@@ -862,7 +1059,17 @@ namespace eka2l1::common {
                     }
 
                     if (entry.type == common::file_type::FILE_DIRECTORY) {
-                        folder_stacks.push(eka2l1::add_path(top_path, name_to_use + eka2l1::get_separator()));
+                        // In in-place lowercase mode the directory has just
+                        // been renamed, so traversal must follow the new name.
+                        // A real copy keeps following the original source name.
+                        const std::string &source_name_to_use =
+                            (no_copy && (flags & FOLDER_COPY_FLAG_LOWERCASE_NAME))
+                            ? name_to_use
+                            : entry.name;
+                        folder_stacks.push({
+                            eka2l1::add_path(source_top_path, source_name_to_use + eka2l1::get_separator()),
+                            resolve_case_insensitive_path(dest_top_path, name_to_use) + eka2l1::get_separator()
+                        });
                     } else {
                         if (is_measuring) {
                             total_size += entry.size;
@@ -872,7 +1079,7 @@ namespace eka2l1::common {
                                     continue;
                                 }
 
-                                if (!common::copy_file(eka2l1::add_path(iterator->dir_name, entry.name), eka2l1::add_path(eka2l1::add_path(dest_folder_to_reside, top_path), name_to_use), overwrite_on_file_exist)) {
+                                if (!common::copy_file(eka2l1::add_path(iterator->dir_name, entry.name), resolve_case_insensitive_path(dest_top_path, name_to_use), overwrite_on_file_exist)) {
                                     return false;
                                 }
 
@@ -901,28 +1108,39 @@ namespace eka2l1::common {
             return true;
         }
 
-        auto iterator = make_directory_iterator(target_folder, "");
-        if (!iterator) {
-            return false;
-        }
-
-        iterator->detail = true;
-
-        common::dir_entry entry;
-
-        while (iterator->next_entry(entry) == 0) {
-            std::string name = add_path(iterator->dir_name, entry.name);
-
-            if (entry.type == common::file_type::FILE_DIRECTORY) {
-                if ((entry.name != ".") && (entry.name != "..")) {
-                    name += eka2l1::get_separator();
-
-                    delete_folder(name);
-                }
+        {
+            auto iterator = make_directory_iterator(target_folder, "");
+            if (!iterator) {
+                return false;
             }
-            common::remove(name);
+
+            iterator->detail = true;
+
+            common::dir_entry entry;
+
+            while (iterator->next_entry(entry) == 0) {
+                std::string name = add_path(iterator->dir_name, entry.name);
+
+                if (entry.type == common::file_type::FILE_DIRECTORY) {
+                    if ((entry.name != ".") && (entry.name != "..")) {
+                        name += eka2l1::get_separator();
+
+                        delete_folder(name);
+                    }
+                }
+                common::remove(name);
+            }
         }
-        return common::remove(target_folder);
+
+        // remove() tells a directory from a file by the trailing separator, and the
+        // caller need not have supplied one. The iterator is also closed by now: a
+        // directory Windows still has a handle open on cannot be removed.
+        std::string folder_to_remove = target_folder;
+        if (folder_to_remove.empty() || !eka2l1::is_separator(folder_to_remove.back())) {
+            folder_to_remove += eka2l1::get_separator();
+        }
+
+        return common::remove(folder_to_remove);
     }
 
     FILE *open_c_file(const std::string &target_file, const char *mode) {

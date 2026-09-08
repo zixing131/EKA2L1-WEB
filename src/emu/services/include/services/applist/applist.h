@@ -258,7 +258,6 @@ namespace eka2l1 {
         void sort_registry_list();
         void init();
 
-        bool delete_registry(const std::u16string &rsc_path);
 
         bool load_registry(eka2l1::io_system *io, const std::u16string &path, drive_number land_drive,
             const language ideal_lang = language::en);
@@ -290,6 +289,9 @@ namespace eka2l1 {
          * Expected request status: KErrNone. 
         */
         void app_language(service::ipc_context &ctx);
+
+        /*! \brief Get how many applications the list holds, as the completion code. */
+        void app_count(service::ipc_context &ctx);
 
         /*! \brief Request the server to run app.
          *
@@ -329,7 +331,6 @@ namespace eka2l1 {
 
         void get_app_icon_sizes(service::ipc_context &ctx);
         void app_info_provided_by_reg_file(service::ipc_context &ctx);
-        data_recog_result recognize_data_impl(common::ro_stream &stream, const std::u16string &name);
 
         void launch_app(service::ipc_context &ctx);
         void is_program(service::ipc_context &ctx);
@@ -361,11 +362,25 @@ namespace eka2l1 {
             kernel::process *requester = nullptr, const epoc::uid known_uid = 0,
             std::function<void(kernel::process*)> app_exit_callback = nullptr,
             const bool pass_command_line_in_env_slot = false,
-            const std::vector<std::uint8_t> *guest_env_slot = nullptr);
+            const std::vector<std::uint8_t> *guest_env_slot = nullptr,
+            const std::string *environment_main = nullptr);
 
     public:
         explicit applist_server(system *sys);
         ~applist_server() override;
+
+        // Recognition depends on the data and the name, not on server state, so this
+        // is a static and can be exercised on its own.
+        static data_recog_result recognize_data_impl(common::ro_stream &stream, const std::u16string &name);
+
+        /**
+         * \brief Forget a registeration without waiting for the next rescan.
+         *
+         * Used by frontends that delete an installed app's files themselves.
+         *
+         * \param rsc_path Path of the registeration file the entry was read from.
+         */
+        bool delete_registry(const std::u16string &rsc_path);
 
         /**
          * @brief       Get the legacy level of the server.

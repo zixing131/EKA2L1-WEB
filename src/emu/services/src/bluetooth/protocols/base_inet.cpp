@@ -63,6 +63,8 @@ namespace eka2l1::epoc::bt {
                 uv_tcp_getpeername(reinterpret_cast<uv_tcp_t*>(opaque_handle), reinterpret_cast<sockaddr*>(&addr), &addr_structlen);                
                 uv_tcp_nodelay(reinterpret_cast<uv_tcp_t*>(opaque_handle), 1);
 
+                if (mid->uses_bonjour_discovery()) return;
+
                 epoc::internet::host_sockaddr_to_guest_saddress(reinterpret_cast<const sockaddr*>(&addr), addr_dest);
 
                 addr_dest.port_ = static_cast<std::uint16_t>(mid->get_server_port());
@@ -83,6 +85,19 @@ namespace eka2l1::epoc::bt {
         if (inet_socket_ && (midman->get_discovery_mode() != DISCOVERY_MODE_DIRECT_IP)) {
             reinterpret_cast<epoc::internet::inet_socket*>(inet_socket_.get())->set_socket_accepted_hook(nullptr);
         }
+    }
+
+    bool btinet_socket::set_option(const std::uint32_t option_id, const std::uint32_t option_family,
+        std::uint8_t *buffer, const std::size_t avail_size) {
+        // KBTSetNoSecurityRequired is handled by Symbian's common
+        // CBluetoothSAP before protocol-specific options. Inet netplay has no
+        // Bluetooth security manager to configure, so accepting it represents
+        // the requested no-security policy for every emulated Bluetooth SAP.
+        if ((option_family == SOL_BT_SAP_BASE) && (option_id == BT_SET_NO_SECURITY_REQUIRED)) {
+            return true;
+        }
+
+        return socket::set_option(option_id, option_family, buffer, avail_size);
     }
 
     void btinet_socket::bind(const epoc::socket::saddress &addr, epoc::notify_info &info) {

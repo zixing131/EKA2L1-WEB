@@ -63,9 +63,9 @@ namespace eka2l1 {
         epoc::notify_info network_registration_status_change_nof_;
         epoc::notify_info signal_strength_change_nof_;
         epoc::notify_info current_network_change_nof_;
+        epoc::notify_info nitz_info_change_nof_;
         epoc::notify_info indicator_change_nof_;
         epoc::notify_info battery_info_change_nof_;
-        epoc::notify_info nitz_info_change_nof_;
         epoc::notify_info current_network_no_location_change_nof_;
 
     protected:
@@ -94,13 +94,13 @@ namespace eka2l1 {
         void notify_signal_strength_change_cancel(eka2l1::service::ipc_context *ctx);
         void notify_current_network_change(eka2l1::service::ipc_context *ctx);
         void notify_current_network_change_cancel(eka2l1::service::ipc_context *ctx);
+        void notify_nitz_info_change(eka2l1::service::ipc_context *ctx);
+        void notify_nitz_info_change_cancel(eka2l1::service::ipc_context *ctx);
         void notify_indicator_change(eka2l1::service::ipc_context *ctx);
         void cancel_indicator_change(eka2l1::service::ipc_context *ctx);
         void get_current_network_cancel(eka2l1::service::ipc_context *ctx);
         void notify_battery_info(eka2l1::service::ipc_context *ctx);
         void notify_battery_info_cancel(eka2l1::service::ipc_context *ctx);
-        void notify_nitz_info_change(eka2l1::service::ipc_context *ctx);
-        void notify_nitz_info_change_cancel(eka2l1::service::ipc_context *ctx);
         void notify_current_network_no_location_change(eka2l1::service::ipc_context *ctx);
         void notify_current_network_no_location_change_cancel(eka2l1::service::ipc_context *ctx);
 

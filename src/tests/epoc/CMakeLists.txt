@@ -1,15 +1,44 @@
 set(CORE_TEST_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/bluetooth/bonjour.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/devices.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/audio.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/graphics/openvg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mem.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vfs.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/ipc_arg.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/property.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/timer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/e32img.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/gdr.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/mbm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/mif.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/nvg.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/romimg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/rsc.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/spi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/svgb.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/package/manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/applist/language.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/applist/registeration.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/applist/recognize.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/fbs/bitmap.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/fbs/fontmatch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/fbs/linkedfont.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/svg_icon.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/sensor/buffering.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/sensor/rotation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/window/surface.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/crebinloader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/domain/domain.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/framework/objects.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/internet/address.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/timezone/rules.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/creiniloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sms/common.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/socket/opcodes.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/ui/iconops.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/ui/skin/skn.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils/obj.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/utils/sec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/j9_jni_table.cpp
     PARENT_SCOPE)

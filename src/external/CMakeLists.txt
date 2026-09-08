@@ -4,6 +4,123 @@ include(CheckSymbolExists)
 add_library(miniz miniz/miniz.h miniz/miniz.c)
 target_include_directories(miniz PUBLIC miniz)
 
+# Several of the vendored projects still declare a cmake_minimum_required below
+# 3.5, which CMake 4 refuses outright. They are not ours to change -- two of them
+# are submodules of dynarmic -- so the floor is relaxed for this subtree only,
+# rather than making every caller pass the flag.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+# libarchive is the one archive reader in this tree: device dumps packed as .7z, N-Gage game cards as
+# .zip / .7z / .rar. It is here rather than a bare 7z decoder so that another container is a matter of
+# flipping options instead of another vendored codebase.
+#
+# Everything it can autodetect is switched off on purpose. libarchive's CMake probes the *host* for
+# liblzma, zlib, bzip2, OpenSSL and friends; on an iOS or Android build those probes find the macOS or
+# Homebrew dylibs and the link step fails (same trap freetype falls into further down). So: every backend
+# is disabled, and the two we actually need - LZMA for 7z, zlib for zip - are built from the xz and zlib
+# submodules and handed to libarchive below. To add another compression method later, build it here the
+# same way rather than turning its ENABLE_ switch back on.
+set(EKA2L1_SAVED_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+
+set(XZ_NLS OFF CACHE BOOL "" FORCE)
+set(XZ_DOC OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_XZ OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_XZDEC OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_LZMADEC OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_LZMAINFO OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_SCRIPTS OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_SYMLINKS OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_SYMLINKS_LZMA OFF CACHE BOOL "" FORCE)
+# Nothing here writes archives, and the threaded coders drag in a pthread configuration we do not want
+# on every platform we ship to.
+set(XZ_THREADS no CACHE STRING "" FORCE)
+
+add_subdirectory(xz EXCLUDE_FROM_ALL)
+
+# Answer libarchive's FIND_PACKAGE(LibLZMA) with the xz target above instead of letting it search.
+# Every one of these is a short-circuit for a specific step of the stock FindLibLZMA: a cached
+# LIBLZMA_INCLUDE_DIR skips its find_path (which on this machine happily returns Homebrew's headers), a
+# set LIBLZMA_LIBRARY skips its find_library (which returns the SDK's liblzma.tbd - a /usr/lib dylib
+# that must not end up in a shipped iOS binary), and the three HAS_ results skip check_library_exists,
+# which cannot link a target that has not been built yet. LIBLZMA_LIBRARY naming a target rather than a
+# file is deliberate: CMake resolves it at generate time, which is what makes libarchive depend on it.
+# Dropping a FindLibLZMA.cmake of our own in CMAKE_MODULE_PATH does not work - libarchive overwrites
+# that variable wholesale on the third line of its CMakeLists.
+set(LIBLZMA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/xz/src/liblzma/api" CACHE PATH "" FORCE)
+set(LIBLZMA_LIBRARY liblzma)
+set(LIBLZMA_HAS_AUTO_DECODER TRUE CACHE INTERNAL "")
+set(LIBLZMA_HAS_EASY_ENCODER TRUE CACHE INTERNAL "")
+set(LIBLZMA_HAS_LZMA_PRESET TRUE CACHE INTERNAL "")
+
+set(ENABLE_LZMA ON CACHE BOOL "" FORCE)
+
+# Same story for zlib. Without it libarchive's zip reader only handles stored entries; it is also the
+# emulator's own deflate, for the Symbian formats that carry one. zlib's CMakeLists is not used - it
+# renames zconf.h in the source tree and insists on a shared library plus examples - so the sources are
+# listed here and the checked-in zconf.h serves as the configuration.
+add_library(zlibstatic STATIC
+        zlib/adler32.c zlib/compress.c zlib/crc32.c zlib/deflate.c zlib/gzclose.c zlib/gzlib.c
+        zlib/gzread.c zlib/gzwrite.c zlib/infback.c zlib/inffast.c zlib/inflate.c zlib/inftrees.c
+        zlib/trees.c zlib/uncompr.c zlib/zutil.c)
+target_include_directories(zlibstatic PUBLIC zlib)
+
+if (UNIX OR APPLE)
+    set_property(TARGET zlibstatic PROPERTY POSITION_INDEPENDENT_CODE ON)
+    # zlib probes these itself only through its own configure/CMake, neither of which runs here.
+    target_compile_definitions(zlibstatic PRIVATE HAVE_UNISTD_H HAVE_STDARG_H)
+endif()
+
+# Short-circuit libarchive's FIND_PACKAGE(ZLIB) exactly the way LibLZMA is handled above: a cached
+# include dir skips find_path, and ZLIB_LIBRARY naming the target skips find_library and still resolves
+# at generate time. The version test reads zlib.h from the include dir, so it passes on its own.
+set(ZLIB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/zlib" CACHE PATH "" FORCE)
+set(ZLIB_LIBRARY zlibstatic)
+
+set(ENABLE_ZLIB ON CACHE BOOL "" FORCE)
+
+# Nothing here uses libarchive's regex matching, and letting it search costs a
+# build: on MSVC no POSIX regex library is found, and libarchive's fall-through
+# for that case fatals with "libgcc not found" instead of moving on.
+set(POSIX_REGEX_LIB "NONE" CACHE STRING "" FORCE)
+foreach (libarchive_backend MBEDTLS NETTLE OPENSSL LIBB2 LZ4 LZO ZSTD BZip2 LIBXML2 EXPAT
+        WIN32_XMLLITE PCREPOSIX PCRE2POSIX LIBGCC CNG ICONV XATTR ACL)
+    set(ENABLE_${libarchive_backend} OFF CACHE BOOL "" FORCE)
+endforeach()
+
+foreach (libarchive_extra TAR CPIO CAT UNZIP TEST INSTALL WERROR)
+    set(ENABLE_${libarchive_extra} OFF CACHE BOOL "" FORCE)
+endforeach()
+
+# libarchive decides which platform functions exist with CHECK_FUNCTION_EXISTS, which only tells the
+# truth if the probe is actually linked. The iOS toolchain compiles try_compile projects as static
+# libraries (see ENABLE_STRICT_TRY_COMPILE in cmake/ios.toolchain.cmake), so an unresolved symbol is never
+# noticed and every probe answers yes - _fseeki64, futimesat, close_range, lzma_stream_encoder_mt and
+# friends included, none of which exist here. libarchive then compiles the code behind them.
+#
+# So make this subtree link its probes, and put the setting back afterwards: the rest of the tree is
+# configured and working against the lenient answers, and flipping it globally would re-answer every
+# other project's probes too. Seeding the known-wrong results by hand instead was tried and rejected -
+# comparing the two generated config.h files showed the list is longer and less obvious than it looks,
+# and it would have to be revisited every time libarchive adds a probe.
+set(EKA2L1_SAVED_TRY_COMPILE_TARGET_TYPE ${CMAKE_TRY_COMPILE_TARGET_TYPE})
+set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+
+add_subdirectory(libarchive EXCLUDE_FROM_ALL)
+
+set(CMAKE_TRY_COMPILE_TARGET_TYPE ${EKA2L1_SAVED_TRY_COMPILE_TARGET_TYPE})
+
+set(BUILD_SHARED_LIBS ${EKA2L1_SAVED_BUILD_SHARED_LIBS})
+
+# archive.h declares everything __declspec(dllimport) on Windows unless LIBARCHIVE_STATIC is defined,
+# and libarchive sets it only on the target itself, never on its interface.
+target_compile_definitions(archive_static INTERFACE LIBARCHIVE_STATIC)
+
+if (UNIX OR APPLE)
+    set_property(TARGET liblzma PROPERTY POSITION_INDEPENDENT_CODE ON)
+    set_property(TARGET archive_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # Force Boost directory for Dynarmic - we never use one
 set (Boost_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ext-boost/" CACHE PATH "Boost include directory")
 if (ANDROID)
@@ -378,6 +495,8 @@ add_definitions(-DFT_CONFIG_OPTION_SUBPIXEL_RENDERING)
 set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
 set(FT_ENABLE_ERROR_STRINGS ON CACHE BOOL "" FORCE)
 
+# FreeType is embedded, not installed; zlibstatic has no standalone export set.
+set(SKIP_INSTALL_ALL ON)
 add_subdirectory(freetype)
 
 set (capstone_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/capstone/include" PARENT_SCOPE)

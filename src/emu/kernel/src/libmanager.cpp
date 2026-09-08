@@ -405,6 +405,9 @@ namespace eka2l1::hle {
         case epocver::epoc80:
             return "v80";
 
+        case epocver::epoc91:
+            return "v91";
+
         case epocver::epoc93fp1:
             return "v93fp1";
             
@@ -17827,7 +17830,9 @@ namespace eka2l1::hle {
 
     drive_number lib_manager::get_drive_rom() {
         if (rom_drv_ == drive_invalid) {
-            for (drive_number drv = drive_z; drv >= drive_a; drv = static_cast<drive_number>(static_cast<int>(drv) - 1)) {
+            // Stepping one below drive_a would leave the enum's value range.
+            for (int drv_index = drive_z; drv_index >= drive_a; drv_index--) {
+                const drive_number drv = static_cast<drive_number>(drv_index);
                 if (auto ent = io_->get_drive_entry(drv)) {
                     if (ent->media_type == drive_media::rom) {
                         rom_drv_ = drv;
@@ -17847,6 +17852,42 @@ namespace eka2l1::hle {
         }
 
         return import_e32img(&img, mem_, kern_, *this, path);
+    }
+
+    // Stage ROFS ROM images at their linked address.
+    bool lib_manager::stage_rom_image_outside_core(common::ro_stream *stream, const address code_address) {
+        const std::uint64_t image_size = stream->size();
+
+        if (mem_->get_real_pointer(code_address)) {
+            return true;
+        }
+
+        const address image_base = code_address - loader::rom_image_header_file_size(kern_->get_epoc_version());
+
+        mem::control_base *control = mem_->get_control();
+        const std::uint32_t table_size = (1U << control->page_per_tab_shift_) << control->page_size_bits_;
+        const address chunk_addr = image_base & ~(table_size - 1);
+        const std::size_t head_gap = image_base - chunk_addr;
+        const std::size_t chunk_size = head_gap + static_cast<std::size_t>(image_size);
+
+        kernel::chunk *img_chunk = kern_->create<kernel::chunk>(mem_, nullptr, "ROFS image", static_cast<address>(head_gap),
+            static_cast<address>(chunk_size), chunk_size, prot_read_write_exec, kernel::chunk_type::normal,
+            kernel::chunk_access::rom, kernel::chunk_attrib::none, 0x00, false, chunk_addr);
+
+        if (!img_chunk) {
+            LOG_ERROR(KERNEL, "Can't map a ROM image linked at 0x{:X}", image_base);
+            return false;
+        }
+
+        std::uint8_t *host = reinterpret_cast<std::uint8_t *>(img_chunk->host_base()) + head_gap;
+
+        if (stream->read(host, static_cast<std::uint32_t>(image_size)) != image_size) {
+            kern_->destroy(img_chunk);
+            return false;
+        }
+
+        stream->seek(0, common::seek_where::beg);
+        return true;
     }
 
     codeseg_ptr lib_manager::load_as_romimg(loader::romimg &romimg, const std::u16string &path, const bool only_shell) {
@@ -17920,7 +17961,6 @@ namespace eka2l1::hle {
                     }
 
                     if (auto ref_seg = kern_->pull_codeseg_by_ep(entry_point)) {
-                        // Add ref
                         kernel::codeseg_dependency_info dep_info;
                         dep_info.dep_ = ref_seg;
 
@@ -18154,9 +18194,18 @@ namespace eka2l1::hle {
 
             eka2l1::ro_file_stream image_data_stream(f.get());
 
-            if (f->is_in_rom() && !loader::is_e32img(reinterpret_cast<common::ro_stream *>(&image_data_stream))) {
+            const bool is_e32 = loader::is_e32img(reinterpret_cast<common::ro_stream *>(&image_data_stream));
+            const bool is_rom = !is_e32 && (f->is_in_rom() || (kern_->get_epoc_version() == epocver::epoc91));
+
+            if (is_rom) {
                 auto romimg = loader::parse_romimg(reinterpret_cast<common::ro_stream *>(&image_data_stream), mem_, kern_->get_epoc_version(), is_driver_lib);
                 if (!romimg) {
+                    return nullptr;
+                }
+
+                if ((kern_->get_epoc_version() == epocver::epoc91)
+                    && !stage_rom_image_outside_core(reinterpret_cast<common::ro_stream *>(&image_data_stream),
+                        romimg->header.code_address)) {
                     return nullptr;
                 }
 
@@ -18505,6 +18554,10 @@ namespace eka2l1::hle {
 
         case epocver::epoc94:
             epoc::register_epocv94(*this);
+            break;
+
+        case epocver::epoc91:
+            epoc::register_epocv91(*this);
             break;
 
         case epocver::epoc93fp1:

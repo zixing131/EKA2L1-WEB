@@ -38,6 +38,7 @@ add_library(epocservs
         include/services/centralrepo/centralrepo.h
         include/services/centralrepo/common.h
         include/services/centralrepo/repo.h
+        include/services/camera/camera.h
         include/services/comm/comm.h
         include/services/internet/protocols/common.h
         include/services/internet/protocols/inet.h
@@ -62,6 +63,7 @@ add_library(epocservs
         include/services/fbs/adapter/font_adapter.h
         include/services/fbs/adapter/freetype_font_adapter.h
         include/services/fbs/adapter/gdr_font_adapter.h
+        include/services/fbs/adapter/linked_font_adapter.h
         include/services/fbs/adapter/stb_font_adapter.h
         include/services/fbs/bitmap.h
         include/services/fbs/compress_queue.h
@@ -69,6 +71,7 @@ add_library(epocservs
         include/services/fbs/font.h
         include/services/fbs/font_atlas.h
         include/services/fbs/font_store.h
+        include/services/fbs/linked_font_config.h
         include/services/fbs/palette.h
         include/services/featmgr/featmgr.h
         include/services/fs/sec.h
@@ -96,7 +99,10 @@ add_library(epocservs
         include/services/msv/msv.h
         include/services/msv/store.h
         include/services/notifier/notifier.h
+        include/services/notifier/bluetooth.h
         include/services/notifier/queries.h
+        include/services/posix/op.h
+        include/services/posix/posix.h
         include/services/redir/redir.h
         include/services/remcon/common.h
         include/services/remcon/controller.h
@@ -177,6 +183,7 @@ add_library(epocservs
         src/centralrepo/centralrepo.cpp
         src/centralrepo/cre.cpp
         src/centralrepo/repo.cpp
+        src/camera/camera.cpp
         src/comm/comm.cpp
         src/internet/browser.cpp
         src/internet/connmonitor.cpp
@@ -198,6 +205,7 @@ add_library(epocservs
         src/fbs/adapter/font_adapter.cpp
         src/fbs/adapter/freetype_font_adapter.cpp
         src/fbs/adapter/gdr_font_adapter.cpp
+        src/fbs/adapter/linked_font_adapter.cpp
         src/fbs/adapter/stb_font_adapter.cpp
         src/fbs/compress_queue.cpp
         src/fbs/fbs.cpp
@@ -205,6 +213,7 @@ add_library(epocservs
         src/fbs/impls/bitmap.cpp
         src/fbs/impls/font.cpp
         src/fbs/impls/font_store.cpp
+        src/fbs/impls/linked_font_config.cpp
         src/featmgr/featmgr.cpp
         src/fs/dirs.cpp
         src/fs/drives.cpp
@@ -231,6 +240,7 @@ add_library(epocservs
         src/msv/store.cpp
         src/notifier/notifier.cpp
         src/notifier/queries.cpp
+        src/posix/posix.cpp
         src/redir/redir.cpp
         src/remcon/common.cpp
         src/remcon/controller.cpp
@@ -301,6 +311,7 @@ add_library(epocservs
         src/window/io.cpp
         src/window/scheduler.cpp
         src/window/screen.cpp
+        src/window/surface.cpp
         src/window/util.cpp
         src/window/window.cpp)
 
@@ -369,4 +380,12 @@ target_link_libraries(epocservs PRIVATE
 
 if (WIN32)
         target_link_libraries(epocservs PRIVATE Ws2_32.lib)
+endif()
+
+if (APPLE)
+        target_sources(epocservs PRIVATE src/bluetooth/protocols/bonjour.cpp)
+endif()
+
+if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
+    target_sources(epocservs PRIVATE src/notifier/bluetooth.cpp)
 endif()

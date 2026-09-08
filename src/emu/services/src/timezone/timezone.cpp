@@ -236,14 +236,6 @@ namespace eka2l1 {
             return days_from_civil(year, 1, 1) * seconds_per_day;
         }
 
-        std::int64_t symbian_time_to_unix_seconds(const std::int64_t time) {
-            return (time - symbian_epoch_microseconds) / microseconds_per_second;
-        }
-
-        std::int64_t unix_seconds_to_symbian_time(const std::int64_t seconds) {
-            return seconds * microseconds_per_second + symbian_epoch_microseconds;
-        }
-
         int year_from_unix_seconds(const std::int64_t seconds) {
             std::int64_t days = seconds / seconds_per_day;
             if (seconds < 0 && seconds % seconds_per_day != 0) {
@@ -293,6 +285,56 @@ namespace eka2l1 {
             }
 
             return transitions;
+        }
+
+        bool read_descriptor_integer(service::ipc_context *ctx, const int slot, std::int64_t &value) {
+            const auto data = ctx->get_argument_data_from_descriptor<std::int64_t>(slot);
+            if (!data) {
+                return false;
+            }
+            value = *data;
+            return true;
+        }
+
+        bool read_time_reference(service::ipc_context *ctx, const int slot, std::int32_t &reference) {
+            const auto data = ctx->get_argument_data_from_descriptor<std::int32_t>(slot);
+            if (!data) {
+                return false;
+            }
+            reference = *data;
+            return reference >= 0 && reference <= 2;
+        }
+
+        std::int64_t convert_time(const std::int64_t symbian_time, const std::int32_t reference) {
+            std::int64_t unix_seconds = epoc::tz::symbian_time_to_unix_seconds(symbian_time);
+            if (reference == 0) {
+                unix_seconds += common::get_local_time_zone_info(unix_seconds).offset_seconds;
+            } else {
+                const std::int64_t local_scalar = unix_seconds;
+                std::int64_t candidate = local_scalar
+                    - common::get_local_time_zone_info(local_scalar).offset_seconds;
+                for (int iteration = 0; iteration < 4; ++iteration) {
+                    const std::int64_t next = local_scalar
+                        - common::get_local_time_zone_info(candidate).offset_seconds;
+                    if (next == candidate) {
+                        break;
+                    }
+                    candidate = next;
+                }
+                unix_seconds = candidate;
+            }
+
+            return epoc::tz::unix_seconds_to_symbian_time(unix_seconds);
+        }
+    }
+
+    namespace epoc::tz {
+        std::int64_t symbian_time_to_unix_seconds(const std::int64_t time) {
+            return (time - symbian_epoch_microseconds) / microseconds_per_second;
+        }
+
+        std::int64_t unix_seconds_to_symbian_time(const std::int64_t seconds) {
+            return seconds * microseconds_per_second + symbian_epoch_microseconds;
         }
 
         std::vector<std::uint8_t> make_rules(const int requested_start_year, const int requested_end_year) {
@@ -350,46 +392,6 @@ namespace eka2l1 {
             }
 
             return result;
-        }
-
-        bool read_descriptor_integer(service::ipc_context *ctx, const int slot, std::int64_t &value) {
-            const auto data = ctx->get_argument_data_from_descriptor<std::int64_t>(slot);
-            if (!data) {
-                return false;
-            }
-            value = *data;
-            return true;
-        }
-
-        bool read_time_reference(service::ipc_context *ctx, const int slot, std::int32_t &reference) {
-            const auto data = ctx->get_argument_data_from_descriptor<std::int32_t>(slot);
-            if (!data) {
-                return false;
-            }
-            reference = *data;
-            return reference >= 0 && reference <= 2;
-        }
-
-        std::int64_t convert_time(const std::int64_t symbian_time, const std::int32_t reference) {
-            std::int64_t unix_seconds = symbian_time_to_unix_seconds(symbian_time);
-            if (reference == 0) {
-                unix_seconds += common::get_local_time_zone_info(unix_seconds).offset_seconds;
-            } else {
-                const std::int64_t local_scalar = unix_seconds;
-                std::int64_t candidate = local_scalar
-                    - common::get_local_time_zone_info(local_scalar).offset_seconds;
-                for (int iteration = 0; iteration < 4; ++iteration) {
-                    const std::int64_t next = local_scalar
-                        - common::get_local_time_zone_info(candidate).offset_seconds;
-                    if (next == candidate) {
-                        break;
-                    }
-                    candidate = next;
-                }
-                unix_seconds = candidate;
-            }
-
-            return unix_seconds_to_symbian_time(unix_seconds);
         }
     }
 
@@ -571,9 +573,9 @@ namespace eka2l1 {
             }
         }
 
-        const int start_year = year_from_unix_seconds(symbian_time_to_unix_seconds(start));
-        const int end_year = year_from_unix_seconds(symbian_time_to_unix_seconds(end));
-        pending_rules_ = make_rules(start_year, end_year);
+        const int start_year = year_from_unix_seconds(epoc::tz::symbian_time_to_unix_seconds(start));
+        const int end_year = year_from_unix_seconds(epoc::tz::symbian_time_to_unix_seconds(end));
+        pending_rules_ = epoc::tz::make_rules(start_year, end_year);
         const std::int32_t size = static_cast<std::int32_t>(pending_rules_.size());
         if (!ctx->write_data_to_descriptor_argument(3, size)) {
             ctx->complete(epoc::error_bad_descriptor);
@@ -634,7 +636,7 @@ namespace eka2l1 {
         }
 
         const std::int32_t result = common::get_local_time_zone_info(
-            symbian_time_to_unix_seconds(time)).daylight_saving
+            epoc::tz::symbian_time_to_unix_seconds(time)).daylight_saving
             ? 1
             : 0;
         if (!ctx->write_data_to_descriptor_argument(2, result)) {

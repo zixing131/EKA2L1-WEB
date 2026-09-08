@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EKA2L1 Web 移植回归</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#edf1f5;color:#182330;font:15px system-ui,sans-serif}main{max-width:1120px;margin:auto;padding:28px}h1{font-size:25px;margin:0 0 8px}p{color:#586577;line-height:1.6}button,select,input{font:inherit}button,select{border:1px solid #c7d0db;border-radius:6px;background:white;padding:10px 14px}button{cursor:pointer}button:hover:enabled{background:#eef4ff}button:disabled{opacity:.45;cursor:default}#start{background:#245ec4;color:white;border-color:#245ec4}label{display:flex;flex-direction:column;gap:7px}input{max-width:100%}.setup,.panel{background:white;padding:20px;border-radius:12px;border:1px solid #dbe2ea}.files{display:grid;grid-template-columns:1fr 1fr;gap:18px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.layout{display:grid;grid-template-columns:282px 1fr;gap:20px;margin-top:20px}.screen{background:#101318;border-radius:12px;padding:20px}canvas{display:block;width:240px;height:320px;background:black;image-rendering:pixelated}.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:14px}.keypad button{padding:9px 2px;font-size:14px}.app-list{display:flex;gap:8px;flex-wrap:wrap;max-height:310px;overflow:auto}.app-list button{font-size:13px;padding:8px 10px}h2{font-size:16px;margin:0 0 12px}pre{white-space:pre-wrap;overflow:auto;max-height:220px;font:12px/1.6 ui-monospace,monospace;color:#37465a;margin:0}.logs{margin-top:20px}.hint{font-size:13px}#summary{font-weight:600;color:#245ec4}@media(max-width:720px){main{padding:16px}.files,.layout{grid-template-columns:1fr}.screen{width:282px;margin:auto}.panel{padding:16px}}
+</style>
+</head>
+<body><main>
+<h1>EKA2L1 Web 移植回归</h1>
+<p>安装固件、启动应用，检查画面与按键。本页不保存测试数据；刷新即可重新开始。</p>
+<section class="setup">
+<div class="files"><label>ROM 文件<input id="rom" type="file" accept=".rom"></label><label>RPKG 文件<input id="rpkg" type="file" accept=".rpkg"></label></div>
+<p class="hint">不选择文件时，使用测试服务器的 rom/SYM.ROM 和 rom/SYM.RPKG（当前为 Nokia 5320）。文件只在本机浏览器中读取。设备语言须由固件支持，否则使用固件默认语言。</p>
+<div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><button id="start">运行回归</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
+</section>
+<div class="layout">
+<div class="screen"><canvas id="canvas" width="240" height="320" tabindex="0" aria-label="模拟器画面"></canvas>
+<div class="keypad" id="keypad">
+<button data-key="LSK" disabled>选项菜单</button><button data-key="UP" disabled>↑</button><button data-key="RSK" disabled>返回</button>
+<button data-key="LEFT" disabled>←</button><button data-key="OK" disabled>确认</button><button data-key="RIGHT" disabled>→</button>
+<button data-key="CLEAR" disabled>删除</button><button data-key="DOWN" disabled>↓</button><button data-key="END" disabled>挂断</button>
+<button data-key="D1" disabled>1</button><button data-key="D2" disabled>2</button><button data-key="D3" disabled>3</button>
+<button data-key="D4" disabled>4</button><button data-key="D5" disabled>5</button><button data-key="D6" disabled>6</button>
+<button data-key="D7" disabled>7</button><button data-key="D8" disabled>8</button><button data-key="D9" disabled>9</button>
+<button data-key="STAR" disabled>＊</button><button data-key="D0" disabled>0</button><button data-key="HASH" disabled>＃</button>
+</div></div>
+<div><section class="panel"><h2>设备应用</h2><div id="apps" class="app-list">安装完成后显示应用列表，并自动启动计算器。</div></section>
+<section class="panel logs"><h2>运行日志</h2><pre id="status">等待开始</pre></section></div>
+</div></main>
+<script src="js/build_id.js"></script><script src="js/i18n/zh-CN.js"></script><script src="js/i18n/en-US.js"></script><script src="js/i18n.js"></script><script src="eka2l1.js"></script><script src="js/boot.js"></script>
+<script>
+(() => {
+    const byId = id => document.getElementById(id);
+    const lines = [];
+    let ready = false;
+    byId('cpu').value = new URLSearchParams(location.search).get('jit') === '0' ? '0' : '1';
+    function note(message) {
+        lines.push(new Date().toISOString() + ' ' + message);
+        if (lines.length > 2000) lines.shift();
+        byId('status').textContent = lines.slice(-80).join('\n');
+        byId('status').scrollTop = byId('status').scrollHeight;
+    }
+    const originalError = console.error, originalLog = console.log;
+    let lastPerfLog = 0;
+    console.error = (...args) => { originalError(...args); note('ERROR ' + args.join(' ')); };
+    console.log = (...args) => {
+        originalLog(...args);
+        const message = args.join(' ');
+        if (/panic|access violation|invalid instruction|loaded fallback|\[Kernel\]|App process exited/i.test(message)) note(message);
+        if (/App process exited/.test(message)) byId('summary').textContent = '应用已退出，请查看日志';
+        if (ready && message.includes('[perf]') && Date.now() - lastPerfLog > 10000) {
+            lastPerfLog = Date.now();
+            note(message);
+        }
+    };
+    window.addEventListener('error', e => note('ERROR ' + e.message));
+    window.addEventListener('unhandledrejection', e => note('ERROR ' + e.reason));
+
+    // A regression run must never read or overwrite the normal launcher's
+    // saved devices, even when both pages share an origin. Mount only MEMFS.
+    const factory = window.createEKA2L1Module;
+    window.createEKA2L1Module = async options => {
+        const mod = await factory(options);
+        const mount = mod.FS.mount;
+        mod.FS.mount = (type, settings, mountpoint) => mount(
+            mountpoint === '/eka2l1' ? mod.FS.filesystems.MEMFS : type, settings, mountpoint);
+        const callMain = mod.callMain;
+        mod.callMain = args => {
+            mod.ccall('wasm_set_jit', null, ['number'], [Number(byId('cpu').value)]);
+            const language = Number(byId('language').value);
+            mod.FS.writeFile('/eka2l1/config.yml', 'language: ' + language + '\n');
+            return callMain(args);
+        };
+        return mod;
+    };
+    function launch(app) {
+        if (!ready) return;
+        // Use the guest launch API directly: testing another application does
+        // not need the camera permission requested by the normal launcher.
+        const result = EKA2L1.module.ccall('wasm_launch_app', 'number', ['number'], [Number(app.uid)]);
+        note('启动 ' + app.name + ' (0x' + Number(app.uid).toString(16) + ') = ' + result);
+        byId('summary').textContent = result === 0 ? '运行中 · ' + app.name : '启动失败 · ' + result;
+    }
+    for (const button of document.querySelectorAll('[data-key]')) {
+        button.addEventListener('click', () => {
+            if (!ready) return;
+            const code = EKA2L1.keys[button.dataset.key];
+            EKA2L1.sendKey(code, true);
+            setTimeout(() => EKA2L1.sendKey(code, false), 100);
+        });
+    }
+    async function readInput(id, fallback) {
+        const file = byId(id).files[0];
+        if (file) return file;
+        const response = await fetch(fallback);
+        if (!response.ok) throw new Error('找不到 ' + fallback + '，请先选择 ROM 和 RPKG 文件。');
+        return response.blob();
+    }
+    byId('restart').onclick = () => location.reload();
+    byId('export').onclick = () => {
+        const url = URL.createObjectURL(new Blob([lines.join('\n')], {type:'text/plain;charset=utf-8'}));
+        const link = document.createElement('a');
+        link.href = url; link.download = 'eka2l1-regression.log'; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    byId('start').onclick = async () => {
+        byId('start').disabled = true;
+        for (const id of ['rom', 'rpkg', 'language', 'cpu']) byId(id).disabled = true;
+        try {
+            note('Build ' + (window.EKA2L1_BUILD_ID || 'dev') + '；语言 ' + byId('language').value + '；JIT ' + byId('cpu').value);
+            const mod = await EKA2L1.boot({canvas:byId('canvas'), onProgress:(percent, message) => {
+                byId('summary').textContent = percent + '% · ' + message;
+            }});
+            note('WebAssembly 核心已就绪');
+            const rpkg = await readInput('rpkg', 'rom/SYM.RPKG');
+            const target = await EKA2L1.streamInstallRpkg(rpkg, (done, total) => {
+                byId('summary').textContent = '安装 RPKG · ' + Math.round(done / total * 100) + '%';
+            });
+            note('RPKG 流式安装完成；ROM 路径 ' + target);
+            const rom = await readInput('rom', 'rom/SYM.ROM');
+            mod.FS.writeFile(target, new Uint8Array(await rom.arrayBuffer()));
+            const result = EKA2L1.initDevice('', '');
+            note('设备初始化 = ' + result);
+            if (result !== 0) throw new Error('设备初始化失败：' + result);
+            const config = mod.FS.readFile('/eka2l1/config.yml', { encoding: 'utf8' });
+            const actualLanguage = config.match(/^language:\s*(-?\d+)/m);
+            if (actualLanguage) note('实际设备语言代码：' + actualLanguage[1]);
+            const apps = EKA2L1.appList();
+            note('找到 ' + apps.length + ' 个应用');
+            byId('apps').textContent = '';
+            ready = true;
+            for (const button of document.querySelectorAll('[data-key]')) button.disabled = false;
+            for (const app of apps) {
+                const button = document.createElement('button');
+                button.textContent = app.name; button.onclick = () => launch(app);
+                byId('apps').append(button);
+            }
+            byId('summary').textContent = '设备就绪';
+            const calculator = apps.find(app => Number(app.uid) === 0x10005902 || /calculator|计算器/i.test(app.name));
+            if (calculator) launch(calculator);
+            setTimeout(() => note('启动后已运行 25 秒，请检查画面与按键。'), 25000);
+        } catch (error) {
+            byId('summary').textContent = '测试中断，请重新开始';
+            note('FAIL ' + (error.stack || error));
+        }
+    };
+})();
+</script></body></html>

@@ -18,6 +18,10 @@
  */
 
 #include <services/notifier/queries.h>
+#include <common/platform.h>
+#if !EKA2L1_PLATFORM(WASM) && !EKA2L1_PLATFORM(OHOS)
+#include <services/notifier/bluetooth.h>
+#endif
 #include <services/ui/plugins/keylocknof.h>
 #include <services/ui/plugins/notenof.h>
 #include <kernel/kernel.h>
@@ -50,6 +54,9 @@ namespace eka2l1::epoc::notifier {
         ADD_PLUGIN(note_display_plugin);
         ADD_PLUGIN(keylock_plugin);
         ADD_PLUGIN(memory_card_dialog_plugin);
+#if !EKA2L1_PLATFORM(WASM) && !EKA2L1_PLATFORM(OHOS)
+        ADD_PLUGIN(bluetooth_device_selection_plugin);
+#endif
 #undef ADD_PLUGIN
 
         std::sort(plugins.begin(), plugins.end(), [](const plugin_instance &lhs, const plugin_instance &rhs) {

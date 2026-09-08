@@ -121,6 +121,7 @@ namespace eka2l1::kernel {
             }
 
             run_core->load_context(crr_thread->ctx);
+            //LOG_TRACE(KERNEL, "Switched to {}", crr_thread->name());
         } else {
             // No current thread is eligible to run. Let the core that this scheduler currently handle sleeps.
             crr_thread = nullptr;
@@ -184,8 +185,8 @@ namespace eka2l1::kernel {
             }
         }
 
-        // A ready thread can briefly outlive its process memory model during
-        // multi-step teardown. Drop stale entries so switch_context receives a
+        // A ready thread can briefly outlive its process's memory model during a
+        // multi-step teardown. Drop the stale entries so switch_context receives a
         // runnable thread with a valid address space.
         while (next_thread) {
             kernel::process *owner = next_thread->owning_process();

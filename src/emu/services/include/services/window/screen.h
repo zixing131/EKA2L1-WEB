@@ -54,6 +54,9 @@ namespace eka2l1::drivers {
 namespace eka2l1::epoc {
     const std::uint32_t WORD_PALETTE_ENTRIES_COUNT = 16;
 
+    // The direct screen access buffer is handed to the guest pre-filled with this value.
+    const std::uint8_t SCREEN_BUFFER_UNTOUCHED_FILL = 255;
+
     struct window;
     struct window_group;
     struct screen;
@@ -85,6 +88,12 @@ namespace eka2l1::epoc {
         drivers::handle dsa_texture;    ///< Texture use for temporary DSA transfer
 
         epoc::display_mode disp_mode;
+
+        // Pixel format of the direct screen access framebuffer. Usually the same as
+        // disp_mode, but EKA1 panels expose a 16-bit framebuffer while WSERV composes
+        // in the deeper mode their wsini.ini declares.
+        epoc::display_mode dsa_disp_mode;
+        epoc::display_mode dsa_disp_mode_initial;
 
         std::uint64_t last_vsync;
         std::uint64_t last_fps_check;
@@ -160,7 +169,13 @@ namespace eka2l1::epoc {
         void abort_all_dsas(const std::int32_t reason);
         void recalculate_visible_regions(bool dont_trigger_redraw = false);
 
-        void restore_from_config(drivers::graphics_driver *driver, const eka2l1::config::app_setting &setting);
+        // `winserv` is the server to notify when restoring the setting changes the
+        // screen mode. Pass null from callers that only want the scaling half of the
+        // setting re-applied (see the DSA upscale path); the mode is then left alone,
+        // since changing it without telling clients would leave them drawing for the
+        // old one.
+        void restore_from_config(drivers::graphics_driver *driver, const eka2l1::config::app_setting &setting,
+            window_server *winserv);
         void store_to_config(drivers::graphics_driver *driver, eka2l1::config::app_setting &setting);
         void try_change_display_rescale(drivers::graphics_driver *driver, const float scale_factor);
 
@@ -175,8 +190,12 @@ namespace eka2l1::epoc {
 
         /**
          * \brief Get the number of bytes between rows in the emulated framebuffer.
+         *
+         * Every writer has to agree on this: the display HAL reports it and the screen
+         * draw device is built with it.
          */
         std::uint32_t screen_buffer_byte_width() const;
+        std::uint32_t screen_buffer_byte_width(const epoc::display_mode mode) const;
 
         /**
          * \brief Get the size of this screen, in pixels.
@@ -199,6 +218,18 @@ namespace eka2l1::epoc {
         const void get_max_num_colors(int &colors, int &greys) const;
 
         void sync_screen_buffer_data(drivers::graphics_driver *driver);
+
+        /**
+         * @brief Widen the assumed direct screen access pixel depth once the guest proves
+         *        it writes deeper pixels than the conservative starting guess.
+         */
+        bool promote_dsa_depth_if_deep_pixels_written();
+
+        /**
+         * @brief Forget what the last direct screen access client wrote, so the next one
+         *        is measured on its own frames.
+         */
+        void reset_dsa_depth_guess();
 
         /**
          * \brief Set screen mode.

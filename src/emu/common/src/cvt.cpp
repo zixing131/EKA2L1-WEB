@@ -35,14 +35,11 @@ namespace eka2l1 {
         using char_ucs2 = char16_t;
 #endif
 
-        // std::wstring_convert carries mutable conversion state (mbstate_t plus a
-        // converted-character count) that every to_bytes/from_bytes call writes to,
-        // so a shared instance is not safe to call from more than one thread. These
-        // converters sit under the string helpers below, which run on the UI thread,
-        // the CPU thread, timer threads and every service thread alike. Keep one
-        // instance per thread: constructing them is not free (each allocates a
-        // codecvt facet) and these paths are hot, so a function-local instance per
-        // call would be wasteful.
+        // std::wstring_convert carries mutable conversion state that every
+        // to_bytes/from_bytes call writes to, so one shared instance cannot serve
+        // the UI, CPU, timer and service threads that all reach the helpers below.
+        // Per thread rather than per call: each instance allocates a codecvt facet
+        // and these paths are hot.
         thread_local std::wstring_convert<std::codecvt_utf8_utf16<char_ucs2>, char_ucs2> ucs2_to_utf8_converter;
         thread_local std::wstring_convert<std::codecvt_utf8_utf16<char_ucs2>, char_ucs2> utf8_to_ucs2_converter;
         thread_local std::wstring_convert<std::codecvt_utf16<wchar_t, 0x10ffff, std::little_endian>, wchar_t> ucs2_to_wstr_converter;

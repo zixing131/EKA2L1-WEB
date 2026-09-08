@@ -22,6 +22,8 @@
 #include <drivers/camera/backend/pattern/camera_pattern.h>
 
 #include <common/platform.h>
+#include <atomic>
+#include <type_traits>
 
 #if EKA2L1_PLATFORM(ANDROID)
 #include <drivers/camera/backend/android/camera_collection_android.h>
@@ -33,6 +35,18 @@
 
 namespace eka2l1::drivers::camera {
     std::unique_ptr<collection> collection_detail = nullptr;
+
+    // Written by the presenter thread, read on whichever thread a backend converts
+    // a frame on.
+    static std::atomic<int> frame_rotation_deg = 0;
+
+    void set_frame_rotation(const int degrees) {
+        frame_rotation_deg.store(((degrees % 360) + 360) % 360, std::memory_order_relaxed);
+    }
+
+    int frame_rotation() {
+        return frame_rotation_deg.load(std::memory_order_relaxed);
+    }
 
     collection *get_collection() {
         if (collection_detail == nullptr) {

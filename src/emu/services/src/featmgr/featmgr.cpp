@@ -59,7 +59,8 @@ namespace eka2l1 {
         feature_id_flash_lite_viewer = 1145,
         feature_id_flash_lite_browser_plugin = 1146,
         feature_id_pen_calibration = 1658,
-        feature_id_tactile_feedback = 1718
+        feature_id_tactile_feedback = 1718,
+        feature_id_help = 1012
     };
 
     void featmgr_server::do_feature_scanning(system *sys) {
@@ -73,20 +74,15 @@ namespace eka2l1 {
         enable_features.push_back(feature_id_pen);
         enable_features.push_back(feature_id_vibra);
         enable_features.push_back(feature_id_pen_calibration);
-        // Avkon Options-menu item gate; see the enum comment. Without this the
-        // built-in Calculator (and apps with the same pattern) panic with
-        // EIKCOCTL 8 when opening their Options menu.
-        enable_features.push_back(feature_id_app_menu_show_images);
 
-        // Java MIDP 2.0: only claim support when the ROM ships the MIDP2
-        // runtime, otherwise the Java AMS stack would boot into nothing.
-        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\midp2runtimev2.dll")) {
-            enable_features.push_back(feature_id_java_midp20);
-        }
+        // Every S60 device ships the help application, and AVKON adjusts a menu pane
+        // depending on whether it is there. A ROM's featreg.cfg is usually near-empty
+        // here, so anything not listed reads as unsupported: the Calculator's Options
+        // menu then panics with EIKCOCTL 8 instead of opening.
+        enable_features.push_back(feature_id_help);
 
-        // Browser-hosted Flash Lite is a separate platform feature from the
-        // standalone viewer. Report it only when the ROM actually supplies the
-        // Netscape-compatible browser plug-in.
+        // Browser-hosted Flash Lite is a separate feature from the standalone viewer
+        // below, so report it only when the ROM carries the browser plug-in itself.
         if (sys->get_io_system()->exist(u"z:\\sys\\bin\\npflashlite.dll")) {
             enable_features.push_back(feature_id_flash_lite_browser_plugin);
         }
@@ -164,6 +160,31 @@ namespace eka2l1 {
         }
 
         return true;
+    }
+
+    bool featmgr_server::is_feature_supported(system *sys, const epoc::uid feature_id) {
+        if (!config_loaded) {
+            if (!load_featmgr_configs(sys->get_io_system())) {
+                LOG_ERROR(SERVICE_FEATMGR, "Error loading feature manager server config!");
+            }
+
+            do_feature_scanning(sys);
+            std::sort(enable_features.begin(), enable_features.end());
+
+            config_loaded = true;
+        }
+
+        if (std::binary_search(enable_features.begin(), enable_features.end(), feature_id)) {
+            return true;
+        }
+
+        for (const auto &feature_range : enable_feature_ranges) {
+            if ((feature_range.low_uid <= feature_id) && (feature_id <= feature_range.high_uid)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     void featmgr_server::feature_supported(service::ipc_context &ctx) {

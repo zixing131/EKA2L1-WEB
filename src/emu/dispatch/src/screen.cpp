@@ -60,6 +60,8 @@ namespace eka2l1::dispatch {
             vsync_notifies_.erase(ite);
         }
 
+        // Completing a guest request needs the kernel lock; this runs on the posting
+        // thread, so take it here rather than signalling the guest unlocked.
         kernel_system *kern = info->requester ? info->requester->get_kernel_object_owner() : nullptr;
         if (kern) {
             kern->lock();
@@ -351,14 +353,22 @@ namespace eka2l1::dispatch {
                 const eka2l1::vec2 screen_size = mode_info.size;
 
                 const char *data_ptr = reinterpret_cast<const char *>(scr->screen_buffer_ptr());
-                const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(scr->disp_mode);
-                const std::size_t dsa_screen_pitch = scr->screen_buffer_byte_width();
+
+                // WINDOWMODE tells us what WSERV composes in, not what a direct screen
+                // access client writes into the panel buffer. Most EKA1 guests take the
+                // reported mode and write that many bytes per pixel, but a few hardcode
+                // 16-bit pixels and would be shredded by a 32-bit upload. The two cases
+                // are distinguishable: at 16 bits the guest only ever fills the first
+                // half of the (always 32-bit sized) buffer. Start narrow and widen the
+                // moment anything lands in the upper half.
+                const bool dsa_depth_changed = scr->promote_dsa_depth_if_deep_pixels_written();
+
+                // Every writer lays its rows out at the pitch the screen reports, so read
+                // it back with that one. Only a 32-bit framebuffer is ever padded.
+                const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(scr->dsa_disp_mode);
                 const std::size_t tight_screen_pitch = mode_info.size.x * sizeof(std::uint32_t);
-                const bool use_screenplay_pitch = scr->is_screenplay_architecture()
-                    && (scr->active_dsa_count_ > 0) && (bits_per_pixel == 32);
-                const std::size_t screen_pitch = use_screenplay_pitch
-                    ? dsa_screen_pitch
-                    : tight_screen_pitch;
+                const std::size_t framebuffer_pitch = scr->screen_buffer_byte_width(scr->dsa_disp_mode);
+                const std::size_t screen_pitch = common::max(framebuffer_pitch, tight_screen_pitch);
                 const std::size_t buffer_size = screen_pitch * mode_info.size.y;
                 const std::size_t pixels_per_line = (screen_pitch != tight_screen_pitch)
                     ? screen_pitch / sizeof(std::uint32_t)
@@ -462,13 +472,25 @@ namespace eka2l1::dispatch {
 
                 std::unique_lock<std::mutex> guard(scr->screen_mutex);
 
+                if (dsa_depth_changed && scr->dsa_texture) {
+                    // The transfer texture was made for the old depth; drop it and let the
+                    // block below build one that matches.
+                    drivers::graphics_command_builder discard_builder;
+                    discard_builder.destroy_bitmap(scr->dsa_texture);
+
+                    drivers::command_list discard_list = discard_builder.retrieve_command_list();
+                    driver->submit_command_list(discard_list);
+
+                    scr->dsa_texture = 0;
+                }
+
                 if (!scr->dsa_texture) {
                     const int max_square_width = common::max<int>(screen_size.x, screen_size.y);
 
                     kern->unlock();
                     guard.unlock();
 
-                    drivers::handle bitmap_handle = drivers::create_bitmap(driver, eka2l1::vec2(max_square_width, max_square_width), epoc::get_bpp_from_display_mode(scr->disp_mode));
+                    drivers::handle bitmap_handle = drivers::create_bitmap(driver, eka2l1::vec2(max_square_width, max_square_width), bits_per_pixel);
 
                     kern->lock();
                     guard.lock();
@@ -489,7 +511,7 @@ namespace eka2l1::dispatch {
 
                 // NOTE: This is a hack for some apps that dont fill alpha
                 // TODO: Figure out why or better solution (maybe the display mode is not really correct?)
-                switch (scr->disp_mode) {
+                switch (scr->dsa_disp_mode) {
                 case epoc::display_mode::color16m:
                 case epoc::display_mode::color16mu:
                 case epoc::display_mode::color16ma:
@@ -538,7 +560,7 @@ namespace eka2l1::dispatch {
                     // Automatically flag and save this settings
                     if (scr->focus) {
                         scr->focus->saved_setting.screen_upscale_method = 1;
-                        scr->restore_from_config(driver, scr->focus->saved_setting);
+                        scr->restore_from_config(driver, scr->focus->saved_setting, nullptr);
                         scr->try_change_display_rescale(driver, scr->display_scale_factor);
                     }
                 }
@@ -548,6 +570,23 @@ namespace eka2l1::dispatch {
 
             scr = scr->next;
         }
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, get_screen_buffer_byte_width, const std::uint32_t screen_number,
+        const std::int32_t display_mode) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        epoc::screen *scr = dispatcher->winserv_->get_screens();
+
+        while (scr != nullptr) {
+            if (scr->number == static_cast<int>(screen_number)) {
+                return static_cast<std::int32_t>(scr->screen_buffer_byte_width(
+                    static_cast<epoc::display_mode>(display_mode)));
+            }
+
+            scr = scr->next;
+        }
+
+        return 0;
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, wait_vsync, const std::int32_t screen_index, eka2l1::ptr<epoc::request_status> sts) {

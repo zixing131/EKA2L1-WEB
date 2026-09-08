@@ -312,6 +312,8 @@ namespace eka2l1 {
         return common::compare_ignore_case(normalized, own) == 0;
     }
 
+    // The sharing state is keyed by path, so the key has to be one single form of it:
+    // a file opened as "c:/dir/f" and again as "c:\dir\f" is the same file.
     static std::u16string canonical_file_attrib_path(std::u16string path) {
         return eka2l1::transform_separators<char16_t>(
             std::move(path), true, eka2l1::get_separator_16);
@@ -723,6 +725,15 @@ namespace eka2l1 {
         vfs_file->close();
 
         symfile new_vfs_file = ctx->sys->get_io_system()->open_file(new_path_abs, last_mode);
+
+        if (!new_vfs_file) {
+            // Renamed on disk, but the new path would not open. Say so, rather than
+            // leaving the subsession holding a null file it dereferences next.
+            LOG_ERROR(SERVICE_EFSRV, "Can't reopen {} after rename", common::ucs2_to_utf8(new_path_abs));
+            ctx->complete(epoc::error_general);
+            return;
+        }
+
         new_vfs_file->seek(last_pos, file_seek_mode::beg);
 
         node->vfs_node = std::move(new_vfs_file);
@@ -1194,13 +1205,12 @@ namespace eka2l1 {
         {
             auto file_dir = eka2l1::file_directory(*name_res);
 
-            // A process's own private directory exists on a real device, so a missing file
-            // there reports KErrNotFound. Here the directory only appears once something has
-            // written to it, and the guest gets KErrPathNotFound instead - a different error
-            // that fallback paths do not recognise. The metadata server, for instance, reads
-            // its schema from C:\private\200009F3\ and only falls back to the ROM copy on
-            // KErrNotFound, so it dies on a clean drive. Materialise the caller's own private
-            // directory to match the device; every other path keeps reporting as before.
+            // A process's own private directory exists on a device, so a missing file
+            // there reports KErrNotFound. Here it only appears once something has
+            // written to it, and the guest gets KErrPathNotFound instead -- a
+            // different error, which fallback paths do not recognise. The metadata
+            // server reads its schema from C:\private\200009F3\ and only falls back
+            // to the ROM copy on KErrNotFound, so it dies on a clean drive.
             if (!io->exist(file_dir) && is_process_own_private_dir(ctx->msg->own_thr->owning_process(), file_dir)) {
                 io->create_directories(file_dir);
             }

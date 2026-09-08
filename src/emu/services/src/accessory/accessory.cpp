@@ -233,8 +233,8 @@ namespace eka2l1 {
             }
         }
 
-        // Every request must be answered: leaving one outstanding blocks the client
-        // thread forever, since these are all synchronous SendReceive calls.
+        // These are synchronous calls, so an answer is not optional: an unanswered
+        // one blocks the client thread for good.
         LOG_ERROR(SERVICE_ACCESSORY, "Unimplemented opcode for accessory session 0x{:X}", ctx->msg->function);
         ctx->complete(epoc::error_not_supported);
     }

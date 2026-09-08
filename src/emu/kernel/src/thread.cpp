@@ -41,37 +41,6 @@
 
 namespace eka2l1 {
     namespace kernel {
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_FAST_SVC = 0xEF800000;
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_SVC = 0xEF000003;
-        static constexpr std::uint32_t WAIT_ANY_REQUEST_PATCHED_SVC = 0xEF000012;
-        static constexpr std::uint32_t ARM_BX_LR = 0xE12FFF1E;
-
-        struct wait_request_stub_info {
-            bool direct_wait_for_any_request = false;
-            bool wait_for_request_wrapper = false;
-        };
-
-        static wait_request_stub_info identify_wait_request_stub(memory_system *mem, kernel::process *owner,
-            const arm::core::thread_context &ctx) {
-            const std::uint32_t *svc_instruction = (ctx.get_pc() >= 4)
-                ? eka2l1::ptr<std::uint32_t>(ctx.get_pc() - 4).get(mem)
-                : nullptr;
-            const std::uint32_t *return_instruction = eka2l1::ptr<std::uint32_t>(ctx.get_pc()).get(mem);
-            const std::uint32_t svc_value = svc_instruction ? *svc_instruction : 0;
-            const std::uint32_t return_value = return_instruction ? *return_instruction : 0;
-            epoc::request_status *wait_target = eka2l1::ptr<epoc::request_status>(ctx.cpu_registers[0]).get(owner);
-
-            wait_request_stub_info info;
-            info.wait_for_request_wrapper = (svc_value == WAIT_ANY_REQUEST_FAST_SVC) && wait_target;
-            info.direct_wait_for_any_request = svc_instruction
-                && (return_value == ARM_BX_LR)
-                && ((svc_value == WAIT_ANY_REQUEST_SVC)
-                    || (svc_value == WAIT_ANY_REQUEST_PATCHED_SVC)
-                    || ((svc_value == WAIT_ANY_REQUEST_FAST_SVC) && !info.wait_for_request_wrapper));
-
-            return info;
-        }
-
         int map_thread_priority_to_calc(thread_priority pri) {
             switch (pri) {
             case thread_priority::priority_much_less:
@@ -496,8 +465,9 @@ namespace eka2l1 {
 
             sleep_level = 1;
 
-            // This HLE sleep is used for host-side frame pacing. It should not
-            // consume or restore guest request signals.
+            // A host-side frame-pacing sleep. It must not consume or restore guest
+            // request signals: the request semaphore carries the active scheduler's
+            // accounting, and one extra signal there is a stray-signal panic.
             if (!scheduler->sleep(this, ussecs, true)) {
                 sleep_level = 0;
                 return false;
@@ -517,10 +487,10 @@ namespace eka2l1 {
             kern->lock();
 
             if (sleep_nof_sts) {
-                // The wakeup event can still be in-flight (already popped from the
-                // timing queue and running outside the timing lock) when the sleeping
-                // thread is torn down. By then the guest request status page may be
-                // unmapped, so translation returns null. Guard it like notify_info::complete.
+                // The wakeup event can already be in flight - popped from the timing
+                // queue and running outside the timing lock - when the sleeping thread
+                // is torn down. The guest request status page may be unmapped by then,
+                // so translation returns null. Guard it like notify_info::complete.
                 epoc::request_status *sts_real = sleep_nof_sts.get(owning_process());
                 if (sts_real) {
                     sts_real->set(errcode, kern->is_eka1());
@@ -780,33 +750,6 @@ namespace eka2l1 {
         }
 
         void thread::wait_for_any_request() {
-            kernel::process *owner = owning_process();
-
-            // The wait-stub identification below reads this thread's saved
-            // context, which is only refreshed when the scheduler switches the
-            // thread out. When the wait is serviced without blocking (a signal
-            // is already queued — common under the JIT, where completions land
-            // before the guest reaches WaitForAnyRequest), the snapshot still
-            // points at an older SVC site and the stub identification misfires.
-            // Refresh from the live core so the check sees the SVC actually
-            // executing.
-            if (kern->crr_thread() == this) {
-                kern->get_cpu()->save_context(ctx);
-            }
-
-            const int before_count = request_sema->count();
-            utils::active_scheduler *act_sched_pre = ldata->scheduler.cast<utils::active_scheduler>().get(owner);
-            const wait_request_stub_info stub_pre = identify_wait_request_stub(mem, owner, ctx);
-
-            // The mirror image of a stray: the active scheduler has a ready active object but the
-            // semaphore is empty, so its signal went missing somewhere. Blocking here would strand
-            // the thread - the completion already happened and nothing will signal again - so hand
-            // the wait straight back and let the guest dispatch what is ready.
-            if ((before_count <= 0) && stub_pre.direct_wait_for_any_request && act_sched_pre
-                && act_sched_pre->has_ready_request(owner)) {
-                return;
-            }
-
             request_sema->wait(0);
         }
 

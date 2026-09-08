@@ -33,10 +33,31 @@ namespace eka2l1::mem::flexible {
         , committed_(0)
         , flags_(0)
         , fixed_addr_(0)
-        , owner_(nullptr) {
+        , owner_(nullptr)
+        , is_addr_shared_(false) {
+    }
+
+    void flexible_mem_model_chunk::remove_attacher(flexible_mem_model_process *process) {
+        auto ite = std::find(attachers_.begin(), attachers_.end(), process);
+
+        if (ite != attachers_.end()) {
+            attachers_.erase(ite);
+        }
     }
 
     flexible_mem_model_chunk::~flexible_mem_model_chunk() {
+        // This struct can die while other processes still have it attached: the kernel object may
+        // be closed while another process holds a handle to a global chunk, or the creator may
+        // exit first. Their attach info points straight at this struct, so make them drop it now,
+        // while our mapping list and memory object are still alive. Otherwise the next teardown
+        // walks freed memory and dereferences a garbage mem_obj_.
+        // Every entry got here through attach_chunk(), which only records an attacher after it
+        // has stored the matching attach info, so detach_chunk() always finds it and calls
+        // remove_attacher(). The list therefore shrinks on every iteration.
+        while (!attachers_.empty()) {
+            attachers_.back()->detach_chunk(this);
+        }
+
         if (fixed_mapping_ && (flags_ & MEM_MODEL_CHUNK_REGION_USER_CODE)) {
             control_flexible *control_mm = reinterpret_cast<control_flexible *>(control_);
             for (auto &mmu : control_mm->mmus_) {

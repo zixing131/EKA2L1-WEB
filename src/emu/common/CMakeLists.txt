@@ -17,6 +17,7 @@ else ()
 endif ()
 
 add_library(common
+        include/common/archive.h
         include/common/applauncher.h
         include/common/arghandler.h
         include/common/atomic.h
@@ -67,6 +68,7 @@ add_library(common
         include/common/virtualmem.h
         include/common/watcher.h
         include/common/wildcard.h
+        src/archive.cpp
         src/atomic.cpp
         src/arghandler.cpp
         src/armemitter.cpp
@@ -136,7 +138,7 @@ file(MAKE_DIRECTORY "${COMMON_GENERATED_INCLUDE_DIR}/common")
 target_include_directories(common PUBLIC
         "${COMMON_GENERATED_INCLUDE_DIR}"
         include)
-target_link_libraries(common PUBLIC fmt miniz spdlog)
+target_link_libraries(common PUBLIC fmt spdlog zlibstatic)
 if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
 else()
@@ -172,3 +174,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/configure.h.in
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/version.h.in
         ${COMMON_GENERATED_INCLUDE_DIR}/common/version.h)
+
+target_link_libraries(common PRIVATE archive_static)
+if (WIN32)
+    target_link_libraries(common PRIVATE bcrypt)
+endif()

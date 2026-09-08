@@ -106,6 +106,8 @@ namespace eka2l1 {
     };
 #pragma pack(pop)
 
+    // TRecognitionConfidence, from AppArc's apmrec.h. The values matter: a client
+    // compares them, and EPossible is zero rather than the middle of the scale.
     enum data_recognition_confidence : std::int32_t {
         data_recognition_confidence_certain = 0x7FFFFFFF,
         data_recognition_confidence_probable = 100,

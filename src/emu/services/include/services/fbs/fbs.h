@@ -145,7 +145,13 @@ namespace eka2l1 {
         fbs_atlas_font_count,
         fbs_atlas_glyph_count,
         fbs_oogm_notification,
-        fbs_get_glyph_cache_metrics
+        fbs_get_glyph_cache_metrics,
+
+        // Past the public TFbsMessage enum: Symbian^3 fbserv moves these CFbsBitmap
+        // header mutations server-side, where stock Symbian does them in the client.
+        fbs_bitmap_set_display_mode = 73,
+        fbs_bitmap_set_size_in_twips = 74,
+        fbs_bitmap_swap_width_height = 75
     };
 
     enum fbs_legacy_level {
@@ -210,6 +216,7 @@ namespace eka2l1 {
         void duplicate_bitmap(service::ipc_context *ctx);
         void create_bitmap(service::ipc_context *ctx);
         void resize_bitmap(service::ipc_context *ctx);
+        void set_bitmap_size_in_twips(service::ipc_context *ctx);
         void notify_dirty_bitmap(service::ipc_context *ctx);
         void cancel_notify_dirty_bitmap(service::ipc_context *ctx);
         void get_clean_bitmap(service::ipc_context *ctx);
@@ -319,6 +326,10 @@ namespace std {
 namespace eka2l1 {
     class io_system;
 
+    namespace common {
+        class ro_stream;
+    }
+
     enum fbs_load_data_err {
         fbs_load_data_err_none,
         fbs_load_data_err_out_of_mem,
@@ -383,6 +394,8 @@ namespace eka2l1 {
         std::uint32_t fallback_coverage_[4] = { 0, 0, 0, 0 };
 
         void load_fonts(eka2l1::io_system *io);
+        void load_custom_fonts(const std::string &storage);
+        void load_linked_fonts(eka2l1::io_system *io);
 
         std::atomic<service::uid> connection_id_counter{ 0x1234 }; // Easier to debug
 
@@ -394,8 +407,10 @@ namespace eka2l1 {
     protected:
         void load_fonts_from_directory(eka2l1::io_system *io, eka2l1::directory *dir);
         void load_fallback_host_fonts();
+        void load_linked_fonts_from_directory(eka2l1::io_system *io, const std::u16string &fonts_folder_path);
         void initialize_server();
 
+        bool add_font(common::ro_stream &stream, const std::string &name, const bool user_font = false);
         bool add_single_font(eka2l1::io_system *io, const std::u16string &path);
 
     public:
@@ -512,10 +527,12 @@ namespace eka2l1 {
          * claim more data than the backing chunk actually commits. Use this to bound
          * host-side reads of bitmap data.
          *
-         * @returns Bytes readable up to the containing chunk's committed end, or
-         *          the given fallback if the pointer belongs to neither chunk.
+         * @returns Bytes readable up to the containing chunk's committed end, or zero
+         *          if the pointer belongs to neither chunk. All bitmap pixels are
+         *          allocated from one of the two, so a pointer that is in neither is
+         *          not something the host may read at all.
          */
-        std::size_t readable_bytes_from(const std::uint8_t *ptr, const std::size_t fallback) const;
+        std::size_t readable_bytes_from(const std::uint8_t *ptr) const;
 
         template <typename T>
         void destroy_bitmap_font(T *bitmapfont);

@@ -20,6 +20,7 @@ add_library(drivers
         include/drivers/audio/backend/dsp_shared.h
         include/drivers/audio/backend/player_shared.h
         include/drivers/camera/camera_collection.h
+        include/drivers/camera/camera_pixel.h
         include/drivers/camera/backend/pattern/camera_pattern.h
         include/drivers/hwrm/backend/vibration_null.h
         include/drivers/hwrm/vibration.h
@@ -55,6 +56,7 @@ add_library(drivers
         src/audio/backend/dsp_shared.cpp
         src/audio/backend/player_shared.cpp
         src/camera/camera_collection.cpp
+        src/camera/camera_pixel.cpp
         src/camera/backend/pattern/camera_pattern.cpp
         src/camera/backend/pattern/camera_pattern_pixel.cpp
         src/hwrm/backend/vibration_null.cpp
@@ -222,3 +224,8 @@ target_include_directories(drivers PUBLIC include ${MINIBAE_PUBLIC_INCLUDE_DIRS}
 if (BUILD_WITH_VULKAN)
     target_link_libraries(drivers PRIVATE Vulkan)
 endif ()
+
+# miniBAE still contains legacy C conversions and implicit declarations.
+if (NOT MSVC)
+    target_compile_options(miniBAE_EMU PRIVATE -Wno-int-conversion -Wno-implicit-function-declaration)
+endif()

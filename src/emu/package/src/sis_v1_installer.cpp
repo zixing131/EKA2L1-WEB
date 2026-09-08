@@ -182,7 +182,7 @@ namespace eka2l1::loader {
 
     bool install_sis_old(const std::u16string &path, io_system *io, drive_number drive,
         package::object &info, choose_lang_func choose_lang_cb, var_value_resolver_func resolver_cb,
-        progress_changed_callback progress_cb, cancel_requested_callback cancel_cb) {
+        progress_changed_callback progress_cb, cancel_requested_callback cancel_cb, const bool stub) {
         std::optional<sis_old> res = *loader::parse_sis_old(common::ucs2_to_utf8(path));
         if (!res.has_value()) {
             return false;
@@ -202,7 +202,8 @@ namespace eka2l1::loader {
         }
 
         info.current_drives = info.drives;
-        info.is_removable = true;
+        info.is_removable = !stub;
+        info.in_rom = stub;
 
         language choosen_language = language::en;
         std::size_t choosen_language_index = 0;
@@ -302,13 +303,13 @@ namespace eka2l1::loader {
             common::ro_std_file_stream sis_file(common::ucs2_to_utf8(path), true);
             sis_file.seek(data_info->position, common::seek_where::beg);
 
-            mz_stream stream;
+            z_stream stream;
 
             stream.zalloc = nullptr;
             stream.zfree = nullptr;
 
             if (!(res->header.op & 0x8)) {
-                if (inflateInit(&stream) != MZ_OK) {
+                if (inflateInit(&stream) != Z_OK) {
                     return false;
                 }
             }
@@ -389,7 +390,7 @@ namespace eka2l1::loader {
         }
 
         for (const std::u16string &path_more_sis: more_sis) {
-            if (!install_sis_old(path_more_sis, io, drive, info, choose_lang_cb, resolver_cb, progress_cb, cancel_cb)) {
+            if (!install_sis_old(path_more_sis, io, drive, info, choose_lang_cb, resolver_cb, progress_cb, cancel_cb, stub)) {
                 return false;
             }
 

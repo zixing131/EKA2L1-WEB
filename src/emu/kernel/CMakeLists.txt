@@ -36,6 +36,7 @@ add_library(epockern
         include/kernel/session.h
         include/kernel/server.h
         include/kernel/thread.h
+        include/kernel/timer_deadline.h
         include/kernel/timer.h
         include/kernel/kernel.h
         include/kernel/reg.h
@@ -99,3 +100,5 @@ target_link_libraries(epockern PRIVATE
         epoctiming
         re2::re2
         )
+# The retained J9 host runtime still reads JARs through miniz.
+target_link_libraries(epockern PRIVATE miniz)

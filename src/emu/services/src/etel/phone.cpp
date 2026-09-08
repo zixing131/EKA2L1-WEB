@@ -273,6 +273,16 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+
+    void etel_phone_subsession::notify_nitz_info_change(eka2l1::service::ipc_context *ctx) {
+        nitz_info_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+    }
+
+    void etel_phone_subsession::notify_nitz_info_change_cancel(eka2l1::service::ipc_context *ctx) {
+        nitz_info_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
     void etel_phone_subsession::notify_indicator_change(eka2l1::service::ipc_context *ctx) {
         indicator_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
     }
@@ -316,14 +326,7 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
-    void etel_phone_subsession::notify_nitz_info_change(eka2l1::service::ipc_context *ctx) {
-        nitz_info_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
-    }
 
-    void etel_phone_subsession::notify_nitz_info_change_cancel(eka2l1::service::ipc_context *ctx) {
-        nitz_info_change_nof_.complete(epoc::error_cancel);
-        ctx->complete(epoc::error_none);
-    }
 
     void etel_phone_subsession::notify_current_network_no_location_change(eka2l1::service::ipc_context *ctx) {
         current_network_no_location_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
@@ -471,9 +474,6 @@ namespace eka2l1 {
                 get_home_network(ctx);
                 break;
 
-            case epoc::etel_mobile_phone_get_nitz_info:
-                get_nitz_info(ctx);
-                break;
 
             case epoc::etel_mobile_phone_get_subscriber_id:
                 get_subscriber_id(ctx);
@@ -483,9 +483,15 @@ namespace eka2l1 {
                 get_phone_id(ctx);
                 break;
 
+            // The no-location variant is the same fetch without the location-area slot,
+            // which is never filled in here anyway.
             case epoc::etel_mobile_phone_get_current_network:
             case epoc::etel_mobile_phone_get_current_network_no_location:
                 get_current_network(ctx);
+                break;
+
+            case epoc::etel_mobile_phone_get_nitz_info:
+                get_nitz_info(ctx);
                 break;
 
             case epoc::etel_mobile_phone_notify_nitz_info_change:

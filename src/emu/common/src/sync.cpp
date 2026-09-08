@@ -72,10 +72,9 @@ namespace eka2l1::common {
 
     public:
         explicit event_impl() {
-            // Match the condition-variable implementation below: one signal
-            // releases one waiter and is consumed atomically by that wait.
-            // A manual-reset event required callers to reset after wait,
-            // leaving a window where a concurrent set could be erased.
+            // Auto-reset, matching the condition-variable implementation below:
+            // one signal releases one waiter and the wait consumes it atomically.
+            // Resetting from the waiter instead would drop a concurrent set().
             evt_ = CreateEvent(NULL, FALSE, FALSE, NULL);
             timer_ = NULL;
 

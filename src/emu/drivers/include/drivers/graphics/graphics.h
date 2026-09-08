@@ -110,7 +110,8 @@ namespace eka2l1::drivers {
 
     enum graphics_driver_extension {
         graphics_driver_extension_anisotrophy_filtering = 1 << 0,
-        graphics_driver_extension_float_precision_qualifier = 1 << 1
+        graphics_driver_extension_float_precision_qualifier = 1 << 1,
+        graphics_driver_extension_glsl_es_100 = 1 << 2
     };
 
     enum graphics_driver_extension_query {
@@ -149,6 +150,10 @@ namespace eka2l1::drivers {
          *
          * \returns Number of command lists processed.
          */
+        virtual std::uint32_t max_texture_size() const {
+            return 2048;
+        }
+
         virtual std::size_t pump() {
             return 0;
         }

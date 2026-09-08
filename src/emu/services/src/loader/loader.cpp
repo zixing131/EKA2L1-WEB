@@ -93,7 +93,7 @@ namespace eka2l1 {
 
             handle_owner = info->owner_type;
             uid3 = info->uid3;
-            stack_size = info->min_stack_size;
+            stack_size = (kern->get_epoc_version() == epocver::epoc91) ? 0 : info->min_stack_size;
         }
 
         if (!process_name16 || !process_args) {
@@ -130,7 +130,13 @@ namespace eka2l1 {
 
         if (info) {
             info->handle = pr_handle;
-            ctx.write_data_to_descriptor_argument(0, *info);
+
+            if (kern->get_epoc_version() == epocver::epoc91) {
+                ctx.write_data_to_descriptor_argument(0, reinterpret_cast<const std::uint8_t *>(&info.value()),
+                    static_cast<std::uint32_t>(sizeof(epoc::ldr_info)), nullptr, true);
+            } else {
+                ctx.write_data_to_descriptor_argument(0, *info);
+            }
         } else {
             info_eka1->result_handle = pr_handle;
             ctx.write_data_to_descriptor_argument(0, *info_eka1);
@@ -261,7 +267,13 @@ namespace eka2l1 {
             own_pr->signal_dll_lock(ctx.msg->own_thr);
 
             info->handle = lib_handle_and_obj.first;
-            ctx.write_data_to_descriptor_argument(0, *info);
+
+            if (kern->get_epoc_version() == epocver::epoc91) {
+                ctx.write_data_to_descriptor_argument(0, reinterpret_cast<const std::uint8_t *>(&info.value()),
+                    static_cast<std::uint32_t>(sizeof(epoc::ldr_info)), nullptr, true);
+            } else {
+                ctx.write_data_to_descriptor_argument(0, *info);
+            }
         } else {
             // Don't know what they are but they got involved in Payload crash (uninitialized variable that should be 1 through this function)
             info_eka1->unkXX[0] = 1;
@@ -407,9 +419,8 @@ namespace eka2l1 {
             return;
         }
 
-        // Physical drivers are represented by host-side HLE services rather
-        // than loaded into the emulated kernel. Match the existing LDD loader
-        // contract so clients can proceed to the emulated channel operation.
+        // Same answer as the logical driver above: the device the client is about to
+        // open is an HLE service here, not a driver loaded into the emulated kernel.
         LOG_TRACE(SERVICE_LOADER, "Trying to load PDD {}", common::ucs2_to_utf8(pdd_name.value()));
         context.complete(epoc::error_none);
     }

@@ -19,6 +19,26 @@
 #include <string>
 #include <vector>
 
+namespace eka2l1::epoc::tz {
+    /**
+     * @brief Convert a Symbian TTime to a Unix timestamp, and back.
+     *
+     * TTime counts microseconds from the start of 1 January year 0; the emulator
+     * already carries that distance as common::ad_epoc_dist_microsecs.
+     */
+    std::int64_t symbian_time_to_unix_seconds(const std::int64_t time);
+    std::int64_t unix_seconds_to_symbian_time(const std::int64_t seconds);
+
+    /**
+     * @brief Serialise the host's transitions the way a client reads them back.
+     *
+     * The layout is the one CTzRules::InternalizeL expects: a header of start
+     * year, end year, initial standard-time offset and rule count, all 16-bit,
+     * then 44 bytes per rule as TTzRule::InternalizeL reads them.
+     */
+    std::vector<std::uint8_t> make_rules(const int requested_start_year, const int requested_end_year);
+}
+
 namespace eka2l1 {
     class timezone_server : public service::typical_server {
         std::string zone_name_;

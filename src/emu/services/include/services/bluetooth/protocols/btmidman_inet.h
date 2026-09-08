@@ -91,6 +91,8 @@ namespace eka2l1::epoc::bt {
         virtual void on_no_more_strangers() = 0;
     };
 
+    class bonjour_discovery;
+
     class midman_inet: public midman {
     private:
         std::map<device_address, std::uint32_t> friend_device_address_mapping_;
@@ -100,6 +102,11 @@ namespace eka2l1::epoc::bt {
         std::vector<friend_info> friends_;
         common::bitmap_allocator allocated_ports_;
         std::array<std::uint16_t, MAX_PORT> port_refs_;
+        // Host ports we actually asked the router to forward. A port ref is not
+        // proof of a mapping (accept() refs a port that was never published),
+        // so unmapping must follow this instead, or we delete a stranger's
+        // mapping on the same router.
+        std::array<bool, MAX_PORT> port_upnp_mapped_;
         std::uint32_t port_offset_;
         bool enable_upnp_;
 
@@ -107,6 +114,7 @@ namespace eka2l1::epoc::bt {
 
         std::shared_ptr<uvw::udp_handle> lan_discovery_call_listener_socket_;
         std::shared_ptr<uvw::tcp_handle> matching_server_socket_;
+        std::vector<char> matching_server_receive_buffer_;
 
         std::shared_ptr<uvw::udp_handle> bluetooth_queries_server_socket_;
         std::shared_ptr<uvw::timer_handle> hearing_timeout_timer_;
@@ -123,8 +131,8 @@ namespace eka2l1::epoc::bt {
         std::string password_;
         discovery_mode discovery_mode_;
 
-        epoc::socket::saddress server_addr_;
-        epoc::socket::saddress local_addr_;
+        epoc::socket::saddress server_addr_{};
+        epoc::socket::saddress local_addr_{};
 
         std::shared_ptr<libuv::task> send_strangers_call_task_;
         std::shared_ptr<libuv::task> reset_timeout_timer_task_;
@@ -134,6 +142,10 @@ namespace eka2l1::epoc::bt {
         void send_call_for_strangers();
 
         // LAN
+#ifdef __APPLE__
+        std::unique_ptr<bonjour_discovery> bonjour_;
+        void sync_bonjour_friends();
+#endif
         void setup_lan_discovery();
         void add_lan_friend(const sockaddr *replier);
         void handle_lan_discovery_receive(const char *buf, std::int64_t nread, const sockaddr *addr);
@@ -145,7 +157,7 @@ namespace eka2l1::epoc::bt {
         void handle_matching_server_msg(std::int64_t nread, const char *buf_ptr);
         void send_login();
         void send_logout(const bool close_and_reset = true);
-        void read_and_add_friend(const char *buf, char &buf_pointer);
+        void read_and_add_friend(const char *buf, std::int64_t nread, std::int64_t &buf_pointer);
         void add_friend(epoc::bt::friend_info &info);
         void on_timeout_friend_search();
 
@@ -165,6 +177,15 @@ namespace eka2l1::epoc::bt {
         std::uint16_t get_free_port();
 
         std::vector<std::uint32_t> get_friend_index_with_address(epoc::socket::saddress &addr);
+        bool get_first_friend_device_address(device_address &result);
+        bool uses_bonjour_discovery() const {
+#ifdef __APPLE__
+            return discovery_mode_ == DISCOVERY_MODE_LAN;
+#else
+            return false;
+#endif
+        }
+
         bool get_friend_device_address(const std::uint32_t index, device_address &result);
         void handle_queries_request(const sockaddr *addr, const char *buf, std::int64_t nread);
 

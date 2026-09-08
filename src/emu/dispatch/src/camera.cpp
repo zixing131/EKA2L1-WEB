@@ -31,16 +31,11 @@
 #include <cstring>
 
 namespace eka2l1::dispatch {
-    // A camera viewfinder/image callback fires on the backend's own delivery
-    // thread and can race with the guest thread that armed the request being
-    // torn down (in-guest app exit, or a host-menu "close app" that kills the
-    // guest process while the AVFoundation session is still delivering frames).
-    // notify_info::complete() dereferences notify_info::requester, so completing
-    // against an already-destroyed thread is a use-after-free (observed crashing
-    // in notify_info::complete on the camera video queue). Validate the requester
-    // against the kernel's live thread list — the caller already holds the kernel
-    // lock — and drop the stale request instead of signalling a dangling thread.
-    // Mirrors complete_audio_notify_if_alive() in audio.cpp.
+    // A viewfinder or image callback fires on the backend's delivery thread, which
+    // can race the teardown of the guest thread that armed the request.
+    // notify_info::complete() dereferences that requester, so drop the request
+    // instead when it is gone. Mirrors complete_audio_notify_if_alive in audio.cpp;
+    // the caller already holds the kernel lock.
     static void complete_camera_notify_if_alive(kernel_system *kern, epoc::notify_info &info, int err_code) {
         if (!info.empty() && kern->is_thread_alive(info.requester)) {
             info.complete(err_code);
@@ -102,9 +97,9 @@ namespace eka2l1::dispatch {
             *cam_info = cam->cached_info_;
         }
 
-        // ECam duplicates share the underlying camera instance. Camera
-        // dispatcher handles have no independent close operation, so the
-        // existing handle already has the required lifetime semantics.
+        // A duplicate shares the underlying camera. Dispatcher camera handles have no
+        // close of their own, so the existing handle already has the lifetime a
+        // duplicate needs.
         return static_cast<std::int32_t>(handle);
     }
 

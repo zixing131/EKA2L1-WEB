@@ -199,6 +199,23 @@ namespace eka2l1::epoc {
         return bmp->header_.bit_per_pixels;
     }
 
+    // A bitmap header lives in memory its owning client can write to, and the pixel
+    // pointer is derived from it (data_offset_, bitmap_size, header_len). Everything
+    // that follows - hashing, RLE decoding, the upload memcpy - reads the whole data
+    // range through that pointer, so a header that no longer describes a real
+    // allocation sends the host off into memory it does not own.
+    static bool bitmap_data_is_readable(fbs_server *fbss, epoc::bitwise_bitmap *bw_bmp) {
+        const std::uint32_t header_len = std::min<std::uint32_t>(bw_bmp->header_.header_len,
+            static_cast<std::uint32_t>(sizeof(loader::sbm_header)));
+
+        if (bw_bmp->header_.bitmap_size < header_len) {
+            return false;
+        }
+
+        const std::size_t data_len = bw_bmp->header_.bitmap_size - header_len;
+        return fbss->readable_bytes_from(bw_bmp->data_pointer(fbss)) >= data_len;
+    }
+
     std::uint64_t bitmap_cache::hash_bitwise_bitmap(epoc::bitwise_bitmap *bw_bmp) {
         std::uint64_t hash = 0xB1711A3F;
 
@@ -222,7 +239,7 @@ namespace eka2l1::epoc {
         if (bw_bmp->header_.bitmap_size < sizeof(bw_bmp->header_)) {
             data_len = 0;
         } else if (fbss_) {
-            data_len = std::min<std::size_t>(data_len, fbss_->readable_bytes_from(data, data_len));
+            data_len = std::min<std::size_t>(data_len, fbss_->readable_bytes_from(data));
         }
 
         XXH64_update(state, data, data_len);
@@ -260,6 +277,13 @@ namespace eka2l1::epoc {
                 kern->get_epoc_version()));
 
             fbss_ = reinterpret_cast<fbs_server *>(ss);
+        }
+
+        if (fbss_ && !bitmap_data_is_readable(fbss_, bmp)) {
+            LOG_ERROR(SERVICE_WINDOW, "Bitmap 0x{:X} points its pixel data outside the bitmap chunks, dropping it",
+                bmp->uid_);
+
+            return 0;
         }
 
         std::int64_t idx = 0;

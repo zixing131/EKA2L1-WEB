@@ -215,6 +215,7 @@ namespace eka2l1 {
 
         std::vector<notify_entry> notify_entries;
         epoc::notify_info dismount_notify_;
+        epoc::notify_info disk_space_notify_;
 
         void notify(const utf16_str &entry, const notify_type type);
         void kick_java_preinstall_wait();

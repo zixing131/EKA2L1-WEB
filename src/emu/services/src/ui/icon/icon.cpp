@@ -62,9 +62,26 @@ namespace eka2l1 {
             break;
         }
 
-        default: {
-            LOG_ERROR(SERVICE_UI, "Unimplemented IPC opcode for AknIconServer session: 0x{:X}", ctx->msg->function);
+        // The real server keeps the decoded source data of an icon around so a later
+        // resize does not have to read the container again, and hands it back when the
+        // client is done. This server re-renders from the container file every time and
+        // caches the results in "icons", so there is nothing to pin or hand back: both
+        // requests are already satisfied, and so is a request to enable the cache.
+        case akn_icon_server_preserve_icon_data:
+        case akn_icon_server_destroy_icon_data:
+        case akn_icon_server_request_to_enable_cache: {
             ctx->complete(epoc::error_none);
+            break;
+        }
+
+        default: {
+            // Complete even what we don't implement. A client blocks in SendReceive
+            // until the server answers, so leaving a message hanging freezes the
+            // calling thread for good - one unknown opcode is enough to leave every
+            // app on a device drawing nothing.
+            LOG_ERROR(SERVICE_UI, "Unimplemented IPC opcode for AknIconServer session: 0x{:X}", ctx->msg->function);
+            ctx->complete(epoc::error_not_supported);
+
             break;
         }
         }
@@ -83,7 +100,6 @@ namespace eka2l1 {
         context.complete(epoc::error_none);
     }
 
-    // Load a .mif icon entry (SVG / NVG vector) into a renderable lunasvg document.
     // Open an icon container, resolving bare names (e.g. "Calcsoft.mif") against the
     // standard resource locations the way AknIconServer would.
     static symfile open_icon_container(io_system *io, const std::u16string &path) {
@@ -95,7 +111,9 @@ namespace eka2l1 {
         // No drive/dir component? Search the well-known resource folders on every drive.
         if ((path.find(u':') == std::u16string::npos) && (path.find(u'\\') == std::u16string::npos)) {
             static const char16_t *kPrefixes[] = { u"\\resource\\apps\\", u"\\resource\\" };
-            for (drive_number drv = drive_z; drv >= drive_a; drv = static_cast<drive_number>(drv - 1)) {
+            // Stepping one below drive_a would leave the enum's value range.
+            for (int drv_index = drive_z; drv_index >= drive_a; drv_index--) {
+                const drive_number drv = static_cast<drive_number>(drv_index);
                 auto entry = io->get_drive_entry(drv);
                 if (!entry) {
                     continue;
@@ -117,6 +135,7 @@ namespace eka2l1 {
         return nullptr;
     }
 
+    // Load a .mif icon entry (SVG / NVG vector) into a renderable lunasvg document.
     static std::unique_ptr<lunasvg::Document> load_mif_icon_document(io_system *io,
         const std::u16string &path, const int icon_index, const int want_w, const int want_h) {
         symfile f = open_icon_container(io, path);
@@ -157,8 +176,10 @@ namespace eka2l1 {
         return lunasvg::Document::loadFromData(svg_content);
     }
 
-    // Write a rendered RGBA buffer into an EColor16MU/EColor64K colour bitmap and an
-    // EGray256 alpha mask, both already created at (w, h).
+    // Write a rendered RGBA buffer into a colour bitmap and its alpha mask, both
+    // already created at (w, h). The server's configured icon mode decides the
+    // colour depth, and the mask is EGray256 or EGray2 depending on the ROM's own
+    // AknIcon configuration resource.
     static void blit_rgba_into_icon(fbs_server *fbss, epoc::bitwise_bitmap *colour,
         epoc::bitwise_bitmap *mask, const std::uint8_t *rgba, const int w, const int h) {
         std::uint8_t *cdata = colour ? colour->data_pointer(fbss) : nullptr;
@@ -167,6 +188,15 @@ namespace eka2l1 {
         const int mbw = mask ? mask->byte_width_ : 0;
         const epoc::display_mode cmode = colour ? colour->settings_.current_display_mode() : epoc::display_mode::none;
         const int cbpp = epoc::get_bpp_from_display_mode(cmode);
+        const epoc::display_mode mmode = mask ? mask->settings_.current_display_mode() : epoc::display_mode::none;
+        const int mbpp = mask ? epoc::get_bpp_from_display_mode(mmode) : 0;
+
+        // A 1bpp mask is stored as 32-bit words, one bit per pixel, bit (x % 32) of
+        // the word at (x / 32) -- the layout the bitmap converters read back. Start
+        // from a cleared mask so only the bits set below are opaque.
+        if (mdata && (mbpp == 1)) {
+            std::memset(mdata, 0, static_cast<std::size_t>(mbw) * h);
+        }
 
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -190,7 +220,14 @@ namespace eka2l1 {
                 }
 
                 if (mdata) {
-                    mdata[y * mbw + x] = a;
+                    if (mbpp == 1) {
+                        if (a >= 0x80) {
+                            std::uint32_t *word = reinterpret_cast<std::uint32_t *>(mdata + y * mbw) + (x / 32);
+                            *word |= 1u << (x & 0x1F);
+                        }
+                    } else if (mbpp == 8) {
+                        mdata[y * mbw + x] = a;
+                    }
                 }
             }
         }

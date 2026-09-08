@@ -16,6 +16,7 @@ add_library(scripting
         src/emulog.cpp
         src/instance.cpp
         src/manager.cpp
+        src/builtin_patches.cpp
         src/message.cpp
         src/mem.cpp
         src/hook.cpp
@@ -35,6 +36,7 @@ target_link_libraries(scripting PRIVATE common
         epocservs)
 
 if (EKA2L1_ENABLE_SCRIPTING_ABILITY)
+    target_compile_definitions(scripting PRIVATE ENABLE_SCRIPTING_LUA=1)
     target_link_libraries(scripting PUBLIC liblua)
 endif (EKA2L1_ENABLE_SCRIPTING_ABILITY)
 

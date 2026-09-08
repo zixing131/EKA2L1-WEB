@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <unordered_set>
 #include <vector>
 
 namespace eka2l1::loader {
@@ -68,7 +69,9 @@ namespace eka2l1::loader {
         return true;
     }
 
-    static bool extract_file(const std::string &devices_rom_path, FILE *parent, rpkg_entry &ent, const std::size_t total, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb) {
+    static bool extract_file(const std::string &devices_rom_path, FILE *parent, rpkg_entry &ent, const std::size_t total,
+        std::unordered_set<std::string> &created_directories, progress_changed_callback progress_cb,
+        cancel_requested_callback cancel_cb) {
         std::string file_full_relative = common::ucs2_to_utf8(ent.path.substr(3));
         std::transform(file_full_relative.begin(), file_full_relative.end(), file_full_relative.begin(),
             ::tolower);
@@ -76,13 +79,22 @@ namespace eka2l1::loader {
         std::string real_path = add_path(add_path(devices_rom_path, "/temp/"), file_full_relative);
 
         std::string dir = eka2l1::file_directory(real_path);
-        common::create_directories(dir);
+        const bool directory_is_cached = created_directories.find(dir) != created_directories.end();
+        if (!directory_is_cached) {
+            common::create_directories(dir);
+        }
 
         common::wo_std_file_stream wf(real_path, true);
 
         if (!wf.valid()) {
             LOG_INFO(SYSTEM, "Skipping with real path: {}, dir: {}", real_path, dir);
             return false;
+        }
+
+        if (!directory_is_cached) {
+            // Opening the output proves the directory exists. Cache only after
+            // that succeeds so a transient creation failure can still be retried.
+            created_directories.emplace(dir);
         }
 
         int64_t left = ent.data_size;
@@ -190,6 +202,55 @@ namespace eka2l1::loader {
         return device_installation_none;
     }
 
+    device_installation_error install_rom_with_optional_rpkg(device_manager *dvcmngr, const std::string &rom_path,
+        const std::string &rpkg_path, const std::string &rom_resident_path, const std::string &drives_z_resident_path,
+        progress_changed_callback progress_cb, cancel_requested_callback cancel_cb) {
+        if (!common::exists(rom_path)) {
+            return device_installation_not_exist;
+        }
+
+        if (!should_install_requires_additional_rpkg(rom_path)) {
+            return install_rom(dvcmngr, rom_path, rom_resident_path, drives_z_resident_path, progress_cb, cancel_cb);
+        }
+
+        if (rpkg_path.empty() || !common::exists(rpkg_path)) {
+            return device_installation_rpkg_missing;
+        }
+
+        // The resident ROM copy below is on this path only, and it is a sizeable share of the wait -
+        // leave it the last tenth of the bar.
+        progress_changed_callback wrapped_cb = nullptr;
+
+        if (progress_cb) {
+            wrapped_cb = [progress_cb](const std::size_t done, const std::size_t total) {
+                progress_cb(done * 9 / 10, total);
+            };
+        }
+
+        std::string firmware_code;
+        const device_installation_error result = install_rpkg(dvcmngr, rpkg_path, drives_z_resident_path,
+            firmware_code, wrapped_cb, cancel_cb);
+
+        if (result != device_installation_none) {
+            return result;
+        }
+
+        // Past the point of no return: the device is in devices.yml and its drive Z is populated, so a
+        // cancel arriving now is ignored rather than left half-installed.
+        const std::string rom_directory = add_path(rom_resident_path, common::lowercase_string(firmware_code) + "\\");
+        common::create_directories(rom_directory);
+
+        if (!common::copy_file(rom_path, add_path(rom_directory, "SYM.ROM"), true)) {
+            return device_installation_rom_fail_to_copy;
+        }
+
+        if (progress_cb) {
+            progress_cb(10, 10);
+        }
+
+        return device_installation_none;
+    }
+
     device_installation_error install_rpkg(device_manager *dvcmngr, const std::string &path, const std::string &devices_rom_path,
         std::string &firmware_code_ret, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb) {
         FILE *f = common::open_c_file(path.data(), "rb");
@@ -252,6 +313,11 @@ namespace eka2l1::loader {
             return device_installation_rpkg_corrupt;
         }
 
+        // An RPKG usually contains many files in the same directory. Keep this
+        // cache local to one extraction so repeated entries do not stat the same
+        // directory hierarchy again, without retaining stale filesystem state.
+        std::unordered_set<std::string> created_directories;
+
         while (!feof(f)) {
             total_read_size = 0;
 
@@ -278,7 +344,7 @@ namespace eka2l1::loader {
 
             LOG_INFO(SYSTEM, "Extracting: {}", common::ucs2_to_utf8(entry.path));
 
-            if (!extract_file(devices_rom_path, f, entry, total_size, progress_cb, cancel_cb)) {
+            if (!extract_file(devices_rom_path, f, entry, total_size, created_directories, progress_cb, cancel_cb)) {
                 break;
             }
 
@@ -389,7 +455,9 @@ namespace eka2l1::loader {
         std::string real_path = add_path(add_path(devices_rom_path_, "/temp/"), file_full_relative);
 
         std::string dir = eka2l1::file_directory(real_path);
-        common::create_directories(dir);
+        if (created_directories_.find(dir) == created_directories_.end()) {
+            common::create_directories(dir);
+        }
 
         out_ = std::make_unique<common::wo_std_file_stream>(real_path, true);
 
@@ -403,6 +471,8 @@ namespace eka2l1::loader {
             // a null out_ and keep extracting.
             LOG_WARN(SYSTEM, "Skipping extract (cannot create): {} (dir {})", real_path, dir);
             out_.reset();
+        } else {
+            created_directories_.emplace(dir);
         }
     }
 

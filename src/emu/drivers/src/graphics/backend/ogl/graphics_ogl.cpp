@@ -127,6 +127,11 @@ namespace eka2l1::drivers {
         context_->make_current();
 
         init_gl_graphics_library(context_->gl_mode());
+        GLint max_tex = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+        if (max_tex > 0) {
+            max_texture_size_ = static_cast<std::uint32_t>(max_tex);
+        }
 #ifdef __EMSCRIPTEN__
         // On WASM producers (OS services, timer thread) and the consumer (the
         // per-frame pump on the browser main thread) can share a thread. A full
@@ -198,6 +203,10 @@ namespace eka2l1::drivers {
                 glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &anisotrophy_max_);
             }
 
+            if (strcmp(reinterpret_cast<const char*>(next_extension), "GL_ARB_ES2_compatibility") == 0) {
+                feature_flags_ |= OGL_FEATURE_SUPPORT_GLSL_ES_100;
+            }
+
             if (strcmp(reinterpret_cast<const char*>(next_extension), "GL_ARB_ES3_1_compatibility") == 0) {
                 feature_flags_ |= OGL_FEATURE_COMPABILITY_ES31;
             }
@@ -247,6 +256,10 @@ namespace eka2l1::drivers {
     }
 
     bool ogl_graphics_driver::support_extension(const graphics_driver_extension ext) {
+        if (ext == graphics_driver_extension_glsl_es_100) {
+            return is_gles || (feature_flags_ & OGL_FEATURE_SUPPORT_GLSL_ES_100);
+        }
+
         if (ext == graphics_driver_extension_anisotrophy_filtering) {
             return (feature_flags_ & OGL_FEATURE_SUPPORT_ANISOTROPHY);
         }

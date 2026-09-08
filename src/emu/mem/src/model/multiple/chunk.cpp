@@ -355,11 +355,20 @@ namespace eka2l1::mem {
         } else {
             addr &= ~(((1 << control_->page_per_tab_shift_) << control_->page_size_bits_) - 1);
 
-            // Mark those as allocated
-            max_size_ = chunk_sec->alloc_.force_fill((addr - chunk_sec->beg_) >> control_->page_size_bits_,
-                static_cast<int>(total_pt << control_->page_per_tab_shift_), false);
+            const std::uint32_t total_page = total_pt << control_->page_per_tab_shift_;
+            const std::size_t total_page_size = static_cast<std::size_t>(total_page) << control_->page_size_bits_;
 
-            max_size_ <<= control_->page_size_bits_;
+            // Forced ROM chunks may live outside the allocator's section.
+            if ((addr >= chunk_sec->beg_) && (static_cast<std::uint64_t>(addr) + total_page_size <= chunk_sec->end_)) {
+                // Mark those as allocated
+                max_size_ = chunk_sec->alloc_.force_fill((addr - chunk_sec->beg_) >> control_->page_size_bits_,
+                    static_cast<int>(total_page), false);
+
+                max_size_ <<= control_->page_size_bits_;
+            } else {
+                max_size_ = total_page_size;
+            }
+
             create_flags_ |= MEM_MODEL_CHUNK_INTERNAL_FORCE_FILL;
         }
 

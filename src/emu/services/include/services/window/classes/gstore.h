@@ -25,6 +25,7 @@
 #include <drivers/graphics/common.h>
 #include <drivers/itc.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -147,7 +148,7 @@ namespace eka2l1::epoc {
 
     struct gdi_store_command {
         gdi_store_command_opcode opcode_ = gdi_store_command_invalid;
-        std::uint8_t data_[MAX_COMMAND_STORE_DATA_SIZE];
+        alignas(std::max_align_t) std::uint8_t data_[MAX_COMMAND_STORE_DATA_SIZE];
         std::shared_ptr<std::vector<std::uint8_t>> dynamic_data_;
 
         std::uint8_t *allocate_dynamic_data(const std::size_t size) {
@@ -161,11 +162,15 @@ namespace eka2l1::epoc {
 
         template <typename T>
         T &get_data_struct() {
+            static_assert(sizeof(T) <= MAX_COMMAND_STORE_DATA_SIZE);
+            static_assert(alignof(T) <= alignof(std::max_align_t));
             return *reinterpret_cast<T*>(data_);
         }
         
         template <typename T>
         const T &get_data_struct_const() const {
+            static_assert(sizeof(T) <= MAX_COMMAND_STORE_DATA_SIZE);
+            static_assert(alignof(T) <= alignof(std::max_align_t));
             return *reinterpret_cast<const T*>(data_);
         }
     };
@@ -228,10 +233,11 @@ namespace eka2l1::epoc {
         eka2l1::vec2 position_;
         common::region clip_;
         drivers::filter_option texture_filter_;
+        bool premultiplied_target_;
 
     public:
         explicit gdi_command_builder(drivers::graphics_driver *drv, drivers::graphics_command_builder &builder, bitmap_cache &bcache,
-            drivers::filter_option texture_filter, const eka2l1::vec2 &position, float scale_factor, const common::region &clip);
+            drivers::filter_option texture_filter, const eka2l1::vec2 &position, float scale_factor, const common::region &clip, bool premultiplied_target = false);
 
         void set_position(const eka2l1::vec2 &pos) {
             position_ = pos;
@@ -246,6 +252,7 @@ namespace eka2l1::epoc {
         }
 
         void build_segment(const gdi_store_command_segment &segment);
+        void build_texture_updates(const gdi_store_command_segment &segment);
         void build_single_command(const gdi_store_command &command);
         void build_command_draw_rect(const gdi_store_command_draw_rect_data &cmd);
         void build_command_draw_line(const gdi_store_command_draw_line_data &cmd);

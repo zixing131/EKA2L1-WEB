@@ -36,6 +36,7 @@
 #include <xxhash.h>
 
 namespace eka2l1::manager {
+#ifdef ENABLE_SCRIPTING_LUA
     static void script_file_changed_callback(void *data, common::directory_changes &changes) {
         scripts *manager = reinterpret_cast<scripts*>(data);
         for (std::size_t i = 0; i < changes.size(); i++) {
@@ -51,6 +52,7 @@ namespace eka2l1::manager {
                 manager->import_module("scripts/" + changes[i].filename_);
         }
     }
+#endif
 
     breakpoint_info::breakpoint_info()
         : addr_(0)
@@ -192,6 +194,7 @@ namespace eka2l1::manager {
     }
 
     void scripts::import_all_modules() {
+#ifdef ENABLE_SCRIPTING_LUA
         // Import all scripts
         std::string cur_dir;
         common::get_current_directory(cur_dir);
@@ -216,8 +219,14 @@ namespace eka2l1::manager {
         // Listen for script change
         folder_watcher.watch("scripts/", script_file_changed_callback, this, common::directory_change_move | common::directory_change_creation
             | common::directory_change_last_write);
+#else
+        // No Lua runtime: the shipped scripts/*.lua patches are compiled in as
+        // native C++ instead.
+        register_builtin_patches();
+#endif
     }
 
+#ifdef ENABLE_SCRIPTING_LUA
     bool scripts::import_module(const std::string &path) {
         const std::string name_full = eka2l1::filename(path);
         const std::string name = eka2l1::replace_extension(name_full, "");
@@ -291,39 +300,48 @@ namespace eka2l1::manager {
         }
     }
 
-    bool scripts::call_module_entry(const std::string &module) {
-        if (!ipc_send_callback_handle) {
-            kernel_system *kern = sys->get_kernel_system();
+#endif
 
-            ipc_send_callback_handle = kern->register_ipc_send_callback([this](const std::string &svr_name, const int ord, const ipc_arg &args, address reqstsaddr, kernel::thread *callee) {
-                call_ipc_send(svr_name, ord, args.args[0], args.args[1], args.args[2], args.args[3], args.flag, reqstsaddr, callee);
-            });
-
-            ipc_complete_callback_handle = kern->register_ipc_complete_callback([this](ipc_msg *msg, const std::int32_t complete_code) {
-                if (msg->msg_session)
-                    call_ipc_complete(msg->msg_session->get_server()->name(), msg->function, msg);
-            });
-
-            breakpoint_hit_callback_handle = kern->register_breakpoint_hit_callback([this](arm::core *core, kernel::thread *correspond, const vaddress addr) {
-                handle_breakpoint(core, correspond, addr);
-            });
-
-            process_switch_callback_handle = kern->register_process_switch_callback([this](arm::core *core, kernel::process *old_one, kernel::process *new_one) {
-                handle_process_switch(core, old_one, new_one);
-            });
-
-            codeseg_loaded_callback_handle = kern->register_codeseg_loaded_callback([this](const std::string &name, kernel::process *attacher, codeseg_ptr target) {
-                handle_codeseg_loaded(name, attacher, target);
-            });
-
-            uid_change_callback_handle = kern->register_uid_process_change_callback([this](kernel::process *aff, kernel::process_uid_type type) {
-                handle_uid_process_change(aff, std::get<2>(type));
-            });
-
-            imb_range_callback_handle = kern->register_imb_range_callback([this](kernel::process *pr, const address addr, const std::size_t size) {
-                handle_imb_range(pr, addr, size);
-            });
+    void scripts::register_kernel_hooks() {
+        if (ipc_send_callback_handle) {
+            return;
         }
+
+        kernel_system *kern = sys->get_kernel_system();
+
+        ipc_send_callback_handle = kern->register_ipc_send_callback([this](const std::string &svr_name, const int ord, const ipc_arg &args, address reqstsaddr, kernel::thread *callee) {
+            call_ipc_send(svr_name, ord, args.args[0], args.args[1], args.args[2], args.args[3], args.flag, reqstsaddr, callee);
+        });
+
+        ipc_complete_callback_handle = kern->register_ipc_complete_callback([this](ipc_msg *msg, const std::int32_t complete_code) {
+            if (msg->msg_session)
+                call_ipc_complete(msg->msg_session->get_server()->name(), msg->function, msg);
+        });
+
+        breakpoint_hit_callback_handle = kern->register_breakpoint_hit_callback([this](arm::core *core, kernel::thread *correspond, const vaddress addr) {
+            handle_breakpoint(core, correspond, addr);
+        });
+
+        process_switch_callback_handle = kern->register_process_switch_callback([this](arm::core *core, kernel::process *old_one, kernel::process *new_one) {
+            handle_process_switch(core, old_one, new_one);
+        });
+
+        codeseg_loaded_callback_handle = kern->register_codeseg_loaded_callback([this](const std::string &name, kernel::process *attacher, codeseg_ptr target) {
+            handle_codeseg_loaded(name, attacher, target);
+        });
+
+        uid_change_callback_handle = kern->register_uid_process_change_callback([this](kernel::process *aff, kernel::process_uid_type type) {
+            handle_uid_process_change(aff, std::get<2>(type));
+        });
+
+        imb_range_callback_handle = kern->register_imb_range_callback([this](kernel::process *pr, const address addr, const std::size_t size) {
+            handle_imb_range(pr, addr, size);
+        });
+    }
+
+#ifdef ENABLE_SCRIPTING_LUA
+    bool scripts::call_module_entry(const std::string &module) {
+        register_kernel_hooks();
 
         if (modules.find(module) == modules.end()) {
             return false;
@@ -333,12 +351,13 @@ namespace eka2l1::manager {
         current_module = state;
 
         if (lua_pcall(state->lua_state(), 0, 0, 0) != LUA_OK) {
-            LOG_ERROR(SCRIPTING, "Error executing script entry of {}: {}", module, lua_tostring(state->lua_state(), -1));            
+            LOG_ERROR(SCRIPTING, "Error executing script entry of {}: {}", module, lua_tostring(state->lua_state(), -1));
             return false;
         }
 
         return true;
     }
+#endif
 
     std::uint32_t scripts::register_ipc(const std::string &server_name, const int opcode, const int invoke_when, void* func) {
         std::size_t handle = 0;
@@ -532,7 +551,7 @@ namespace eka2l1::manager {
     }
 
     std::uint32_t scripts::register_breakpoint(const std::string &lib_name, const uint32_t addr, const std::uint32_t process_uid,
-        const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func, const bool eager_resolve) {
+        const std::uint32_t uid3, const std::uint32_t seghash, breakpoint_hit_func func) {
         const std::string lib_name_lower = common::lowercase_string(lib_name);
         std::size_t handle = 0;
 
@@ -552,7 +571,7 @@ namespace eka2l1::manager {
             info.codeseg_uid3_ = 0;
         } else {
             hle::lib_manager *manager = sys->get_lib_manager();
-            if (manager && eager_resolve) {
+            if (manager) {
                 if (codeseg_ptr seg = manager->load(common::utf8_to_ucs2(lib_name))) {
                     const bool identity_matches = ((uid3 == 0) || (std::get<2>(seg->get_uids()) == uid3))
                         && ((seghash == 0) || (seg->get_hash() == seghash));

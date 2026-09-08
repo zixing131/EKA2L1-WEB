@@ -326,9 +326,8 @@ namespace eka2l1::kernel {
 
         if (attaches.empty()) {
             if (!garbage_link.alone()) {
-                // Drops the collector's reference on this deceased codeseg;
-                // only safe because we already hold our own reference
-                // (increase_access_count() above).
+                // Drops the collector's reference on this deceased codeseg. Safe only
+                // because we already hold our own (increase_access_count() above).
                 kern->get_codedump_collector().remove(this);
             }
         }
@@ -403,7 +402,7 @@ namespace eka2l1::kernel {
             kern->destroy(info.code_chunk);
         }
 
-        // A previous non-fatal detach may have parked this attach info in the
+        // An earlier non-fatal detach may have parked this attach info in the
         // codedump collector; erasing it below while its garbage link is still
         // enqueued leaves the collector walking freed memory on its next clean.
         kern->get_codedump_collector().remove(info);

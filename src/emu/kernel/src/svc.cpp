@@ -140,11 +140,11 @@ namespace eka2l1::epoc {
             return ss->get_full_path();
         }
 
-        // Statically-linked XIP DLLs run in place from ROM and only get a codeseg when
-        // they appear in an image's DLL reference (attach) chain, so an address inside
-        // e.g. gflm.dll won't resolve above. Fall back to the ROM file tree: XIP entries
-        // record their linear address range, letting us find the image containing the
-        // address (Dll::FileName is commonly used to derive the caller DLL's drive).
+        // A statically linked XIP DLL runs in place from ROM and only gets a codeseg
+        // once it appears in some image's DLL reference chain, so an address inside
+        // one (gflm.dll, say) does not resolve above. The ROM file tree records the
+        // linear address range of every XIP entry, which is enough to name the image
+        // the address belongs to.
         loader::rom *rom_info = kern->get_rom_info();
         if (rom_info) {
             std::u16string prefix(1, drive_to_char16(kern->get_lib_manager()->get_drive_rom()));
@@ -755,6 +755,11 @@ namespace eka2l1::epoc {
         return epoc::error_none;
     }
 
+    // Symbian 9.1 keys TLS by the DLL handle, like EKA1.
+    BRIDGE_FUNC(std::int32_t, dll_set_tls_no_uid, kernel::handle h, eka2l1::ptr<void> data_set) {
+        return dll_set_tls(kern, h, static_cast<std::int32_t>(h), data_set);
+    }
+
     BRIDGE_FUNC(void, dll_free_tls, kernel::handle h) {
         kernel::thread *thr = kern->crr_thread();
         thr->close_tls_slot(h);
@@ -778,9 +783,9 @@ namespace eka2l1::epoc {
         full_path_ptr.get(crr_pr)->assign(crr_pr, path_utf8);
     }
 
-    // Exec::GetModuleNameFromAddress. Unlike Dll::FileName's exec it reports whether the
-    // address could be attributed at all, and callers (TExtendedLocale::GetLocaleDllName,
-    // and the SQL server on startup) branch on that code.
+    // Exec::GetModuleNameFromAddress. Unlike Dll::FileName's executive it reports
+    // whether the address could be attributed at all, and its callers branch on that
+    // code: TExtendedLocale::GetLocaleDllName, and the SQL server on startup.
     BRIDGE_FUNC(std::int32_t, get_module_name_from_address, std::int32_t addr, eka2l1::ptr<epoc::des8> module_name_ptr) {
         std::optional<std::u16string> full_path = get_dll_full_path(kern, addr);
 
@@ -992,9 +997,9 @@ namespace eka2l1::epoc {
         if ((int)msg->args.get_arg_type(param) & (int)ipc_arg_type::flag_des) {
             epoc::desc_base *base = eka2l1::ptr<epoc::desc_base>(msg->args.args[param]).get(msg->own_thr->owning_process());
 
-            // The slot is typed as a descriptor but the client may still have passed a
-            // null or unmapped address; Symbian answers KErrBadDescriptor rather than
-            // faulting the file server.
+            // The slot is typed as a descriptor, but the client may still have passed
+            // a null or unmapped address. Symbian answers KErrBadDescriptor there
+            // rather than faulting the server.
             if (!base) {
                 return epoc::error_bad_descriptor;
             }
@@ -2291,6 +2296,63 @@ namespace eka2l1::epoc {
         return epoc::error_none;
     }
 
+    // A ROM system daemon and the global object it publishes once it is up.
+    struct startup_daemon_entry {
+        const char *start_object_name;
+        const char16_t *executable;
+    };
+
+    // EKA2L1 never runs the ROM's boot startup sequence (on S60 that is the System Starter,
+    // z:\sys\bin\startup.exe), so system daemons exist only once some application demands one.
+    // An application that probes for a daemon's start object therefore sits through its own
+    // timeout on every launch: the Clock polls ClkNitzMdlStartSemaphore six times a second
+    // apart before giving up and starting the NITZ module itself. Start the daemon the moment
+    // its start object is looked up, which is what the missing boot sequence would have done
+    // long before the application asked.
+    static const startup_daemon_entry STARTUP_DAEMONS[] = {
+        { "ClkNitzMdlStartSemaphore", u"ClkNitzMdls.exe" }
+    };
+
+    static void start_missing_startup_daemon(kernel_system *kern, const std::string &missing_object_name) {
+        const char16_t *executable = nullptr;
+
+        for (const startup_daemon_entry &entry : STARTUP_DAEMONS) {
+            if (common::compare_ignore_case(missing_object_name.c_str(), entry.start_object_name) == 0) {
+                executable = entry.executable;
+                break;
+            }
+        }
+
+        if (!executable) {
+            return;
+        }
+
+        const std::u16string exe_name = executable;
+
+        // The daemon publishes its start object a moment after it is spawned, so a probe that
+        // lands in that window must not spawn a second copy.
+        for (auto &process_obj : kern->get_process_list()) {
+            kernel::process *candidate = reinterpret_cast<kernel::process *>(process_obj.get());
+
+            if ((candidate->get_exit_type() == kernel::entity_exit_type::pending)
+                && (common::compare_ignore_case(eka2l1::filename(candidate->get_exe_path(), true), exe_name) == 0)) {
+                return;
+            }
+        }
+
+        process_ptr daemon = kern->spawn_new_process(exe_name, u"", 0, 0);
+
+        if (!daemon) {
+            LOG_WARN(KERNEL, "System daemon {} is not present in this ROM", common::ucs2_to_utf8(exe_name));
+            return;
+        }
+
+        // Warn level on purpose: the normal-use log preset pins Kernel at warn, and a process
+        // the guest never asked for is worth seeing in a bug report.
+        LOG_WARN(KERNEL, "Starting system daemon {} in place of the ROM boot sequence", common::ucs2_to_utf8(exe_name));
+        daemon->run();
+    }
+
     BRIDGE_FUNC(std::int32_t, handle_open_object, std::int32_t obj_type, eka2l1::ptr<epoc::desc8> name_des, std::int32_t owner) {
         process_ptr pr = kern->crr_process();
         std::string obj_name = name_des.get(pr)->to_std_string(pr);
@@ -2301,6 +2363,8 @@ namespace eka2l1::epoc {
 
         if (!obj) {
             LOG_ERROR(KERNEL, "Can't open object: {}", obj_name);
+            start_missing_startup_daemon(kern, obj_name);
+
             return epoc::error_not_found;
         }
 
@@ -2839,6 +2903,11 @@ namespace eka2l1::epoc {
     BRIDGE_FUNC(void, thread_set_flags, kernel::handle h, std::uint32_t clear_mask, std::uint32_t set_mask) {
         thread_ptr thr = kern->get<kernel::thread>(h);
 
+        if (!thr) {
+            LOG_ERROR(KERNEL, "invalid thread handle 0x{:x}", h);
+            return;
+        }
+
         uint32_t org_flags = thr->get_flags();
         uint32_t new_flags = ((org_flags & ~clear_mask) | set_mask);
 
@@ -3262,7 +3331,17 @@ namespace eka2l1::epoc {
             return;
         }
 
-        timer->after(kern->crr_thread(), req_sts, us_after);
+        timer->after_tick_queue(kern->crr_thread(), req_sts, us_after);
+    }
+
+    BRIDGE_FUNC(void, timer_after_high_res, kernel::handle h, eka2l1::ptr<epoc::request_status> req_sts, std::int32_t us_after) {
+        timer_ptr timer = kern->get<kernel::timer>(h);
+
+        if (!timer) {
+            return;
+        }
+
+        timer->after_high_res(kern->crr_thread(), req_sts, us_after);
     }
 
     BRIDGE_FUNC(void, timer_lock, kernel::handle h, eka2l1::ptr<epoc::request_status> req_sts, std::uint32_t second_fraction_enum) {
@@ -3288,7 +3367,7 @@ namespace eka2l1::epoc {
             return;
         }
 
-        timer->after(kern->crr_thread(), req_sts, us_after);
+        timer->after_tick_queue(kern->crr_thread(), req_sts, us_after);
     }
     
     BRIDGE_FUNC(void, timer_after_ticks_eka1, eka2l1::ptr<epoc::request_status> req_sts, std::int32_t ticks_after, kernel::handle h) {
@@ -3611,11 +3690,12 @@ namespace eka2l1::epoc {
 
         kernel::process *process_to_operate = thr_to_operate->owning_process();
 
-        // The byte count comes from the separate length argument, not from the descriptor: callers
-        // hand over a plain buffer (a TPtr8 built with the two-argument constructor still has a
-        // zero length) and let the command header say how much of it to transfer. So both
-        // directions are bounded by the descriptor's capacity, which get_max_length() reports as
-        // the length for the constant descriptor types that have no separate maximum.
+        // The byte count comes from the separate length argument, not from the
+        // descriptor: callers hand over a plain buffer (a TPtr8 built with the
+        // two-argument constructor still has a zero length) and let the command header
+        // say how much of it to transfer. Both directions are therefore bounded by the
+        // descriptor's capacity, which get_max_length() reports as the length for the
+        // constant descriptor types that have no separate maximum.
         if (len > static_cast<std::int32_t>(buf->get_max_length(crr))) {
             return is_write ? epoc::error_overflow : epoc::error_underflow;
         }
@@ -3641,8 +3721,8 @@ namespace eka2l1::epoc {
                 return epoc::error_none;
             }
 
-            // Fall through to the instruction cache flush below: a four byte write is exactly the
-            // size of an ARM instruction, and patching one is the whole point of this command.
+            // Fall through to the instruction cache flush below: four bytes is exactly
+            // one ARM instruction, and patching one is what this command is for.
         } else {
             std::uint8_t *dest_of_operate = reinterpret_cast<std::uint8_t *>(process_to_operate->get_ptr_on_addr_space(addr));
 
@@ -4139,6 +4219,16 @@ namespace eka2l1::epoc {
             name_of_sema = common::ucs2_to_utf8(name_of_sema_des->to_std_string(target_process));
         }
 
+        // Named kernel objects live in a global namespace. EKA1 clients commonly
+        // try CreateGlobal first and fall back to OpenGlobal on KErrAlreadyExists;
+        // creating a second object here leaves the two clients synchronising on
+        // different semaphores.
+        if ((access_of_sema == kernel::access_type::global_access)
+            && kern->get_by_name_and_type<kernel::legacy::semaphore>(name_of_sema, kernel::object_type::sema)) {
+            finish_status_request_eka1(target_thread, finish_signal, epoc::error_already_exists);
+            return epoc::error_already_exists;
+        }
+
         const kernel::handle h = kern->create_and_add<kernel::legacy::semaphore>(get_handle_owner_from_eka1_attribute(attribute),
                                          name_of_sema, create_info->arg3_, access_of_sema)
                                      .first;
@@ -4544,6 +4634,35 @@ namespace eka2l1::epoc {
         pr->rename(name_to_rename_str);
 
         finish_status_request_eka1(target_thread, finish_signal, epoc::error_none);
+        return epoc::error_none;
+    }
+
+    std::int32_t process_kill_eka1(kernel_system *kern, const std::uint32_t attribute, epoc::eka1_executor *create_info,
+        epoc::request_status *finish_signal, kernel::thread *target_thread, const kernel::entity_exit_type exit_type) {
+        kernel::process *pr = kern->get<kernel::process>(create_info->arg0_);
+
+        if (!pr) {
+            finish_status_request_eka1(target_thread, finish_signal, epoc::error_bad_handle);
+            return epoc::error_bad_handle;
+        }
+
+        const std::int32_t reason = static_cast<std::int32_t>(create_info->arg1_);
+        std::u16string category = u"None";
+
+        if (exit_type == kernel::entity_exit_type::panic) {
+            epoc::desc16 *category_des = eka2l1::ptr<epoc::desc16>(create_info->arg2_).get(target_thread->owning_process());
+
+            if (!category_des) {
+                finish_status_request_eka1(target_thread, finish_signal, epoc::error_argument);
+                return epoc::error_argument;
+            }
+
+            category = category_des->to_std_string(target_thread->owning_process());
+        }
+
+        // Complete before killing: the target may be the calling process itself.
+        finish_status_request_eka1(target_thread, finish_signal, epoc::error_none);
+        pr->kill(exit_type, category, reason);
         return epoc::error_none;
     }
 
@@ -5334,6 +5453,15 @@ namespace eka2l1::epoc {
             case epoc::eka1_executor::execute_v6_rename_process:
                 return process_rename_eka1(kern, attribute, create_info, finish_signal, crr_thread);
 
+            case epoc::eka1_executor::execute_v6_kill_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::kill);
+
+            case epoc::eka1_executor::execute_v6_terminate_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::terminate);
+
+            case epoc::eka1_executor::execute_v6_panic_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::panic);
+
             case epoc::eka1_executor::execute_v6_logon_process:
                 return process_logon_eka1(kern, attribute, create_info, finish_signal, crr_thread);
 
@@ -5463,6 +5591,15 @@ namespace eka2l1::epoc {
 
             case epoc::eka1_executor::execute_v80_rename_process:
                 return process_rename_eka1(kern, attribute, create_info, finish_signal, crr_thread);
+
+            case epoc::eka1_executor::execute_v80_kill_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::kill);
+
+            case epoc::eka1_executor::execute_v80_terminate_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::terminate);
+
+            case epoc::eka1_executor::execute_v80_panic_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::panic);
 
             case epoc::eka1_executor::execute_v80_logon_process:
                 return process_logon_eka1(kern, attribute, create_info, finish_signal, crr_thread);
@@ -5633,6 +5770,15 @@ namespace eka2l1::epoc {
             case epoc::eka1_executor::execute_v81a_rename_process:
                 return process_rename_eka1(kern, attribute, create_info, finish_signal, crr_thread);
 
+            case epoc::eka1_executor::execute_v81a_kill_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::kill);
+
+            case epoc::eka1_executor::execute_v81a_terminate_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::terminate);
+
+            case epoc::eka1_executor::execute_v81a_panic_process:
+                return process_kill_eka1(kern, attribute, create_info, finish_signal, crr_thread, kernel::entity_exit_type::panic);
+
             case epoc::eka1_executor::execute_v81a_logon_process:
                 return process_logon_eka1(kern, attribute, create_info, finish_signal, crr_thread);
 
@@ -5754,14 +5900,20 @@ namespace eka2l1::epoc {
         return result;
     }
 
+    // Reaching these two means the client used the legacy TAny*[4] send, which
+    // writes four words and no argument-type header. Whether the kernel is old
+    // enough for is_ipc_old() does not come into it: EKA1 runs up to and
+    // including Symbian OS 8.1a, and is_ipc_old() stops at epoc7, so on 7.0,
+    // 8.0 and 8.1a it would have session_send_general read a fifth word the
+    // client never wrote.
     BRIDGE_FUNC(std::int32_t, session_send_sync_eka1, kernel::handle session_handle, const std::int32_t ord,
         std::uint32_t *args, eka2l1::ptr<epoc::request_status> status) {
-        return session_send_general(kern, session_handle, ord, args, status, kern->is_ipc_old(), true);
+        return session_send_general(kern, session_handle, ord, args, status, true, true);
     }
 
     BRIDGE_FUNC(std::int32_t, session_send_eka1, kernel::handle session_handle, const std::int32_t ord,
         std::uint32_t *args, eka2l1::ptr<epoc::request_status> status) {
-        return session_send_general(kern, session_handle, ord, args, status, kern->is_ipc_old(), false);
+        return session_send_general(kern, session_handle, ord, args, status, true, false);
     }
 
     std::int32_t thread_ipc_to_des_eka1(kernel_system *kern, address client_ptr_addr, epoc::des8 *des_ptr, std::int32_t offset, kernel::handle client_thread_h,
@@ -6149,6 +6301,7 @@ namespace eka2l1::epoc {
         return chn->do_request(request_nof_info, func, args[0], args[1], false);
     }
 
+    // TChannelCreateInfo8, as Exec::ChannelCreate receives it.
     struct logical_channel_create_info {
         epoc::version version;
         std::int32_t unit;
@@ -6200,6 +6353,9 @@ namespace eka2l1::epoc {
             owner == epoc::owner_process ? kernel::owner_type::process : kernel::owner_type::thread);
     }
 
+    // The emulated logical devices are built in, so there is no image to load. A
+    // channel is created straight from the factory instead, and E32Loader::DeviceLoad
+    // has nothing to do.
     BRIDGE_FUNC(std::int32_t, logical_device_load) {
         return epoc::error_not_supported;
     }
@@ -6437,7 +6593,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x3A, request_signal),
         BRIDGE_REGISTER(0x3B, handle_name),
         BRIDGE_REGISTER(0x3C, handle_full_name),
-        BRIDGE_REGISTER(0x3E, handle_info),
+        BRIDGE_REGISTER(0x3D, handle_info),
         BRIDGE_REGISTER(0x3E, handle_count),
         BRIDGE_REGISTER(0x3F, after),
         BRIDGE_REGISTER(0x41, message_complete),
@@ -6480,7 +6636,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x83, logical_device_free),
         BRIDGE_REGISTER(0x84, logical_channel_create),
         BRIDGE_REGISTER(0x85, timer_create),
-        BRIDGE_REGISTER(0x86, timer_after), // Actually TimerHighRes
+        BRIDGE_REGISTER(0x86, timer_after_high_res), // Actually TimerHighRes
         BRIDGE_REGISTER(0x87, after), // Actually AfterHighRes
         BRIDGE_REGISTER(0x88, change_notifier_create),
         BRIDGE_REGISTER(0x8D, thread_get_cpu_time),
@@ -6668,7 +6824,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x82, device_load),
         BRIDGE_REGISTER(0x83, channel_create),
         BRIDGE_REGISTER(0x84, timer_create),
-        BRIDGE_REGISTER(0x85, timer_after), // Actually TimerHighRes
+        BRIDGE_REGISTER(0x85, timer_after_high_res), // Actually TimerHighRes
         BRIDGE_REGISTER(0x86, after), // Actually AfterHighRes
         BRIDGE_REGISTER(0x87, change_notifier_create),
         BRIDGE_REGISTER(0x9C, wait_dll_lock),
@@ -6724,6 +6880,12 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xE3, get_locale_dll_name),
         BRIDGE_REGISTER(0xE5, session_security_info),
         BRIDGE_REGISTER(0xE8, btrace_out)
+    };
+
+    // Register 9.1 ABI differences before the shared 9.3 table.
+    const eka2l1::hle::func_map svc_register_funcs_v91_diff = {
+        BRIDGE_REGISTER(0x4D, dll_tls_eka1),
+        BRIDGE_REGISTER(0x75, dll_set_tls_no_uid)
     };
 
     const eka2l1::hle::func_map svc_register_funcs_v93 = {
@@ -6849,7 +7011,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x81, device_load),
         BRIDGE_REGISTER(0x82, channel_create),
         BRIDGE_REGISTER(0x83, timer_create),
-        BRIDGE_REGISTER(0x84, timer_after), // Actually TimerHighRes
+        BRIDGE_REGISTER(0x84, timer_after_high_res), // Actually TimerHighRes
         BRIDGE_REGISTER(0x85, after), // Actually AfterHighRes
         BRIDGE_REGISTER(0x86, change_notifier_create),
         BRIDGE_REGISTER(0x87, undertaker_create),
@@ -6961,6 +7123,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x80002C, semaphore_signal_n_eka1),
         BRIDGE_REGISTER(0x80002D, server_find_next),
         BRIDGE_REGISTER(0x800033, thread_find_next),
+        BRIDGE_REGISTER(0x800040, thread_get_des_length),
+        BRIDGE_REGISTER(0x800041, thread_get_des_max_length),
         BRIDGE_REGISTER(0x800042, thread_read_ipc_to_des8),
         BRIDGE_REGISTER(0x800043, thread_read_ipc_to_des16),
         BRIDGE_REGISTER(0x800044, thread_write_ipc_to_des8),
@@ -7043,6 +7207,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x1A, mutex_signal_eka1),
         BRIDGE_REGISTER(0x1B, process_id),
         BRIDGE_REGISTER(0x20, process_exit_type),
+        BRIDGE_REGISTER(0x21, process_exit_reason),
         BRIDGE_REGISTER(0x29, semaphore_count_eka1),
         BRIDGE_REGISTER(0x2A, semaphore_wait_eka1),
         BRIDGE_REGISTER(0x32, thread_id),
@@ -7078,6 +7243,12 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x80002C, semaphore_signal_n_eka1),
         BRIDGE_REGISTER(0x80002D, server_find_next),
         BRIDGE_REGISTER(0x800033, thread_find_next),
+        BRIDGE_REGISTER(0x800040, thread_get_des_length),
+        BRIDGE_REGISTER(0x800041, thread_get_des_max_length),
+        BRIDGE_REGISTER(0x800042, thread_read_ipc_to_des8),
+        BRIDGE_REGISTER(0x800043, thread_read_ipc_to_des16),
+        BRIDGE_REGISTER(0x800044, thread_write_ipc_to_des8),
+        BRIDGE_REGISTER(0x800045, thread_write_ipc_to_des16),
         BRIDGE_REGISTER(0x80004B, change_notifier_logon_eka1),
         BRIDGE_REGISTER(0x80004C, change_notifier_logoff),
         BRIDGE_REGISTER(0x800054, des8_match),
@@ -7096,11 +7267,13 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x80007E, dll_global_data_read),
         BRIDGE_REGISTER(0x80007F, dll_global_data_write),
         BRIDGE_REGISTER(0x800083, user_svr_hal_get),
+        BRIDGE_REGISTER(0x8000A2, is_exception_handled_eka1),
         BRIDGE_REGISTER(0x8000A8, heap_created),
         BRIDGE_REGISTER(0x8000A9, library_type_eka1),
         BRIDGE_REGISTER(0x8000AA, process_type_eka1),
         BRIDGE_REGISTER(0x8000AB, get_locale_char_set),
         BRIDGE_REGISTER(0x8000AF, process_set_type_eka1),
+        BRIDGE_REGISTER(0x8000B7, bus_dev_open_socket),
         BRIDGE_REGISTER(0x8000BB, user_svr_dll_filename),
         BRIDGE_REGISTER(0x8000C0, process_command_line_length),
         BRIDGE_REGISTER(0x8000C2, get_inactivity_time),
@@ -7243,6 +7416,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xC00034, thread_resume),
         BRIDGE_REGISTER(0xC00035, thread_suspend),
         BRIDGE_REGISTER(0xC00037, thread_set_priority_eka1),
+        BRIDGE_REGISTER(0xC0003B, thread_set_flags_eka1),
         BRIDGE_REGISTER(0xC00046, thread_request_complete_eka1),
         BRIDGE_REGISTER(0xC00047, timer_cancel),
         BRIDGE_REGISTER(0xC00048, timer_after_eka1),

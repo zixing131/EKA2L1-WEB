@@ -18,7 +18,12 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/algorithm.h>
+#include <common/path.h>
 #include <common/platform.h>
+
+#include <memory>
+#include <unordered_map>
 
 #include <services/accessory/accessory.h>
 #include <services/alarm/alarm.h>
@@ -30,6 +35,7 @@
 #include <services/backup/backup.h>
 #include <services/bluetooth/bt.h>
 #include <services/bluetooth/btman.h>
+#include <services/camera/camera.h>
 #include <services/centralrepo/centralrepo.h>
 #include <services/comm/comm.h>
 #include <services/domain/domain.h>
@@ -47,6 +53,7 @@
 #include <services/loader/loader.h>
 #include <services/msv/msv.h>
 #include <services/notifier/notifier.h>
+#include <services/posix/posix.h>
 #include <services/redir/redir.h>
 #include <services/remcon/remcon.h>
 #include <services/sensor/sensor.h>
@@ -254,10 +261,9 @@ namespace eka2l1::epoc {
         // From Domain Server request
         DEFINE_INT_PROP(sys, 0x1020e406, 0x250, 0);
 
-        // Published by the system state manager at boot on a real device. Without them
-        // SysUtil's critical-disk-space check finds no threshold anywhere and fails, and
-        // a caller that checks free space before writing (Camera saving a photo) never
-        // finishes.
+        // Without these SysUtil's critical-disk-space check finds no threshold at all
+        // and leaves, so a caller that checks free space before writing -- Camera
+        // saving a photo, for one -- never gets to the write.
         DEFINE_INT_PROP(sys, epoc::DISK_LEVEL_CATEGORY, epoc::RAM_DISK_CRITICAL_THRESHOLD_KEY,
             epoc::RAM_DISK_CRITICAL_THRESHOLD);
         DEFINE_INT_PROP(sys, epoc::DISK_LEVEL_CATEGORY, epoc::OTHER_DISK_CRITICAL_THRESHOLD_KEY,
@@ -273,9 +279,61 @@ namespace eka2l1 {
     namespace service {
         // Mostly replace startup process of a normal EPOC startup
         void init_services(system *sys) {
+            if (sys->get_kernel_system()->is_eka1()) {
+                kernel_system *kern = sys->get_kernel_system();
+                auto posix_servers = std::make_shared<std::unordered_map<kernel::uid, posix_server *>>();
+
+                kern->register_codeseg_loaded_callback([sys, posix_servers](const std::string &, kernel::process *process,
+                                                           codeseg_ptr code_segment) {
+                    // Patch libraries are attached globally while the device boots and do not
+                    // belong to a guest process.
+                    if (!process) {
+                        return;
+                    }
+
+                    const auto existing_server = posix_servers->find(process->unique_id());
+                    if (existing_server != posix_servers->end()) {
+                        // EKA1 GUI applications run inside AppRun.exe. Once its .app image is
+                        // attached, that image determines the POSIX current drive rather than
+                        // AppRun's Z: drive.
+                        if (common::lowercase_ucs2_string(eka2l1::path_extension(code_segment->get_full_path()))
+                            == u".app") {
+                            existing_server->second->update_executable_path(code_segment->get_full_path());
+                        }
+                        return;
+                    }
+
+                    if (code_segment != process->get_codeseg()) {
+                        return;
+                    }
+
+                    std::unique_ptr<posix_server> server = std::make_unique<posix_server>(sys, process, code_segment->get_full_path());
+                    (*posix_servers)[process->unique_id()] = server.get();
+                    std::unique_ptr<service::server> generic_server = std::move(server);
+                    sys->get_kernel_system()->add_custom_server(generic_server);
+                });
+
+                kern->register_process_exit_callback([posix_servers](kernel::process *process) {
+                    const auto server = posix_servers->find(process->unique_id());
+                    if (server == posix_servers->end()) {
+                        return;
+                    }
+
+                    // Process exit callbacks run before its session handles are released.
+                    // Removing the HLE server here would leave those sessions pointing at
+                    // freed memory. The server has a process-unique name, so only remove it
+                    // from the lookup map and let normal kernel teardown own its lifetime.
+                    posix_servers->erase(server);
+                });
+            }
+
             CREATE_SERVER_D(sys, fs_server);
             CREATE_SERVER(sys, loader_server);
             CREATE_SERVER(sys, shutdown_server);
+
+            if (sys->get_kernel_system()->is_eka1()) {
+                CREATE_SERVER(sys, camera_server);
+            }
 
             config::state *cfg = sys->get_config();
 
@@ -322,7 +380,7 @@ namespace eka2l1 {
             CREATE_SERVER(sys, eikappui_server);
             // The AknIconServer HLE renders icons itself (lunasvg / mbm) instead of the guest
             // ROM server. It exists to work around N95-class S60v3 FP1 ROMs, whose guest icon
-            // server rasterises scalable NVG menu icons through software OpenVG — the emulator
+            // server rasterises scalable NVG menu icons through software OpenVG -- the emulator
             // has no GPU NVG, and that draw-device path only accepts 32bpp, so it leaves on the
             // standard 64K icon and aborts the Options menu. The HLE is not a complete drop-in
             // replacement, though: newer ROMs (e.g. Nokia 5320, FP2) render every icon fine via
@@ -336,6 +394,7 @@ namespace eka2l1 {
 
             CREATE_SERVER(sys, system_agent_server);
             CREATE_SERVER(sys, unipertar_server);
+
             if (sys->get_symbian_version_use() >= epocver::epoc95) {
                 CREATE_SERVER(sys, timezone_server);
             }

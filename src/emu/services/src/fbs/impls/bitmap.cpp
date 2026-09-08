@@ -138,6 +138,22 @@ namespace eka2l1 {
         }
 
         static void do_white_fill(std::uint8_t *dest, const std::size_t size, epoc::display_mode mode) {
+            // EColor4K keeps 12 bits in a 16-bit pixel, so an all-ones byte fill gives 0xFFFF
+            // rather than white. Every other mode's all-ones pattern is already white.
+            if (mode == epoc::display_mode::color4k) {
+                const std::size_t pixel_count = size >> 1;
+                for (std::size_t i = 0; i < pixel_count; i++) {
+                    dest[i * 2] = 0xFF;
+                    dest[i * 2 + 1] = 0x0F;
+                }
+
+                if (size & 1) {
+                    dest[size - 1] = 0xFF;
+                }
+
+                return;
+            }
+
             std::fill(dest, dest + size, 0xFF);
         }
 
@@ -178,7 +194,7 @@ namespace eka2l1 {
             byte_width_ = get_byte_width(info.size_pixels.width(), static_cast<std::uint8_t>(info.bit_per_pixels));
 
             if (white_fill && (data_offset_ != 0)) {
-                do_white_fill(reinterpret_cast<std::uint8_t *>(data), info.bitmap_size - sizeof(loader::sbm_header), settings_.current_display_mode());
+                do_white_fill(reinterpret_cast<std::uint8_t *>(data), info.bitmap_size - sizeof(loader::sbm_header), disp_mode);
             }
         }
 
@@ -1037,7 +1053,7 @@ namespace eka2l1 {
         return no_failure;
     }
 
-    std::size_t fbs_server::readable_bytes_from(const std::uint8_t *ptr, const std::size_t fallback) const {
+    std::size_t fbs_server::readable_bytes_from(const std::uint8_t *ptr) const {
         // Membership is tested against the whole reserved range so a pointer past
         // the committed end still resolves to this chunk (and clamps to zero)
         // instead of falling through with an unbounded size.
@@ -1051,7 +1067,12 @@ namespace eka2l1 {
             return (ptr < committed_end) ? static_cast<std::size_t>(committed_end - ptr) : 0;
         }
 
-        return fallback;
+        // Pixels always come out of one of the two chunks above, whatever the
+        // bitmap's age or format: even a bitmap read straight from a ROM MBM is
+        // decompressed into them (load_data_to_rom). A pointer that lands outside
+        // both was computed from a header field that no longer describes reality,
+        // and following it walks host memory the emulator does not own.
+        return 0;
     }
 
     bool fbs_server::is_large_bitmap(const std::uint32_t compressed_size) const {
@@ -1336,6 +1357,23 @@ namespace eka2l1 {
                 server<fbs_server>()->compressor->notify(dirty_nof_);
             }
         }
+    }
+
+    void fbscli::set_bitmap_size_in_twips(service::ipc_context *ctx) {
+        const epoc::handle handle = *(ctx->get_argument_value<std::uint32_t>(0));
+        fbsbitmap *bmp = obj_table_.get<fbsbitmap>(handle);
+
+        if (!bmp) {
+            ctx->complete(epoc::error_unknown);
+            return;
+        }
+
+        // Metadata only, like the client-side CFbsBitmap::SetSizeInTwips this replaces.
+        bmp = get_clean_bitmap(bmp);
+        bmp->bitmap_->header_.size_twips = eka2l1::object_size(*(ctx->get_argument_value<int>(1)),
+            *(ctx->get_argument_value<int>(2)));
+
+        ctx->complete(epoc::error_none);
     }
 
     void fbscli::cancel_notify_dirty_bitmap(service::ipc_context *ctx) {

@@ -1346,19 +1346,24 @@ namespace eka2l1 {
 
     void window_server::load_wsini() {
         io_system *io = sys->get_io_system();
-        std::optional<eka2l1::drive> drv;
-        drive_number dn = drive_z;
+        drive_number rom_drive = drive_invalid;
 
-        for (; dn >= drive_a; dn = (drive_number)((int)dn - 1)) {
-            drv = io->get_drive_entry(dn);
+        for (int i = static_cast<int>(drive_z); i >= static_cast<int>(drive_a); i--) {
+            std::optional<eka2l1::drive> drv = io->get_drive_entry(static_cast<drive_number>(i));
 
             if (drv && drv->media_type == drive_media::rom) {
+                rom_drive = static_cast<drive_number>(i);
                 break;
             }
         }
 
+        if (rom_drive == drive_invalid) {
+            LOG_ERROR(SERVICE_WINDOW, "No ROM drive is mounted, app using window server will broken");
+            return;
+        }
+
         std::u16string wsini_path;
-        wsini_path += static_cast<char16_t>((char)dn + 'A');
+        wsini_path += static_cast<char16_t>(static_cast<char>(rom_drive) + 'A');
         wsini_path += u":\\system\\data\\wsini.ini";
 
         auto wsini_path_host = io->get_raw_path(wsini_path);
@@ -1384,6 +1389,7 @@ namespace eka2l1 {
 
         common::ini_node_ptr window_mode_node = ws_config.find("WINDOWMODE");
         epoc::display_mode scr_mode_global = epoc::display_mode::color16ma;
+        epoc::display_mode dsa_mode_global = epoc::display_mode::color16ma;
 
         if (window_mode_node) {
             common::ini_pair *window_mode_pair = window_mode_node->get_as<common::ini_pair>();
@@ -1405,25 +1411,28 @@ namespace eka2l1 {
                 if (conv_res != epoc::display_mode::color_last) {
                     scr_mode_global = conv_res;
                     use_in_ini = false;
-
-                    // A 4K-colour panel is driven through a 16-bit framebuffer: two bytes
-                    // per pixel with the top four unused. Reporting EColor4K makes apps
-                    // that map a display mode to a *byte* stride come up with zero bytes
-                    // per pixel, so they allocate nothing and then blit 16bpp over the
-                    // heap (X-Plore on the N-Gage panics with USER 44 that way).
-                    if (scr_mode_global == epoc::display_mode::color4k) {
-                        scr_mode_global = epoc::display_mode::color64k;
-                    }
                 }
             }
 
             if (use_in_ini) {
                 scr_mode_global = epoc::string_to_display_mode(modes[0]);
+            }
 
-                // It seems to be so!!! Since games still use metainfo hacks at the beginning of screen buffer
-                if (kern->is_eka1() && (epoc::get_bpp_from_display_mode(scr_mode_global) > 16)) {
-                    scr_mode_global = epoc::display_mode::color64k;
-                }
+            // NGA render stages report every 32bpp target as DisplayMode16M (EColor16MA).
+            if ((kern->get_epoc_version() >= epocver::epoc10)
+                && (epoc::get_bpp_from_display_mode(scr_mode_global) == 32)) {
+                scr_mode_global = epoc::display_mode::color16ma;
+            }
+
+            dsa_mode_global = scr_mode_global;
+
+            // WINDOWMODE is the mode WSERV composes in; it is not proof of what a direct
+            // screen access client writes into the panel buffer. Most EKA1 guests follow
+            // the reported mode, but some hardcode 16-bit pixels, so start narrow and let
+            // screen::promote_dsa_depth_if_deep_pixels_written() widen once the guest
+            // shows it writes deeper ones.
+            if (kern->is_eka1() && (epoc::get_bpp_from_display_mode(dsa_mode_global) > 16)) {
+                dsa_mode_global = epoc::display_mode::color64k;
             }
         }
 
@@ -1481,6 +1490,7 @@ namespace eka2l1 {
 
             scr.screen_number = total_screen - 1;
             scr.disp_mode = scr_mode_global;
+            scr.dsa_disp_mode = dsa_mode_global;
             scr.auto_clear = is_auto_clear;
             scr.flicker_free = flicker_free;
             scr.blt_offscreen = blit_offscreen;
@@ -1630,6 +1640,18 @@ namespace eka2l1 {
                     break;
                 }
             } while (true);
+
+            // The 5500 wsini has one fixed screen mode and no hardware state.
+            if ((kern->get_epoc_version() == epocver::epoc91)
+                && scr.hardware_states.empty() && !scr.modes.empty()) {
+                epoc::config::hardware_state only_state;
+
+                only_state.state_number = 0;
+                only_state.mode_normal = scr.modes[0].mode_number;
+                only_state.mode_alternative = scr.modes[0].mode_number;
+
+                scr.hardware_states.push_back(only_state);
+            }
 
             screen_configs.push_back(scr);
         } while ((screen_node != nullptr) && (!one_screen_only));
@@ -2002,7 +2024,7 @@ namespace eka2l1 {
 
         // Fill with white
         std::uint8_t *fill_start = reinterpret_cast<std::uint8_t *>(buffer->host_base());
-        std::fill(fill_start, fill_start + max_chunk_size, 255);
+        std::fill(fill_start, fill_start + max_chunk_size, epoc::SCREEN_BUFFER_UNTOUCHED_FILL);
 
         scr->screen_buffer_chunk = buffer;
     }

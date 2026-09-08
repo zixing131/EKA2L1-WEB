@@ -20,10 +20,12 @@
 #include <dispatch/audio.h>
 #include <dispatch/camera.h>
 #include <dispatch/hui.h>
+#include <dispatch/image.h>
 #include <dispatch/register.h>
 #include <dispatch/screen.h>
 #include <dispatch/video.h>
 
+#include <dispatch/libraries/featmgr/functions.h>
 #include <dispatch/libraries/sysutils/functions.h>
 #include <dispatch/libraries/egl/egl.h>
 #include <dispatch/libraries/gles_shared/gles_shared.h>
@@ -38,6 +40,7 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER(3, wait_vsync),
         BRIDGE_REGISTER_DISPATCHER(4, cancel_wait_vsync),
         BRIDGE_REGISTER_DISPATCHER(5, flexible_post),
+        BRIDGE_REGISTER_DISPATCHER(6, get_screen_buffer_byte_width),
         BRIDGE_REGISTER_DISPATCHER(0x20, eaudio_player_inst),
         BRIDGE_REGISTER_DISPATCHER(0x21, eaudio_player_notify_any_done),
         BRIDGE_REGISTER_DISPATCHER(0x22, eaudio_player_supply_url),
@@ -108,11 +111,19 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER(0x94, evideo_player_set_volume),
         BRIDGE_REGISTER_DISPATCHER(0x95, evideo_player_set_rotation),
         BRIDGE_REGISTER_DISPATCHER(0x96, evideo_player_unregister_window),
+        BRIDGE_REGISTER_DISPATCHER(0x97, evideo_player_set_geometry),
+        BRIDGE_REGISTER_DISPATCHER(0x98, evideo_player_inst_with_version),
+        BRIDGE_REGISTER_DISPATCHER(0x99, evideo_player_set_crop),
         BRIDGE_REGISTER_DISPATCHER(0xA0, ehui_open_input_view),
         BRIDGE_REGISTER_DISPATCHER(0xA1, ehui_get_stored_input_text),
         BRIDGE_REGISTER_DISPATCHER(0xA2, ehui_close_input_view),
         BRIDGE_REGISTER_DISPATCHER(0xA3, ehui_is_keypad_based),
+        BRIDGE_REGISTER_DISPATCHER(0xB0, eimage_decode_info),
+        BRIDGE_REGISTER_DISPATCHER(0xB1, eimage_decode),
         BRIDGE_REGISTER_DISPATCHER(0x1000, sysutils::sysstartup_get_state),
+        BRIDGE_REGISTER_DISPATCHER(0x1010, featmgr::feature_manager_initialize_lib),
+        BRIDGE_REGISTER_DISPATCHER(0x1011, featmgr::feature_manager_uninitialize_lib),
+        BRIDGE_REGISTER_DISPATCHER(0x1012, featmgr::feature_manager_feature_supported),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1100, egl_choose_config_emu, "eglChooseConfig"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1101, egl_copy_buffers_emu, "eglCopyBuffers"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1102, egl_create_context_emu, "eglCreateContext"),
@@ -135,7 +146,7 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1113, egl_query_string_emu, "eglQueryString"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1114, egl_query_surface_emu, "eglQuerySurface"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1115, egl_swap_buffers_emu, "eglSwapBuffers"),
-        //BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1116, egl_terminate_emu, "eglTerminate"),
+        BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1116, egl_terminate_emu, "eglTerminate"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1117, egl_wait_gl_emu, "eglWaitGL"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1118, egl_wait_native_emu, "eglWaitNative"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1119, gl_active_texture_emu, "glActiveTexture"),
@@ -478,5 +489,6 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1456, vg_create_paint_emu, "vgCreatePaint"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1457, vg_load_identity_emu, "vgLoadIdentity"),
         BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1458, vg_draw_path_emu, "vgDrawPath"),
+        BRIDGE_REGISTER_DISPATCHER_SYMBOL(0x1459, egl_query_profiling_data_nok_emu, "eglQueryProfilingDataNOK"),
     };
 }
