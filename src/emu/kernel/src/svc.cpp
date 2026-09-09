@@ -1808,6 +1808,19 @@ namespace eka2l1::epoc {
         int *arg1 = a1.get(pr);
         int *arg2 = a2.get(pr);
 
+        // These display setters follow the Symbian HAL ABI and encode their
+        // scalar input directly in the a1 pointer value. Preserve that value;
+        // resolving it as a guest address would turn the small numeric range
+        // into an unmapped/null host pointer.
+        constexpr std::int32_t hal_group_display = 4;
+        constexpr std::int32_t hal_set_display_contrast = 4;
+        constexpr std::int32_t hal_set_display_brightness = 13;
+        if ((cage & 0xFFFF) == hal_group_display
+            && (func == hal_set_display_contrast
+                || func == hal_set_display_brightness)) {
+            arg1 = reinterpret_cast<int *>(static_cast<std::uintptr_t>(a1.ptr_address()));
+        }
+
         return do_hal(kern->get_system(), cage, func, arg1, arg2);
     }
 

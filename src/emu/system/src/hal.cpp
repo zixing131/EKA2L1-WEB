@@ -50,7 +50,9 @@
 extern bool eka2l1_leave_probe;
 
 namespace eka2l1::epoc {
-    static constexpr std::uint32_t HAL_CONTRAST_MAX = 100;
+    static constexpr std::int32_t HAL_CONTRAST_MIN = -15;
+    static constexpr std::int32_t HAL_CONTRAST_MAX = 15;
+    static constexpr std::int32_t HAL_BRIGHTNESS_MAX = 31;
 
     hal::hal(eka2l1::system *sys)
         : sys(sys) {}
@@ -160,6 +162,90 @@ namespace eka2l1::epoc {
 
     struct display_hal : public hal {
         window_server *winserv_;
+        std::int32_t contrast_;
+        std::int32_t brightness_;
+
+        bool screen_exists(const std::uint16_t device_num) const {
+            return winserv_ && winserv_->get_screen(device_num);
+        }
+
+        int max_contrast(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!a1) {
+                return epoc::error_argument;
+            }
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            *a1 = HAL_CONTRAST_MAX;
+            return epoc::error_none;
+        }
+
+        int set_contrast(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            // Symbian's display HAL passes scalar setter values by casting the
+            // integer to TAny*, rather than by passing a pointer to an integer.
+            const std::int32_t value = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(a1));
+            if ((value < HAL_CONTRAST_MIN) || (value > HAL_CONTRAST_MAX)) {
+                return epoc::error_argument;
+            }
+
+            contrast_ = value;
+            return epoc::error_none;
+        }
+
+        int contrast(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!a1) {
+                return epoc::error_argument;
+            }
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            *a1 = contrast_;
+            return epoc::error_none;
+        }
+
+        int max_brightness(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!a1) {
+                return epoc::error_argument;
+            }
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            *a1 = HAL_BRIGHTNESS_MAX;
+            return epoc::error_none;
+        }
+
+        int set_brightness(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            const std::int32_t value = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(a1));
+            if ((value < 0) || (value > HAL_BRIGHTNESS_MAX)) {
+                return epoc::error_argument;
+            }
+
+            brightness_ = value;
+            return epoc::error_none;
+        }
+
+        int brightness(int *a1, int *a2, const std::uint16_t device_num) {
+            if (!a1) {
+                return epoc::error_argument;
+            }
+            if (!screen_exists(device_num)) {
+                return epoc::error_not_found;
+            }
+
+            *a1 = brightness_;
+            return epoc::error_none;
+        }
 
         static void get_screen_info_from_scr_object(epoc::screen *scr, epoc::screen_info_v1 &info) {
             info.window_handle_valid_ = false;
@@ -284,13 +370,21 @@ namespace eka2l1::epoc {
 
         explicit display_hal(system *sys)
             : hal(sys)
-            , winserv_(nullptr) {
+            , winserv_(nullptr)
+            , contrast_(0)
+            , brightness_((HAL_BRIGHTNESS_MAX + 1) / 2) {
             REGISTER_HAL_FUNC(display_hal_screen_info, display_hal, current_screen_info);
+            REGISTER_HAL_FUNC(display_hal_max_display_contrast, display_hal, max_contrast);
+            REGISTER_HAL_FUNC(display_hal_set_display_contrast, display_hal, set_contrast);
+            REGISTER_HAL_FUNC(display_hal_display_contrast, display_hal, contrast);
             REGISTER_HAL_FUNC(display_hal_current_mode_info, display_hal, current_mode_info);
             REGISTER_HAL_FUNC(display_hal_specified_mode_info, display_hal, specified_mode_info);
             REGISTER_HAL_FUNC(display_hal_colors, display_hal, color_count);
             REGISTER_HAL_FUNC(display_hal_mode, display_hal, mode);
             REGISTER_HAL_FUNC(display_hal_backlight_on, display_hal, backlight_on);
+            REGISTER_HAL_FUNC(display_hal_max_display_brightness, display_hal, max_brightness);
+            REGISTER_HAL_FUNC(display_hal_set_display_brightness, display_hal, set_brightness);
+            REGISTER_HAL_FUNC(display_hal_display_brightness, display_hal, brightness);
 
             winserv_ = reinterpret_cast<window_server *>(sys->get_kernel_system()->get_by_name<service::server>(
                 eka2l1::get_winserv_name_by_epocver(sys->get_symbian_version_use())));
