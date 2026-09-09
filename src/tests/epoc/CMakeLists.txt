@@ -34,6 +34,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/services/internet/address.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/timezone/rules.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/creiniloader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sms/common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/socket/opcodes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/ui/iconops.cpp

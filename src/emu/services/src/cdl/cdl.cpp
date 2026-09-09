@@ -63,7 +63,7 @@ namespace eka2l1 {
         }
 
         if (*by_name) {
-            const auto name = ctx->get_argument_value<std::u16string>(2);
+            const auto name = ctx->get_argument_value<std::u16string>(1);
             if (!name) {
                 ctx->complete(epoc::error_argument);
                 return;
@@ -83,6 +83,8 @@ namespace eka2l1 {
         }
 
         serialize_refs(filtered, temp_buf_);
+        LOG_TRACE(SERVICE_CDLENG, "CDL refs query by_name={} total={} count={} serialized={}",
+            *by_name, server<cdl_server>()->refs_.size(), filtered.size(), temp_buf_.size());
         const std::uint32_t size = static_cast<std::uint32_t>(temp_buf_.size());
         if (!ctx->write_data_to_descriptor_argument(0, size)) {
             ctx->complete(epoc::error_argument);
@@ -116,10 +118,14 @@ namespace eka2l1 {
             ctx->complete(epoc::error_argument);
             return;
         }
-        const std::u16string lower = common::lowercase_ucs2_string(*name);
+        // Native clients also pass a bare plugin name. CDL identifies the
+        // ECom implementation by the hexadecimal filename stem, not its path.
+        const std::u16string lower = common::lowercase_ucs2_string(
+            replace_extension(filename(*name, true), u""));
+        LOG_TRACE(SERVICE_CDLENG, "CDL plugin drive name='{}'", common::ucs2_to_utf8(*name));
         for (const cdl_ref &ref : server<cdl_server>()->refs_) {
-            if (common::lowercase_ucs2_string(ref.name) == lower
-                || common::lowercase_ucs2_string(ref.name + u".dll") == lower) {
+            if (common::lowercase_ucs2_string(replace_extension(
+                    filename(ref.name, true), u"")) == lower) {
                 ctx->complete(char16_to_drive(ref.name[0]));
                 return;
             }
@@ -128,6 +134,8 @@ namespace eka2l1 {
     }
 
     void cdl_server_session::fetch(service::ipc_context *ctx) {
+        LOG_TRACE(SERVICE_CDLENG, "CDL IPC opcode=0x{:X} from {}", ctx->msg->function,
+            ctx->msg->own_thr ? ctx->msg->own_thr->name() : "<unknown>");
         switch (ctx->msg->function) {
         case epoc::cdl_server_cmd_request_get_cust:
         case epoc::cdl_server_cmd_get_cust:
@@ -149,6 +157,7 @@ namespace eka2l1 {
             notifier_.sts = ctx->msg->request_sts;
             break;
         case epoc::cdl_server_cmd_cancel_notify_change:
+            notifier_.complete(epoc::error_cancel);
             ctx->complete(epoc::error_none);
             break;
         default:
@@ -193,6 +202,11 @@ namespace eka2l1 {
     }
 
     void cdl_server::connect(service::ipc_context &ctx) {
+        // Service initialization can happen before the ROM-backed Z: drive is
+        // mounted. Refresh lazily when the first native client connects.
+        if (refs_.empty()) {
+            load_refs();
+        }
         create_session<cdl_server_session>(&ctx);
         ctx.complete(epoc::error_none);
     }

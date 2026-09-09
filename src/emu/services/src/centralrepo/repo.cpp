@@ -303,12 +303,14 @@ namespace eka2l1 {
 
         switch (ctx->msg->function) {
         case cen_rep_create_int:
+        case cen_rep_set_int:
             new_var.etype = central_repo_entry_type::integer;
             new_var.intd = ctx->msg->args.args[1];
 
             break;
 
-        case cen_rep_create_real: {
+        case cen_rep_create_real:
+        case cen_rep_set_real: {
             new_var.etype = central_repo_entry_type::real;
             std::optional<double> dd_val = ctx->get_argument_data_from_descriptor<double>(1);
 
@@ -321,7 +323,8 @@ namespace eka2l1 {
             break;
         }
 
-        case cen_rep_create_string: {
+        case cen_rep_create_string:
+        case cen_rep_set_string: {
             new_var.etype = central_repo_entry_type::string;
             std::optional<std::string> bb_val = ctx->get_argument_value<std::string>(1);
 
@@ -361,9 +364,13 @@ namespace eka2l1 {
         // Use mode 1 (write) to get the entry, since we are modifying data.
         central_repo_entry *entry = get_entry(*ctx->get_argument_value<std::uint32_t>(0), 1);
 
-        // If it does not exist, or it is in different type, discard.
-        // Depends on the invalid type, we set error code
+        // CRepository::Set creates missing settings as well as updating existing
+        // ones. Reuse the typed Create decoding for nontransactional writes.
         if (!entry) {
+            if (!is_active() && get_transaction_mode() != central_repo_transaction_mode::read_only) {
+                create_value(ctx);
+                return;
+            }
             ctx->complete(epoc::error_not_found);
             return;
         }
@@ -375,7 +382,7 @@ namespace eka2l1 {
         case cen_rep_set_int: {
             if (entry->data.etype != central_repo_entry_type::integer) {
                 ctx->complete(epoc::error_argument);
-                break;
+                return;
             }
 
             entry->data.intd = static_cast<std::uint64_t>(*ctx->get_argument_value<std::uint32_t>(1));
@@ -385,13 +392,13 @@ namespace eka2l1 {
         case cen_rep_set_real: {
             if (entry->data.etype != central_repo_entry_type::real) {
                 ctx->complete(epoc::error_argument);
-                break;
+                return;
             }
 
             std::optional<double> data = ctx->get_argument_data_from_descriptor<double>(1);
             if (!data.has_value()) {
                 ctx->complete(epoc::error_argument);
-                break;
+                return;
             }
 
             entry->data.reald = data.value();
@@ -401,7 +408,7 @@ namespace eka2l1 {
         case cen_rep_set_string: {
             if (entry->data.etype != central_repo_entry_type::string) {
                 ctx->complete(epoc::error_argument);
-                break;
+                return;
             }
 
             entry->data.strd = *ctx->get_argument_value<std::string>(1);
