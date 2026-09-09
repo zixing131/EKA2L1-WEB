@@ -435,10 +435,20 @@ namespace eka2l1 {
             // worker busy-waits when those hardware backends are unavailable,
             // so preserve the existing HLE hardware service during phone boot.
             CREATE_SERVER(sys, hwrm_server);
-            CREATE_SERVER(sys, view_server);
+            if (!native_phone_boot) {
+                // EikSrv creates the native view server with its application
+                // starter callback. An existing HLE instance makes that
+                // initialization fail with KErrAlreadyExists.
+                CREATE_SERVER(sys, view_server);
+            }
             CREATE_SERVER(sys, remcon_server);
             CREATE_SERVER(sys, etel_server);
-            CREATE_SERVER(sys, notifier_server);
+            if (!native_phone_boot) {
+                // EikSrv starts !Notifier from its idle callback. Reserving the
+                // name here makes that callback leave with KErrAlreadyExists
+                // and opens a modal system-error dialog during native boot.
+                CREATE_SERVER(sys, notifier_server);
+            }
             CREATE_SERVER(sys, msv_server);
 
             CREATE_SERVER(sys, sensor_server);
@@ -450,6 +460,13 @@ namespace eka2l1 {
             CREATE_SERVER(sys, socket_server);
 
             CREATE_SERVER(sys, comm_server);
+            if (native_phone_boot) {
+                // StartC32 waits on this property even when the socket and
+                // serial services already exist. Their HLE backends are ready
+                // here; advertise ECoreComponentsStarted (rscommon.h), without
+                // claiming the ROM's complete CPM configuration has run.
+                DEFINE_INT_PROP_D(sys, 0x101F75B6, 0x102045DD, 10);
+            }
             CREATE_SERVER(sys, bt_server);
             CREATE_SERVER(sys, btman_server);
             // Accessory state is host hardware. Keep this server in-process
@@ -458,10 +475,11 @@ namespace eka2l1 {
             // starves the ROM UI startup threads.
             CREATE_SERVER(sys, accessory_server);
 
-            // Not really sure about this one
-            CREATE_SERVER(sys, keysound_server);
-
             if (!native_phone_boot) {
+                // EikSrv launches its own KeySoundServer during a native phone
+                // boot. Pre-registering the HLE makes LaunchServer return
+                // KErrAlreadyExists and aborts CEikServAppUi::ConstructL.
+                CREATE_SERVER(sys, keysound_server);
                 CREATE_SERVER(sys, eikappui_server);
             }
             // The AknIconServer HLE renders icons itself (lunasvg / mbm) instead of the guest

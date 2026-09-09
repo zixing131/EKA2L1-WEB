@@ -99,6 +99,7 @@ namespace eka2l1::epoc {
 
     enum mmf_dev_server_opcode {
         mmf_dev_init0 = 0,
+        mmf_dev_init1 = 1,
         mmf_dev_init3 = 3,
         mmf_dev_capabilities = 4,
         mmf_dev_config = 5,

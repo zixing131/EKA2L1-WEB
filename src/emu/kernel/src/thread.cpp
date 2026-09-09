@@ -606,7 +606,9 @@ namespace eka2l1 {
                         continue;
                     }
                     const std::string where = resolve(*word);
-                    if (where != "?") {
+                    const bool rom_candidate = (*word >= 0x80000000U && *word < 0x90000000U)
+                        && pr->get_ptr_on_addr_space(*word & ~1U);
+                    if (where != "?" || rom_candidate) {
                         LOG_WARN(KERNEL, "  stack[sp+0x{:03X}] = 0x{:08X} ({}){}", off, *word, where,
                             (printed < 8) ? code_hex(*word) : "");
                         printed++;

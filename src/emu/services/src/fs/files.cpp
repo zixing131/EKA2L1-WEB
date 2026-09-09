@@ -39,6 +39,8 @@
 #include <cstring>
 #include <vector>
 
+extern bool eka2l1_shell_leave_probe;
+
 namespace eka2l1 {
     // Ring of the last failed RFs opens by a J9/AMS opener, recorded in
     // fs open dispatch; printed in the j9midps60 exit hint (process.cpp) so a
@@ -1162,6 +1164,9 @@ namespace eka2l1 {
         kernel::process *opener_pr = ctx->msg->own_thr ? ctx->msg->own_thr->owning_process() : nullptr;
         const std::string opener_name = opener_pr ? opener_pr->name() : "?";
         const std::string lower_opener = common::lowercase_string(opener_name);
+        if (eka2l1_shell_leave_probe && lower_opener.find("xnthemeserver") != std::string::npos) {
+            LOG_WARN(SERVICE_EFSRV, "[shell-fs] FileOpen '{}' mode=0x{:X}", name_utf8, *open_mode_res);
+        }
         const bool j9_opener = (lower_opener.find("j9") != std::string::npos)
             || (lower_opener.find("systemams") != std::string::npos);
         const std::string lower_name = common::lowercase_string(name_utf8);

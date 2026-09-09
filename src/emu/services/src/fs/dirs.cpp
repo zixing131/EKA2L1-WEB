@@ -36,6 +36,8 @@
 
 #include <utility>
 
+extern bool eka2l1_shell_leave_probe;
+
 namespace eka2l1 {
     void note_j9_fs_miss(const std::u16string &raw, const int err);
 
@@ -107,6 +109,9 @@ namespace eka2l1 {
         }
 
         const std::int32_t attrib_raw = *ctx->get_argument_value<std::int32_t>(1);
+        if (eka2l1_shell_leave_probe && lower_opener.find("xnthemeserver") != std::string::npos) {
+            LOG_WARN(SERVICE_EFSRV, "[shell-fs] DirOpen '{}' attrib=0x{:X}", common::ucs2_to_utf8(*dir), attrib_raw);
+        }
         std::uint32_t attrib = io_attrib_include_file | io_attrib_include_dir;
 
         bool check_other_flag = false;
@@ -132,7 +137,11 @@ namespace eka2l1 {
 
         if (attrib_raw & epoc::fs::entry_att_allow_uid) {
             attrib |= io_attrib_allow_uid;
-            attrib &= ~io_attrib_include_dir;
+            // AllowUid requests UID information; it does not exclude folders.
+            // Only a non-null UID filter restricts enumeration to files.
+            if (utype->uid1 || utype->uid2 || utype->uid3) {
+                attrib &= ~io_attrib_include_dir;
+            }
         }
 
         fs_server *serv = server<fs_server>();
@@ -206,9 +215,10 @@ namespace eka2l1 {
                     common::ucs2_to_utf8(ss_path), opener_name);
                 note_j9_fs_miss(*dir, -12);
             }
-            // Match device RDir::Open: missing dir with an existing parent
-            // is KErrNotFound, and j9vmall LeaveIfError's that code.
-            ctx->complete(epoc::error_not_found);
+            // RDir::Open reports a missing directory as KErrPathNotFound.
+            // Native Mediator treats an absent optional events directory as
+            // empty, but aborts startup on KErrNotFound.
+            ctx->complete(epoc::error_path_not_found);
             server<fs_server>()->remove(node);
             return;
         }
@@ -338,6 +348,9 @@ namespace eka2l1 {
             }
 
             epoc::fs::build_symbian_entry_from_emulator_entry(io, info.value(), entry);
+            if (eka2l1_shell_leave_probe && ctx->msg->own_thr->name() == "xnthemeserver") {
+                LOG_WARN(SERVICE_EFSRV, "[shell-fs] DirRead name='{}' attrib=0x{:X}", info->name, entry.attrib);
+            }
             const std::uint32_t entry_write_size = epoc::fs::entry_standard_size + 4;
 
             memcpy(entry_buf, &entry, entry_write_size);

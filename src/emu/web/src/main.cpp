@@ -157,6 +157,8 @@ namespace eka2l1::web {
         std::size_t phone_boot_component_index = 0;
         double phone_boot_next_component_ms = 0.0;
         bool phone_visible_regions_forced = false;
+        // Associate staged native components with their startup process.
+        eka2l1::kernel::process *phone_boot_parent = nullptr;
 
         int window_width = 360;
         int window_height = 640;
@@ -194,6 +196,7 @@ using namespace eka2l1::web;
 using namespace eka2l1;
 
 static void advance_phone_boot_plan(double now_ms);
+static bool phone_boot_plan_complete();
 
 // ============================================================================
 // SDL2-based Emu Window for Web
@@ -1093,7 +1096,7 @@ static void main_loop() {
     // visible region.  Recalculate once after the staged plan has completed,
     // before the first post-boot composition.
     if (g_state.phone_boot_active && !g_state.phone_visible_regions_forced
-        && (g_state.phone_boot_component_index >= 12) && g_state.winserv) {
+        && phone_boot_plan_complete() && g_state.winserv) {
         for (epoc::screen *scr = g_state.winserv->get_screens(); scr; scr = scr->next) {
             scr->recalculate_visible_regions();
         }
@@ -1199,12 +1202,11 @@ static void main_loop() {
         }
     }
 
-    // EStart owns a native !Loader server in the ROM. Unlike the HLE Loader,
-    // that server has no guest-side dispatch loop in a browser build, so the
-    // synchronous ELoadLogicalDevice request remains accepted forever. Complete
-    // only that bootstrap request, using the same request-status and reference
-    // accounting as RMessage2::Complete; all later system applications still
-    // execute from the ROM normally.
+    // Compatibility bridge for selected requests observed pending on the ROM's
+    // native startup services. Use the emulator's loader operations and normal
+    // request-status/reference accounting. The underlying native-service
+    // startup failures still need investigation; a pending request alone does
+    // not establish that the guest service has no dispatch loop.
     if (g_state.phone_boot_active) {
         auto *kern = g_state.symsys->get_kernel_system();
         int completed = 0;
@@ -1222,10 +1224,8 @@ static void main_loop() {
             const bool is_loader_bootstrap = is_native_loader && is_estart && (msg->function == 3);
             const bool is_loader_get_info = is_native_loader && (msg->function == 7);
             const bool is_loader_load_process = is_native_loader && (msg->function == 1);
-            // The ROM's domain server likewise owns the public server name, but
-            // has no web dispatch loop. Opcode 3 only cancels a pending domain
-            // transition notification; it has no result payload and completing
-            // it mirrors the HLE domain service's steady-state behavior.
+            // Opcode 3 cancels a domain transition notification. This temporary
+            // bridge retains the existing steady-state cancellation behavior.
             const bool is_domain_cancel_notification = is_native_domain && (msg->function == 3);
             if (!is_loader_bootstrap && !is_loader_get_info && !is_loader_load_process
                 && !is_domain_cancel_notification) {
@@ -1271,8 +1271,7 @@ static void main_loop() {
                         load_info.handle = kern->open_handle_with_thread(msg->own_thr, child,
                             static_cast<kernel::owner_type>(load_info.owner_type));
                         if (load_info.handle == kernel::INVALID_HANDLE
-                            || load_info_des->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info)) != 0
-                            || !child->run()) {
+                            || load_info_des->assign(requester, reinterpret_cast<const std::uint8_t *>(&load_info), sizeof(load_info)) != 0) {
                             result = epoc::error_general;
                         }
                     }
@@ -1281,8 +1280,7 @@ static void main_loop() {
             } else if (is_loader_get_info) {
                 // ECom queries a plug-in's E32 metadata through !Loader before it
                 // can instantiate the active-idle implementation. The ROM Loader
-                // server is live but has no browser-side service loop, so reproduce
-                // the EGetInfo contract directly against the emulator's lib manager.
+                // request is serviced against the emulator's lib manager here.
                 epoc::desc16 *name = eka2l1::ptr<epoc::desc16>(msg->args.args[1]).get(requester);
                 epoc::des8 *info_out = eka2l1::ptr<epoc::des8>(msg->args.args[0]).get(requester);
                 epoc::des8 *image_out = eka2l1::ptr<epoc::des8>(msg->args.args[2]).get(requester);
@@ -2377,7 +2375,32 @@ int wasm_probe_boot_exe(const char *utf8_path) {
     return 0;
 }
 
-static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u16string &path) {
+static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u16string &path,
+    eka2l1::kernel::process *parent) {
+    if (eka2l1::filename(path, true) == u"telephonyaudioroutingserver.dll") {
+        // This ROM service is a DLL-hosted thread, normally started by the
+        // handset audio adaptation. Export 1 is its native thread function;
+        // it installs its scheduler, creates the server and rendezvouses.
+        // Its constructor uses RThread().Name() as the server name.
+        if (kern->get_by_name<eka2l1::service::server>("telephonyaudioroutingserver")) return true;
+        if (!parent) return false;
+        auto *segment = kern->get_lib_manager()->load(path);
+        if (!segment) return false;
+        segment->attach(parent);
+        segment->attached_report(parent);
+        segment->unmark();
+        const auto exports = segment->get_export_table(parent);
+        if (exports.empty() || !exports[0]) return false;
+        auto *thread = kern->create<eka2l1::kernel::thread>(kern->get_memory_system(), kern->get_ntimer(),
+            parent, eka2l1::kernel::access_type::local_access, "telephonyaudioroutingserver",
+            exports[0], 0x8000, 0x1000, 0x100000, false);
+        if (thread) {
+            thread->set_priority(eka2l1::kernel::thread_priority::priority_absolute_foreground_normal);
+        }
+        if (!thread) return false;
+        thread->resume();
+        return true;
+    }
     for (const auto &process_obj : kern->get_process_list()) {
         const auto *process = reinterpret_cast<const eka2l1::kernel::process *>(process_obj.get());
         if ((process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending)
@@ -2387,19 +2410,32 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
     }
 
     eka2l1::kernel::process *process = kern->spawn_new_process(path, u"");
-    return process && process->run();
+    if (!process) {
+        return false;
+    }
+    if (parent) {
+        parent->add_child_process(process);
+    }
+    return process->run();
 }
 
 // Keep the plan in one place so native ROM startup remains deterministic.
-static constexpr std::array<std::u16string_view, 12> PHONE_BOOT_PLAN = {
+static constexpr std::array<std::u16string_view, 18> PHONE_BOOT_PLAN = {
     u"z:\\sys\\bin\\ecomserver.exe",
     u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\ailaunch.exe",
-    u"z:\\sys\\bin\\phone.exe",
+    u"z:\\sys\\bin\\telephonyaudioroutingserver.dll",
+    // S60v3 uses phone.exe; S60v5 (5800) names the equivalent shell
+    // phoneui.exe. Keeping both candidates lets the ROM decide by presence.
+    u"z:\\sys\\bin\\phoneserver.exe",
+    u"z:\\sys\\bin\\phone.exe", u"z:\\sys\\bin\\phoneui.exe",
+    u"z:\\sys\\bin\\akniconsrv.exe",
     u"z:\\sys\\bin\\akncapserver.exe",
     u"z:\\sys\\bin\\mediatorserver.exe", u"z:\\sys\\bin\\randsvr.exe",
     u"z:\\sys\\bin\\splashscreen.exe", u"z:\\sys\\bin\\sysagt2svr.exe",
-    u"z:\\sys\\bin\\startup.exe", u"z:\\sys\\bin\\sysap.exe",
-    u"z:\\sys\\bin\\menu2.exe"
+    u"z:\\sys\\bin\\eshell.exe", u"z:\\sys\\bin\\startup.exe",
+    u"z:\\sys\\bin\\sysap.exe",
+    // 5320 carries menu2.exe while 5800 carries menu3.exe.
+    u"z:\\sys\\bin\\menu2.exe", u"z:\\sys\\bin\\menu3.exe"
 };
 
 static void advance_phone_boot_plan(const double now_ms) {
@@ -2411,7 +2447,7 @@ static void advance_phone_boot_plan(const double now_ms) {
 
     eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
     const std::u16string component(PHONE_BOOT_PLAN[g_state.phone_boot_component_index]);
-    if (!start_phone_boot_component(kern, component)) {
+    if (!start_phone_boot_component(kern, component, g_state.phone_boot_parent)) {
         LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM boot component did not start: {}",
             eka2l1::common::ucs2_to_utf8(component));
     }
@@ -2420,6 +2456,10 @@ static void advance_phone_boot_plan(const double now_ms) {
     // Let the server execute one guest scheduling slice and publish its name
     // before launching the next dependent component.
     g_state.phone_boot_next_component_ms = now_ms + 700.0;
+}
+
+static bool phone_boot_plan_complete() {
+    return g_state.phone_boot_component_index >= PHONE_BOOT_PLAN.size();
 }
 
 /**
@@ -2444,18 +2484,23 @@ int wasm_boot_phone() {
         }
         const std::string raw_name = eka2l1::common::lowercase_string(process->raw_name());
         if ((raw_name.find("akncap") == std::string::npos) && (raw_name.find("sysap") == std::string::npos)
-            && (raw_name.find("startup") == std::string::npos) && (raw_name.find("menu") == std::string::npos)) {
+            && (raw_name.find("startup") == std::string::npos) && (raw_name.find("menu") == std::string::npos)
+            && (raw_name.find("phone") == std::string::npos)
+            && (raw_name.find("standby") == std::string::npos)
+            && (raw_name.find("home screen") == std::string::npos)
+            && (raw_name.find("ailaunch") == std::string::npos)) {
             return;
+        }
+        if (auto primary = process->get_primary_thread()) {
+            const auto &regs = primary->get_thread_context().cpu_registers;
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] shell exit context pc=0x{:08X} lr=0x{:08X}", regs[15], regs[14]);
         }
         LOG_WARN(FRONTEND_CMDLINE, "[phone] ROM shell process exited: name={} type={} reason={} category={}",
             process->name(), static_cast<int>(process->get_exit_type()), process->get_exit_reason(),
             eka2l1::common::ucs2_to_utf8(process->get_exit_category()));
     });
 
-    // EStart owns the complete ROM hand-off to System Starter.  In
-    // particular, it creates the Starter child itself and waits for the
-    // child’s normal completion notifications; creating Startup.exe here a
-    // second time bypasses that parent/child protocol.
+    // Start the ROM's EStart process before the compatibility boot plan.
     static const std::u16string estart_path = u"z:\\sys\\bin\\estart.exe";
     if (!g_state.symsys->get_io_system()->exist(estart_path)) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] ROM does not contain {}",
@@ -2493,11 +2538,9 @@ int wasm_boot_phone() {
         return -5;
     }
 
-    // The Web kernel has no implementation for the ROM's RProcess::Create
-    // route used by EStart.  Keep the compatibility bridge at that exact
-    // hand-off: create the documented System Starter child, then leave all
-    // subsequent plan parsing, application launch and window ownership to the
-    // ROM processes themselves.
+    // Start System Starter as EStart's child while the full ROM boot hand-off
+    // is being brought up. This is a compatibility launch, not proof that the
+    // native boot sequence has finished.
     static const std::u16string sysstart_path = u"z:\\sys\\bin\\sysstart.exe";
     eka2l1::kernel::process *sysstart = kern->spawn_new_process(sysstart_path, u"");
     if (!sysstart) {
@@ -2514,16 +2557,13 @@ int wasm_boot_phone() {
         return -7;
     }
 
-    // SysStart reads its platform-specific process plan from the writable
-    // device image. Web's transient device starts without that generated file,
-    // so bridge this missing plan by launching the same ROM programs from
-    // Starter_Arm.rsc. EWSRV remains omitted because its role is supplied by
-    // EKA2L1's window server. The plan is
-    // advanced from the frame loop so native servers can publish before a
-    // consumer attempts its first session.
+    // Stage ROM programs while the native System Starter chain is incomplete.
+    // EWSRV is supplied by EKA2L1's window server. Advancing from the frame loop
+    // gives native servers time to publish before their consumers connect.
     g_state.phone_boot_component_index = 0;
     g_state.phone_boot_next_component_ms = emscripten_get_now();
     g_state.phone_visible_regions_forced = false;
+    g_state.phone_boot_parent = sysstart;
 
     g_state.paused = false;
     LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
@@ -2532,9 +2572,8 @@ int wasm_boot_phone() {
 }
 
 // EStart's ROM System Starter owns the state publication and process hand-off.
-// The frontend retains this exported hook for the regression page, but it must
-// not publish synthetic boot state or terminate a live Starter process: doing
-// so can race the real AknCap/active-idle launch chain.
+// Supply the Starter launch-phase handoff after the compatibility plan has
+// started its services. Startup itself owns animation and first-use completion.
 EMSCRIPTEN_KEEPALIVE
 int wasm_phone_finish_startup() {
     if (!g_state.symsys || !g_state.phone_boot_active) {
@@ -2551,11 +2590,40 @@ int wasm_phone_finish_startup() {
     if (!kern) {
         return -2;
     }
-    if (eka2l1::property_ptr splash_state = kern->get_prop(0x101F8766, 0x301)) {
-        splash_state->set_int(101);
-        LOG_INFO(FRONTEND_CMDLINE, "[phone] published native Splash completion state");
+    auto startup_state = kern->get_prop(0x100058F4, 1);
+    auto system_state = kern->get_prop(0x101F8766, 0x41);
+    if (!system_state) {
+        return 1;
     }
-    return 0;
+    // The compatibility plan supplies Starter's UI-service launch phase.
+    // Hand control to Startup's own animation / country / date state machine
+    // once it has installed its subscriber. Do not claim its UI is finished.
+    if (system_state->get_int() >= 100 && system_state->get_int() < 104) {
+        system_state->set_int(104); // ESwStateCriticalPhaseOK
+    }
+    if (eka2l1::property_ptr splash_state = kern->get_prop(0x101F8766, 0x301)) {
+        if (splash_state->get_int() != 101) {
+            splash_state->set_int(101);
+            LOG_INFO(FRONTEND_CMDLINE, "[phone] published native Splash completion state");
+        }
+    }
+    auto ui_phase = kern->get_prop(0x101F8766, 0x46);
+    if (ui_phase && ui_phase->get_int() == 104) { // EStartupUiPhaseAllDone, set by Startup
+        if (system_state->get_int() == 104) {
+            system_state->set_int(110); // ESwStateNormalRfOff: no modem backend
+        }
+        if (auto global_notes = kern->get_prop(0x101F8773, 6)) {
+            global_notes->set_int(1);
+        }
+        return 0;
+    }
+    if (!startup_state || !startup_state->is_defined() || startup_state->get_int() == 0) {
+        return 1;
+    }
+    if (startup_state->get_int() == 1) {
+        startup_state->set_int(2); // EStartupAppStateStartAnimations
+    }
+    return 1;
 }
 
 /**
@@ -3882,10 +3950,12 @@ static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {
 // thread kill / process kill / unimplemented SVC logs a guest backtrace at
 // WARN level. For chasing apps that die silently during init.
 extern bool eka2l1_leave_probe;
+extern bool eka2l1_shell_leave_probe;
 
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_leave_probe(int enabled) {
-    eka2l1_leave_probe = (enabled != 0);
+    eka2l1_leave_probe = (enabled == 1);
+    eka2l1_shell_leave_probe = (enabled == 2);
     std::printf("[probe] leave probe %s\n", enabled ? "ON" : "OFF");
 }
 
@@ -3962,6 +4032,18 @@ void wasm_debug_dump() {
     if (!kern) {
         std::printf("[dump] kernel not created\n");
         return;
+    }
+
+    if (g_state.phone_boot_active) {
+        const std::pair<std::uint32_t, std::uint32_t> boot_keys[] = {
+            {0x101F8766, 0x41}, {0x101F8766, 0x43}, {0x101F8766, 0x44},
+            {0x101F8766, 0x46}, {0x101F8766, 0x301}, {0x100058F4, 1}, {0x100058F4, 2}
+        };
+        for (const auto &[category, key] : boot_keys) {
+            auto prop = kern->get_prop(category, key);
+            std::printf("[dump] boot-property %08X:%X=%d defined=%d\n", category, key,
+                prop ? prop->get_int() : -1, prop && prop->is_defined());
+        }
     }
 
     for (auto &obj : kern->get_process_list()) {
@@ -4059,16 +4141,19 @@ void wasm_debug_dump() {
         if (pr && sp) {
             const std::uint32_t *stack_words = eka2l1::ptr<std::uint32_t>(sp).get(pr);
             int printed = 0;
+            const bool phone_wait = common::lowercase_string(thr->name()) == "telephone";
             if (stack_words) {
-                for (std::uint32_t i = 0; (i < 96) && (printed < 12); ++i) {
-                    const std::uint32_t candidate = stack_words[i] & ~1U;
+                for (std::uint32_t i = 0; (i < (phone_wait ? 768U : 96U)) && (printed < (phone_wait ? 64 : 12)); ++i) {
+                    const auto *word = eka2l1::ptr<std::uint32_t>(sp + i * 4).get(pr);
+                    if (!word) break;
+                    const std::uint32_t candidate = *word & ~1U;
                     for (auto &seg_obj : kern->get_codeseg_list()) {
                         eka2l1::codeseg_ptr seg = reinterpret_cast<eka2l1::codeseg_ptr>(seg_obj.get());
                         if (!seg) continue;
                         const eka2l1::address beg = seg->get_code_run_addr(pr);
                         if (beg && (candidate >= beg) && (candidate < beg + seg->get_text_size())) {
                             std::printf("[dump]     stack+0x%X = 0x%08X (%s+0x%X)\n",
-                                i * 4, stack_words[i], seg->name().c_str(), candidate - beg);
+                                i * 4, *word, seg->name().c_str(), candidate - beg);
                             ++printed;
                             break;
                         }

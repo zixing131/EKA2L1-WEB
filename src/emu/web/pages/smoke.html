@@ -24,7 +24,8 @@
 <div class="keypad" id="keypad">
 <button data-key="LSK" disabled>选项菜单</button><button data-key="UP" disabled>↑</button><button data-key="RSK" disabled>返回</button>
 <button data-key="LEFT" disabled>←</button><button data-key="OK" disabled>确认</button><button data-key="RIGHT" disabled>→</button>
-<button data-key="CLEAR" disabled>删除</button><button data-key="DOWN" disabled>↓</button><button data-key="END" disabled>挂断</button>
+<button data-key="CALL" disabled>拨号</button><button data-key="MENU" disabled>主菜单</button><button data-key="END" disabled>挂断</button>
+<button data-key="CLEAR" disabled>删除</button><button data-key="DOWN" disabled>↓</button><span></span>
 <button data-key="D1" disabled>1</button><button data-key="D2" disabled>2</button><button data-key="D3" disabled>3</button>
 <button data-key="D4" disabled>4</button><button data-key="D5" disabled>5</button><button data-key="D6" disabled>6</button>
 <button data-key="D7" disabled>7</button><button data-key="D8" disabled>8</button><button data-key="D9" disabled>9</button>
@@ -100,8 +101,12 @@
         note('启动 ROM 手机系统 = ' + result);
         byId('summary').textContent = (result === 0 || result === 1) ? '运行中 · 手机系统' : '启动失败 · ' + result;
         if (result === 0 || result === 1) {
-            setTimeout(() => {
+            setTimeout(function finishStartup() {
                 const handoff = EKA2L1.finishPhoneStartup();
+                if (handoff === 1) {
+                    setTimeout(finishStartup, 500);
+                    return;
+                }
                 note('完成 ROM 启动交接 = ' + handoff);
             }, 12000);
         }

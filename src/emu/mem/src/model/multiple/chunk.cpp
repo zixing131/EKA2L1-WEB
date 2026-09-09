@@ -414,8 +414,14 @@ namespace eka2l1::mem {
     }
 
     multiple_mem_model_chunk::~multiple_mem_model_chunk() {
-        // Decommit the whole things
-        decommit(0, max_size_);
+        // do_create() sets max_size_ before reserving host memory and creating
+        // page_tabs_. If that reservation fails, create_chunk() destroys this
+        // partially initialized object. Walking max_size_ with an empty table
+        // vector reads a stray table id and can clear an unrelated mapping
+        // (page-table 0 is normally the first ROM megabyte).
+        if (host_base_ && !page_tabs_.empty()) {
+            decommit(0, max_size_);
+        }
 
         // Free the region that previously allocated from the allocator
         if (!(create_flags_ & MEM_MODEL_CHUNK_INTERNAL_FORCE_FILL)) {
@@ -434,7 +440,7 @@ namespace eka2l1::mem {
         }
 
         // Ignore the result, just unmap things
-        if (!is_external_host)
+        if (host_base_ && !is_external_host)
             common::unmap_memory(host_base_, max_size_);
     }
 }

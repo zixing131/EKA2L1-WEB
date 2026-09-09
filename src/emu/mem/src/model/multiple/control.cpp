@@ -25,7 +25,10 @@ namespace eka2l1::mem {
         : control_base(monitor, alloc, conf, psize_bits, mem_map_old)
         , global_dir_(page_size_bits_, 0)
         , user_global_sec_(mem_map_old ? shared_data_eka1 : shared_data, mem_map_old ? shared_data_end_eka1 : ram_drive, page_size())
-        , user_code_sec_(mem_map_old ? ram_code_addr_eka1 : ram_code_addr, mem_map_old ? ram_code_addr_eka1_end : dll_static_data, page_size())
+        // EKA2 RAM code occupies 0x70000000..0x7fffffff. Using the EKA2 DLL
+        // data base (0x38000000) as the end wrapped the unsigned range through
+        // the ROM and eventually let a generated code chunk replace its PDE.
+        , user_code_sec_(mem_map_old ? ram_code_addr_eka1 : ram_code_addr, mem_map_old ? ram_code_addr_eka1_end : rom, page_size())
         , user_rom_sec_(mem_map_old ? rom_eka1 : rom, mem_map_old ? kern_mapping_eka1 : global_data, page_size())
         , kernel_mapping_sec_(mem_map_old ? kern_mapping_eka1 : kernel_mapping, mem_map_old ? kern_mapping_eka1_end : kernel_mapping_end, page_size()) {
     }
@@ -86,7 +89,11 @@ namespace eka2l1::mem {
         }
 
         auto switch_page_table = [=](page_directory *target_dir) {
-            if (tab) {
+            // idx_ describes the table's last virtual slot, but a table can be
+            // attached to several address spaces. Do not clear that slot from
+            // a target directory unless it actually contains this table: it
+            // may contain the ROM table belonging to that address space.
+            if (tab && target_dir->get_page_table_from_index(last_off) == tab) {
                 target_dir->set_page_table(last_off, nullptr);
             }
 

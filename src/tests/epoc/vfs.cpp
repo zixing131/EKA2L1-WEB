@@ -7,6 +7,7 @@
 #include <vfs/vfs.h>
 
 #include <fstream>
+#include <set>
 
 struct io_scope_guard {
     eka2l1::io_system *io;
@@ -84,5 +85,37 @@ TEST_CASE("physical_filesystem_is_case_insensitive_but_preserves_entry_case", "v
     REQUIRE(new_file);
     REQUIRE(eka2l1::filename(*new_file) == u"NewSave.Dat");
 
+    eka2l1::common::delete_folder(root);
+}
+
+TEST_CASE("UID enumeration keeps directories and short files without a UID filter", "[vfs][dir-uid]") {
+    const std::string root = "vfs_uid_enumeration";
+    eka2l1::common::delete_folder(root);
+    eka2l1::common::create_directories(eka2l1::add_path(root, "themes"));
+    {
+        std::ofstream short_file(eka2l1::add_path(root, "short.dat"), std::ios::binary);
+        short_file.put('x');
+        std::ofstream uid_file(eka2l1::add_path(root, "app.dat"), std::ios::binary);
+        const eka2l1::epoc::uid_type uid{0x10000079, 0x100039CE, 0x102750F0};
+        uid_file.write(reinterpret_cast<const char *>(&uid), sizeof(uid));
+    }
+
+    eka2l1::io_system io;
+    io_scope_guard guard(io);
+    REQUIRE(io.mount_physical_path(drive_number::drive_a, drive_media::physical, io_attrib_internal,
+        eka2l1::common::utf8_to_ucs2(root)));
+    const auto attributes = io_attrib_include_file | io_attrib_include_dir | io_attrib_allow_uid;
+    auto all = io.open_dir(u"A:\\*", {}, attributes);
+    REQUIRE(all);
+    std::set<std::string> names;
+    while (const auto entry = all->get_next_entry()) names.insert(entry->name);
+    REQUIRE(names == std::set<std::string>{"themes", "short.dat", "app.dat"});
+
+    auto filtered = io.open_dir(u"A:\\*", {0, 0, 0x102750F0}, attributes);
+    REQUIRE(filtered);
+    const auto match = filtered->get_next_entry();
+    REQUIRE(match);
+    REQUIRE(match->name == "app.dat");
+    REQUIRE_FALSE(filtered->get_next_entry());
     eka2l1::common::delete_folder(root);
 }

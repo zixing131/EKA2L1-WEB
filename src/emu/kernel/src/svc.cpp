@@ -60,6 +60,7 @@ namespace eka2l1::hle {
 // Debug probe: when set (from the frontend), every guest Leave / thread kill /
 // process kill logs at WARN with a guest backtrace. Off by default.
 bool eka2l1_leave_probe = false;
+bool eka2l1_shell_leave_probe = false;
 
 // Last Leaves raised inside the IBM J9 VM process (j9midps60), recorded by
 // leave_start. The j9midps60 exit hint (process.cpp) prints them, so even a
@@ -339,6 +340,18 @@ namespace eka2l1::epoc {
         return static_cast<std::int32_t>(pr_real->unique_id());
     }
 
+    BRIDGE_FUNC(void, library_type, kernel::handle h, eka2l1::ptr<epoc::uid_type> uid_type) {
+        auto *library = kern->get<kernel::library>(h);
+        auto *type = uid_type.get(kern->crr_process());
+        if (!library || !type) {
+            return;
+        }
+        const auto ids = library->get_codeseg()->get_uids();
+        type->uid1 = std::get<0>(ids);
+        type->uid2 = std::get<1>(ids);
+        type->uid3 = std::get<2>(ids);
+    }
+
     BRIDGE_FUNC(void, process_type, kernel::handle h, eka2l1::ptr<epoc::uid_type> uid_type) {
         process_ptr pr_real = kern->get<kernel::process>(h);
 
@@ -569,20 +582,14 @@ namespace eka2l1::epoc {
             return;
         }
 
-        // EKA2 RProcess::CommandLine takes TDes16. Length is in UTF-16
-        // characters, matching process_command_line_length. Writing
-        // chars<<1 made ESTLIB's TBuf report a byte length; the 8-bit
-        // argv splitter then stopped at the first UTF-16 NUL, so J9
-        // started with a truncated command line and later data-aborted.
-        auto *data16 = reinterpret_cast<epoc::des16 *>(data);
-        std::u16string cmdline = pr->get_cmd_args();
-        const std::uint32_t max_chars = data16->get_max_length(crr_process);
-        if (max_chars && (cmdline.size() > max_chars)) {
-            LOG_WARN(KERNEL, "Command line truncated from {} to {} UTF-16 units",
-                cmdline.size(), max_chars);
-            cmdline.resize(max_chars);
-        }
-        data16->assign(crr_process, cmdline);
+        // EKA2 euser wraps the public TDes16 in a TPtr8 for this executive
+        // call, then divides the returned byte length by two. Preserve all
+        // UTF-16 units, including embedded NULs in server startup handshakes.
+        const std::u16string &cmdline = pr->get_cmd_args();
+        const std::uint32_t byte_length = std::min<std::uint32_t>(
+            static_cast<std::uint32_t>(cmdline.size() * sizeof(char16_t)),
+            data->get_max_length(crr_process));
+        data->assign(crr_process, reinterpret_cast<const std::uint8_t *>(cmdline.data()), byte_length);
     }
 
     BRIDGE_FUNC(void, process_set_flags, kernel::handle h, std::uint32_t clear_mask, std::uint32_t set_mask) {
@@ -882,6 +889,9 @@ namespace eka2l1::epoc {
                 msg->own_thr->owning_process()->raw_name());
             const std::string server_name = (msg->msg_session && msg->msg_session->get_server())
                 ? msg->msg_session->get_server()->name() : "";
+            if (eka2l1_shell_leave_probe && server_name.find("telephonyaudiorouting") != std::string::npos) {
+                LOG_WARN(KERNEL, "[shell-ipc] Complete server={} opcode={} result={}", server_name, msg->function, val);
+            }
             const bool stub_client = client_name.find("stubmidp") != std::string::npos;
             const bool j9_client = client_name.find("j9") != std::string::npos;
             const bool installer_client = (client_name.find("midp2silentmidletinstall") != std::string::npos)
@@ -1191,6 +1201,22 @@ namespace eka2l1::epoc {
         return epoc::error_none;
     }
 
+    BRIDGE_FUNC(void, message_construct_from_ptr, kernel::handle h, service::message2 *out) {
+        auto *msg = kern->get_msg(h);
+        if (!msg || !out) {
+            return;
+        }
+        out->ipc_msg_handle = msg->id;
+        out->function = msg->function;
+        for (std::size_t i = 0; i < 4; ++i) {
+            out->args[i] = (msg->function == -2) ? 0 : msg->args.args[i];
+        }
+        out->spare1 = 0;
+        out->session_ptr = msg->session_ptr_lle;
+        // RMessageU2 copies only the first 32 bytes. The user-side flags and
+        // spare3 are not part of the executive's reconstructed message.
+    }
+
     BRIDGE_FUNC(std::int32_t, message_client, kernel::handle h, kernel::owner_type owner) {
         eka2l1::ipc_msg_ptr msg = kern->get_msg(h);
 
@@ -1310,6 +1336,9 @@ namespace eka2l1::epoc {
         kernel::process *crr_pr = kern->crr_process();
 
         std::string server_name = server_name_des.get(crr_pr)->to_std_string(crr_pr);
+        if (eka2l1_shell_leave_probe && kern->crr_thread()->name() == "telephonyaudioroutingserver") {
+            LOG_WARN(KERNEL, "[shell-ipc] CreateServer name='{}' mode={}", server_name, mode);
+        }
 
         // Exclamination point at the beginning of server name requires ProtServ
         if (!server_name.empty() && server_name[0] == '!') {
@@ -1409,6 +1438,10 @@ namespace eka2l1::epoc {
 
         const std::string server_name = server_name_des.get(pr)->to_std_string(pr);
         server_ptr server = kern->get_by_name<service::server>(server_name);
+
+        if (eka2l1_shell_leave_probe && server_name.find("telephonyaudiorouting") != std::string::npos) {
+            LOG_WARN(KERNEL, "[shell-ipc] CreateSession name='{}' found={} from={}", server_name, server != nullptr, pr->name());
+        }
 
         const std::string proc = pr ? pr->name() : "?";
         const std::string lower_proc = common::lowercase_string(proc);
@@ -1535,6 +1568,11 @@ namespace eka2l1::epoc {
         }
 
         const std::string server_name = ss->get_server()->name();
+
+        if (eka2l1_shell_leave_probe && server_name.find("telephonyaudiorouting") != std::string::npos) {
+            LOG_WARN(KERNEL, "[shell-ipc] Send server={} opcode={} args={:X},{:X},{:X},{:X}",
+                server_name, ord, arg.args[0], arg.args[1], arg.args[2], arg.args[3]);
+        }
 
         const bool j9_interesting = j9_proc
             && ((server_name.find("SystemAMS") != std::string::npos)
@@ -1725,7 +1763,10 @@ namespace eka2l1::epoc {
             }
         }
 
-        if (eka2l1_leave_probe) {
+        const std::string shell_name = common::lowercase_string(thr->name());
+        if (eka2l1_leave_probe || (eka2l1_shell_leave_probe
+            && (shell_name == "telephone" || shell_name == "home screen"
+                || shell_name == "standby" || shell_name == "menu"))) {
             LOG_WARN(KERNEL, "[probe] Leave code={} depth={} thread={} trap_handler=0x{:08X}",
                 static_cast<std::int32_t>(kern->get_cpu()->get_reg(0)), thr->get_leave_depth(),
                 thr->name(), current_local_data(kern)->trap_handler.ptr_address());
@@ -3057,6 +3098,8 @@ namespace eka2l1::epoc {
             return epoc::error_not_found;
         }
 
+        if (prop->get_data_type() != service::property_type::int_data) return epoc::error_argument;
+
         std::int32_t *val_ptr = value.get(kern->crr_process());
         *val_ptr = prop->get_int();
 
@@ -3073,25 +3116,7 @@ namespace eka2l1::epoc {
             return epoc::error_not_found;
         }
 
-        std::uint8_t *data_ptr = data.get(crr_pr);
-        auto data_vec = prop->get_bin();
-
-        const std::size_t size_to_copy = std::min<std::size_t>(data_vec.size(), datlength);
-        std::int32_t return_code = epoc::error_none;
-
-        if (data_vec.size() > datlength) {
-            // The given buffer can't hold ours.
-            return_code = epoc::error_overflow;
-        }
-
-        // Whether the buffer is too small, we still have to either copy truncated or full data.
-        std::copy(data_vec.begin(), data_vec.begin() + size_to_copy, data.get(kern->crr_process()));
-
-        if (return_code != epoc::error_none) {
-            return return_code;
-        }
-
-        return datlength;
+        return prop->read_bin(data.get(crr_pr), datlength);
     }
 
     BRIDGE_FUNC(std::int32_t, property_attach, std::int32_t cage, std::int32_t val, epoc::owner_type owner) {
@@ -3239,11 +3264,10 @@ namespace eka2l1::epoc {
             return epoc::error_not_found;
         }
 
-        *value_ptr.get(pr) = prop->get_property_object()->get_int();
-
-        if (prop->get_property_object()->get_int() == -1) {
+        if (prop->get_property_object()->get_data_type() != service::property_type::int_data) {
             return epoc::error_argument;
         }
+        *value_ptr.get(pr) = prop->get_property_object()->get_int();
 
         return epoc::error_none;
     }
@@ -3255,28 +3279,7 @@ namespace eka2l1::epoc {
             return epoc::error_not_found;
         }
 
-        std::vector<uint8_t> dat = prop->get_property_object()->get_bin();
-
-        if (dat.size() == 0) {
-            return epoc::error_argument;
-        }
-
-        const std::size_t size_to_copy = std::min<std::size_t>(dat.size(), buffer_size);
-        std::int32_t return_code = epoc::error_none;
-
-        if (dat.size() > buffer_size) {
-            // The given buffer can't hold ours.
-            return_code = epoc::error_overflow;
-        }
-
-        // Whether the buffer is too small, we still have to either copy truncated or full data.
-        std::copy(dat.begin(), dat.begin() + size_to_copy, buffer_ptr_guest.get(kern->crr_process()));
-
-        if (return_code != epoc::error_none) {
-            return return_code;
-        }
-
-        return buffer_size;
+        return prop->get_property_object()->read_bin(buffer_ptr_guest.get(kern->crr_process()), buffer_size);
     }
 
     BRIDGE_FUNC(std::int32_t, property_find_set_int, std::int32_t cage, std::int32_t key, std::int32_t value) {
@@ -3286,7 +3289,7 @@ namespace eka2l1::epoc {
             return epoc::error_not_found;
         }
 
-        const bool res = prop->set(value);
+        const bool res = prop->set_int(value);
 
         if (!res) {
             return epoc::error_argument;
@@ -6620,6 +6623,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x5A, exception_handler),
         BRIDGE_REGISTER(0x5E, is_exception_handled),
         BRIDGE_REGISTER(0x5F, process_get_memory_info),
+        BRIDGE_REGISTER(0x63, library_type),
         BRIDGE_REGISTER(0x64, process_type),
         BRIDGE_REGISTER(0x68, thread_create),
         BRIDGE_REGISTER(0x69, handle_open_object_by_find_handle),
@@ -6664,6 +6668,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xA8, message_get_des_max_length),
         BRIDGE_REGISTER(0xA9, message_ipc_copy),
         BRIDGE_REGISTER(0xAA, message_client),
+        BRIDGE_REGISTER(0xAC, message_construct_from_ptr),
         BRIDGE_REGISTER(0xAD, message_kill),
         BRIDGE_REGISTER(0xAE, message_open_handle),
         BRIDGE_REGISTER(0xAF, process_security_info),
@@ -6805,6 +6810,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x5B, set_exception_handler),
         BRIDGE_REGISTER(0x5E, is_exception_handled),
         BRIDGE_REGISTER(0x5F, process_get_memory_info),
+        BRIDGE_REGISTER(0x63, library_type),
         BRIDGE_REGISTER(0x64, process_type),
         BRIDGE_REGISTER(0x68, thread_create),
         BRIDGE_REGISTER(0x69, handle_open_object_by_find_handle),
@@ -6851,6 +6857,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xA7, message_get_des_max_length),
         BRIDGE_REGISTER(0xA8, message_ipc_copy),
         BRIDGE_REGISTER(0xA9, message_client),
+        BRIDGE_REGISTER(0xAB, message_construct_from_ptr),
         BRIDGE_REGISTER(0xAC, message_kill),
         BRIDGE_REGISTER(0xAD, message_open_handle),
         BRIDGE_REGISTER(0xAE, process_security_info),
@@ -6995,6 +7002,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x5D, is_exception_handled),
         BRIDGE_REGISTER(0x5E, process_get_memory_info),
         BRIDGE_REGISTER(0x5F, library_get_memory_info),
+        BRIDGE_REGISTER(0x62, library_type),
         BRIDGE_REGISTER(0x63, process_type),
         BRIDGE_REGISTER(0x65, chunk_top),
         BRIDGE_REGISTER(0x67, thread_create),
@@ -7046,6 +7054,7 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0xA7, message_ipc_copy),
         BRIDGE_REGISTER(0xA8, message_client),
         BRIDGE_REGISTER(0xAA, message_construct),
+        BRIDGE_REGISTER(0xAA, message_construct_from_ptr),
         BRIDGE_REGISTER(0xAB, message_kill),
         BRIDGE_REGISTER(0xAC, message_open_handle),
         BRIDGE_REGISTER(0xAD, process_security_info),

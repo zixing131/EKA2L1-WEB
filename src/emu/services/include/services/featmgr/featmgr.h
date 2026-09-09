@@ -25,6 +25,10 @@
 
 namespace eka2l1 {
     class io_system;
+    namespace loader { struct e32img; }
+
+    // Read the immutable UID table used by the S60 StaticFeatures provider.
+    std::vector<epoc::uid> read_static_features(const loader::e32img &image);
 
     struct featmgr_config_header {
         char magic[4];

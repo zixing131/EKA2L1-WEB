@@ -176,7 +176,7 @@ namespace eka2l1::epoc {
         }
 
         const std::uint32_t crr_fn_count = current_filename_count();
-        std::uint32_t *area_ptr = search_filename_in_area(areabase, filename_id, crr_fn_count);
+        std::uint32_t *area_ptr = search_filename_in_area(areabase, filename_id + filename_id_base_, crr_fn_count);
 
         if (!area_ptr) {
             return -1;
@@ -198,7 +198,7 @@ namespace eka2l1::epoc {
         }
 
         const std::uint32_t crr_fn_count = current_filename_count();
-        std::uint32_t *areaptr = search_filename_in_area(areabase, filename_id, crr_fn_count);
+        std::uint32_t *areaptr = search_filename_in_area(areabase, filename_id + filename_id_base_, crr_fn_count);
 
         // Check if we found the name?
         if (!areaptr) {
@@ -211,7 +211,7 @@ namespace eka2l1::epoc {
         }
 
         // Let's do copy!
-        areaptr[0] = filename_id;
+        areaptr[0] = filename_id + filename_id_base_;
         areaptr += 1;
 
         // Copy the base in
@@ -220,7 +220,7 @@ namespace eka2l1::epoc {
 
         // Fill 0 in the unused places
         std::fill(reinterpret_cast<std::uint8_t *>(areaptr) + filename_base.length() * 2 + filename.length() * 2,
-            reinterpret_cast<std::uint8_t *>(areaptr) + AKN_SKIN_SERVER_MAX_FILENAME_BYTES, 0);
+            reinterpret_cast<std::uint8_t *>(areaptr) + AKN_SKIN_SERVER_MAX_FILENAME_BYTES - sizeof(std::uint32_t), 0);
 
         return true;
     }
@@ -348,9 +348,9 @@ namespace eka2l1::epoc {
             current_def = reinterpret_cast<akns_item_def *>(current_head);
         } else {
             // The definition already exists. Recopy it
-            current_def = reinterpret_cast<akns_item_def *>(get_area_base(
-                              epoc::akn_skin_chunk_area_base_offset::item_def_area_base))
-                + index;
+            current_def = reinterpret_cast<akns_item_def *>(
+                static_cast<std::uint8_t *>(get_area_base(akn_skin_chunk_area_base_offset::item_def_area_base))
+                + index * definition_size);
 
             if (current_def->type_ == def.type_ && current_def->data_.type_ == epoc::akns_mtptr_type::akns_mtptr_type_relative_ram) {
                 std::uint32_t *data_size = current_def->data_.get_relative<std::uint32_t>(
@@ -367,7 +367,7 @@ namespace eka2l1::epoc {
 
             std::int32_t head = 0;
             if (flags_ & akn_skin_chunk_maintainer_lookup_use_linked_list) {
-                std::int32_t head = current_def->next_hash_;
+                head = current_def->next_hash_;
             }
             std::memcpy(current_def, &def, definition_size);
 
@@ -550,7 +550,9 @@ namespace eka2l1::epoc {
             return nullptr;
         }
 
-        return defs + index;
+        const std::size_t definition_size = (flags_ & akn_skin_chunk_maintainer_lookup_use_linked_list)
+            ? sizeof(akns_item_def_v2) : sizeof(akns_item_def_v1);
+        return reinterpret_cast<akns_item_def *>(reinterpret_cast<std::uint8_t *>(defs) + index * definition_size);
     }
 
     bool akn_skin_chunk_maintainer::import_color_table(const skn_color_table &table) {
@@ -822,6 +824,9 @@ namespace eka2l1::epoc {
     }
 
     bool akn_skin_chunk_maintainer::import(skn_file &skn, const std::u16string &filename_base) {
+        // Filename IDs are local to each skin. Keep the base skin's paths
+        // intact when the selected theme also starts numbering at zero.
+        filename_id_base_ = current_filename_count();
         // First up import filenames
         for (auto &filename : skn.filenames_) {
             if (!update_filename(filename.first, filename.second, filename_base)) {

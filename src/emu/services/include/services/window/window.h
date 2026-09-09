@@ -108,12 +108,14 @@ namespace eka2l1::epoc {
         std::uint32_t keycode_;
         std::uint32_t modifiers_mask_;
         std::uint32_t modifiers_;
-        std::uint32_t pri_;
+        std::int32_t pri_;
 
         std::uint32_t id;
     };
 
     bool operator<(const event_capture_key_notifier &lhs, const event_capture_key_notifier &rhs);
+    const event_capture_key_notifier *find_key_capture(cp_queue<event_capture_key_notifier> &requests,
+        event_key_capture_type type, std::uint32_t modifiers);
 
     struct pixel_twips_and_rot {
         eka2l1::vec2 pixel_size;
@@ -355,6 +357,7 @@ namespace eka2l1 {
     class window_server : public service::server {
     public:
         using key_capture_request_queue = cp_queue<epoc::event_capture_key_notifier>;
+        void remove_key_captures(epoc::window *owner, std::uint32_t id = 0);
 
         struct {
             // maps from controller button / key to input key code

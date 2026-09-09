@@ -114,6 +114,16 @@ namespace eka2l1 {
             return local;
         }
 
+        std::int32_t property::read_bin(std::uint8_t *destination, std::int32_t capacity) {
+            if (!is_defined()) return epoc::error_not_found;
+            if (data_type != property_type::bin_data || capacity < 0
+                || (!destination && capacity > 0)) return epoc::error_argument;
+            const auto count = std::min<std::uint32_t>(data_len, capacity);
+            if (count) std::memcpy(destination, bindata.data(), count);
+            return data_len > static_cast<std::uint32_t>(capacity)
+                ? epoc::error_overflow : static_cast<std::int32_t>(data_len);
+        }
+
         void property::subscribe(epoc::notify_info &info) {
             subscription_queue.push(&info);
         }

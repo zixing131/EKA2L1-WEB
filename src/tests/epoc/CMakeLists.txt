@@ -6,6 +6,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/mem.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vfs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/ipc_arg.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/message.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/property.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/timer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/e32img.cpp
@@ -28,8 +29,11 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sensor/buffering.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sensor/rotation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/window/surface.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/window/keycapture.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/crebinloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/domain/domain.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/featmgr.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/etel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/framework/objects.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/internet/address.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/timezone/rules.cpp

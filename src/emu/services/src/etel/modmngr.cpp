@@ -84,6 +84,22 @@ namespace eka2l1::epoc::etel {
         auto phone_obj = std::make_unique<etel_phone>(phone_info);
         phone_obj->lines_.push_back(reinterpret_cast<etel_line *>(line_entry.entity_.get()));
 
+        // Native call handling opens all four standard lines even while offline.
+        // Each line has independent status and notification subscriptions.
+        const std::pair<const char *, std::uint32_t> extra_lines[] = {
+            { "Voice2", epoc::etel_line_caps_voice },
+            { "Data", epoc::etel_line_caps_data },
+            { "Fax", epoc::etel_line_caps_fax }
+        };
+        for (const auto &[name, caps] : extra_lines) {
+            etel_module_entry entry;
+            entry.tsy_name_ = module_lowercased;
+            auto line = std::make_unique<etel_line>(line_info, name, caps);
+            phone_obj->lines_.push_back(line.get());
+            entry.entity_ = std::move(line);
+            entries_.push_back(std::move(entry));
+        }
+
         phone_entry.entity_ = std::move(phone_obj);
 
         entries_.push_back(std::move(phone_entry));
@@ -151,16 +167,13 @@ namespace eka2l1::epoc::etel {
     }
 
     std::optional<std::uint32_t> module_manager::get_entry_real_index(const std::uint32_t respective_index, const etel_entry_type type) {
-        std::int32_t i = -1;
-
-        while ((i != respective_index) && ((i < 0) || ((i < entries_.size()) && entries_[i].entity_->type() != type)))
-            i++;
-
-        if (i == entries_.size() || (i < 0)) {
-            return std::nullopt;
+        std::uint32_t matched = 0;
+        for (std::uint32_t i = 0; i < entries_.size(); ++i) {
+            if (entries_[i].entity_->type() == type && matched++ == respective_index) {
+                return i;
+            }
         }
-
-        return i;
+        return std::nullopt;
     }
 
     bool module_manager::get_entry(const std::uint32_t real_index, etel_module_entry **entry) {

@@ -39,6 +39,12 @@ namespace eka2l1 {
         , line_(line) {
     }
 
+    etel_line_subsession::~etel_line_subsession() {
+        status_change_nof_.complete(epoc::error_cancel);
+        incoming_call_nof_.complete(epoc::error_cancel);
+        call_added_nof_.complete(epoc::error_cancel);
+    }
+
     void etel_line_subsession::dispatch(service::ipc_context *ctx) {
         if (legacy_level_ <= ETEL_LEGACY_LEVEL_TRANSITION) {
             switch (ctx->msg->function) {
@@ -64,10 +70,20 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented etel line opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         } else {
             switch (ctx->msg->function) {
+            case epoc::etel_line_notify_call_added:
+                call_added_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+                break;
+
+            case epoc::etel_line_cancel_notify_call_added:
+                call_added_nof_.complete(epoc::error_cancel);
+                ctx->complete(epoc::error_none);
+                break;
+
             case epoc::etel_line_get_status:
             case epoc::etel_mobile_line_get_mobile_line_status: // Note: Not the same, just stub
                 get_status(ctx);
@@ -91,6 +107,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_ETEL, "Unimplemented etel line opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         }

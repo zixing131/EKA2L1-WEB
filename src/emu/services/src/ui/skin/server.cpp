@@ -195,6 +195,19 @@ namespace eka2l1 {
     }
 
     void akn_skin_server::merge_active_skin(eka2l1::io_system *io) {
+        // Themes only override a subset of the system's items. Avkon relies
+        // on the remaining definitions in Series60Skin (for example the
+        // indicator popup's separator, which has no file fallback).
+        const auto base_path = epoc::find_skin_file(io, DEFAULT_ALWAYS_EXIST_SKIN_PID);
+        if (base_path) {
+            auto file = io->open_file(*base_path, READ_MODE | BIN_MODE);
+            if (file) {
+                ro_file_stream stream(file.get());
+                epoc::skn_file base_skin(&stream);
+                chunk_maintainer_->import(base_skin,
+                    epoc::get_resource_path_of_skin(io, DEFAULT_ALWAYS_EXIST_SKIN_PID).value_or(u""));
+            }
+        }
         epoc::pid skin_pid = settings_->active_skin_pid();
         if (skin_pid.first == 0) {
             epoc::pid default_pid = settings_->default_skin_pid();
@@ -228,6 +241,9 @@ namespace eka2l1 {
             }
         }
 
+        if (base_path && skin_pid == DEFAULT_ALWAYS_EXIST_SKIN_PID) {
+            return;
+        }
         std::optional<std::u16string> resource_path = epoc::get_resource_path_of_skin(io, skin_pid);
 
         symfile skin_file_obj = io->open_file(skin_path.value(), READ_MODE | BIN_MODE);

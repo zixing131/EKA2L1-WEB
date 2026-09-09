@@ -259,6 +259,8 @@
         'player.backToLibrary': '回到程序库',
         'player.retry': '重试',
         'player.keySoftLeft': '左软键',
+        'player.keyMenu': '主菜单',
+        'player.keyCall': '拨号',
         'player.keySoftRight': '右软键',
         'player.keyEnd': '挂断',
         'overlay.missingAppTitle': '缺少应用参数',

@@ -108,7 +108,9 @@ if (EMSCRIPTEN)
         "SHELL:-s INITIAL_MEMORY=268435456"
         # 1GB cap: heavy runs peak well under 400MB, and a smaller reservation
         # is friendlier to iOS Safari's shared-memory accounting.
-        "SHELL:-s MAXIMUM_MEMORY=1073741824"
+        # S60 5th Edition reserves large maximum sizes for many process heaps.
+        # Keep enough WASM address space for the complete native shell.
+        "SHELL:-s MAXIMUM_MEMORY=2147483648"
         "SHELL:-s STACK_SIZE=4194304"
         "SHELL:-s USE_SDL=2"
         "SHELL:-s FULL_ES3=0"

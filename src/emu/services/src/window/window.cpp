@@ -80,6 +80,19 @@ namespace eka2l1::epoc {
         return lhs.pri_ < rhs.pri_;
     }
 
+    const event_capture_key_notifier *find_key_capture(cp_queue<event_capture_key_notifier> &requests,
+        event_key_capture_type type, std::uint32_t modifiers) {
+        const event_capture_key_notifier *best = nullptr;
+        // A priority queue's backing array is a heap, not a sorted sequence.
+        for (const auto &request : requests) {
+            if (!request.user || request.type_ != type
+                || (modifiers & request.modifiers_mask_) != request.modifiers_) continue;
+            if (!best || request.pri_ > best->pri_
+                || (request.pri_ == best->pri_ && request.id > best->id)) best = &request;
+        }
+        return best;
+    }
+
     graphics_orientation number_to_orientation(int rot) {
         switch (rot) {
         case 0: {
@@ -1066,6 +1079,43 @@ namespace eka2l1::epoc {
         }
 
         switch (cmd.header.op) {
+        case ws_cl_op_set_faded: {
+            // TWsClCmdSetSystemFaded packs black/white maps and flags into
+            // three bytes. Its flags differ from the per-window SetFaded.
+            if (cmd.header.cmd_len < sizeof(std::uint32_t)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            struct system_fade_walker : window_tree_walker {
+                std::uint32_t params;
+                bool do_it(window *win) override {
+                    if (win->type == window_kind::client && !(win->flags & window::flags_non_fading)) {
+                        win->flags &= ~window::flags_faded;
+                        if (params & 0x10000) {
+                            win->flags |= window::flags_faded;
+                        }
+                        win->black_map = (params & 0x20000) ? 128 : (params & 0xFF);
+                        win->white_map = (params & 0x20000) ? 255 : ((params >> 8) & 0xFF);
+                    }
+                    return false;
+                }
+            } walker;
+            std::memcpy(&walker.params, cmd.data_ptr, sizeof(walker.params));
+            screen *scr = primary_device ? primary_device->scr : get_ws().get_screen(0);
+            if (scr) {
+                const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+                scr->root->walk_tree(&walker, window_tree_walk_style::bonjour_children);
+            }
+            ctx.complete(epoc::error_none);
+            break;
+        }
+
+        case ws_cl_op_clear_hot_keys:
+            // No system hotkeys are installed by this window server. Clearing
+            // that empty set still needs a reply to RWsSession::ClearHotKeys.
+            ctx.complete(epoc::error_none);
+            break;
+
         // Gets the total number of window groups with specified priority currently running
         // in the window server.
         case ws_cl_op_num_window_groups:
@@ -1290,6 +1340,16 @@ namespace eka2l1::epoc {
             get_double_click_settings(ctx, cmd);
             break;
 
+        case ws_cl_op_start_custom_text_cursor:
+        case ws_cl_op_complete_custom_text_cursor:
+            // SetCustomTextCursor is synchronous. Bitmap cursor registration
+            // is not implemented, so return an error instead of leaving the
+            // caller waiting forever (EikSrv registers these during startup).
+            // A negative start result also stops ws32 from using a bogus sprite
+            // handle or submitting members for an unregistered cursor.
+            ctx.complete(epoc::error_not_supported);
+            break;
+
         default:
             LOG_INFO(SERVICE_WINDOW, "Unimplemented ClOp: 0x{:x}", cmd.header.op);
             break;
@@ -1301,10 +1361,6 @@ namespace eka2l1::epoc {
         notifier.id = id;
 
         window_server::key_capture_request_queue &rqueue = get_ws().key_capture_requests[notifier.keycode_];
-
-        if (!rqueue.empty() && notifier.pri_ == 0) {
-            notifier.pri_ = rqueue.top().pri_ + 1;
-        }
 
         rqueue.push(std::move(notifier));
 
@@ -1336,6 +1392,19 @@ namespace eka2l1::epoc {
 }
 
 namespace eka2l1 {
+    void window_server::remove_key_captures(epoc::window *owner, std::uint32_t id) {
+        for (auto &[key, requests] : key_capture_requests) {
+            key_capture_request_queue retained;
+            while (!requests.empty()) {
+                const auto request = requests.top();
+                requests.pop();
+                if (request.user != owner || (id && request.id != id)) retained.push(request);
+            }
+            requests = std::move(retained);
+        }
+    }
+
+
     std::string get_winserv_name_by_epocver(const epocver ver) {
         if (ver < epocver::eka2) {
             return "Windowserver";

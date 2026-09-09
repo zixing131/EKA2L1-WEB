@@ -105,13 +105,13 @@ namespace eka2l1::mem {
 
         if (mul_chunk->is_local && mul_chunk->own_process_ != this) {
             return false;
-        } else {
-            // Already attach it
-            return true;
         }
 
-        if (std::find(attached_.begin(), attached_.end(), mul_chunk) == attached_.end()) {
-            return false;
+        if (mul_chunk->own_process_ == this ||
+            std::find(attached_.begin(), attached_.end(), mul_chunk) != attached_.end()) {
+            // The owner already has the mapping, and a second open by the same
+            // process must not duplicate its attachment record.
+            return true;
         }
 
         attached_.push_back(mul_chunk);
@@ -123,7 +123,7 @@ namespace eka2l1::mem {
         for (std::size_t i = 0; i < mul_chunk->page_tabs_.size(); i++) {
             if (mul_chunk->page_tabs_[i] != 0xFFFFFFFF) {
                 control_->assign_page_table(control_->get_page_table_by_id(mul_chunk->page_tabs_[i]),
-                    static_cast<vm_address>(mul_chunk->base_ + (i << control_->page_size_bits_)),
+                    static_cast<vm_address>(mul_chunk->base_ + (i << control_->chunk_shift_)),
                     0, &addr_space_id_, 1);
             }
         }
@@ -151,7 +151,7 @@ namespace eka2l1::mem {
         // Unassign page tables
         for (std::size_t i = 0; i < mul_chunk->page_tabs_.size(); i++) {
             if (mul_chunk->page_tabs_[i] != 0xFFFFFFFF) {
-                control_->assign_page_table(nullptr, static_cast<vm_address>(mul_chunk->base_ + (i << control_->page_size_bits_)),
+                control_->assign_page_table(nullptr, static_cast<vm_address>(mul_chunk->base_ + (i << control_->chunk_shift_)),
                     0, &addr_space_id_, 1);
             }
         }

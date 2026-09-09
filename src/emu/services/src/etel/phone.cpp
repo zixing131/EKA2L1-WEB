@@ -34,6 +34,19 @@ namespace eka2l1 {
         , phone_(phone) {
     }
 
+    etel_phone_subsession::~etel_phone_subsession() {
+        mode_change_nof_.complete(epoc::error_cancel);
+        network_selection_change_nof_.complete(epoc::error_cancel);
+        stop_in_dtmf_string_nof_.complete(epoc::error_cancel);
+        network_registration_status_change_nof_.complete(epoc::error_cancel);
+        signal_strength_change_nof_.complete(epoc::error_cancel);
+        current_network_change_nof_.complete(epoc::error_cancel);
+        nitz_info_change_nof_.complete(epoc::error_cancel);
+        indicator_change_nof_.complete(epoc::error_cancel);
+        battery_info_change_nof_.complete(epoc::error_cancel);
+        current_network_no_location_change_nof_.complete(epoc::error_cancel);
+    }
+
     void etel_phone_subsession::get_status(service::ipc_context *ctx) {
         ctx->write_data_to_descriptor_argument<epoc::etel_phone_status>(0, phone_->status_);
         ctx->complete(epoc::error_none);
@@ -440,6 +453,54 @@ namespace eka2l1 {
 
             case epoc::etel_mobile_phone_get_current_mode:
                 get_current_mode(ctx);
+                break;
+
+            case 88: // EETelPhoneSetEmergencyClient
+                // The HLE phone has no separate emergency heap to reserve.
+                ctx->complete(epoc::error_none);
+                break;
+
+            case epoc::etel_mobile_phone_get_network_selection_setting: {
+                auto setting = ctx->get_argument_data_from_descriptor<epoc::etel_phone_network_selection_v1>(0);
+                if (!setting) {
+                    ctx->complete(epoc::error_argument);
+                    break;
+                }
+                setting->method_ = 1; // ENetworkSelectionAutomatic
+                setting->band_class_ = 0;
+                setting->operation_mode_ = 0;
+                ctx->write_data_to_descriptor_argument(0, *setting, nullptr, true);
+                ctx->complete(epoc::error_none);
+                break;
+            }
+
+            case epoc::etel_mobile_phone_notify_network_selection_setting_change:
+                network_selection_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+                break;
+
+            case epoc::etel_mobile_phone_notify_network_selection_setting_change_cancel:
+                network_selection_change_nof_.complete(epoc::error_cancel);
+                ctx->complete(epoc::error_none);
+                break;
+
+            case epoc::etel_mobile_phone_notify_stop_in_dtmf_string:
+                stop_in_dtmf_string_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+                break;
+
+            case epoc::etel_mobile_phone_notify_stop_in_dtmf_string_cancel:
+                stop_in_dtmf_string_nof_.complete(epoc::error_cancel);
+                ctx->complete(epoc::error_none);
+                break;
+
+            case epoc::etel_mobile_phone_notify_mode_change:
+                // The offline radio mode stays unchanged. Keep the observer
+                // pending until cancellation, like the other phone notifiers.
+                mode_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+                break;
+
+            case epoc::etel_mobile_phone_notify_mode_change_cancel:
+                mode_change_nof_.complete(epoc::error_cancel);
+                ctx->complete(epoc::error_none);
                 break;
 
             case epoc::etel_mobile_phone_get_network_registration_status:

@@ -19,6 +19,7 @@
  */
 
 #include <common/log.h>
+#include <loader/e32img.h>
 
 #include <services/context.h>
 #include <services/featmgr/featmgr.h>
@@ -29,6 +30,47 @@
 #include <vfs/vfs.h>
 
 namespace eka2l1 {
+    std::vector<epoc::uid> read_static_features(const loader::e32img &image) {
+        const auto &header = image.header;
+        if (header.code_offset > image.data.size()
+            || header.code_size > image.data.size() - header.code_offset) return {};
+        const auto *code = reinterpret_cast<const std::uint8_t *>(image.data.data() + header.code_offset);
+        // CStaticFeatures::FeatureSupported performs a linear search ending at
+        // 0x80000000. Recognize the complete Thumb search loop, with only its
+        // PC-relative LDR displacement variable, rather than guessing where a
+        // list of small integers starts in an arbitrary DLL.
+        static constexpr std::uint8_t search_loop[] = {
+            0x00,0x20,0x01,0x23,0x10,0xB5,0x00,0x4C,0xDB,0x07,0x04,0xE0,
+            0x91,0x42,0x01,0xD1,0x01,0x20,0x10,0xBD,0x40,0x1C,0x82,0x00,
+            0xA2,0x58,0x9A,0x42,0xF6,0xD1,0x00,0x20,0x10,0xBD
+        };
+        auto read_word = [code](std::size_t offset) {
+            std::uint32_t value;
+            std::memcpy(&value, code + offset, sizeof(value));
+            return value;
+        };
+        for (std::size_t offset = 0; offset + sizeof(search_loop) <= header.code_size; offset += 2) {
+            bool matches = true;
+            for (std::size_t i = 0; i < sizeof(search_loop); ++i) {
+                if (i != 6 && code[offset + i] != search_loop[i]) { matches = false; break; }
+            }
+            if (!matches) continue;
+            const std::uint64_t literal = ((std::uint64_t(header.code_base) + offset + 10) & ~3ULL)
+                + code[offset + 6] * 4ULL;
+            if (literal < header.code_base || literal - header.code_base + 4 > header.code_size) continue;
+            const std::uint32_t table = read_word(literal - header.code_base);
+            if (table < header.code_base) continue;
+            std::vector<epoc::uid> features;
+            for (std::uint64_t pos = std::uint64_t(table) - header.code_base;
+                pos + 4 <= header.code_size && features.size() < 4096; pos += 4) {
+                const auto uid = read_word(pos);
+                if (uid == 0x80000000U) return features;
+                features.push_back(uid);
+            }
+        }
+        return {};
+    }
+
     featmgr_server::featmgr_server(system *sys)
         : service::server(sys->get_kernel_system(), sys, nullptr, "!FeatMgrServer", true) {
         REGISTER_IPC(featmgr_server, feature_supported, EFeatMgrFeatureSupported, "FeatMgr::FeatureSupported");
@@ -123,6 +165,16 @@ namespace eka2l1 {
     }
 
     bool featmgr_server::load_featmgr_configs(io_system *io) {
+        // On S60 the ROM's immutable feature list is supplied by this DLL;
+        // featreg.cfg alone often contains only a few overrides/ranges.
+        if (symfile static_file = io->open_file(u"Z:\\sys\\bin\\StaticFeatures.dll", READ_MODE | BIN_MODE)) {
+            ro_file_stream stream(static_file.get());
+            if (auto image = loader::parse_e32img(&stream, false)) {
+                auto features = read_static_features(*image);
+                LOG_INFO(SERVICE_FEATMGR, "Loaded {} ROM static features", features.size());
+                enable_features.insert(enable_features.end(), features.begin(), features.end());
+            }
+        }
         symfile cfg_file = io->open_file(u"Z:\\private\\102744CA\\featreg.cfg", READ_MODE | BIN_MODE);
 
         if (!cfg_file) {

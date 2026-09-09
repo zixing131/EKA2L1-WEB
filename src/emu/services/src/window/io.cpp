@@ -23,6 +23,9 @@
 #include <services/window/window.h>
 
 #include <kernel/kernel.h>
+#include <common/log.h>
+
+extern bool eka2l1_shell_leave_probe;
 
 namespace eka2l1::epoc {
     void window_pointer_focus_walker::add_new_event(const epoc::event &evt) {
@@ -156,7 +159,7 @@ namespace eka2l1::epoc {
             const std::uint32_t the_code = epoc::map_scancode_to_keycode(static_cast<std_scan_code>(
                 evt.key_evt_.scancode));
 
-            const std::uint64_t data_for_repeatable = extra_event.key_evt_.scancode | (static_cast<std::uint64_t>(extra_event.key_evt_.code) << 32);
+            const std::uint64_t data_for_repeatable = extra_event.key_evt_.scancode | (static_cast<std::uint64_t>(the_code) << 32);
 
             if (!dont_send_extra_key_event) {
                 extra_event.key_evt_.code = the_code;
@@ -166,22 +169,35 @@ namespace eka2l1::epoc {
                     extra_event.key_evt_.modifiers = event_modifier_repeatable;
             }
 
-            evt.handle = focus->get_client_handle();
-            extra_event.handle = focus->get_client_handle();
+            // CaptureKey uses a translated key code; CaptureKeyUpsAndDowns
+            // uses the scan code. Route each event once to its winning owner.
+            auto target_for = [&](std::uint32_t code, event_key_capture_type type) -> epoc::window * {
+                const auto found = serv_->key_capture_requests.find(code);
+                if (found == serv_->key_capture_requests.end()) return focus;
+                const auto *capture = find_key_capture(found->second, type, evt.key_evt_.modifiers);
+                return capture ? capture->user : focus;
+            };
+            epoc::window *raw_target = evt.type == epoc::event_code::key
+                ? target_for(the_code, event_key_capture_type::normal)
+                : target_for(evt.key_evt_.scancode, event_key_capture_type::up_and_downs);
+            epoc::window *key_target = target_for(the_code, event_key_capture_type::normal);
+            evt.handle = raw_target->get_client_handle();
+            extra_event.handle = key_target->get_client_handle();
+
+            if (eka2l1_shell_leave_probe) {
+                LOG_WARN(SERVICE_WINDOW, "[key-route] type={} scan={} key={} focus={} raw={} key-target={}",
+                    static_cast<int>(evt.type), evt.key_evt_.scancode, the_code,
+                    focus->client->get_client()->name(), raw_target->client->get_client()->name(),
+                    key_target->client->get_client()->name());
+            }
 
             kern->lock();
-            focus->queue_event(evt);
+            raw_target->queue_event(evt);
+            if (!dont_send_extra_key_event) key_target->queue_event(extra_event);
             kern->unlock();
 
-            if (!dont_send_extra_key_event) {
-                // Give it a single key event also
-                kern->lock();
-                focus->queue_event(extra_event);
-                kern->unlock();
-
-                if ((evt.type == epoc::event_code::key_down) && repeatable) {
-                    timing->schedule_event(serv_->initial_repeat_delay_, serv_->repeatable_event_, data_for_repeatable);
-                }
+            if (!dont_send_extra_key_event && repeatable) {
+                timing->schedule_event(serv_->initial_repeat_delay_, serv_->repeatable_event_, data_for_repeatable);
             }
 
             if ((evt.type == epoc::event_code::key_up) && repeatable) {
@@ -194,38 +210,7 @@ namespace eka2l1::epoc {
                 kern->unlock();
             }
 
-            // Iterates through key capture requests and deliver those in needs.key_capture_request_queue &rqueue = key_capture_requests[extra_key_evt.key_evt_.code];
-            window_server::key_capture_request_queue &rqueue = serv_->key_capture_requests[evt.key_evt_.code];
 
-            for (auto ite = rqueue.end(); ite != rqueue.begin(); ite--) {
-                // No need to deliver twice.
-                if (ite->user->id == focus->id) {
-                    break;
-                }
-
-                switch (ite->type_) {
-                case epoc::event_key_capture_type::normal:
-                    extra_event.handle = ite->user->get_client_handle();
-
-                    kern->lock();
-                    ite->user->queue_event(extra_event);
-                    kern->unlock();
-
-                    break;
-
-                case epoc::event_key_capture_type::up_and_downs:
-                    evt.handle = ite->user->get_client_handle();
-
-                    kern->lock();
-                    ite->user->queue_event(evt);
-                    kern->unlock();
-
-                    break;
-
-                default:
-                    break;
-                }
-            }
         }
 
         evts_.clear();

@@ -143,6 +143,9 @@ namespace eka2l1 {
 
     etel_session::~etel_session() {
         etel_server *serv = server<etel_server>();
+        if (serv->priority_client_ == this) {
+            serv->priority_client_ = nullptr;
+        }
         io_system *io = serv->get_system()->get_io_system();
 
         serv->mngr_.unload_from_sessions(io, client_ss_uid_);
@@ -295,7 +298,7 @@ namespace eka2l1 {
         // Try to get the subsession
         std::optional<std::uint32_t> subsession_handle = ctx->get_argument_value<std::uint32_t>(2);
 
-        if (!subsession_handle || subsession_handle.value() > subsessions_.size()) {
+        if (!subsession_handle || subsession_handle.value() == 0 || subsession_handle.value() > subsessions_.size()) {
             LOG_ERROR(SERVICE_ETEL, "Subsession handle not available");
             ctx->complete(epoc::error_argument);
             return;
@@ -317,12 +320,25 @@ namespace eka2l1 {
                 return common::compare_ignore_case(common::utf8_to_ucs2(line->name_), name_of_object.value()) == 0;
             });
 
-            if (line_ite != phone->lines_.end()) {
+            if (common::compare_ignore_case(name_of_object.value(), u"CUSTOMAPI") == 0) {
+                new_sub = std::make_unique<etel_custom_subsession>(this, server<etel_server>()->legacy_level());
+            } else if (name_of_object.value() == u"S22") {
+                // KETelConferenceCall, opened as a child of RMobilePhone.
+                new_sub = std::make_unique<etel_conference_subsession>(this, server<etel_server>()->legacy_level());
+            } else if (name_of_object.value() == u"S21") {
+                // KETelUssdMessaging, also used by the native phone engine.
+                new_sub = std::make_unique<etel_ussd_subsession>(this, server<etel_server>()->legacy_level());
+            } else if (line_ite != phone->lines_.end()) {
                 // Create the subsession
                 new_sub = std::make_unique<etel_line_subsession>(this, *line_ite, server<etel_server>()->legacy_level());
             } else {
                 LOG_ERROR(SERVICE_ETEL, "Unable to open subsession with object name {}", common::ucs2_to_utf8(name_of_object.value()));
             }
+        } else if (sub->type() == etel_subsession_type_line && name_of_object.value() == u"::") {
+            // RCall::OpenNewCall asks its line to allocate an idle call slot.
+            new_sub = std::make_unique<etel_call_subsession>(this, server<etel_server>()->legacy_level());
+            const auto name = common::utf8_to_ucs2("Call" + std::to_string(subsessions_.size() + 1));
+            ctx->write_arg(1, name);
         } else {
             LOG_ERROR(SERVICE_ETEL, "Unhandled subsession type to open from {}", static_cast<int>(sub->type()));
         }
@@ -481,6 +497,21 @@ namespace eka2l1 {
                 // or the application's UI thread remains blocked forever.
                 ctx->complete(epoc::error_none);
                 break;
+
+            case epoc::etel_set_priority_client:
+            case epoc::etel_set_priority_client_v2: {
+                // The phone application reserves the single priority session
+                // before initializing its engine. HLE requests do not need a
+                // separate guest emergency heap, but ownership still matters.
+                auto *serv = server<etel_server>();
+                if (serv->priority_client_) {
+                    ctx->complete(epoc::error_already_exists);
+                } else {
+                    serv->priority_client_ = this;
+                    ctx->complete(epoc::error_none);
+                }
+                break;
+            }
 
             case epoc::etel_line_enumerate_call:
                 line_enumerate_call(ctx);

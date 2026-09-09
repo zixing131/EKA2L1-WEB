@@ -61,7 +61,9 @@ namespace eka2l1::mem {
             return nullptr;
         }
 
-        return cur_dir_->get_pointer(addr);
+        // Global mappings can predate this process's page directory. Resolve
+        // them through the controller, as kernel-side memory access does.
+        return manager_->get_host_pointer(current_addr_space(), addr);
     }
 
     page_info *mmu_multiple::get_page_info(const vm_address addr) {
@@ -69,6 +71,6 @@ namespace eka2l1::mem {
             return nullptr;
         }
 
-        return cur_dir_->get_page_info(addr);
+        return manager_->get_page_info(current_addr_space(), addr);
     }
 }

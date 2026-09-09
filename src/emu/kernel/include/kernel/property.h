@@ -114,6 +114,8 @@ namespace eka2l1 {
 
             int get_int();
             std::vector<uint8_t> get_bin();
+            service::property_type get_data_type() const { return data_type; }
+            std::int32_t read_bin(std::uint8_t *destination, std::int32_t capacity);
 
             template <typename T>
             std::optional<T> get_pkg() {

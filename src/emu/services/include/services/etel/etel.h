@@ -70,6 +70,7 @@ namespace eka2l1 {
         friend struct etel_session;
 
         epoc::etel::module_manager mngr_;
+        etel_session *priority_client_ = nullptr;
 
         service::property *call_status_prop_;
         service::property *network_bars_prop_;

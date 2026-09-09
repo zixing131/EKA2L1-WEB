@@ -109,6 +109,7 @@ namespace eka2l1::epoc {
     }
 
     window_group::~window_group() {
+        client->get_ws().remove_key_captures(this);
         if (uid_owner_change_process) {
             uid_owner_change_process->unregister_uid_type_change_callback(uid_owner_change_callback_handle);
         }
@@ -261,6 +262,14 @@ namespace eka2l1::epoc {
 
             ctx.complete(client->add_event_notifier(capture_key_notify));
 
+            break;
+        }
+
+        case EWsWinOpCancelCaptureKey:
+        case EWsWinOpCancelCaptureKeyUpsAndDowns: {
+            const auto capture_id = *reinterpret_cast<const std::uint32_t *>(cmd.data_ptr);
+            if (capture_id) client->get_ws().remove_key_captures(this, capture_id);
+            ctx.complete(epoc::error_none);
             break;
         }
 

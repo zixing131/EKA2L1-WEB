@@ -20,6 +20,7 @@
 #include <common/log.h>
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
+#include <kernel/property.h>
 #include <services/audio/mmf/audio.h>
 #include <services/audio/mmf/dev.h>
 #include <system/epoc.h>
@@ -32,6 +33,18 @@ namespace eka2l1 {
         : service::typical_server(sys, MMF_AUDIO_SERVER_NAME)
         , dev_(dev)
         , flags_(0) {
+        // Native audio-policy observers (including 5800 frcpplugin) read this
+        // list as a count, padding, and ten 64-bit client IDs. Publish an empty
+        // list before they subscribe; an absent provider leaves their stack
+        // package uninitialized. HLE has no policy-managed clients at startup.
+        auto *kern = sys->get_kernel_system();
+        auto *clients = kern->get_prop(0x101F457F, 2);
+        if (!clients) {
+            clients = kern->create<service::property>();
+            clients->first = 0x101F457F;
+            clients->second = 2;
+        }
+        if (!clients->is_defined()) clients->define(service::property_type::bin_data, 88);
     }
 
     void mmf_audio_server::connect(service::ipc_context &context) {

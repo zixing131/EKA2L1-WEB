@@ -259,6 +259,8 @@
         'player.backToLibrary': 'Back to library',
         'player.retry': 'Retry',
         'player.keySoftLeft': 'Left soft key',
+        'player.keyMenu': 'Menu',
+        'player.keyCall': 'Call',
         'player.keySoftRight': 'Right soft key',
         'player.keyEnd': 'End call',
         'overlay.missingAppTitle': 'Missing app parameter',

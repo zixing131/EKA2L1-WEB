@@ -23,6 +23,7 @@
 #include <utils/reqsts.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace eka2l1 {
@@ -36,7 +37,11 @@ namespace eka2l1 {
 
     enum etel_subsession_type {
         etel_subsession_type_phone = 0,
-        etel_subsession_type_line = 1
+        etel_subsession_type_line = 1,
+        etel_subsession_type_custom = 2,
+        etel_subsession_type_conference = 3,
+        etel_subsession_type_call = 4,
+        etel_subsession_type_ussd = 5
     };
 
     struct etel_subsession {
@@ -58,6 +63,37 @@ namespace eka2l1 {
         virtual ~etel_subsession() = default;
     };
 
+    struct etel_custom_subsession : public etel_subsession {
+        using etel_subsession::etel_subsession;
+        void dispatch(service::ipc_context *ctx) override;
+        etel_subsession_type type() const override { return etel_subsession_type_custom; }
+    };
+
+    struct etel_conference_subsession : public etel_subsession {
+        epoc::notify_info notifications_[3];
+        using etel_subsession::etel_subsession;
+        ~etel_conference_subsession() override;
+        void dispatch(service::ipc_context *ctx) override;
+        etel_subsession_type type() const override { return etel_subsession_type_conference; }
+    };
+
+    struct etel_call_subsession : public etel_subsession {
+        std::map<int, epoc::notify_info> notifications_;
+        using etel_subsession::etel_subsession;
+        ~etel_call_subsession() override;
+        void dispatch(service::ipc_context *ctx) override;
+        etel_subsession_type type() const override { return etel_subsession_type_call; }
+    };
+
+    struct etel_ussd_subsession : public etel_subsession {
+        epoc::notify_info receive_nof_;
+        epoc::notify_info release_nof_;
+        using etel_subsession::etel_subsession;
+        ~etel_ussd_subsession() override;
+        void dispatch(service::ipc_context *ctx) override;
+        etel_subsession_type type() const override { return etel_subsession_type_ussd; }
+    };
+
     struct etel_phone_subsession : public etel_subsession {
         etel_phone *phone_;
         epoc::notify_info network_registration_status_change_nof_;
@@ -67,6 +103,9 @@ namespace eka2l1 {
         epoc::notify_info indicator_change_nof_;
         epoc::notify_info battery_info_change_nof_;
         epoc::notify_info current_network_no_location_change_nof_;
+        epoc::notify_info mode_change_nof_;
+        epoc::notify_info network_selection_change_nof_;
+        epoc::notify_info stop_in_dtmf_string_nof_;
 
     protected:
         void get_status(service::ipc_context *ctx);
@@ -108,6 +147,7 @@ namespace eka2l1 {
 
     public:
         explicit etel_phone_subsession(etel_session *session, etel_phone *phone, const etel_legacy_level lvl);
+        ~etel_phone_subsession() override;
 
         void dispatch(service::ipc_context *ctx) override;
 
@@ -121,6 +161,7 @@ namespace eka2l1 {
         etel_line *line_;
         epoc::notify_info status_change_nof_;
         epoc::notify_info incoming_call_nof_;
+        epoc::notify_info call_added_nof_;
 
     protected:
         void get_status(service::ipc_context *ctx);
@@ -131,6 +172,7 @@ namespace eka2l1 {
 
     public:
         explicit etel_line_subsession(etel_session *session, etel_line *line, const etel_legacy_level lvl);
+        ~etel_line_subsession() override;
 
         void dispatch(service::ipc_context *ctx) override;
 

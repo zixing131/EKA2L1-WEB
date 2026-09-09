@@ -99,6 +99,7 @@ namespace eka2l1::epoc {
         std::vector<akn_skin_chunk_area> areas_;
 
         std::uint32_t level_;
+        std::uint32_t filename_id_base_ = 0;
         std::uint32_t flags_;
 
         std::unique_ptr<akn_skin_bitmap_store> bitmap_store_;

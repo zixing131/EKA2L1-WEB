@@ -27,6 +27,13 @@
 #include <catch2/catch.hpp>
 
 #include <common/buffer.h>
+#include <config/config.h>
+#include <cpu/arm_factory.h>
+#include <kernel/chunk.h>
+#include <kernel/kernel.h>
+#include <kernel/timing.h>
+#include <mem/mem.h>
+#include <services/ui/skin/chunk_maintainer.h>
 
 #include <cstdint>
 #include <vector>
@@ -153,4 +160,50 @@ TEST_CASE("skn_image_table_keeps_distinct_items_apart", "skn_file") {
     REQUIRE(skn.img_tabs_[0x5678].images.size() == 9);
     REQUIRE(skn.img_tabs_[0x1234].images.front() == 0x100);
     REQUIRE(skn.img_tabs_[0x5678].images.front() == 0x200);
+}
+
+TEST_CASE("skin theme overrides preserve base items and filename references", "[skin-merge]") {
+    const auto flags = GENERATE(0u, static_cast<unsigned>(epoc::akn_skin_chunk_maintainer_lookup_use_linked_list));
+    config::state conf;
+    ntimer timing(1000000);
+    auto monitor = arm::create_exclusive_monitor(arm_emulator_type::dyncom, 1);
+    auto cpu = arm::create_core(monitor.get(), arm_emulator_type::dyncom);
+    memory_system memory(monitor.get(), &conf, mem::mem_model_type::multiple, false);
+    kernel_system kern(nullptr, &timing, nullptr, &conf, nullptr, nullptr, cpu.get(), nullptr);
+    kernel::chunk shared(&kern, &memory, nullptr, "skin-test", 0, 384 * 1024, 384 * 1024,
+        prot_read_write, kernel::chunk_type::normal, kernel::chunk_access::global, kernel::chunk_attrib::none);
+    epoc::akn_skin_chunk_maintainer maintainer(&shared, 4096, flags);
+    auto data = make_skin({});
+    common::ro_buf_stream stream(data.data(), data.size());
+    epoc::skn_file base(&stream);
+    base.filenames_[0] = u"base.mbm";
+    // These IDs collide in the linked-list table. Overriding the middle
+    // entry must preserve the rest of the chain as well as the v1 stride.
+    for (unsigned id : {1u, 129u, 257u}) {
+        epoc::skn_bitmap_info bitmap{};
+        bitmap.id_hash = id;
+        bitmap.filename_id = 0;
+        bitmap.bmp_idx = id;
+        bitmap.mask_bitmap_idx = 0xFFFFFFFF;
+        base.bitmaps_[id] = bitmap;
+    }
+    REQUIRE(maintainer.import(base, u"z:\\base\\"));
+    epoc::skn_file theme(&stream);
+    theme.filenames_[0] = u"theme.mbm";
+    theme.bitmaps_[129] = base.bitmaps_[129];
+    theme.bitmaps_[129].bmp_idx = 999;
+    REQUIRE(maintainer.import(theme, u"z:\\theme\\"));
+    for (unsigned id : {1u, 129u, 257u}) {
+        auto *def = maintainer.get_item_definition({id, 0});
+        REQUIRE(def);
+        CHECK(def->id_ == epoc::pid(id, 0));
+        auto *payload = def->data_.get_relative<std::uint32_t>(
+            maintainer.get_area_base(epoc::akn_skin_chunk_area_base_offset::data_area_base));
+        REQUIRE(payload);
+        CHECK(payload[2] == (id == 129 ? 999 : id));
+        auto *filenames = static_cast<std::uint8_t *>(
+            maintainer.get_area_base(epoc::akn_skin_chunk_area_base_offset::filename_area_base));
+        const std::u16string filename(reinterpret_cast<char16_t *>(filenames + payload[1]));
+        CHECK(filename == (id == 129 ? u"z:\\theme\\theme.mbm" : u"z:\\base\\base.mbm"));
+    }
 }

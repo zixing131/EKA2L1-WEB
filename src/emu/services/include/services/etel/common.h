@@ -98,6 +98,8 @@ namespace eka2l1::epoc {
         etel_line_enumerate_call = 34,
         etel_line_get_call_info = 35,
         etel_line_get_status = 39,
+        etel_line_notify_call_added = 40,
+        etel_line_cancel_notify_call_added = 41,
         etel_phone_enumerate_lines = 46,
         etel_phone_get_line_info = 49,
         etel_enumerate_phones = 54,
@@ -111,6 +113,8 @@ namespace eka2l1::epoc {
         etel_line_notify_incoming_call = 71,
         etel_line_cancel_notify_incoming_call = 72,
         etel_phone_init = 75,
+        etel_set_priority_client = 77,
+        etel_set_priority_client_v2 = 90,
         etel_mobile_phone_transition_get_identity_caps = 3015,
         etel_mobile_phone_transition_get_phone_id = 3016,
         etel_mobile_phone_transition_get_subscriber_id = 3017,
@@ -126,21 +130,28 @@ namespace eka2l1::epoc {
         etel_mobile_phone_get_signal_strength = 20060,
         etel_mobile_phone_notify_battery_info_change = 20067,
         etel_mobile_phone_notify_indicator_changes = 20084,
+        etel_mobile_phone_notify_mode_change = 20086,
         etel_mobile_phone_notify_network_registration_status_change = 20092,
         etel_mobile_phone_notify_signal_strength_change = 20097,
+        etel_mobile_phone_notify_stop_in_dtmf_string = 21023,
         // cancel = original + 500
         etel_mobile_line_cancel_notify_status_change = 20524,
         etel_mobile_phone_get_network_registration_status_cancel = 20554,
         etel_mobile_phone_notify_battery_info_change_cancel = 20567,
         etel_mobile_phone_notify_indicator_changes_cancel = 20584,
+        etel_mobile_phone_notify_mode_change_cancel = 20586,
         etel_mobile_phone_notify_network_registration_status_change_cancel = 20592,
         etel_mobile_phone_notify_signal_strength_change_cancel = 20597,
+        etel_mobile_phone_notify_stop_in_dtmf_string_cancel = 21523,
         etel_mobile_phone_get_home_network = 22004,
         etel_mobile_phone_get_nitz_info = 22008,
+        etel_mobile_phone_get_network_selection_setting = 22010,
         etel_mobile_phone_get_phone_id = 22012,
         etel_mobile_phone_get_subscriber_id = 22017,
         etel_mobile_phone_notify_nitz_info_change = 22022,
+        etel_mobile_phone_notify_network_selection_setting_change = 22023,
         etel_mobile_phone_notify_nitz_info_change_cancel = 22522,
+        etel_mobile_phone_notify_network_selection_setting_change_cancel = 22523,
         etel_mobile_phone_get_current_network_no_location = 24011,
         etel_mobile_phone_notify_current_network_no_location_change = 24015,
         etel_mobile_phone_notify_current_network_no_location_change_cancel = 24515,
@@ -320,6 +331,12 @@ namespace eka2l1::epoc {
 
     struct etel_multimode_type {
         std::int32_t extension_id_;
+    };
+
+    struct etel_phone_network_selection_v1 : etel_multimode_type {
+        std::int32_t method_;
+        std::int32_t band_class_;
+        std::int32_t operation_mode_;
     };
 
     struct etel_old_bsc_network_id {
