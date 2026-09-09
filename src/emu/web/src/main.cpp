@@ -3762,6 +3762,117 @@ void wasm_set_paused(int paused) {
     g_state.paused = (paused != 0);
 }
 
+// A real S60 handset lets AknCapServer and the Phone application turn the
+// application/green keys into window-group switches.  The ROM services run in
+// phone mode, but some device dumps (including the 5320) stop after consuming
+// those raw keys and never perform the final switch.  Reuse the already-running
+// native group instead of spawning a second copy of Menu or Log.
+static bool focus_phone_shell_group(const std::string_view owner_name) {
+    if (!g_state.phone_boot_active || !g_state.winserv) {
+        return false;
+    }
+
+    epoc::screen *screen = g_state.winserv->get_current_focus_screen();
+    if (!screen) {
+        return false;
+    }
+
+    for (epoc::window_group *group = screen->get_group_chain(); group;
+         group = reinterpret_cast<epoc::window_group *>(group->sibling)) {
+        if (!group->can_receive_focus() || !group->client || !group->client->get_client()) {
+            continue;
+        }
+
+        const std::string owner = common::lowercase_string(group->client->get_client()->name());
+        if (owner != owner_name) {
+            continue;
+        }
+
+        group->set_position(0);
+        return screen->focus == group;
+    }
+
+    return false;
+}
+
+static bool launch_phone_log() {
+    constexpr std::uint32_t S60_LOG_APP_UID = 0x101F4CD5;
+    static const std::u16string LOG_EXECUTABLE = u"z:\\sys\\bin\\Logs.exe";
+
+    if (!g_state.phone_boot_active || !g_state.symsys) {
+        return false;
+    }
+
+    kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern || !g_state.symsys->get_io_system()->exist(LOG_EXECUTABLE)) {
+        return false;
+    }
+
+    // A second press while Logs is still constructing its window group must
+    // not spawn another copy.
+    for (const auto &process_object : kern->get_process_list()) {
+        const auto *process = reinterpret_cast<const kernel::process *>(process_object.get());
+        const std::string process_name = common::lowercase_string(process->raw_name());
+        if ((process->get_exit_type() == kernel::entity_exit_type::pending)
+            && ((process_name == "log") || (process_name == "logs"))) {
+            return true;
+        }
+    }
+
+    kern->lock();
+    kernel::process *process = kern->spawn_new_process(
+        LOG_EXECUTABLE, u"", S60_LOG_APP_UID, 0x80000);
+    if (!process) {
+        kern->unlock();
+        return false;
+    }
+
+    // S60 3rd Edition applications read CApaCommandLine from environment slot
+    // 1.  This is the same payload AppArc builds for a normal application run,
+    // without waiting for its registry mutex during native phone startup.
+    epoc::apa::command_line command;
+    command.launch_cmd_ = epoc::apa::command_run;
+    command.executable_path_ = LOG_EXECUTABLE;
+    command.default_screen_number_ = 0;
+    std::string environment = command.to_buffer();
+    process->set_arg_slot(1, reinterpret_cast<std::uint8_t *>(environment.data()), environment.size());
+
+    const bool started = process->run();
+    kern->unlock();
+    if (started) {
+        g_state.paused = false;
+    }
+    return started;
+}
+
+static void finish_phone_system_key(const int scancode) {
+    static bool log_launch_pending = false;
+
+    switch (scancode) {
+    case epoc::std_key_application_0:
+    case epoc::std_key_menu:
+        focus_phone_shell_group("menu");
+        break;
+    case epoc::std_key_yes:
+        // The green key opens the call log on S60.  Focus an existing Log
+        // instance, or start the ROM application on first use.
+        if (!focus_phone_shell_group("log") && !log_launch_pending) {
+            log_launch_pending = true;
+            // Process creation must run after wasm_send_key has returned;
+            // launching from the input or frame callback re-enters the kernel.
+            emscripten_async_call([](void *) {
+                log_launch_pending = false;
+                if (!focus_phone_shell_group("log")) {
+                    launch_phone_log();
+                }
+            }, nullptr, 250);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 /**
  * Inject a key event using a raw Symbian scancode (epoc::std_scan_code).
  * Used by the on-screen keypad in the web UI; bypasses SDL entirely.
@@ -3782,6 +3893,12 @@ void wasm_send_key(int scancode, int pressed) {
     auto evt = make_key_event_driver(scancode,
         pressed ? eka2l1::drivers::key_state::pressed : eka2l1::drivers::key_state::released);
     g_state.winserv->queue_input_from_driver(evt);
+
+    // Let the native owner receive the complete down/up pair first, then supply
+    // the missing focus hand-off if this ROM did not do so itself.
+    if (!pressed) {
+        finish_phone_system_key(scancode);
+    }
 }
 
 /**
