@@ -2519,18 +2519,12 @@ int wasm_phone_finish_startup() {
     if (!g_state.symsys || !g_state.phone_boot_active) {
         return -1;
     }
-    // The device bootstrap owns the individual startup-state transitions.
-    // The browser only supplies the final SplashScreen-close notification;
-    // forcing the other terminal values races Startup, SysAp and AknCap while
-    // they are still registering their real window groups.
-    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
-    if (!kern) {
-        return -2;
-    }
-    if (eka2l1::property_ptr splash_state = kern->get_prop(0x101F8766, 0x301)) {
-        splash_state->set_int(101);
-    }
-    LOG_INFO(FRONTEND_CMDLINE, "[phone] published ROM startup completion state");
+    // The device bootstrap owns every startup-state transition, including the
+    // final SplashScreen close.  Publishing one from JavaScript races the
+    // native active-idle launch chain and can make SysAp/Menu2 tear down their
+    // window groups before either has rendered.  Keep this export so older
+    // callers remain compatible, but deliberately leave the ROM state alone.
+    LOG_INFO(FRONTEND_CMDLINE, "[phone] ignored synthetic startup completion request");
     return 0;
 }
 
