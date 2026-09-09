@@ -61,6 +61,11 @@ namespace eka2l1 {
 
         void load_physical_device(service::ipc_context &context);
 
+        // Web has no guest-mountable filesystem plug-in implementation. A
+        // synchronous loader request must still complete so callers can use
+        // their normal fallback rather than block indefinitely.
+        void load_fs_plugin(service::ipc_context &context);
+
         void get_info_from_header(service::ipc_context &context);
 
         void delete_loader(service::ipc_context &context);

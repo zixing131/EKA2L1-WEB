@@ -429,6 +429,13 @@ namespace eka2l1 {
         context.complete(epoc::error_not_found);
     }
 
+    void loader_server::load_fs_plugin(service::ipc_context &context) {
+        // Fs plug-ins require a kernel filesystem backend that the web build
+        // does not expose. Returning KErrNotSupported matches that boundary
+        // and, crucially, releases RLoader::LoadFSPlugin SendReceive callers.
+        context.complete(epoc::error_not_supported);
+    }
+
     loader_server::loader_server(system *sys)
         : service::server(sys->get_kernel_system(), sys, nullptr, get_loader_server_name_through_epocver(sys->get_symbian_version_use()), true) {
         REGISTER_IPC(loader_server, load_process, ELoadProcess, "Loader::LoadProcess");
@@ -438,6 +445,7 @@ namespace eka2l1 {
         REGISTER_IPC(loader_server, delete_loader, ELdrDelete, "Loader::Delete");
         REGISTER_IPC(loader_server, check_library_hash, ECheckLibraryHash, "Loader::CheckLibraryHash");
         REGISTER_IPC(loader_server, load_locale, ELoadLocale, "Loader::LoadLocale");
+        REGISTER_IPC(loader_server, load_fs_plugin, ELoadFSPlugin, "Loader::LoadFSPlugin");
         REGISTER_IPC(loader_server, load_logical_device, ELoadLogicalDevice, "Loader::LoadLogicalDevice");
         REGISTER_IPC(loader_server, load_physical_device, ELoadPhysicalDevice, "Loader::LoadPhysicalDevice");
     }
