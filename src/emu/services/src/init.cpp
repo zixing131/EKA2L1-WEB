@@ -37,6 +37,7 @@
 #include <services/bluetooth/btman.h>
 #include <services/camera/camera.h>
 #include <services/centralrepo/centralrepo.h>
+#include <services/cdl/cdl.h>
 #include <services/comm/comm.h>
 #include <services/domain/domain.h>
 #include <services/drm/helper.h>
@@ -415,6 +416,13 @@ namespace eka2l1 {
             const bool native_phone_boot = cfg->native_phone_boot;
             if (!native_phone_boot) {
                 CREATE_SERVER(sys, applist_server);
+            }
+            // The ROM shell uses CDL to enumerate active-idle layout plug-ins.
+            // Keep this compatibility implementation for handset boots; the
+            // native CdlServer varies between ROMs and is absent on some
+            // packages.
+            if (native_phone_boot) {
+                CREATE_SERVER(sys, cdl_server);
             }
             // A complete S60 startup brings up AknCapServer itself.  Its
             // server name is the same one used by the app-launch HLE below,

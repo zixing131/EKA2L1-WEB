@@ -156,6 +156,7 @@ namespace eka2l1::web {
         // server instance.
         std::size_t phone_boot_component_index = 0;
         double phone_boot_next_component_ms = 0.0;
+        bool phone_visible_regions_forced = false;
 
         int window_width = 360;
         int window_height = 640;
@@ -1086,6 +1087,19 @@ static void main_loop() {
 
     advance_phone_boot_plan(now_ms);
 
+    // Some ROM window clients create their first group while the screen is
+    // still owned by the splash.  They do not always set WSERV's dirty-region
+    // bit again when focus changes, leaving the native canvases with an empty
+    // visible region.  Recalculate once after the staged plan has completed,
+    // before the first post-boot composition.
+    if (g_state.phone_boot_active && !g_state.phone_visible_regions_forced
+        && (g_state.phone_boot_component_index >= 12) && g_state.winserv) {
+        for (epoc::screen *scr = g_state.winserv->get_screens(); scr; scr = scr->next) {
+            scr->recalculate_visible_regions();
+        }
+        g_state.phone_visible_regions_forced = true;
+    }
+
     // Execute screen redraws deferred by the animation scheduler. They must
     // run here on the main thread: redraw performs synchronous GPU calls
     // (inline-dispatched on this thread), which would deadlock on the ntimer
@@ -1213,7 +1227,8 @@ static void main_loop() {
             // transition notification; it has no result payload and completing
             // it mirrors the HLE domain service's steady-state behavior.
             const bool is_domain_cancel_notification = is_native_domain && (msg->function == 3);
-            if (!is_loader_bootstrap && !is_loader_get_info && !is_loader_load_process && !is_domain_cancel_notification) {
+            if (!is_loader_bootstrap && !is_loader_get_info && !is_loader_load_process
+                && !is_domain_cancel_notification) {
                 return;
             }
 
@@ -2375,8 +2390,9 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
     return process && process->run();
 }
 
-static constexpr std::array<std::u16string_view, 13> PHONE_BOOT_PLAN = {
-    u"z:\\sys\\bin\\ecomserver.exe", u"z:\\sys\\bin\\cdlserver.exe",
+// Keep the plan in one place so native ROM startup remains deterministic.
+static constexpr std::array<std::u16string_view, 12> PHONE_BOOT_PLAN = {
+    u"z:\\sys\\bin\\ecomserver.exe",
     u"z:\\sys\\bin\\apsexe.exe", u"z:\\sys\\bin\\ailaunch.exe",
     u"z:\\sys\\bin\\phone.exe",
     u"z:\\sys\\bin\\akncapserver.exe",
@@ -2488,6 +2504,10 @@ int wasm_boot_phone() {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not create ROM System Starter");
         return -6;
     }
+    // The compatibility-created SysStart can otherwise retain the current
+    // scheduler slot while it waits for the ROM plan, starving the shell
+    // processes that EStart would normally create on hardware.
+    sysstart->set_priority(eka2l1::kernel::process_priority::low);
     estart->add_child_process(sysstart);
     if (!sysstart->run()) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM System Starter");
@@ -2496,13 +2516,14 @@ int wasm_boot_phone() {
 
     // SysStart reads its platform-specific process plan from the writable
     // device image. Web's transient device starts without that generated file,
-    // so bridge only this missing plan by launching the same ROM programs from
-    // Starter_Arm.rsc. FBSERV and EWSRV are deliberately absent: their roles
-    // are already supplied by EKA2L1's window and font servers. The plan is
+    // so bridge this missing plan by launching the same ROM programs from
+    // Starter_Arm.rsc. EWSRV remains omitted because its role is supplied by
+    // EKA2L1's window server. The plan is
     // advanced from the frame loop so native servers can publish before a
     // consumer attempts its first session.
     g_state.phone_boot_component_index = 0;
     g_state.phone_boot_next_component_ms = emscripten_get_now();
+    g_state.phone_visible_regions_forced = false;
 
     g_state.paused = false;
     LOG_INFO(FRONTEND_CMDLINE, "[phone] Started ROM boot sequence: {}",
@@ -4135,6 +4156,27 @@ void wasm_debug_dump() {
 
     });
 
+    if (g_state.winserv) {
+        epoc::screen *scr = g_state.winserv->get_screens();
+        std::printf("[dump] concise-focus group='%s'\n",
+            (scr && scr->focus) ? common::ucs2_to_utf8(scr->focus->name).c_str() : "<none>");
+        if (scr) {
+            const std::uint32_t total_groups = g_state.winserv->get_total_window_groups(-1, scr->number);
+            std::vector<std::uint32_t> group_ids(total_groups);
+            if (total_groups) g_state.winserv->get_window_group_list(group_ids.data(), total_groups, -1, scr->number);
+            for (const std::uint32_t id : group_ids) {
+                epoc::window_group *group = g_state.winserv->get_group_from_id(id);
+                if (!group || !group->client || !group->client->get_client()) continue;
+                const std::string owner = group->client->get_client()->name();
+                if (owner.find("sysap") != std::string::npos || owner.find("menu") != std::string::npos
+                    || owner.find("startup") != std::string::npos || owner.find("akncap") != std::string::npos) {
+                    std::printf("[dump] concise-window owner='%s' name='%s' active=%d focus=%d\n",
+                        owner.c_str(), common::ucs2_to_utf8(group->name).c_str(),
+                        (scr->focus == group) ? 1 : 0, group->can_receive_focus() ? 1 : 0);
+                }
+            }
+        }
+    }
     std::printf("[dump] =====================================================\n");
     std::fflush(stdout);
 }

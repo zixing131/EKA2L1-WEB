@@ -38,6 +38,8 @@ add_library(epocservs
         include/services/centralrepo/centralrepo.h
         include/services/centralrepo/common.h
         include/services/centralrepo/repo.h
+        include/services/cdl/cdl.h
+        include/services/cdl/ops.h
         include/services/camera/camera.h
         include/services/comm/comm.h
         include/services/internet/protocols/common.h
@@ -181,6 +183,7 @@ add_library(epocservs
         src/bluetooth/bt.cpp
         src/bluetooth/btman.cpp
         src/centralrepo/centralrepo.cpp
+        src/cdl/cdl.cpp
         src/centralrepo/cre.cpp
         src/centralrepo/repo.cpp
         src/camera/camera.cpp
