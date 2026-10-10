@@ -706,15 +706,13 @@ button { font-family: inherit; }
     justify-content: center;
     background: #000;
     position: relative;
-    overflow: hidden;
+    overflow: auto;
 }
 
 #canvas {
     display: block;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    max-width: 100%;
-    max-height: 100%;
     outline: none;
 }
 

@@ -688,10 +688,9 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
         const int x = static_cast<int>((swapchain_size.x - width) / 2);
         const int y = static_cast<int>((swapchain_size.y - height) / 2);
 
-        const float scale_x = width / static_cast<float>(size.x);
-        const float scale_y = height / static_cast<float>(size.y);
-
-        scr->set_native_scale_factor(g_state.graphics_driver.get(), scale_x, scale_y);
+        // CSS owns display scale (适应窗口 / 1× / 2×). Resizing the guest
+        // framebuffer to the window here reallocates every time that size
+        // changes, which is what makes the picture keep zooming after a rotate.
         scr->absolute_pos.x = x;
         scr->absolute_pos.y = y;
 
@@ -759,6 +758,37 @@ static void draw_emulated_screen(eka2l1::drivers::graphics_command_builder &buil
     builder.load_backup_state();
 }
 
+// The SDL window starts at a fixed portrait size so the splash cannot collapse
+// the WebGL buffer. Once the guest mode is known, shrink that window to the
+// rotated guest picture. The blit then fills the bitmap edge to edge, and the
+// page's 适应窗口 setting can scale the picture into the stage. Leaving the
+// portrait window in place letterboxes the picture under a black band, and
+// CSS-fitting that whole bitmap does not make the picture any larger than 1×.
+static void sync_canvas_to_screen(epoc::screen *scr) {
+    if (!g_window || !scr) {
+        return;
+    }
+
+    const eka2l1::vec2 mode = scr->current_mode().size;
+    if ((mode.x <= 0) || (mode.y <= 0)) {
+        return;
+    }
+
+    int canvas_w = mode.x;
+    int canvas_h = mode.y;
+    if ((scr->ui_rotation % 180) != 0) {
+        std::swap(canvas_w, canvas_h);
+    }
+
+    if ((canvas_w == g_state.window_width) && (canvas_h == g_state.window_height)) {
+        return;
+    }
+
+    SDL_SetWindowSize(g_window, canvas_w, canvas_h);
+    g_state.window_width = canvas_w;
+    g_state.window_height = canvas_h;
+}
+
 // WebGL's default backbuffer is invalidated after every swap.  The window
 // server only recomposes when guest content changes, so presenting from its
 // retained screen texture must happen every RAF; otherwise the next empty
@@ -775,6 +805,8 @@ static void present_emulated_screen() {
     if (!scr || !scr->screen_texture) {
         return;
     }
+
+    sync_canvas_to_screen(scr);
 
     eka2l1::drivers::graphics_command_builder builder;
     draw_emulated_screen(builder, scr,
@@ -1072,12 +1104,11 @@ static void main_loop() {
     // so the canvas stays responsive.
     if (g_state.window) {
         g_state.window->poll_events();
-
-        const eka2l1::vec2 fb_size = g_state.window->window_fb_size();
-        if ((fb_size.x > 0) && (fb_size.y > 0)) {
-            g_state.window_width = fb_size.x;
-            g_state.window_height = fb_size.y;
-        }
+        // The page scales the canvas with CSS. Adopting the drawable size here
+        // follows that CSS box (and devicePixelRatio), so a rotation resize and
+        // a fit-to-window style change chase each other and the picture keeps
+        // zooming. The drawing buffer stays at the size SDL was created with,
+        // or the one wasm_set_screen_rotation last set.
     }
 
     // Cap at 60fps (30fps in low-power mode). The loop
@@ -4113,28 +4144,9 @@ void wasm_set_screen_rotation(int rotation) {
     }
 
     scr->ui_rotation = rotation;
-
-    // Reshape the canvas so the rotated image fills it edge-to-edge. SDL
-    // updates the canvas element; the resize event refreshes window_width/
-    // height for draw_emulated_screen's fit.
-    const eka2l1::vec2 base = scr->current_mode().size;
-    eka2l1::vec2 canvas_size = base;
-    if ((rotation % 180) != 0) {
-        std::swap(canvas_size.x, canvas_size.y);
-    }
-
-    // Keep the emulator's original upscale factor (the SDL window is created
-    // bigger than the guest screen; preserve that ratio).
-    if ((base.x > 0) && (base.y > 0) && g_window) {
-        const float upscale = static_cast<float>(std::max(g_state.window_width, g_state.window_height))
-            / static_cast<float>(std::max(base.x, base.y));
-        canvas_size.x = static_cast<int>(canvas_size.x * upscale);
-        canvas_size.y = static_cast<int>(canvas_size.y * upscale);
-        SDL_SetWindowSize(g_window, canvas_size.x, canvas_size.y);
-
-        g_state.window_width = canvas_size.x;
-        g_state.window_height = canvas_size.y;
-    }
+    // Guest pixels, swapped for 90/270. Not a multiple of the current window,
+    // so rotating again cannot keep enlarging the bitmap.
+    sync_canvas_to_screen(scr);
 
     LOG_INFO(FRONTEND_CMDLINE, "Screen rotation set to {} degrees", rotation);
 }

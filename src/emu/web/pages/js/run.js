@@ -137,20 +137,22 @@
         var stage = document.getElementById('stage');
         var sw = stage.clientWidth, sh = stage.clientHeight;
 
-        // The emulator resizes its drawing buffer on screen rotation; follow
-        // the live canvas dimensions instead of the boot-time constants.
+        // The drawing buffer is the guest picture (no letterbox bars). Fitting
+        // that rectangle to the stage is what makes 适应窗口 larger than 1×.
         var bw = canvas.width || BASE_W;
         var bh = canvas.height || BASE_H;
         var w, h;
 
         if (scalePref === 'fit') {
             var s = Math.min(sw / bw, sh / bh);
-            w = Math.floor(bw * s);
-            h = Math.floor(bh * s);
+            if (!isFinite(s) || s <= 0) s = 1;
+            w = Math.max(1, Math.floor(bw * s));
+            h = Math.max(1, Math.floor(bh * s));
         } else {
-            var mult = parseFloat(scalePref) || 1;
-            w = bw * mult;
-            h = bh * mult;
+            var mult = parseFloat(scalePref);
+            if (!isFinite(mult) || mult <= 0) mult = 1;
+            w = Math.max(1, Math.round(bw * mult));
+            h = Math.max(1, Math.round(bh * mult));
         }
 
         canvas.style.width = w + 'px';
@@ -158,6 +160,15 @@
     }
 
     window.addEventListener('resize', fitCanvas);
+    // SDL writes the guest size onto the canvas attributes once the screen
+    // mode is known, and again on rotate. Refit so 适应窗口 picks that up
+    // without waiting for a browser resize.
+    if (window.MutationObserver) {
+        new MutationObserver(fitCanvas).observe(canvas, {
+            attributes: true,
+            attributeFilter: ['width', 'height']
+        });
+    }
 
     function focusCanvas() {
         canvas.focus();
@@ -172,10 +183,23 @@
 
     function applyRotation() {
         if (!EKA2L1.ready || !started) return;
+        var beforeW = canvas.width;
+        var beforeH = canvas.height;
         EKA2L1.setRotation(rotation);
-        // SDL resizes the canvas synchronously; refit on the next tick.
-        setTimeout(fitCanvas, 0);
-        focusCanvas();
+        // 90/270 swaps the drawing buffer. SDL usually updates the canvas
+        // attributes before returning; retry a few frames in case it lands late,
+        // then stop. A later tick must not keep changing the CSS size.
+        var tries = 0;
+        (function refit() {
+            fitCanvas();
+            var swapped = (rotation % 180) !== 0;
+            if (swapped && canvas.width === beforeW && canvas.height === beforeH && tries < 8) {
+                tries++;
+                setTimeout(refit, 32);
+                return;
+            }
+            focusCanvas();
+        })();
     }
 
     window.rotateScreen = function (delta) {
