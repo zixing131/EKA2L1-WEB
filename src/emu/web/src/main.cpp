@@ -157,6 +157,10 @@ namespace eka2l1::web {
         std::size_t phone_boot_component_index = 0;
         double phone_boot_next_component_ms = 0.0;
         bool phone_visible_regions_forced = false;
+        // Wall time when the staged ROM launch plan finished. Used to notice a
+        // Startup connect that StarterServer accepted and then never completed.
+        double phone_boot_plan_ready_ms = 0.0;
+        bool phone_starter_handshake_released = false;
         // Associate staged native components with their startup process.
         eka2l1::kernel::process *phone_boot_parent = nullptr;
 
@@ -196,6 +200,7 @@ using namespace eka2l1::web;
 using namespace eka2l1;
 
 static void advance_phone_boot_plan(double now_ms);
+static void release_stuck_phone_starter_handshake(double now_ms);
 static bool phone_boot_plan_complete();
 
 // ============================================================================
@@ -1089,6 +1094,7 @@ static void main_loop() {
     }
 
     advance_phone_boot_plan(now_ms);
+    release_stuck_phone_starter_handshake(now_ms);
 
     // Some ROM window clients create their first group while the screen is
     // still owned by the splash.  They do not always set WSERV's dirty-region
@@ -2456,6 +2462,94 @@ static void advance_phone_boot_plan(const double now_ms) {
     // Let the server execute one guest scheduling slice and publish its name
     // before launching the next dependent component.
     g_state.phone_boot_next_component_ms = now_ms + 700.0;
+    if (phone_boot_plan_complete() && (g_state.phone_boot_plan_ready_ms == 0.0)) {
+        g_state.phone_boot_plan_ready_ms = now_ms;
+    }
+}
+
+// E72 Startup draws the Nokia handshake and then blocks in
+// RSessionBase::CreateSession("StarterServer"). sysstart accepts that connect
+// and never completes it: the server thread stays in a tight adaptation-client
+// loop, so the animation never leaves the first frame. Once the launch plan
+// has had time to finish the connect itself, complete the leftover message and
+// drop the spinning thread so the UI can run.
+static void release_stuck_phone_starter_handshake(const double now_ms) {
+    if (!g_state.phone_boot_active || g_state.phone_starter_handshake_released || !g_state.symsys) {
+        return;
+    }
+    if (!phone_boot_plan_complete() || (g_state.phone_boot_plan_ready_ms == 0.0)) {
+        return;
+    }
+    if (now_ms < g_state.phone_boot_plan_ready_ms + 4000.0) {
+        return;
+    }
+    if (now_ms > g_state.phone_boot_plan_ready_ms + 20000.0) {
+        g_state.phone_starter_handshake_released = true;
+        return;
+    }
+
+    eka2l1::kernel_system *kern = g_state.symsys->get_kernel_system();
+    if (!kern) {
+        return;
+    }
+
+    bool released = false;
+    kern->for_each_inflight_ipc_message([&](eka2l1::ipc_msg *msg) {
+        if (!msg || !msg->own_thr || !msg->request_sts) {
+            return;
+        }
+        if ((msg->type != eka2l1::ipc_message_type_sync)
+            || ((msg->msg_status != eka2l1::ipc_message_status::accepted)
+                && (msg->msg_status != eka2l1::ipc_message_status::delivered))) {
+            return;
+        }
+        if (msg->debug_server_name.find("StarterServer") == std::string::npos) {
+            return;
+        }
+        const std::string sender = eka2l1::common::lowercase_string(msg->own_thr->name());
+        if (sender.find("startup") == std::string::npos) {
+            return;
+        }
+
+        epoc::request_status *status = msg->request_sts.get(msg->own_thr->owning_process());
+        if (!status) {
+            return;
+        }
+
+        if (!msg->delivered_msg_link.alone()) {
+            msg->delivered_msg_link.deque();
+        }
+        if (!msg->session_msg_link.alone()) {
+            msg->session_msg_link.deque();
+        }
+
+        const int function = msg->function;
+        status->set(epoc::error_none, kern->is_eka1());
+        msg->msg_status = eka2l1::ipc_message_status::completed;
+        msg->own_thr->signal_request();
+        if (msg->thread_handle_low) {
+            kern->close(msg->thread_handle_low);
+            msg->thread_handle_low = 0;
+        }
+        msg->unref();
+        released = true;
+        LOG_WARN(FRONTEND_CMDLINE, "[phone] released Startup request {} held by StarterServer", function);
+    });
+
+    if (!released) {
+        return;
+    }
+
+    for (auto &obj : kern->get_thread_list()) {
+        auto *thr = reinterpret_cast<eka2l1::kernel::thread *>(obj.get());
+        if (!thr || (thr->name() != "StarterServer")) {
+            continue;
+        }
+        if (thr->current_state() == eka2l1::kernel::thread_state::run) {
+            thr->suspend();
+            LOG_WARN(FRONTEND_CMDLINE, "[phone] parked spinning StarterServer thread");
+        }
+    }
 }
 
 static bool phone_boot_plan_complete() {
@@ -2533,6 +2627,8 @@ int wasm_boot_phone() {
     });
 
     g_state.phone_boot_active = true;
+    g_state.phone_boot_plan_ready_ms = 0.0;
+    g_state.phone_starter_handshake_released = false;
     if (!estart->run()) {
         LOG_ERROR(FRONTEND_CMDLINE, "[phone] Could not run ROM startup process");
         return -5;
