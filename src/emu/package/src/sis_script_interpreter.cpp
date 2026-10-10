@@ -384,6 +384,15 @@ namespace eka2l1 {
                 break;
             }
 
+            // PKG `IF deviceproperty(uid)` — true when that product package is
+            // already registered. ROM stubs (series60v3.2.sis and friends) are
+            // preinstalled, so this must see them, not only normal installs.
+            case ss_expr_op::EFuncDevProperties: {
+                const auto uid = static_cast<manager::uid>(static_cast<std::uint32_t>(lhs));
+                pass = (mngr && (mngr->package(uid, 0) != nullptr)) ? 1 : 0;
+                break;
+            }
+
             default: {
                 pass = -1;
                 LOG_WARN(PACKAGE, "Unimplemented operation {} for expression", static_cast<int>(expr->op));
@@ -680,13 +689,6 @@ namespace eka2l1 {
 
                             extract_targets.push_back(info);
                             extract_target_accumulated_size += file->uncompressed_len;
-
-                            const std::string raw_path_lower = common::lowercase_string(raw_path);
-                            if ((FOUND_STR(raw_path_lower.find(".sis")) || FOUND_STR(raw_path_lower.find(".sisx")))
-                                && loader::identify_sis_type(raw_path).has_value()) {
-                                LOG_INFO(PACKAGE, "Detected an SmartInstaller SIS, path at: {}", raw_path);
-                                gathered_sis_paths.push_back(common::utf8_to_ucs2(raw_path));
-                            }
                         }
                     } else {
                         skip_next_file = false;
@@ -816,6 +818,28 @@ namespace eka2l1 {
                     }
 
                     return nullptr;
+                }
+
+                // Smart-installer packages (Qt 4.7.3) ship the real libraries as
+                // nested .sis files and a RUN exe. The exe is not launched; the
+                // nested packages have to be installed after they are on disk.
+                // Checking before extract always misses them, so QtCore never lands.
+                for (const extract_target_info &target : extract_targets) {
+                    if (target.file_path_.empty()) {
+                        continue;
+                    }
+
+                    const std::string lower = common::lowercase_string(target.file_path_);
+                    if ((lower.rfind(".sis") == std::string::npos) && (lower.rfind(".sisx") == std::string::npos)) {
+                        continue;
+                    }
+
+                    if (!loader::identify_sis_type(target.file_path_).has_value()) {
+                        continue;
+                    }
+
+                    LOG_INFO(PACKAGE, "Installing embedded SIS: {}", target.file_path_);
+                    gathered_sis_paths.push_back(common::utf8_to_ucs2(target.file_path_));
                 }
             }
 

@@ -239,7 +239,11 @@ namespace eka2l1 {
                 }
 
                 case hal_entry_manufacturer:
-                    return preset::MANUFACTURER_NOKIA_UID;
+                    // HALData::TManufacturer::EManufacturer_Nokia. PKG
+                    // `IF (MANUFACTURER = NOKIA)` compares this attribute with 2.
+                    // Nokia's UID (0x101F7E7B) never matches that test, so every
+                    // Nokia-only file in a package (Qt Mobility) was skipped.
+                    return 2;
 
                 default:
                     break;
