@@ -26,8 +26,90 @@
 #include <xxHash/xxhash.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace eka2l1::kernel {
+    // No firmware we run exports more than 221 drtaeabi ordinals. Ordinal 222 is
+    // __aeabi_idiv and 223 is __aeabi_uidiv; a binary linked against a newer SDK
+    // (fcnes-native, rebuilt scdv) branches to address 0 and dies with KERN-EXEC 3.
+    // These leaves match that ABI: r0/r1 in, quotient in r0, divide-by-zero yields 0.
+    static address aeabi_div_fallback(kernel_system *kern, process *guest, const std::string &provider,
+        const std::uint16_t ordinal) {
+        if (!kern || !guest || ((ordinal != 222) && (ordinal != 223))) {
+            return 0;
+        }
+
+        if (common::lowercase_string(provider).find("drtaeabi") == std::string::npos) {
+            return 0;
+        }
+
+        static const std::uint32_t k_code[] = {
+            0xE3510000,
+            0x03A00000,
+            0x012FFF1E,
+            0xE92D0010,
+            0xE3A02000,
+            0xE3A03000,
+            0xE3A0401F,
+            0xE1A03083,
+            0xE1A0C430,
+            0xE20CC001,
+            0xE183300C,
+            0xE1A02082,
+            0xE1530001,
+            0x20433001,
+            0x23822001,
+            0xE2544001,
+            0x5AFFFFF5,
+            0xE1A00002,
+            0xE8BD0010,
+            0xE12FFF1E,
+            0xE3510000,
+            0x03A00000,
+            0x012FFF1E,
+            0xE92D4010,
+            0xE0204001,
+            0xE3500000,
+            0x42600000,
+            0xE3510000,
+            0x42611000,
+            0xEBFFFFE1,
+            0xE3540000,
+            0x42600000,
+            0xE8BD4010,
+            0xE12FFF1E,
+        };
+
+        // ROM chunk: shared address, name survives, and kernel reset wipes it with everything else.
+        // A code chunk would be renamed and mapped per process.
+        chunk *block = kern->get_by_name<chunk>("aeabi_div");
+        if (!block) {
+            static constexpr std::uint32_t k_bytes = 0x1000;
+            block = kern->create<chunk>(kern->get_memory_system(), nullptr, "aeabi_div", 0, k_bytes, k_bytes,
+                prot_read_write_exec, chunk_type::normal, chunk_access::rom, chunk_attrib::none);
+
+            if (!block) {
+                return 0;
+            }
+
+            std::memcpy(block->host_base(), k_code, sizeof(k_code));
+            LOG_WARN(KERNEL, "Synthesized drtaeabi __aeabi_idiv/__aeabi_uidiv");
+        }
+
+        if (guest) {
+            block->open_to(guest);
+        }
+
+        const address base = block->base(guest).ptr_address();
+        if (!base) {
+            return 0;
+        }
+
+        const address uidiv = base;
+        const address idiv = base + 20 * sizeof(std::uint32_t);
+        return (ordinal == 222) ? idiv : uidiv;
+    }
+
     codeseg::codeseg(kernel_system *kern, const std::string &name, codeseg_create_info &info)
         : kernel_obj(kern, name, nullptr, kernel::access_type::global_access)
         , patched_(false)
@@ -346,7 +428,11 @@ namespace eka2l1::kernel {
                         const std::uint16_t adj = (import >> 16) & 0xFFFF;
                         const std::uint32_t offset_to_apply = (import >> 32) & 0xFFFFFFFF;
 
-                        const address addr = dependency.dep_->lookup(new_foe, ord);
+                        address addr = dependency.dep_->lookup(new_foe, ord);
+                        if (!addr) {
+                            addr = aeabi_div_fallback(kern, new_foe, dependency.dep_->name(), ord);
+                        }
+
                         if (!addr) {
                             // The import is left pointing at address zero, so the first call
                             // through it runs off into unmapped memory. Name the importer and
