@@ -96,21 +96,131 @@
 
     keypadEl.classList.toggle('hidden', !keypadDefaultVisible());
 
+    // 0 off, 1 next key only, 2 locked. Fn, Shift, Sym and Ctrl all use this:
+    // one tap arms the next key, a second tap locks it, a third tap clears it.
+    // Fn swaps in the blue legend. The others are held down around that key.
+    var mods = {};
+    keypadEl.querySelectorAll('[data-special]').forEach(function (btn) {
+        mods[btn.dataset.special] = {
+            btn: btn,
+            scan: btn.dataset.mod ? parseInt(btn.dataset.mod, 10) : 0,
+            mode: 0,
+            held: false
+        };
+    });
+
+    function paintMod(m) {
+        m.btn.classList.toggle('latched', m.mode > 0);
+        m.btn.classList.toggle('locked', m.mode === 2);
+    }
+
+    function setMod(name, mode) {
+        var m = mods[name];
+        if (!m) return;
+        m.mode = mode;
+        paintMod(m);
+        if (mode === 0 && m.held) {
+            if (EKA2L1.ready) EKA2L1.sendKey(m.scan, 0);
+            m.held = false;
+        }
+    }
+
+    function cycleMod(name) {
+        var m = mods[name];
+        if (!m) return;
+        if (m.mode === 0) setMod(name, 1);
+        else if (m.mode === 1) setMod(name, 2);
+        else setMod(name, 0);
+    }
+
+    // Press every armed modifier that has a scancode. One-shot modifiers are
+    // returned so the caller can release them after the key itself goes up.
+    function pressArmedMods() {
+        var oneshot = [];
+        Object.keys(mods).forEach(function (name) {
+            var m = mods[name];
+            if (!m.mode || !m.scan) return;
+            if (!m.held && EKA2L1.ready) {
+                EKA2L1.sendKey(m.scan, 1);
+                m.held = true;
+            }
+            if (m.mode === 1) oneshot.push(m);
+        });
+        return oneshot;
+    }
+
+    function releaseOneshot(oneshot) {
+        for (var i = 0; i < oneshot.length; i++) {
+            var m = oneshot[i];
+            if (m.held && EKA2L1.ready) EKA2L1.sendKey(m.scan, 0);
+            m.held = false;
+            m.mode = 0;
+            paintMod(m);
+        }
+    }
+
+    function applyLayout(name) {
+        if (name !== 'e72') name = 't9';
+        localStorage.setItem('eka2l1_keylayout', name);
+        var boards = keypadEl.querySelectorAll('[data-layout]');
+        for (var i = 0; i < boards.length; i++) {
+            boards[i].hidden = boards[i].getAttribute('data-layout') !== name;
+        }
+        var choices = keypadEl.querySelectorAll('[data-layout-choice]');
+        for (var j = 0; j < choices.length; j++) {
+            choices[j].classList.toggle('active', choices[j].getAttribute('data-layout-choice') === name);
+        }
+        if (canvas) fitCanvas();
+    }
+
+    keypadEl.querySelectorAll('[data-layout-choice]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            applyLayout(btn.getAttribute('data-layout-choice'));
+        });
+    });
+    applyLayout(localStorage.getItem('eka2l1_keylayout') || 't9');
+
+    function resolveCode(spec) {
+        if (!spec) return 0;
+        if (EKA2L1.keys && EKA2L1.keys[spec]) return EKA2L1.keys[spec];
+        if (spec.length === 1) return spec.charCodeAt(0);
+        var n = parseInt(spec, 10);
+        return isFinite(n) ? n : 0;
+    }
+
     // Pointer events so touch and mouse share one path; pointer capture keeps
     // the release reliable even when the finger slides off the button.
     keypadEl.querySelectorAll('.key').forEach(function (btn) {
-        var code = EKA2L1.keys[btn.dataset.key];
-        if (!code) return;
+        if (btn.dataset.special) {
+            btn.addEventListener('pointerdown', function (e) {
+                e.preventDefault();
+                cycleMod(btn.dataset.special);
+                if (navigator.vibrate) navigator.vibrate(8);
+            });
+            btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+            return;
+        }
+
+        var base = btn.dataset.scan ? parseInt(btn.dataset.scan, 10)
+            : (btn.dataset.code ? resolveCode(btn.dataset.code) : (EKA2L1.keys[btn.dataset.key] || 0));
+        var alt = btn.dataset.fn ? resolveCode(btn.dataset.fn) : 0;
+        if (!base && !alt) return;
 
         var down = false;
+        var sent = 0;
+        var oneshot = [];
 
         btn.addEventListener('pointerdown', function (e) {
             e.preventDefault();
             btn.setPointerCapture(e.pointerId);
             if (down || !EKA2L1.ready) return;
             down = true;
+            var fn = mods.fn;
+            sent = (fn && fn.mode && alt) ? alt : base;
+            if (fn && fn.mode === 1 && alt) setMod('fn', 0);
+            oneshot = pressArmedMods();
             btn.classList.add('pressed');
-            EKA2L1.sendKey(code, 1);
+            if (sent) EKA2L1.sendKey(sent, 1);
             if (navigator.vibrate) navigator.vibrate(8);
         });
 
@@ -118,7 +228,10 @@
             if (!down) return;
             down = false;
             btn.classList.remove('pressed');
-            if (EKA2L1.ready) EKA2L1.sendKey(code, 0);
+            if (EKA2L1.ready && sent) EKA2L1.sendKey(sent, 0);
+            releaseOneshot(oneshot);
+            oneshot = [];
+            sent = 0;
         };
 
         btn.addEventListener('pointerup', release);

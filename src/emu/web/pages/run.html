@@ -83,35 +83,113 @@
     </div>
 </main>
 
-<!-- Virtual keypad: joypad + numpad, classic S60 layout -->
+<!-- Virtual keypad. T9 is the classic S60 pad; E72 follows the real handset:
+     control deck under the screen, then QWERTY. Bottom row is Fn Shift Sym @
+     space ? ! ' Ctrl, matching the E72 (smaller space, two extra keys). -->
 <footer class="keypad hidden" id="keypad">
-    <div class="keypad-grid">
-        <button class="key key-soft" data-key="LSK" data-i18n="player.keySoftLeft">左软键</button>
-        <button class="key" data-key="UP">▲</button>
-        <button class="key key-soft" data-key="RSK" data-i18n="player.keySoftRight">右软键</button>
-        <button class="key" data-key="LEFT">◀</button>
-        <button class="key key-accent" data-key="OK">OK</button>
-        <button class="key" data-key="RIGHT">▶</button>
-        <button class="key key-soft" data-key="CALL" data-i18n="player.keyCall">拨号</button>
-        <button class="key key-accent" data-key="MENU" data-i18n="player.keyMenu">主菜单</button>
-        <button class="key key-soft key-red" data-key="END" data-i18n="player.keyEnd">挂断</button>
-        <button class="key key-soft" data-key="CLEAR">C</button>
-        <button class="key" data-key="DOWN">▼</button>
-        <span></span>
+    <div class="keypad-switch" role="tablist">
+        <button type="button" class="keypad-choice" data-layout-choice="t9" data-i18n="player.layoutT9" data-i18n-title="player.layoutT9Title">T9</button>
+        <button type="button" class="keypad-choice" data-layout-choice="e72" data-i18n="player.layoutE72" data-i18n-title="player.layoutE72Title">E72</button>
     </div>
-    <div class="keypad-grid">
-        <button class="key" data-key="D1">1</button>
-        <button class="key" data-key="D2">2</button>
-        <button class="key" data-key="D3">3</button>
-        <button class="key" data-key="D4">4</button>
-        <button class="key" data-key="D5">5</button>
-        <button class="key" data-key="D6">6</button>
-        <button class="key" data-key="D7">7</button>
-        <button class="key" data-key="D8">8</button>
-        <button class="key" data-key="D9">9</button>
-        <button class="key" data-key="STAR">＊</button>
-        <button class="key" data-key="D0">0</button>
-        <button class="key" data-key="HASH">＃</button>
+    <div class="keypad-board" data-layout="t9">
+        <div class="keypad-grid">
+            <button class="key key-soft" data-key="LSK" data-i18n="player.keySoftLeft">左软键</button>
+            <button class="key" data-key="UP">▲</button>
+            <button class="key key-soft" data-key="RSK" data-i18n="player.keySoftRight">右软键</button>
+            <button class="key" data-key="LEFT">◀</button>
+            <button class="key key-accent" data-key="OK">OK</button>
+            <button class="key" data-key="RIGHT">▶</button>
+            <button class="key key-soft" data-key="CALL" data-i18n="player.keyCall">拨号</button>
+            <button class="key key-accent" data-key="MENU" data-i18n="player.keyMenu">主菜单</button>
+            <button class="key key-soft key-red" data-key="END" data-i18n="player.keyEnd">挂断</button>
+            <button class="key key-soft" data-key="CLEAR">C</button>
+            <button class="key" data-key="DOWN">▼</button>
+            <span></span>
+        </div>
+        <div class="keypad-grid">
+            <button class="key" data-key="D1">1</button>
+            <button class="key" data-key="D2">2</button>
+            <button class="key" data-key="D3">3</button>
+            <button class="key" data-key="D4">4</button>
+            <button class="key" data-key="D5">5</button>
+            <button class="key" data-key="D6">6</button>
+            <button class="key" data-key="D7">7</button>
+            <button class="key" data-key="D8">8</button>
+            <button class="key" data-key="D9">9</button>
+            <button class="key" data-key="STAR">＊</button>
+            <button class="key" data-key="D0">0</button>
+            <button class="key" data-key="HASH">＃</button>
+        </div>
+    </div>
+    <div class="keypad-board" data-layout="e72" hidden>
+        <div class="e72-deck">
+            <div class="e72-cluster">
+                <button class="key key-soft" data-key="LSK" data-i18n="player.keySoftLeft">左软键</button>
+                <button class="key key-green" data-key="CALL" data-i18n="player.keyCall">拨号</button>
+                <button class="key key-soft" data-key="MENU" data-i18n="player.keyHome">主页</button>
+                <button class="key key-soft" data-scan="181" data-i18n="player.keyCalendar">日历</button>
+            </div>
+            <div class="e72-dpad" aria-hidden="false">
+                <button class="key e72-up" data-key="UP">▲</button>
+                <button class="key e72-left" data-key="LEFT">◀</button>
+                <button class="key key-accent e72-ok" data-key="OK">OK</button>
+                <button class="key e72-right" data-key="RIGHT">▶</button>
+                <button class="key e72-down" data-key="DOWN">▼</button>
+            </div>
+            <div class="e72-cluster">
+                <button class="key key-soft" data-scan="182" data-i18n="player.keyContacts">通讯录</button>
+                <button class="key key-soft" data-scan="183" data-i18n="player.keyMail">邮件</button>
+                <button class="key key-red" data-key="END" data-i18n="player.keyEnd">挂断</button>
+                <button class="key key-soft" data-key="RSK" data-i18n="player.keySoftRight">右软键</button>
+            </div>
+        </div>
+        <div class="e72-row">
+            <button class="key e72-key" data-code="Q" data-fn="1"><span class="e72-alt">1</span><span class="e72-main">Q</span></button>
+            <button class="key e72-key" data-code="W" data-fn="2"><span class="e72-alt">2</span><span class="e72-main">W</span></button>
+            <button class="key e72-key" data-code="E" data-fn="3"><span class="e72-alt">3</span><span class="e72-main">E</span></button>
+            <button class="key e72-key" data-code="R" data-fn="4"><span class="e72-alt">4</span><span class="e72-main">R</span></button>
+            <button class="key e72-key" data-code="T" data-fn="5"><span class="e72-alt">5</span><span class="e72-main">T</span></button>
+            <button class="key e72-key" data-code="Y" data-fn="6"><span class="e72-alt">6</span><span class="e72-main">Y</span></button>
+            <button class="key e72-key" data-code="U" data-fn="7"><span class="e72-alt">7</span><span class="e72-main">U</span></button>
+            <button class="key e72-key" data-code="I" data-fn="8"><span class="e72-alt">8</span><span class="e72-main">I</span></button>
+            <button class="key e72-key" data-code="O" data-fn="9"><span class="e72-alt">9</span><span class="e72-main">O</span></button>
+            <button class="key e72-key" data-code="P" data-fn="0"><span class="e72-alt">0</span><span class="e72-main">P</span></button>
+        </div>
+        <div class="e72-row">
+            <button class="key e72-key" data-code="A" data-fn="*"><span class="e72-alt">*</span><span class="e72-main">A</span></button>
+            <button class="key e72-key" data-code="S" data-fn="+"><span class="e72-alt">+</span><span class="e72-main">S</span></button>
+            <button class="key e72-key" data-code="D" data-fn="-"><span class="e72-alt">-</span><span class="e72-main">D</span></button>
+            <button class="key e72-key" data-code="F" data-fn="="><span class="e72-alt">=</span><span class="e72-main">F</span></button>
+            <button class="key e72-key" data-code="G" data-fn="("><span class="e72-alt">(</span><span class="e72-main">G</span></button>
+            <button class="key e72-key" data-code="H" data-fn=")"><span class="e72-alt">)</span><span class="e72-main">H</span></button>
+            <button class="key e72-key" data-code="J" data-fn="/"><span class="e72-alt">/</span><span class="e72-main">J</span></button>
+            <button class="key e72-key" data-code="K" data-fn="#"><span class="e72-alt">#</span><span class="e72-main">K</span></button>
+            <button class="key e72-key" data-code="L" data-fn="&amp;"><span class="e72-alt">&amp;</span><span class="e72-main">L</span></button>
+            <button class="key e72-key e72-mod" data-scan="1" data-i18n-title="player.keyBackspace">⌫</button>
+        </div>
+        <div class="e72-row">
+            <button class="key e72-key" data-code="Z" data-fn="!"><span class="e72-alt">!</span><span class="e72-main">Z</span></button>
+            <button class="key e72-key" data-code="X" data-fn="&quot;"><span class="e72-alt">&quot;</span><span class="e72-main">X</span></button>
+            <button class="key e72-key" data-code="C" data-fn="'"><span class="e72-alt">'</span><span class="e72-main">C</span></button>
+            <button class="key e72-key" data-code="V" data-fn=":"><span class="e72-alt">:</span><span class="e72-main">V</span></button>
+            <button class="key e72-key" data-code="B" data-fn=";"><span class="e72-alt">;</span><span class="e72-main">B</span></button>
+            <button class="key e72-key" data-code="N" data-fn="?"><span class="e72-alt">?</span><span class="e72-main">N</span></button>
+            <button class="key e72-key" data-code="M" data-fn=","><span class="e72-alt">,</span><span class="e72-main">M</span></button>
+            <button class="key e72-key" data-code=","><span class="e72-main">,</span></button>
+            <button class="key e72-key" data-code="."><span class="e72-main">.</span></button>
+            <button class="key e72-key e72-mod" data-scan="3" data-i18n-title="player.keyEnter">↵</button>
+        </div>
+        <div class="e72-row">
+            <button class="key e72-key e72-mod" data-special="fn" data-i18n-title="player.keyFn">Fn</button>
+            <button class="key e72-key e72-mod" data-special="shift" data-mod="18" data-i18n-title="player.keyShift">⇧</button>
+            <button class="key e72-key e72-mod" data-special="sym" data-mod="19" data-i18n-title="player.keySym">Sym</button>
+            <button class="key e72-key" data-code="@"><span class="e72-main">@</span></button>
+            <button class="key e72-key e72-space" data-scan="5" data-i18n-title="player.keySpace"></button>
+            <button class="key e72-key" data-code="?"><span class="e72-main">?</span></button>
+            <button class="key e72-key" data-code="!"><span class="e72-main">!</span></button>
+            <button class="key e72-key" data-code="'"><span class="e72-main">'</span></button>
+            <button class="key e72-key e72-mod" data-special="ctrl" data-mod="22" data-i18n-title="player.keyCtrl">Ctrl</button>
+        </div>
     </div>
 </footer>
 

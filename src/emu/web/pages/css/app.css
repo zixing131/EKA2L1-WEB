@@ -767,9 +767,10 @@ button { font-family: inherit; }
 /* ------------------------------------------------------------------ keypad */
 .keypad {
     display: flex;
-    justify-content: center;
-    gap: 14px;
-    padding: 10px 12px calc(10px + var(--safe-bottom));
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px calc(8px + var(--safe-bottom));
     background: var(--keypad-bg);
     border-top: 0.5px solid var(--separator);
     user-select: none;
@@ -778,6 +779,46 @@ button { font-family: inherit; }
 }
 
 .keypad.hidden { display: none; }
+
+.keypad-switch {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    background: var(--key-bg);
+    border-radius: 9px;
+}
+
+.keypad-choice {
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    padding: 4px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.keypad-choice.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.keypad-board {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    width: 100%;
+}
+
+.keypad-board[hidden] { display: none !important; }
+
+.keypad-board[data-layout="e72"] {
+    flex-direction: column;
+    gap: 5px;
+    max-width: 760px;
+}
 
 .keypad-grid {
     display: grid;
@@ -803,7 +844,85 @@ button { font-family: inherit; }
     touch-action: none;
 }
 
-.key:active, .key.pressed { background: var(--key-press); transform: translateY(1px); }
+.key:active, .key.pressed, .key.latched { background: var(--key-press); transform: translateY(1px); }
+.key.locked { box-shadow: inset 0 0 0 2px var(--blue); }
+
+.e72-deck {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.e72-cluster {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+}
+
+.e72-cluster .key {
+    height: 36px;
+    font-size: 11px;
+    padding: 0 2px;
+}
+
+.e72-dpad {
+    display: grid;
+    grid-template-columns: 42px 42px 42px;
+    grid-template-areas:
+        ". up ."
+        "left ok right"
+        ". down .";
+    gap: 4px;
+    flex: none;
+}
+
+.e72-up { grid-area: up; }
+.e72-left { grid-area: left; }
+.e72-ok { grid-area: ok; }
+.e72-right { grid-area: right; }
+.e72-down { grid-area: down; }
+
+.e72-dpad .key { height: 36px; }
+
+.e72-row {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    gap: 4px;
+}
+
+.e72-key {
+    height: 40px;
+    border-radius: 7px;
+    font-size: 14px;
+    position: relative;
+    padding: 0;
+}
+
+.e72-main { line-height: 1; }
+
+.e72-alt {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    font-size: 9px;
+    font-weight: 650;
+    color: var(--blue);
+    line-height: 1;
+}
+
+.e72-mod { color: var(--text-2); font-size: 12px; }
+
+.e72-space { grid-column: span 2; }
+.e72-space::after {
+    content: "";
+    width: 36%;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--text-3);
+}
 .key.key-soft { font-size: 12px; color: var(--text-2); }
 .key.key-accent { color: var(--accent); }
 .key.key-green { color: var(--green); }
@@ -817,6 +936,13 @@ button { font-family: inherit; }
 @media (max-height: 500px) and (orientation: landscape) {
     .keypad { padding: 6px 10px calc(6px + var(--safe-bottom)); }
     .key { height: 38px; }
+    .e72-key, .e72-cluster .key, .e72-dpad .key { height: 30px; }
+}
+
+@media (max-width: 420px) {
+    .e72-dpad { grid-template-columns: 34px 34px 34px; }
+    .e72-key { height: 34px; font-size: 13px; }
+    .e72-cluster .key { font-size: 10px; height: 32px; }
 }
 
 .player-error-actions { display: flex; gap: 10px; margin-top: 6px; }

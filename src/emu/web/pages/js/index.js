@@ -958,18 +958,23 @@
     // ---- settings ------------------------------------------------------------
 
     var prefScale = document.getElementById('prefScale');
+    var prefKeyLayout = document.getElementById('prefKeyLayout');
     var prefKeypad = document.getElementById('prefKeypad');
     var prefShowSys = document.getElementById('prefShowSys');
     var prefPerf = document.getElementById('prefPerf');
     var prefFilter = document.getElementById('prefFilter');
     var prefLang = document.getElementById('prefLang');
     prefScale.value = localStorage.getItem('eka2l1_scale') || 'fit';
+    if (prefKeyLayout) prefKeyLayout.value = localStorage.getItem('eka2l1_keylayout') || 't9';
     prefKeypad.value = localStorage.getItem('eka2l1_keypad') || 'auto';
     prefShowSys.value = localStorage.getItem('eka2l1_show_sys') || '0';
     prefPerf.value = localStorage.getItem('eka2l1_perf') || 'auto';
     prefFilter.value = localStorage.getItem('eka2l1_filter') || 'auto';
     if (prefLang) prefLang.value = EKA2L1.getLocalePref();
     prefScale.addEventListener('change', function () { localStorage.setItem('eka2l1_scale', this.value); });
+    if (prefKeyLayout) {
+        prefKeyLayout.addEventListener('change', function () { localStorage.setItem('eka2l1_keylayout', this.value); });
+    }
     prefKeypad.addEventListener('change', function () { localStorage.setItem('eka2l1_keypad', this.value); });
     prefShowSys.addEventListener('change', function () {
         localStorage.setItem('eka2l1_show_sys', this.value);
