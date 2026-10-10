@@ -6,6 +6,7 @@ add_library(epocldd
         include/ldd/hal/hal.h
         include/ldd/mmcif/consts.h
         include/ldd/mmcif/mmcif.h
+        include/ldd/iad/iad.h
         include/ldd/nokiaisc/nokiaisc.h
         include/ldd/oldcamera/oldcamera.h
         include/ldd/videodriver/videodriver.h
@@ -14,6 +15,7 @@ add_library(epocldd
         src/ekeyb/ekeyb.cpp
         src/hal/hal.cpp
         src/mmcif/mmcif.cpp
+        src/iad/iad.cpp
         src/nokiaisc/nokiaisc.cpp
         src/oldcamera/oldcamera.cpp
         src/videodriver/videodriver.cpp

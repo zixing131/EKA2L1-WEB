@@ -399,6 +399,7 @@
         beginFramePoll();
 
         function beginFramePoll() {
+            try { EKA2L1.syncLocation(); } catch (e) {}
             EKA2L1.setPaused(false);
             // First composed frame -> reveal the canvas.
             var t0 = performance.now();

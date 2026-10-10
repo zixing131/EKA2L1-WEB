@@ -545,6 +545,7 @@
         // app is one. Warm getUserMedia so ECam / Camera opens without a second
         // prompt when the guest later reserves the device.
         try { EKA2L1.requestCamera(); } catch (e) {}
+        try { EKA2L1.syncLocation(); } catch (e) {}
         return ccall('wasm_launch_app', 'number', ['number'], [uid]);
     };
 
@@ -720,6 +721,43 @@
         } catch (e) {
             return 0;
         }
+    };
+
+    /**
+     * Push a WGS84 fix into the guest IAD/GPS channel.
+     * lat/lon are decimal degrees. accuracy and altitude are metres,
+     * speed is metres per second, heading is degrees.
+     */
+    EKA2L1.setGps = function (lat, lon, accuracy, altitude, speed, heading) {
+        if (!EKA2L1.module) return;
+        var scale = function (value, factor) {
+            var n = Math.round((Number(value) || 0) * factor);
+            if (n > 2147483647) return 2147483647;
+            if (n < -2147483648) return -2147483648;
+            return n;
+        };
+        ccall('wasm_set_gps', null, ['number', 'number', 'number', 'number', 'number', 'number'], [
+            scale(lat, 1e7), scale(lon, 1e7), scale(accuracy, 1000),
+            scale(altitude, 100), scale(speed, 1000), scale(heading, 1000)
+        ]);
+    };
+
+    /** Watch the browser location and keep the guest fix updated. */
+    EKA2L1.syncLocation = function () {
+        if (!navigator.geolocation) return 0;
+        if (EKA2L1._geoWatch != null) return 1;
+        EKA2L1._geoWatch = navigator.geolocation.watchPosition(function (pos) {
+            var c = pos.coords;
+            EKA2L1.setGps(c.latitude, c.longitude, c.accuracy, c.altitude, c.speed, c.heading);
+            console.log('[Kernel] host gps ' + c.latitude.toFixed(6) + ',' + c.longitude.toFixed(6));
+        }, function (err) {
+            console.log('[Kernel] host gps denied ' + (err && err.code));
+            if (EKA2L1._geoWatch != null && navigator.geolocation.clearWatch) {
+                navigator.geolocation.clearWatch(EKA2L1._geoWatch);
+            }
+            EKA2L1._geoWatch = null;
+        }, { enableHighAccuracy: false, maximumAge: 5000, timeout: 20000 });
+        return 1;
     };
 
     EKA2L1.sendKey = function (scancode, pressed) {

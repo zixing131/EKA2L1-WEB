@@ -91,6 +91,7 @@
         if (!ready) return;
         // Use the guest launch API directly: testing another application does
         // not need the camera permission requested by the normal launcher.
+        try { EKA2L1.syncLocation(); } catch (e) {}
         const result = EKA2L1.module.ccall('wasm_launch_app', 'number', ['number'], [Number(app.uid)]);
         note('启动 ' + app.name + ' (0x' + Number(app.uid).toString(16) + ') = ' + result);
         byId('summary').textContent = result === 0 ? '运行中 · ' + app.name : '启动失败 · ' + result;
