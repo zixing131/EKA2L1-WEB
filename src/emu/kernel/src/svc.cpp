@@ -582,10 +582,27 @@ namespace eka2l1::epoc {
             return;
         }
 
+        const std::u16string &cmdline = pr->get_cmd_args();
+
+        // The IBM J9 bring-up (j9_* hooks in libmanager.cpp) was tuned while this
+        // call reported its length in UTF-16 units, which leaves J9 with the first
+        // half of its arguments. Handing it the whole line sends the VM down another
+        // init path, and it data-aborts in j9vmall23.dll. Keep that answer for J9
+        // until the hooks are reworked for full arguments.
+        if (common::lowercase_string(pr->raw_name()).find("j9midps60") == 0) {
+            auto *data16 = reinterpret_cast<epoc::des16 *>(data);
+            std::u16string legacy = cmdline;
+            const std::uint32_t max_chars = data16->get_max_length(crr_process);
+            if (max_chars && (legacy.size() > max_chars)) {
+                legacy.resize(max_chars);
+            }
+            data16->assign(crr_process, legacy);
+            return;
+        }
+
         // EKA2 euser wraps the public TDes16 in a TPtr8 for this executive
         // call, then divides the returned byte length by two. Preserve all
         // UTF-16 units, including embedded NULs in server startup handshakes.
-        const std::u16string &cmdline = pr->get_cmd_args();
         const std::uint32_t byte_length = std::min<std::uint32_t>(
             static_cast<std::uint32_t>(cmdline.size() * sizeof(char16_t)),
             data->get_max_length(crr_process));

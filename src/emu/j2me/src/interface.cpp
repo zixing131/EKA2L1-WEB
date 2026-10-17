@@ -727,6 +727,19 @@ namespace eka2l1::j2me {
         }
 
         kernel::process *ams = find_running_process_with_args(kern, "systemamscore", "-boot");
+        if (!ams && trader_up) {
+            // SystemAMS.exe starts its core as " -proxy -boot". A -boot core runs the
+            // boot tasks (preinstall scan), and when no client holds it, it reports idle
+            // to the trader (Private opcode 2) and returns from E32Main. A core started
+            // without -boot registers as the serving core (opcode 1) and publishes
+            // !MIDP.SystemAMS.SystemAMS / .MIDP2, which StubMIDP2 needs. Respawning
+            // -boot cores here only piles up processes that exit at once.
+            ams = find_running_process(kern, "systemamscore");
+            if (!ams) {
+                ams = spawn_systemams_core(kern, io, u"");
+            }
+            return ams;
+        }
         if (!ams) {
             for (int i = 0; i < 48; i++) {
                 sys->loop();

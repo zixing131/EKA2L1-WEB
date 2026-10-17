@@ -123,6 +123,13 @@ namespace eka2l1 {
         // menu then panics with EIKCOCTL 8 instead of opening.
         enable_features.push_back(feature_id_help);
 
+        // Java MIDP 2.0: only claim support when the ROM ships the MIDP2 runtime,
+        // otherwise the Java AMS stack would boot into nothing. SystemAMSCore asks
+        // for this feature first thing at startup.
+        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\midp2runtimev2.dll")) {
+            enable_features.push_back(feature_id_java_midp20);
+        }
+
         // Browser-hosted Flash Lite is a separate feature from the standalone viewer
         // below, so report it only when the ROM carries the browser plug-in itself.
         if (sys->get_io_system()->exist(u"z:\\sys\\bin\\npflashlite.dll")) {

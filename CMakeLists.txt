@@ -75,8 +75,13 @@ if (EMSCRIPTEN)
     # Link-time optimization across every TU/static lib for the perf build.
     # Both compile and link must carry -flto so the final wasm-ld step can do
     # cross-module inlining (notably into the CPU interpreter hot loop).
-    add_compile_options(-flto)
-    add_link_options(-flto)
+    # The LTO link needs several GB of RAM; turn it off for local test builds
+    # on machines that cannot afford it.
+    option(EKA2L1_WASM_LTO "Link the WASM build with -flto" ON)
+    if (EKA2L1_WASM_LTO)
+        add_compile_options(-flto)
+        add_link_options(-flto)
+    endif()
 endif()
 
 # HarmonyOS / OpenHarmony (DevEco BiSheng toolchain sets CMAKE_SYSTEM_NAME=OHOS).

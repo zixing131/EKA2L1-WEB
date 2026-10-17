@@ -388,6 +388,7 @@
         var lowPower = EKA2L1.applyPerfPrefs();
         if (lowPower) console.log('[EKA2L1] low-power mode active (30fps cap)');
 
+        if (params.get('leaveprobe') === '1') EKA2L1.module.ccall('wasm_set_leave_probe', null, ['number'], [1]);
         if (phoneMode) EKA2L1.setPhoneBootMode(true);
         var result = EKA2L1.initDevice('', '');
         if (result !== 0) {
