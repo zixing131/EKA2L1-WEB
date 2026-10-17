@@ -68,6 +68,10 @@
 // Defined in svc.cpp; debug probe toggled by the frontend.
 extern bool eka2l1_leave_probe;
 
+// Run IBM J9 as shipped: no J9/JCL code patches, BKPT hooks or host MIDP attach.
+// For finding where the unmodified VM fails. Toggled by the frontend.
+bool eka2l1_j9_raw = false;
+
 namespace eka2l1::hle {
     static std::array<std::u16string, 2> LDD_SKIP_LOAD_LIST = {
         u"VideoDriver.LDD",
@@ -17452,6 +17456,11 @@ namespace eka2l1::hle {
     void apply_j2me_compat_patches(codeseg_ptr cs, const std::string &name_hint) {
         const std::string name = common::lowercase_string(name_hint.empty() ? cs->name() : name_hint);
 
+        if (eka2l1_j9_raw && ((name.find("j9") != std::string::npos) || (name.find("jcl") != std::string::npos))) {
+            LOG_WARN(EMULATED_STDOUT, "[j9-raw] no patches for '{}'", name);
+            return;
+        }
+
         if ((name.find("j9") != std::string::npos) || (name.find("jcl") != std::string::npos)) {
             if (name.find("j9midps60") != std::string::npos) {
                 j9_loaded_libs.clear();
@@ -17759,9 +17768,10 @@ namespace eka2l1::hle {
                        || (name.find("lcdui") != std::string::npos))
             && (name.find("j9midps60") == std::string::npos)) {
             collect_j9_jni_exports(cs);
-        } else if (name.find("integrityserver") != std::string::npos) {
+        } else if ((name.find("integrityserver") != std::string::npos) && !eka2l1_j9_raw) {
             apply_integrity_compat_patch(cs);
-        } else if (name.find("midp2systemams") != std::string::npos) {
+        } else if ((name.find("midp2systemams") != std::string::npos) && !eka2l1_j9_raw) {
+            // Raw J9 mode lets the real AMS Find/Launch spawn the VM.
             apply_ams_find_compat_patch(cs);
         }
     }

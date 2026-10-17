@@ -41,6 +41,11 @@
 
 extern bool eka2l1_shell_leave_probe;
 
+// Defined in kernel/svc.cpp; debug probe toggled by the frontend.
+extern bool eka2l1_leave_probe;
+// Defined in kernel/libmanager.cpp: run the Java stack without host workarounds.
+extern bool eka2l1_j9_raw;
+
 namespace eka2l1 {
     // Ring of the last failed RFs opens by a J9/AMS opener, recorded in
     // fs open dispatch; printed in the j9midps60 exit hint (process.cpp) so a
@@ -966,6 +971,11 @@ namespace eka2l1 {
         std::int32_t target_handle = *ctx->get_argument_value<std::int32_t>(0);
         fs_node *node = get_file_node(target_handle);
 
+        if (eka2l1_leave_probe) {
+            LOG_WARN(SERVICE_EFSRV, "[handle-probe] file_duplicate handle=0x{:X} found={} client={}",
+                target_handle, node != nullptr, ctx->msg->own_thr->owning_process()->name());
+        }
+
         if (!node) {
             ctx->complete(epoc::error_not_found);
             return;
@@ -1008,10 +1018,18 @@ namespace eka2l1 {
         } else if (get_file_node(static_cast<int>(demangled))) {
             adopted = demangled;
         } else {
+            if (eka2l1_leave_probe) {
+                LOG_WARN(SERVICE_EFSRV, "[handle-probe] file_adopt 0x{:X} not found -> KErrBadHandle client={}",
+                    mangled, ctx->msg->own_thr->owning_process()->name());
+            }
             ctx->complete(epoc::error_bad_handle);
             return;
         }
 
+        if (eka2l1_leave_probe) {
+            LOG_WARN(SERVICE_EFSRV, "[handle-probe] file_adopt 0x{:X} -> 0x{:X} client={}",
+                mangled, adopted, ctx->msg->own_thr->owning_process()->name());
+        }
         ctx->write_data_to_descriptor_argument<epoc::handle>(3, adopted);
         ctx->complete(epoc::error_none);
     }
@@ -1370,7 +1388,7 @@ namespace eka2l1 {
             const bool java_locale_props = (lower_name.find("\\resource\\ive\\bin\\java_") != std::string::npos)
                 && (lower_name.size() >= 11)
                 && (lower_name.compare(lower_name.size() - 11, 11, ".properties") == 0);
-            if (java_integrity_store || java_locale_props) {
+            if ((java_integrity_store || java_locale_props) && !eka2l1_j9_raw) {
                 if (symfile created = io->open_file(*name_res, WRITE_MODE | BIN_MODE)) {
                     created->close();
                     LOG_WARN(SERVICE_EFSRV, "Materialized empty Java file {}", name_utf8);

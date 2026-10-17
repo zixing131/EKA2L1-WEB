@@ -44,6 +44,9 @@
 #include <miniz.h>
 #include <vector>
 
+// Defined in kernel/libmanager.cpp: run IBM J9 without the J9 compat hooks.
+extern bool eka2l1_j9_raw;
+
 namespace eka2l1::j2me {
     static bool g_launch_should_retry = false;
     // StubMIDP2 is a bounce process: it SendReceive()s opcode 1 to
@@ -2005,7 +2008,7 @@ namespace eka2l1::j2me {
             // Launch is stubbed so opcode 1 Completes(0) without KERN-EXEC.
             // StubMIDP2 then User::Exit(0). If AMS is still up, spawn J9 as
             // its child (Creator SID check).
-            if ((std::strcmp(g_last_stub_how, "handoff") == 0)
+            if (!eka2l1_j9_raw && (std::strcmp(g_last_stub_how, "handoff") == 0)
                 && (java_midp2_server_ready(kern) || java_ams_server_ready(kern))) {
                 const std::u16string suite_name = common::utf8_to_ucs2(
                     entry.name_.empty() ? entry.title_ : entry.name_);

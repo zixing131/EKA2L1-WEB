@@ -62,6 +62,9 @@ namespace eka2l1::hle {
 bool eka2l1_leave_probe = false;
 bool eka2l1_shell_leave_probe = false;
 
+// Defined in libmanager.cpp.
+extern bool eka2l1_j9_raw;
+
 // Last Leaves raised inside the IBM J9 VM process (j9midps60), recorded by
 // leave_start. The j9midps60 exit hint (process.cpp) prints them, so even a
 // truncated console log shows the fatal leave that killed the MIDlet.
@@ -589,7 +592,7 @@ namespace eka2l1::epoc {
         // half of its arguments. Handing it the whole line sends the VM down another
         // init path, and it data-aborts in j9vmall23.dll. Keep that answer for J9
         // until the hooks are reworked for full arguments.
-        if (common::lowercase_string(pr->raw_name()).find("j9midps60") == 0) {
+        if (!eka2l1_j9_raw && (common::lowercase_string(pr->raw_name()).find("j9midps60") == 0)) {
             auto *data16 = reinterpret_cast<epoc::des16 *>(data);
             std::u16string legacy = cmdline;
             const std::uint32_t max_chars = data16->get_max_length(crr_process);
@@ -1258,6 +1261,12 @@ namespace eka2l1::epoc {
         }
 
         auto obj = kern->get_kernel_obj_raw(static_cast<kernel::handle>(msg->args.args[index]), msg->own_thr);
+        if (eka2l1_leave_probe) {
+            LOG_WARN(KERNEL, "[handle-probe] message_open_handle idx={} raw=0x{:X} want_type={} got={} client={}",
+                index, msg->args.args[index], static_cast<int>(obj_type),
+                obj ? static_cast<int>(obj->get_object_type()) : -1,
+                msg->own_thr ? msg->own_thr->owning_process()->name() : "?");
+        }
         if (!obj) {
             return epoc::error_bad_handle;
         }

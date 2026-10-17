@@ -113,6 +113,9 @@
 
 #ifdef __EMSCRIPTEN__
 #include <atomic>
+
+// Defined in kernel/libmanager.cpp: run IBM J9 without the J9 compat hooks.
+extern bool eka2l1_j9_raw;
 extern std::atomic<std::uint64_t> eka2l1_wasm_guest_instrs_total;
 extern std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated;
 #endif
@@ -1161,7 +1164,7 @@ static void main_loop() {
 
     if (eka2l1::hle::j9_host_midp_active()) {
         eka2l1::hle::j9_host_tick_midp();
-    } else {
+    } else if (!eka2l1_j9_raw) {
         // The guest J9 path is still responsible for VM/bootstrap services,
         // while the bounded host interpreter provides a generic MIDP/LCDUI
         // fallback for suites that the ROM cannot execute to first frame yet.
@@ -4176,6 +4179,12 @@ static const char *thread_state_to_str(const eka2l1::kernel::thread_state st) {
 // WARN level. For chasing apps that die silently during init.
 extern bool eka2l1_leave_probe;
 extern bool eka2l1_shell_leave_probe;
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_j9_raw(int enabled) {
+    eka2l1_j9_raw = (enabled != 0);
+    std::printf("[j9-raw] %s\n", eka2l1_j9_raw ? "ON" : "OFF");
+}
 
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_leave_probe(int enabled) {

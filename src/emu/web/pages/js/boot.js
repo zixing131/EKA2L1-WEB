@@ -189,6 +189,10 @@
             }).then(function (mod) {
                 EKA2L1.module = mod;
                 applyJitQueryParams(mod);
+                // ?j9raw=1: run the Java stack without the J9/AMS/installer host workarounds.
+                if (new URLSearchParams(location.search).get('j9raw') === '1') {
+                    mod.ccall('wasm_set_j9_raw', null, ['number'], [1]);
+                }
                 patchIDBFS(mod);
 
                 try { mod.FS.mkdir('/eka2l1'); } catch (e) { /* exists */ }
