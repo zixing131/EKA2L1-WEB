@@ -181,6 +181,8 @@
         'error.deviceInstallFailed': '设备固件安装失败：\n{msg}',
         'error.sisInstallFailed': 'SIS 安装失败：\n{msg}',
         'error.jarInstallFailed': 'Java ME 安装失败：\n{msg}',
+        'error.midletInstallerStopped': '设备安装器未完成安装，请重试。',
+        'error.midletInstallerTimeout': '设备安装器超时，程序尚未安装完成。',
         'error.installFailedCode': '安装失败（代码 {code}）',
         'error.quotaInsufficient': '浏览器存储空间不足：需要约 {need}MB（含写入余量），仅剩 {free}MB / 配额 {quota}MB。\n请删除一些已安装的应用或设备后重试',
         'error.quotaInsufficientSuffixLow': '；当前配额过小，疑似无痕/隐私浏览模式。',

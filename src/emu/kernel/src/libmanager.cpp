@@ -321,8 +321,7 @@ namespace eka2l1::hle {
         std::vector<std::uint32_t> export_tables = dest_seg->get_export_table_raw();
         auto will_current_export_resolve_to_trampoline_map = [&](const std::size_t index) -> bool {
             if (export_tables[index] > dest_ptr) {
-                if (((dest_ptr & 1) && ((export_tables[index] & ~1) - (dest_ptr & ~1) < sizeof(THUMB_TRAMPOLINE_ASM))) ||
-                    (((dest_ptr & 1) == 0) && ((export_tables[index] & ~1) - (dest_ptr & ~1) < sizeof(ARM_TRAMPOLINE_ASM)))) {
+                if ((export_tables[index] & ~1u) - (dest_ptr & ~1u) < export_trampoline_size(dest_ptr)) {
                     resolve_to_trampoline_map = true;
                     trampoline_map.emplace(dest_ptr, source_ptr);
 
@@ -354,21 +353,7 @@ namespace eka2l1::hle {
                 *reinterpret_cast<std::uint32_t *>(dest_ptr_host) = 0xEF0000FF;        // SVC #0xFF
             }
         } else {
-            if (dest_ptr & 1) {
-                std::memcpy(dest_ptr_host, THUMB_TRAMPOLINE_ASM, sizeof(THUMB_TRAMPOLINE_ASM));
-
-                // It's thumb
-                // Hope it's big enough
-                if (((dest_ptr & ~1) & 3) == 0) {
-                    dest_ptr_host -= 2;
-                }
-
-                *reinterpret_cast<std::uint32_t *>(dest_ptr_host + sizeof(THUMB_TRAMPOLINE_ASM)) = source_ptr;
-            } else {
-                // ARM!!!!!!!!!
-                std::memcpy(dest_ptr_host, ARM_TRAMPOLINE_ASM, sizeof(ARM_TRAMPOLINE_ASM));
-                *reinterpret_cast<std::uint32_t *>(dest_ptr_host + sizeof(ARM_TRAMPOLINE_ASM)) = source_ptr;
-            }
+            write_export_trampoline(dest_ptr_host, dest_ptr, source_ptr);
         }
     }
 
@@ -619,6 +604,29 @@ namespace eka2l1::hle {
                 if (patch_seg) {
                     patch_seg->attach(nullptr, true);
                     patch_seg->unmark();
+
+                    // Upgrade the shipped audio shim without depending on a
+                    // Symbian SDK rebuild. These are EKA2L1 patch-DLL exports,
+                    // not offsets into a device ROM or the Java VM. r0 (this)
+                    // is replaced by the dispatcher ID; remaining MMF arguments
+                    // retain their normal registers and stack positions.
+                    if (common::lowercase_string(eka2l1::filename(patch_image_paths[i]))
+                        == "mediaclientaudio_general.dll") {
+                        auto *commands = kern_->create<kernel::chunk>(kern_->get_memory_system(), nullptr,
+                            "AudioCustomCommands", 0, 0x1000, 0x1000, prot_read_write_exec,
+                            kernel::chunk_type::normal, kernel::chunk_access::rom, kernel::chunk_attrib::anonymous);
+                        if (commands) {
+                            const std::uint32_t ordinals[] = {10, 9, 13, 12};
+                            auto *code = reinterpret_cast<std::uint32_t *>(commands->host_base());
+                            const address base = commands->base(nullptr).ptr_address();
+                            for (std::uint32_t command = 0; command < 4; ++command) {
+                                code[command * 3] = 0xE3A00039 + command; // mov r0, #dispatch ID
+                                code[command * 3 + 1] = 0xEFC10000; // svc #0xC10000
+                                code[command * 3 + 2] = 0xE12FFF1E; // bx lr
+                                patch_seg->set_export(ordinals[command], eka2l1::ptr<void>(base + command * 12));
+                            }
+                        }
+                    }
                 }
             }
 
@@ -17739,9 +17747,11 @@ namespace eka2l1::hle {
 
         if (name.find("midp2silentmidletinstall") != std::string::npos) {
             apply_silent_midlet_installer_compat_patch(cs);
-        } else if (name == "midp2installerplugin.dll") {
+        } else if ((name == "midp2installerplugin.dll") && !eka2l1_j9_raw) {
             apply_installer_compat_patch(cs);
-        } else if (name == "ifeui.dll") {
+        } else if ((name == "ifeui.dll") && !eka2l1_j9_raw) {
+            // Run also initializes the RFs used by the JAD/JAR recognizer.
+            // Stubbing the whole entry leaves a zero session handle.
             apply_ifeui_compat_patch(cs);
         } else if (name.find("j9midps60") != std::string::npos) {
             apply_j9_allfiles_patch(cs);

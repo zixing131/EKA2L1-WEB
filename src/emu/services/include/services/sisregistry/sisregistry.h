@@ -64,6 +64,7 @@ namespace eka2l1 {
         bool fetch(service::ipc_context *ctx);
         void get_version(eka2l1::service::ipc_context *ctx);
         void is_in_rom(eka2l1::service::ipc_context *ctx);
+        void request_property(eka2l1::service::ipc_context *ctx);
         void get_selected_drive(eka2l1::service::ipc_context *ctx);
         void request_files(eka2l1::service::ipc_context *ctx);
         void request_uid(eka2l1::service::ipc_context *ctx);

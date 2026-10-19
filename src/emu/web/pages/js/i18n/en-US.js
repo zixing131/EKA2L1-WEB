@@ -181,6 +181,8 @@
         'error.deviceInstallFailed': 'Device firmware installation failed:\n{msg}',
         'error.sisInstallFailed': 'SIS installation failed:\n{msg}',
         'error.jarInstallFailed': 'Java ME installation failed:\n{msg}',
+        'error.midletInstallerStopped': 'The device installer stopped before completing installation. Please try again.',
+        'error.midletInstallerTimeout': 'The device installer timed out. Installation has not completed.',
         'error.installFailedCode': 'Install failed (code {code})',
         'error.quotaInsufficient': 'Not enough browser storage: need about {need}MB (including write headroom), only {free}MB free of a {quota}MB quota.\nPlease delete some installed apps or devices and try again',
         'error.quotaInsufficientSuffixLow': '; the quota is unusually small, this looks like private/incognito browsing.',

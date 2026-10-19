@@ -14,7 +14,7 @@
 <section class="setup">
 <div class="files"><label>ROM 文件<input id="rom" type="file" accept=".rom"></label><label>RPKG 文件<input id="rpkg" type="file" accept=".rpkg"></label></div>
 <p class="hint">不选择文件时，使用测试链接指定的固件，未指定则默认 Nokia 5320。文件只在本机浏览器中读取。设备语言须由固件支持，否则使用固件默认语言。</p>
-<label>测试游戏（可选 SIS / SISX）<input id="package" type="file" accept=".sis,.sisx"></label>
+<label>测试游戏（可选 SIS / SISX / JAR）<input id="package" type="file" accept=".sis,.sisx,.jar"></label>
 <button id="diagnose" disabled>诊断状态</button>
 <label>画面方向<select id="rotation" disabled><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
 <div class="toolbar"><label>设备语言<select id="language"><option value="-1">固件默认</option><option value="31">简体中文</option><option value="1">English</option></select></label><label>CPU<select id="cpu"><option value="1">默认 JIT</option><option value="0">解释器</option></select></label><label>帧率上限<select id="max-fps"><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option></select></label><button id="start">运行回归</button><button id="start-phone" disabled>启动手机系统</button><button id="restart">重新开始</button><button id="export">导出日志</button><span id="summary" role="status">等待开始</span></div>
@@ -87,12 +87,19 @@
         };
         return mod;
     };
-    function launch(app) {
+    async function launch(app) {
         if (!ready) return;
         // Use the guest launch API directly: testing another application does
         // not need the camera permission requested by the normal launcher.
         try { EKA2L1.syncLocation(); } catch (e) {}
-        const result = EKA2L1.module.ccall('wasm_launch_app', 'number', ['number'], [Number(app.uid)]);
+        const api = app.j2me ? 'wasm_launch_midlet' : 'wasm_launch_app';
+        let result;
+        byId('summary').textContent = '启动中 · ' + app.name;
+        for (let attempt = 0; attempt < 30; ++attempt) {
+            result = EKA2L1.module.ccall(api, 'number', ['number'], [Number(app.uid)]);
+            if (result !== -100 && result !== -101) break;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
         note('启动 ' + app.name + ' (0x' + Number(app.uid).toString(16) + ') = ' + result);
         byId('summary').textContent = result === 0 ? '运行中 · ' + app.name : '启动失败 · ' + result;
     }
@@ -165,12 +172,15 @@
             if (new URLSearchParams(location.search).get('phone') === '1') {
                 note('启用原生 ROM 手机服务 = ' + EKA2L1.setPhoneBootMode(true));
             }
+            const packagePath = new URLSearchParams(location.search).get('package');
+            const javaPackage = /\.jar$/i.test(byId('package').files[0]?.name
+                || (packagePath ? new URL(packagePath, location.href).pathname : ''));
+            if (javaPackage) mod.ccall('wasm_set_j9_raw', null, ['number'], [1]);
             const result = EKA2L1.initDevice('', '');
             note('设备初始化 = ' + result);
             if (result !== 0) throw new Error('设备初始化失败：' + result);
             const previousAppUids = new Set(EKA2L1.appList().map(app => Number(app.uid)));
             let pkg = byId('package').files[0];
-            const packagePath = new URLSearchParams(location.search).get('package');
             if (!pkg && packagePath) {
                 const url = new URL(packagePath, location.href);
                 if (url.origin !== location.origin) throw new Error('测试程序包必须来自当前测试服务器');
@@ -179,12 +189,21 @@
                 pkg = await response.blob();
             }
             if (pkg) {
-                const path = '/eka2l1/regression.sis';
+                const path = javaPackage ? '/eka2l1/regression.jar' : '/eka2l1/regression.sis';
                 mod.FS.writeFile(path, new Uint8Array(await pkg.arrayBuffer()));
                 try {
-                    const installed = EKA2L1.installPackage(path);
+                    const installed = javaPackage ? EKA2L1.installMidlet(path) : EKA2L1.installPackage(path);
                     note('安装测试程序包 = ' + installed);
                     if (installed !== 0) throw new Error('安装测试程序包失败：' + installed);
+                    if (javaPackage) {
+                        byId('summary').textContent = '安装 Java ME 程序';
+                        const deadline = Date.now() + 180000;
+                        while (EKA2L1.midletInstallStatus() === 1 && Date.now() < deadline) {
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                        }
+                        const state = EKA2L1.midletInstallStatus();
+                        if (state !== 2) throw new Error('ROM Java 安装未完成：' + state);
+                    }
                 } finally {
                     mod.FS.unlink(path);
                 }
@@ -208,9 +227,10 @@
             }
             byId('summary').textContent = '设备就绪';
             const calculator = apps.find(app => Number(app.uid) === 0x10005902 || /calculator|计算器/i.test(app.name));
-            const initialApp = pkg ? apps.find(app => !previousAppUids.has(Number(app.uid))) : calculator;
+            const initialApp = pkg ? apps.find(app => !previousAppUids.has(Number(app.uid))
+                && (!javaPackage || app.j2me)) : calculator;
             if (new URLSearchParams(location.search).get('phone') === '1') bootPhone();
-            else if (initialApp) launch(initialApp);
+            else if (initialApp && new URLSearchParams(location.search).get('autolaunch') !== '0') launch(initialApp);
             setTimeout(() => note('启动后已运行 25 秒，请检查画面与按键。'), 25000);
         } catch (error) {
             byId('summary').textContent = '测试中断，请重新开始';

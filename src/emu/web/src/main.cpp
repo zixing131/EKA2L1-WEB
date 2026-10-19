@@ -94,6 +94,7 @@
 #include <kernel/process.h>
 #include <kernel/server.h>
 #include <kernel/thread.h>
+#include <kernel/mutex.h>
 #include <mem/ptr.h>
 #include <utils/reqsts.h>
 #include <utils/dll.h>
@@ -194,6 +195,9 @@ namespace eka2l1::web {
 
         // 0 = idle, 1 = guest MIDP installer running, 2 = success, < 0 = failed.
         std::atomic<int> midlet_install_state{ 0 };
+        std::uint32_t midlet_install_id = 0;
+        std::vector<std::pair<std::uint32_t, std::uint64_t>> midlet_install_previous;
+        std::uint64_t midlet_install_generation = 0;
     };
 
     static wasm_state g_state;
@@ -1873,7 +1877,7 @@ int wasm_install_package(const char *pkg_path) {
 /**
  * Stage a JAR in the RM-409 Java preinstall directory and run the ROM's own
  * MIDP2 silent installer. App registration is completed asynchronously by the
- * guest process; wasm_midlet_install_status() reports when it has exited.
+ * guest process; raw mode reports success once its AppArc registration is committed.
  */
 EMSCRIPTEN_KEEPALIVE
 int wasm_install_midlet(const char *jar_path) {
@@ -1886,14 +1890,31 @@ int wasm_install_midlet(const char *jar_path) {
         g_state.midlet_install_state.store(0, std::memory_order_release);
     }
 
+    const auto generation = ++g_state.midlet_install_generation;
+    g_state.midlet_install_id = 0;
+    g_state.midlet_install_previous.clear();
+    auto *install_kern = g_state.symsys->get_kernel_system();
+    auto *install_apps = reinterpret_cast<eka2l1::applist_server *>(install_kern->get_by_name<eka2l1::service::server>(
+        eka2l1::get_app_list_server_name_by_epocver(install_kern->get_epoc_version())));
+    if (install_apps) {
+        for (auto &reg : install_apps->get_registerations()) {
+            g_state.midlet_install_previous.emplace_back(reg.mandatory_info.uid, reg.last_rsc_modified);
+        }
+    }
     g_state.midlet_install_state.store(1, std::memory_order_release);
-    eka2l1::j2me::app_entry entry;
+    eka2l1::j2me::app_entry entry{};
     const eka2l1::j2me::install_error result = eka2l1::j2me::install(
-        g_state.symsys.get(), jar_path, entry, [](eka2l1::kernel::process *installer) {
+        g_state.symsys.get(), jar_path, entry, [generation](eka2l1::kernel::process *installer) {
+            if (generation != g_state.midlet_install_generation
+                || g_state.midlet_install_state.load(std::memory_order_acquire) == 2) return;
             // nullptr means no guest process was started (ROM lacks the MIDP2
             // silent installer / AMS core). The MIDlet was still registered in
             // the host j2me app list, so treat this as a synchronous success.
             if (!installer) {
+                if (eka2l1_j9_raw) {
+                    g_state.midlet_install_state.store(-4, std::memory_order_release);
+                    return;
+                }
                 LOG_INFO(FRONTEND_CMDLINE,
                     "MIDP install completed synchronously (no guest installer)");
                 if (g_state.symsys) {
@@ -1931,17 +1952,16 @@ int wasm_install_midlet(const char *jar_path) {
                     static_cast<int>(installer->get_exit_type()), installer->get_exit_reason(),
                     eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
             }
-            // Host already marked the JAR as installed (state 2). Do not
-            // regress that to -4 if SWInst later panics or is killed.
-            if (g_state.midlet_install_state.load(std::memory_order_acquire) == 2) {
-                return;
+            // Raw success is confirmed by the committed target registration.
+            if (!eka2l1_j9_raw || !success) {
+                g_state.midlet_install_state.store(success ? 2 : -4, std::memory_order_release);
             }
-            g_state.midlet_install_state.store(success ? 2 : -4, std::memory_order_release);
         });
 
+    g_state.midlet_install_id = entry.id_;
     if (result != eka2l1::j2me::INSTALL_ERROR_JAR_SUCCESS) {
         g_state.midlet_install_state.store(0, std::memory_order_release);
-    } else if (g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
+    } else if (!eka2l1_j9_raw && g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
         // Host j2me list already has the MIDlet. Guest SWInst hangs on
         // "?:\\..." after a fake-success 516 and would otherwise leave the
         // library UI spinning until timeout, then reject the next JAR (-3).
@@ -1954,6 +1974,35 @@ int wasm_install_midlet(const char *jar_path) {
 
 EMSCRIPTEN_KEEPALIVE
 int wasm_midlet_install_status() {
+    // The ROM silent installer remains alive to watch the preinstall directory.
+    // AppArc sees the registration before SWInst finishes its transaction. Do
+    // not let the frontend pause/save at that point: a reload would restore an
+    // incomplete AMS database even though the MIDlet already has an icon.
+    if (eka2l1_j9_raw && g_state.symsys
+        && g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
+        auto *kern = g_state.symsys->get_kernel_system();
+        for (const auto &object : kern->get_process_list()) {
+            auto *process = static_cast<eka2l1::kernel::process *>(object.get());
+            if (process && process->get_uid() == 0x101F875A
+                && process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending) {
+                return 1;
+            }
+        }
+        auto *apps = reinterpret_cast<eka2l1::applist_server *>(kern->get_by_name<eka2l1::service::server>(
+            eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+        auto entry = g_state.symsys->get_j2me_applist()->get_entry(g_state.midlet_install_id);
+        if (apps && entry) {
+            const auto uid = eka2l1::j2me::installed_app_uid(g_state.symsys.get(), *entry);
+            auto *reg = uid ? apps->get_registration(uid) : nullptr;
+            if (reg && !reg->non_native_opaque_data.empty()) {
+                const auto prior = std::find(g_state.midlet_install_previous.begin(),
+                    g_state.midlet_install_previous.end(), std::make_pair(uid, reg->last_rsc_modified));
+                if (prior == g_state.midlet_install_previous.end()) {
+                    g_state.midlet_install_state.store(2, std::memory_order_release);
+                }
+            }
+        }
+    }
     return g_state.midlet_install_state.load(std::memory_order_acquire);
 }
 
@@ -3414,6 +3463,8 @@ const char *wasm_get_app_icon(int uid) {
  * Launch an installed app by its UID.
  * Returns 0 on success, negative on error.
  */
+int wasm_launch_midlet(int virtual_uid);
+
 EMSCRIPTEN_KEEPALIVE
 int wasm_launch_app(int uid) {
     if (!g_state.symsys) return -1;
@@ -3430,6 +3481,13 @@ int wasm_launch_app(int uid) {
     eka2l1::apa_app_registry *reg = alserv->get_registration(
         static_cast<std::uint32_t>(uid));
     if (!reg) return -4;
+    if (eka2l1_j9_raw && (reg->caps.flags & eka2l1::apa_capability::non_native)) {
+        for (const auto &entry : g_state.symsys->get_j2me_applist()->get_entries()) {
+            if (eka2l1::j2me::installed_app_uid(g_state.symsys.get(), entry) == static_cast<std::uint32_t>(uid)) {
+                return wasm_launch_midlet(static_cast<int>(0x7E000000u | entry.id_));
+            }
+        }
+    }
 
     const std::u16string app_path = reg->mandatory_info.app_path.to_std_string(nullptr);
     LOG_INFO(FRONTEND_CMDLINE, "Launching app uid=0x{:08X} path={}",
@@ -3631,6 +3689,11 @@ int wasm_launch_midlet(int virtual_uid) {
             };
 
             auto find_java_reg = [&]() -> eka2l1::apa_app_registry * {
+                if (eka2l1_j9_raw) {
+                    auto entry = j2me_list->get_entry(j2me_id);
+                    const auto uid = entry ? eka2l1::j2me::installed_app_uid(g_state.symsys.get(), *entry) : 0;
+                    return uid ? alserv->get_registration(uid) : nullptr;
+                }
                 eka2l1::apa_app_registry *by_uid = alserv->get_registration(injected_uid);
                 if (by_uid && (by_uid->caps.flags & eka2l1::apa_capability::non_native)) {
                     return by_uid;
@@ -3651,7 +3714,7 @@ int wasm_launch_midlet(int virtual_uid) {
             };
 
             eka2l1::apa_app_registry *java_reg = find_java_reg();
-            if (!java_reg) {
+            if (!java_reg && !eka2l1_j9_raw) {
                 // Point AppArc at the AMS suite JAD that j2me::launch() restages.
                 // Do not restage to preinstall: AMS -boot would auto-spawn the
                 // silent installer and race J9.
@@ -3683,7 +3746,18 @@ int wasm_launch_midlet(int virtual_uid) {
                 // then StubMIDP2RecogExe with CApaCommandLine in env slot 1 so
                 // AMS can spawn j9midps60. Overlay still tracks the VM.
                 reset_exit_state();
-                if (eka2l1::j2me::launch(g_state.symsys.get(), j2me_id, exit_cb)) {
+                const std::uint32_t registered_uid = java_reg->mandatory_info.uid;
+                if (eka2l1_j9_raw
+                    ? eka2l1::j2me::launch_registered(g_state.symsys.get(), registered_uid, [&]() {
+                        // AMS startup pumps the guest and may refresh AppArc's
+                        // vector. Resolve the registration again after that.
+                        auto *current_reg = alserv->get_registration(registered_uid);
+                        if (!current_reg) return false;
+                        eka2l1::epoc::apa::command_line cmd;
+                        cmd.launch_cmd_ = eka2l1::epoc::apa::command_open;
+                        return alserv->launch_app(*current_reg, cmd, nullptr, nullptr);
+                    }, exit_cb)
+                    : eka2l1::j2me::launch(g_state.symsys.get(), j2me_id, exit_cb)) {
                     g_state.paused = false;
                     return 0;
                 }
@@ -3700,6 +3774,10 @@ int wasm_launch_midlet(int virtual_uid) {
                     "(it exits with None -1 on this ROM)",
                     midlet_name.empty() ? midlet_title : midlet_name);
             } else {
+                if (eka2l1_j9_raw) {
+                    g_state.paused = false;
+                    return wasm_midlet_install_status() == 1 ? -100 : -2;
+                }
                 const int prev_state = g_state.midlet_install_state.load(std::memory_order_acquire);
                 if (prev_state == 1) {
                     LOG_WARN(FRONTEND_CMDLINE,
@@ -3749,6 +3827,8 @@ int wasm_launch_midlet(int virtual_uid) {
             }
         }
     }
+
+    if (eka2l1_j9_raw) return -2;
 
     // --- Strategy 2: Direct launcher spawn (ROMs with midp2midletlauncher.exe) ---
     reset_exit_state();
@@ -4338,6 +4418,31 @@ void wasm_debug_dump() {
             thread_state_to_str(thr->current_state()),
             pc, pc_module.c_str(), pc_offset, lr, sp,
             thr->wait_obj ? thr->wait_obj->name().c_str() : "");
+
+        if (thr->wait_obj && thr->wait_obj->get_object_type() == eka2l1::kernel::object_type::mutex) {
+            auto *mutex = static_cast<eka2l1::kernel::mutex *>(thr->wait_obj);
+            auto *holder = mutex->holder();
+            std::printf("[dump] mutex=%llu locks=%d holder='%s' holder-state=%s\n",
+                static_cast<unsigned long long>(mutex->unique_id()), mutex->recursion_count(),
+                holder ? holder->name().c_str() : "<none>",
+                holder ? thread_state_to_str(holder->current_state()) : "<none>");
+        }
+        if (pr && pr->raw_name().find("j9midps60") != std::string::npos
+            && thr->current_state() == eka2l1::kernel::thread_state::wait_fast_sema) {
+            const auto &regs = thr->get_thread_context().cpu_registers;
+            std::printf("[dump] wait registers r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X\n",
+                regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
+            // RM-409 User::WaitForRequest preserves its status pointer in r5.
+            // Include the surrounding CActive header for cancellation stalls.
+            if (regs[5] >= 4 && regs[5] < 0x80000000u) {
+                std::printf("[dump] wait status context:");
+                for (int word = -1; word < 14; ++word) {
+                    auto *value = reinterpret_cast<const std::uint32_t *>(pr->get_ptr_on_addr_space(regs[5] + word * 4));
+                    if (value) std::printf(" %08X", *value);
+                }
+                std::printf("\n");
+            }
+        }
 
         // RM-409's MIDP2SilentMIDletInstall owns one CActive-derived monitor.
         // When its scheduler is idle, the saved CPU stack only points into

@@ -932,7 +932,7 @@ namespace eka2l1::epoc {
             // disk-space/Leave patches. The installer then hangs on a notify
             // and never commits the suite into AMS. Treat this as success so
             // the preinstaller can finish JavaReg/AMS registration.
-            if ((server_name.find("AppServer") != std::string::npos) && (msg->function == 516)
+            if (!eka2l1_j9_raw && (server_name.find("AppServer") != std::string::npos) && (msg->function == 516)
                 && (val == -30472)) {
                 kernel::thread *completer = kern->crr_thread();
                 LOG_WARN(KERNEL, "[java-ipc-complete] rewriting SWInst opcode 516 -30472 -> 0 (client={} completer={})",

@@ -442,7 +442,12 @@
             }
         }
 
-        var launch = isJ2me ? EKA2L1.launchMidlet(appUid) : EKA2L1.launchApp(appUid);
+        // AppArc UIDs can also identify Java apps. Keep the same entry point
+        // when AMS asks for a retry; launchMidlet only accepts virtual UIDs.
+        function launchSelectedApp() {
+            return isJ2me ? EKA2L1.launchMidlet(appUid) : EKA2L1.launchApp(appUid);
+        }
+        var launch = launchSelectedApp();
 
         if (launch === -101) {
             // SystemAMSCore -boot is running but !MIDP.SystemAMS.SystemAMS is
@@ -452,7 +457,7 @@
             var amsT0 = performance.now();
             var amsPoll = setInterval(function () {
                 var elapsed = performance.now() - amsT0;
-                launch = EKA2L1.launchMidlet(appUid);
+                launch = launchSelectedApp();
                 if (launch === 0) {
                     clearInterval(amsPoll);
                     console.log('[EKA2L1] Java AMS ready, MIDlet launch succeeded');
@@ -497,7 +502,7 @@
                 if (st === 2) {
                     clearInterval(regPoll);
                     console.log('[EKA2L1] Reregister complete, retrying launch');
-                    launch = EKA2L1.launchMidlet(appUid);
+                    launch = launchSelectedApp();
                     if (launch !== 0) {
                         if (launch === -100) {
                             overlayError(EKA2L1.t('overlay.launchFailedTitle'),
@@ -569,7 +574,9 @@
             if (isJ2me) {
                 try { j9n = EKA2L1.j9PresentCount ? EKA2L1.j9PresentCount() : 0; } catch (e) { j9n = 0; }
             }
-            var ready = isJ2me ? (j9n > 0) : (EKA2L1.redrawCount() > 0);
+            // ROM J9 draws through WindowServer, without the legacy host-MIDP
+            // present counter. Accept a composed guest frame for Java as well.
+            var ready = EKA2L1.redrawCount() > 0 || j9n > 0;
             if (ready) {
                 clearInterval(poll);
                 started = true;

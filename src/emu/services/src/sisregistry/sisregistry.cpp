@@ -278,6 +278,11 @@ namespace eka2l1 {
             break;
         }
 
+        case sisregistry_property: {
+            request_property(ctx);
+            break;
+        }
+
         case sisregistry_trust_timestamp: {
             get_trust_timestamp(ctx);
             break;
@@ -831,6 +836,29 @@ namespace eka2l1 {
 
         ctx->write_data_to_descriptor_argument(0, obj->in_rom);
         ctx->complete(epoc::error_none);
+    }
+
+    void sisregistry_client_subsession::request_property(service::ipc_context *ctx) {
+        const auto key = ctx->get_argument_value<std::int32_t>(0);
+        if (!key.has_value()) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        const package::object *obj = package_object(ctx);
+        if (obj) {
+            // RSisRegistryEntry::PropertyL passes the integer key in slot 0
+            // and a TPckg<TInt> output descriptor in slot 1.
+            for (const auto &property : obj->properties) {
+                if (property.key == key.value()) {
+                    int error = epoc::error_none;
+                    ctx->write_data_to_descriptor_argument(1, property.value, &error);
+                    ctx->complete(error);
+                    return;
+                }
+            }
+        }
+        ctx->complete(epoc::error_not_found);
     }
 
     void sisregistry_client_subsession::get_selected_drive(eka2l1::service::ipc_context *ctx) {

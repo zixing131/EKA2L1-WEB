@@ -139,6 +139,83 @@ namespace eka2l1::dispatch {
         return 0;
     }
 
+    // TMMFMessageDestination contains a UID, object handle and three reserved TInt fields.
+    struct mmf_message_destination {
+        std::uint32_t uid;
+        std::int32_t handle;
+        std::uint32_t reserved[3];
+    };
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_custom_sync, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2, epoc::des8 *output) {
+        auto *process = sys->get_kernel_system()->crr_process();
+        if (!destination || !destination->is_valid_descriptor()
+            || destination->get_length() != sizeof(mmf_message_destination)
+            || !destination->get_pointer(process)) {
+            return epoc::error_bad_descriptor;
+        }
+        mmf_message_destination target{};
+        std::memcpy(&target, destination->get_pointer(process), sizeof(target));
+        mmf_message_destination result{0, -2, {}}; // KMMFObjectHandleNull
+        if (target.uid == 0x10200017 && function == 0) { // ECibGetBuilder
+            result.uid = 0x10207A8E;
+            result.handle = 1;
+        } else if (target.uid == 0x10207A8E && target.handle == 1) {
+            if (function == 2) { // ECibRemove: no effect objects are allocated.
+                if (!data1 || !data1->is_valid_descriptor()
+                    || data1->get_length() != sizeof(mmf_message_destination)
+                    || !data1->get_pointer(process)) {
+                    return epoc::error_bad_descriptor;
+                }
+                return epoc::error_none;
+            }
+            if (function != 1) {
+                return epoc::error_not_supported;
+            }
+            if (!data1 || !data1->is_valid_descriptor() || data1->get_length() != sizeof(std::uint32_t)
+                || !data1->get_pointer(process)) {
+                return epoc::error_bad_descriptor;
+            }
+            // ECibBuild: no optional hardware effects are implemented. A null
+            // destination is the MMF protocol's supported "interface absent" reply.
+            std::uint32_t uid = 0;
+            std::memcpy(&uid, data1->get_pointer(process), sizeof(uid));
+            LOG_TRACE(HLE_DISPATCHER, "MMF custom interface 0x{:08X} unavailable", uid);
+        } else {
+            return epoc::error_not_supported;
+        }
+        if (!output || !output->is_valid_descriptor() || !output->get_pointer(process)
+            || (output->get_descriptor_type() != epoc::buf && output->get_descriptor_type() != epoc::ptr
+                && output->get_descriptor_type() != epoc::ptr_to_buf)) {
+            return epoc::error_bad_descriptor;
+        }
+        if (output->get_max_length(process) < sizeof(result)) {
+            return epoc::error_overflow;
+        }
+        output->assign(process, reinterpret_cast<const std::uint8_t *>(&result), sizeof(result));
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_custom_sync_no_output, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2) {
+        return eaudio_player_custom_sync(sys, func_num, destination, function, data1, data2, nullptr);
+    }
+
+    BRIDGE_FUNC_DISPATCHER(void, eaudio_player_custom_async, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2, epoc::des8 *output,
+        eka2l1::ptr<epoc::request_status> status) {
+        // No asynchronous custom command is implemented. In particular, an
+        // observer must not receive successful, empty events and rearm forever.
+        epoc::notify_info info(status, sys->get_kernel_system()->crr_thread());
+        info.complete(epoc::error_not_supported);
+    }
+
+    BRIDGE_FUNC_DISPATCHER(void, eaudio_player_custom_async_no_output, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2,
+        eka2l1::ptr<epoc::request_status> status) {
+        eaudio_player_custom_async(sys, func_num, destination, function, data1, data2, nullptr, status);
+    }
+
     BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, eaudio_player_inst, const std::uint32_t init_flags) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         drivers::audio_driver *aud_driver = sys->get_audio_driver();

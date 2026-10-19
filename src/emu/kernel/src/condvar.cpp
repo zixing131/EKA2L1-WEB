@@ -138,9 +138,12 @@ namespace eka2l1::kernel {
     void condvar::unblock_thread(thread *thr) {
         mutex *mut = thr->condvar_mutex_ ? thr->condvar_mutex_ : holding_;
         const int saved_locks = thr->condvar_lock_count_;
-        thr->condvar_mutex_ = nullptr;
-        thr->condvar_lock_count_ = 0;
-
+        // Keep the saved mutex/count until actual acquisition. Another thread
+        // may still own the mutex when Signal/Broadcast wakes this waiter.
+        if (!mut || saved_locks <= 0) {
+            thr->condvar_mutex_ = nullptr;
+            thr->condvar_lock_count_ = 0;
+        }
         thr->wait_obj = nullptr;
         timing_->unschedule_event(timeout_event_, thr->unique_id());
 
@@ -158,7 +161,6 @@ namespace eka2l1::kernel {
             thr->get_scheduler()->dewait(thr);
             if (saved_locks > 0) {
                 mut->wait(thr);
-                mut->lock_count = saved_locks;
             }
         }
 

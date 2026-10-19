@@ -78,6 +78,7 @@ namespace eka2l1 {
             }
 
             int count() const;
+            int recursion_count() const { return lock_count; }
 
             bool signal(kernel::thread *callee);
 

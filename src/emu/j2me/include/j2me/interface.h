@@ -59,6 +59,12 @@ namespace eka2l1::j2me {
      */
     bool launch_should_retry();
 
+    // Launch the guest-installed app using its AMS opaque IDs, then track J9.
+    std::uint32_t installed_app_uid(system *sys, const app_entry &entry);
+
+    bool launch_registered(system *sys, std::uint32_t app_uid, std::function<bool()> launch_stub,
+        std::function<void(kernel::process*)> exit_cb);
+
     /**
      * @brief Kill a hung MIDP2SilentMIDletInstall / SWInst so a new JAR install
      *        is not rejected as "already in progress".

@@ -563,7 +563,7 @@ namespace eka2l1 {
     void applist_server::rescan_registries_on_drive_newarch(eka2l1::io_system *io, const drive_number drv,
         std::vector<std::u16string> &register_file_paths) {
         const std::u16string import_rsc_path = std::u16string(1, drive_to_char16(drv)) + u":\\Private\\10003a3f\\import\\apps\\" + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
-        const std::u16string non_native_rsc_path = std::u16string(1, drive_to_char16(drv)) + NON_NATIVE_RESOURCE_DIRECTORY + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
+        const std::u16string non_native_rsc_path = std::u16string(1, drive_to_char16(drv)) + u":" + NON_NATIVE_RESOURCE_DIRECTORY + u"*_reg.r??";
         const std::u16string rom_rscs_path = std::u16string(1, drive_to_char16(drv)) + u":\\Private\\10003a3f\\apps\\" + NEWARCH_REG_FILE_SEARCH_WILDCARD16;
 
         // Supposedly to only scan in ROM, but it's not really that strict on the emulator ;)

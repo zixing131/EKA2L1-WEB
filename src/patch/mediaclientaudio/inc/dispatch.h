@@ -32,6 +32,15 @@ typedef unsigned long long TUint64;
 extern "C" {
 /// AUDIO PLAYER DISPATCH API
 
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerCustomSync, const TDesC8 &aDestination, TInt aFunction,
+    const TDesC8 &aData1, const TDesC8 &aData2, TDes8 &aOutput);
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerCustomSyncNoOutput, const TDesC8 &aDestination, TInt aFunction,
+    const TDesC8 &aData1, const TDesC8 &aData2);
+HLE_DISPATCH_FUNC(void, EAudioPlayerCustomAsync, const TDesC8 &aDestination, TInt aFunction,
+    const TDesC8 &aData1, const TDesC8 &aData2, TDes8 &aOutput, TRequestStatus &aStatus);
+HLE_DISPATCH_FUNC(void, EAudioPlayerCustomAsyncNoOutput, const TDesC8 &aDestination, TInt aFunction,
+    const TDesC8 &aData1, const TDesC8 &aData2, TRequestStatus &aStatus);
+
 // Create new audio player instance
 HLE_DISPATCH_FUNC(TAny *, EAudioPlayerNewInstance, TUint32 aInitFlags);
 

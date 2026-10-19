@@ -378,22 +378,7 @@ namespace eka2l1::dispatch {
             if (seg->is_rom()) {
                 void *ptr = mem_->get_real_pointer(orgaddr & ~1);
 
-                if (orgaddr & 1) {
-                    std::memcpy(ptr, hle::THUMB_TRAMPOLINE_ASM, sizeof(hle::THUMB_TRAMPOLINE_ASM));
-
-                    std::uint32_t offset_do_write = sizeof(hle::THUMB_TRAMPOLINE_ASM);
-
-                    if (((orgaddr & ~1) & 3) == 0) {
-                        offset_do_write -= 2;
-                    }
-
-                    ptr = reinterpret_cast<std::uint8_t *>(ptr) + offset_do_write;
-                } else {
-                    std::memcpy(ptr, hle::ARM_TRAMPOLINE_ASM, sizeof(hle::ARM_TRAMPOLINE_ASM));
-                    ptr = reinterpret_cast<std::uint8_t *>(ptr) + sizeof(hle::ARM_TRAMPOLINE_ASM);
-                }
-
-                *reinterpret_cast<std::uint32_t *>(ptr) = entryentry;
+                hle::write_export_trampoline(ptr, orgaddr, entryentry);
             }
 
             std::uint32_t *start_base = reinterpret_cast<std::uint32_t *>(reinterpret_cast<std::uint8_t *>(

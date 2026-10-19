@@ -81,7 +81,13 @@ namespace eka2l1 {
             }
 
             if (holding == thr) {
-                ++lock_count;
+                if (thr->condvar_mutex_ == this) {
+                    lock_count = std::max(1, thr->condvar_lock_count_);
+                    thr->condvar_mutex_ = nullptr;
+                    thr->condvar_lock_count_ = 0;
+                } else {
+                    ++lock_count;
+                }
             } else {
                 // The holder may legitimately be blocked on another wait object -- its
                 // request semaphore, say -- while owning this mutex. It releases us
@@ -89,7 +95,14 @@ namespace eka2l1 {
                 kernel::thread *calm_down = thr;
                 waits.push(calm_down);
 
-                calm_down->get_scheduler()->wait(calm_down);
+                // A condvar wake first makes the thread ready. wait() only
+                // dequeues running threads, so remove ready threads explicitly.
+                if (calm_down->state == thread_state::ready) {
+                    calm_down->get_scheduler()->unschedule(calm_down);
+                    kern->prepare_reschedule();
+                } else {
+                    calm_down->get_scheduler()->wait(calm_down);
+                }
                 calm_down->state = thread_state::wait_mutex;
 
                 calm_down->wait_obj = this;
@@ -191,16 +204,28 @@ namespace eka2l1 {
 
         bool mutex::signal(kernel::thread *callee) {
             if (!holding) {
-                LOG_ERROR(KERNEL, "Signal a mutex that's not held by any thread");
+                LOG_ERROR(KERNEL, "Signal unowned mutex {} from {} (count={})", unique_id(), callee->name(), lock_count);
                 return false;
             }
 
             if (holding != callee) {
-                LOG_ERROR(KERNEL, "Calling signal with the caller not being the holder");
+                LOG_ERROR(KERNEL, "Mutex {} signalled by {} instead of holder {} (count={})", unique_id(), callee->name(), holding->name(), lock_count);
                 return false;
             }
 
             --lock_count;
+
+            auto transfer_ownership = [&](thread *next) {
+                holding = next;
+                // The blocked SVC resumes after Wait; it is not executed again.
+                // Restore a condvar waiter's recursion only when it owns us.
+                lock_count = next->condvar_mutex_ == this
+                    ? std::max(1, next->condvar_lock_count_) : 1;
+                if (next->condvar_mutex_ == this) {
+                    next->condvar_mutex_ = nullptr;
+                    next->condvar_lock_count_ = 0;
+                }
+            };
 
             auto put_top_wait_to_pending = [&]() {
                 if (waits.empty()) {
@@ -234,7 +259,7 @@ namespace eka2l1 {
                     thr->state = thread_state::ready;
                     thr->wait_obj = nullptr;
 
-                    holding = thr;
+                    transfer_ownership(thr);
 
                     // Try to get a thread to be in a mutex holding ready state (mutex hold pending)
                     if (pendings.empty()) {
@@ -259,7 +284,7 @@ namespace eka2l1 {
                 ready_thread->wait_obj = nullptr;
 
                 // Push the next thread in wait queue to the pending queue
-                holding = ready_thread;
+                transfer_ownership(ready_thread);
 
                 if (!waits.empty()) {
                     put_top_wait_to_pending();

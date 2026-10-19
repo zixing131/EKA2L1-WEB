@@ -879,6 +879,45 @@ namespace eka2l1::j2me {
         return out;
     }
 
+    std::uint32_t installed_app_uid(system *sys, const app_entry &entry) {
+        // The guest uids file contains the suite UID followed by each MIDlet's
+        // AppArc UID. Neither is the internal AMS ID stored in opaque data.
+        auto *io = sys->get_io_system();
+        const std::u16string base = u"C:\\private\\102033E6\\MIDlets\\";
+        auto dir = io->open_dir(base, {}, io_attrib_include_dir);
+        if (!dir) return 0;
+        std::uint32_t result = 0;
+        while (auto ent = dir->get_next_entry()) {
+            if (ent->type != io_component_type::dir || ent->name.size() != 10
+                || ent->name.front() != '[' || ent->name.back() != ']') continue;
+            const auto folder = base + common::utf8_to_ucs2(ent->name) + u"\\";
+            const auto jad = read_guest_text_prefix(io, folder + u"m.jad", 65536);
+            auto attribute = [&](const std::string &key) {
+                std::size_t start = 0;
+                while (start < jad.size()) {
+                    auto end = jad.find_first_of("\r\n", start);
+                    if (end == std::string::npos) end = jad.size();
+                    if (jad.compare(start, key.size(), key) == 0) {
+                        auto value = start + key.size();
+                        while (value < end && (jad[value] == ' ' || jad[value] == '\t')) ++value;
+                        return jad.substr(value, end - value);
+                    }
+                    start = end + 1;
+                }
+                return std::string{};
+            };
+            if (attribute("MIDlet-Name:") != entry.name_
+                || attribute("MIDlet-Vendor:") != entry.author_
+                || attribute("MIDlet-Version:") != entry.version_) continue;
+            auto uids = io->open_file(folder + u"uids", READ_MODE | BIN_MODE);
+            std::uint32_t ids[2] = {};
+            if (!uids || uids->read_file(ids, 1, sizeof(ids)) != sizeof(ids)) continue;
+            if (result && result != ids[1]) return 0; // Ambiguous installation.
+            result = ids[1];
+        }
+        return result;
+    }
+
     // StubMIDP2 opcode 1 looks the suite up by AMS uid, not by the JAD path.
     // Host inject uses 0x20000000|app_id; a successful silent install creates a
     // different folder under C:\private\102033E6\MIDlets\. Prefer that uid.
@@ -954,7 +993,9 @@ namespace eka2l1::j2me {
         }
 
         static constexpr char16_t JOURNAL_DB[] = u"C:\\private\\101F875A\\journal.db";
-        if (!io->exist(JOURNAL_DB)) {
+        // An empty file is not a DBMS database. In raw mode SWInst must
+        // create its own journal, including the database header and schema.
+        if (!eka2l1_j9_raw && !io->exist(JOURNAL_DB)) {
             if (symfile jf = io->open_file(JOURNAL_DB, WRITE_MODE | BIN_MODE)) {
                 jf->close();
                 LOG_WARN(J2ME, "Created empty SWInst journal.db");
@@ -1443,7 +1484,7 @@ namespace eka2l1::j2me {
     //   User::Exit(IPC result)
     static bool launch_via_stubmidp2(system *sys, kernel::process *ams,
         const std::u16string &suite_jad, const std::uint32_t suite_uid,
-        std::function<void(kernel::process *)> exit_cb) {
+        std::function<void(kernel::process *)> exit_cb, std::function<bool()> launch_stub = nullptr) {
         io_system *io = sys->get_io_system();
         kernel_system *kern = sys->get_kernel_system();
         static constexpr char16_t STUB[] = u"Z:\\sys\\bin\\StubMIDP2RecogExe.exe";
@@ -1455,7 +1496,7 @@ namespace eka2l1::j2me {
             LOG_WARN(J2ME, "StubMIDP2RecogExe.exe is not in this ROM");
             return false;
         }
-        if (suite_jad.empty() || !io->exist(suite_jad)) {
+        if (!launch_stub && (suite_jad.empty() || !io->exist(suite_jad))) {
             g_last_stub_how = "no-jad";
             LOG_WARN(J2ME, "StubMIDP2 skipped: suite JAD missing ({})",
                 common::ucs2_to_utf8(suite_jad));
@@ -1600,7 +1641,13 @@ namespace eka2l1::j2me {
 
         auto try_stub = [&]() -> bool {
             g_last_stub_how = "slot1";
-            kernel::process *stub = spawn_stubmidp2(sys, ams, suite_jad, suite_uid);
+            kernel::process *stub = nullptr;
+            if (launch_stub) {
+                if (!launch_stub()) return false;
+                stub = find_running_process(kern, "StubMIDP2");
+            } else {
+                stub = spawn_stubmidp2(sys, ams, suite_jad, suite_uid);
+            }
             if (!stub) {
                 g_last_stub_how = "spawn-slot1-fail";
                 return false;
@@ -1629,6 +1676,35 @@ namespace eka2l1::j2me {
                 g_last_stub_how, g_last_stub_reason, g_stub_cycle);
         }
         return false;
+    }
+
+    bool launch_registered(system *sys, std::uint32_t app_uid, std::function<bool()> launch_stub,
+        std::function<void(kernel::process *)> exit_cb) {
+        static std::uint32_t target_uid = 0;
+        static kernel::uid tracked_vm = 0;
+        g_launch_should_retry = false;
+        auto *vm = find_running_process(sys->get_kernel_system(), "j9midps60");
+        if (vm && (target_uid != app_uid || (tracked_vm && tracked_vm != vm->unique_id()))) {
+            LOG_WARN(J2ME, "Another J9 instance is already running; refusing to report this MIDlet as launched");
+            return false;
+        }
+        if (target_uid != app_uid || (!vm && tracked_vm)) {
+            g_ams_handoff_pending = false;
+            g_ams_handoff_waits = 0;
+            g_stub_cycle = 0;
+            tracked_vm = 0;
+        }
+        target_uid = app_uid;
+        // A persisted AppArc registration survives a page reload, its guest
+        // servers do not. Boot the real AMS even when no installer ran in this
+        // session, before waiting for the StubMIDP2 connection endpoints.
+        auto *ams = boot_java_runtime(sys);
+        const bool launched = launch_via_stubmidp2(sys, ams, {}, 0, std::move(exit_cb), std::move(launch_stub));
+        if (launched) {
+            vm = find_running_process(sys->get_kernel_system(), "j9midps60");
+            if (vm) tracked_vm = vm->unique_id();
+        }
+        return launched;
     }
 
     static constexpr std::uint32_t J9_STACK_SIZE = 0x40000;

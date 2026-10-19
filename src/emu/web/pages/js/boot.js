@@ -189,8 +189,9 @@
             }).then(function (mod) {
                 EKA2L1.module = mod;
                 applyJitQueryParams(mod);
-                // ?j9raw=1: run the Java stack without the J9/AMS/installer host workarounds.
-                if (new URLSearchParams(location.search).get('j9raw') === '1') {
+                // Use the ROM installer and IBM J9 by default, on both the
+                // library and run pages. Keep the old mode opt-in for diagnosis.
+                if (new URLSearchParams(location.search).get('j9raw') !== '0') {
                     mod.ccall('wasm_set_j9_raw', null, ['number'], [1]);
                 }
                 patchIDBFS(mod);

@@ -588,19 +588,15 @@
     };
 
     function waitForMidletInstaller() {
-        // Host registration is the install success the library cares about.
-        // Guest SWInst may hang; wasm_install_midlet marks state=2 as soon as
-        // the JAR is in the host list. Keep a short poll so a synchronous
-        // complete is visible, and treat a leftover in-progress as success
-        // rather than painting the library "install failed".
-        var deadline = Date.now() + 8000;
+        // Success means the ROM installer committed the AppArc registration.
+        var deadline = Date.now() + 180000;
         return new Promise(function (resolve, reject) {
             function poll() {
                 var state = EKA2L1.midletInstallStatus();
                 if (state === 2) { resolve(); return; }
-                if (state === 0) { resolve(); return; }
+                if (state === 0) { reject(new Error(EKA2L1.t('error.midletInstallerStopped'))); return; }
                 if (state < 0) { reject(new Error('MIDP installer failed (' + state + ')')); return; }
-                if (Date.now() >= deadline) { resolve(); return; }
+                if (Date.now() >= deadline) { reject(new Error(EKA2L1.t('error.midletInstallerTimeout'))); return; }
                 setTimeout(poll, 250);
             }
             setTimeout(poll, 250);
@@ -628,11 +624,6 @@
                 try { EKA2L1.module.FS.unlink(target); } catch (e) {}
                 if (result !== 0) throw new Error(EKA2L1.t('error.installFailedCode', { code: result }));
 
-                // The MIDlet is registered in the host j2me app list immediately
-                // (before any guest-side install), so refresh now so it shows up
-                // even if the ROM installer later stalls or fails.
-                refreshApps();
-
                 return waitForMidletInstaller();
             })
             .then(function () {
@@ -650,20 +641,11 @@
                 console.error('[EKA2L1] Java ME install failed:', err);
                 setStatus('red', EKA2L1.t('status.installFailed'));
 
-                // The MIDlet may have been registered even if the ROM installer
-                // timed out — refresh so it is visible and save the list.
                 refreshApps();
-                try { EKA2L1.save(); } catch (e) {}
 
                 var msg = err.message || String(err);
-                if (msg.indexOf('timed out') !== -1 || msg.indexOf('stopped before') !== -1) {
-                    // Installer async issues are non-fatal: the MIDlet is already
-                    // registered. Show a softer message instead of a blocking dialog.
-                    EKA2L1.toast(EKA2L1.t('toast.midletRegisteredInstallerIncomplete'), 5000);
-                } else {
-                    showError(EKA2L1.t('error.jarInstallFailed', { msg: msg }));
-                    EKA2L1.toast(msg, 4000);
-                }
+                showError(EKA2L1.t('error.jarInstallFailed', { msg: msg }));
+                EKA2L1.toast(msg, 4000);
             });
     });
 

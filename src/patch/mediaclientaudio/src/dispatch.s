@@ -184,3 +184,18 @@ ETonePlayerSetBalance:
 
 ETonePlayerGetFixedSequenceName:
     CallHleDispatch 0xCF
+.global EAudioPlayerCustomSync
+EAudioPlayerCustomSync:
+    CallHleDispatch 0x39
+
+.global EAudioPlayerCustomSyncNoOutput
+EAudioPlayerCustomSyncNoOutput:
+    CallHleDispatch 0x3A
+
+.global EAudioPlayerCustomAsync
+EAudioPlayerCustomAsync:
+    CallHleDispatch 0x3B
+
+.global EAudioPlayerCustomAsyncNoOutput
+EAudioPlayerCustomAsyncNoOutput:
+    CallHleDispatch 0x3C

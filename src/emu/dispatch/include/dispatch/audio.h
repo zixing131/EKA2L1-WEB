@@ -25,6 +25,18 @@
 #include <utils/reqsts.h>
 
 namespace eka2l1::dispatch {
+    // MMF custom-interface builder; effects absent from the backend return a null handle.
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_custom_sync, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2, epoc::des8 *output);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_custom_sync_no_output, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2);
+    BRIDGE_FUNC_DISPATCHER(void, eaudio_player_custom_async, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2, epoc::des8 *output,
+        eka2l1::ptr<epoc::request_status> status);
+    BRIDGE_FUNC_DISPATCHER(void, eaudio_player_custom_async_no_output, epoc::des8 *destination,
+        std::int32_t function, epoc::des8 *data1, epoc::des8 *data2,
+        eka2l1::ptr<epoc::request_status> status);
+
     BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, eaudio_player_inst, const std::uint32_t init_flags);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_destroy, eka2l1::ptr<void> handle);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_supply_url, eka2l1::ptr<void> handle,

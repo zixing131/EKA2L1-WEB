@@ -28,6 +28,7 @@ namespace eka2l1 {
         sisregistry_localized_vendor_name = 0x8,
         sisregistry_package_name = 0x9,
         sisregistry_in_rom = 0xA,
+        sisregistry_property = 0xC,
         sisregistry_selected_drive = 0xD,
         sisregistry_get_matching_supported_languages = 0x11,
         sisregistry_trust_timestamp = 0x16,

@@ -225,25 +225,19 @@ EXPORT_C const CMMFControllerImplementationInformation &CMdaAudioPlayerUtility::
 }
 
 EXPORT_C TInt CMdaAudioPlayerUtility::CustomCommandSync(const TMMFMessageDestinationPckg &aDestination, TInt aFunction, const TDesC8 &aDataTo1, const TDesC8 &aDataTo2, TDes8 &aDataFrom) {
-    LogOut(KMcaCat, _L("Custom command not supported!"));
-    return 0;
+    return EAudioPlayerCustomSync(0, aDestination, aFunction, aDataTo1, aDataTo2, aDataFrom);
 }
 
 EXPORT_C TInt CMdaAudioPlayerUtility::CustomCommandSync(const TMMFMessageDestinationPckg &aDestination, TInt aFunction, const TDesC8 &aDataTo1, const TDesC8 &aDataTo2) {
-    LogOut(KMcaCat, _L("Custom command not supported!"));
-    return 0;
+    return EAudioPlayerCustomSyncNoOutput(0, aDestination, aFunction, aDataTo1, aDataTo2);
 }
 
 EXPORT_C void CMdaAudioPlayerUtility::CustomCommandAsync(const TMMFMessageDestinationPckg &aDestination, TInt aFunction, const TDesC8 &aDataTo1, const TDesC8 &aDataTo2, TDes8 &aDataFrom, TRequestStatus &aStatus) {
-    LogOut(KMcaCat, _L("Custom command not supported!"));
-    TRequestStatus *statusPtr = &aStatus;
-    User::RequestComplete(statusPtr, KErrNone);
+    EAudioPlayerCustomAsync(0, aDestination, aFunction, aDataTo1, aDataTo2, aDataFrom, aStatus);
 }
 
 EXPORT_C void CMdaAudioPlayerUtility::CustomCommandAsync(const TMMFMessageDestinationPckg &aDestination, TInt aFunction, const TDesC8 &aDataTo1, const TDesC8 &aDataTo2, TRequestStatus &aStatus) {
-    LogOut(KMcaCat, _L("Custom command not supported!"));
-    TRequestStatus *statusPtr = &aStatus;
-    User::RequestComplete(statusPtr, KErrNone);
+    EAudioPlayerCustomAsyncNoOutput(0, aDestination, aFunction, aDataTo1, aDataTo2, aStatus);
 }
 
 void CMdaAudioPlayerUtility::SetRepeats(TInt aRepeatNumberOfTimes, const TTimeIntervalMicroSeconds &aTrailingSilence) {
