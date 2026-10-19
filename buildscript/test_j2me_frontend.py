@@ -25,6 +25,19 @@ async def run(args):
         # This test exercises installation/storage, not PWA updates. A worker
         # activating on first load can otherwise reload midway through setup.
         page = await browser.new_page(service_workers='allow' if args.service_worker else 'block')
+        permission_task = None
+        if args.query_choice is not None:
+            async def answer_system_queries():
+                count = 0
+                while True:
+                    dialog = page.locator('#ekaSystemQuestion')
+                    if await dialog.count():
+                        count += 1
+                        print('System query:', await dialog.inner_text(), flush=True)
+                        await page.screenshot(path=str(args.output / f'query-{count}.png'))
+                        await dialog.locator('[data-choice="' + str(args.query_choice) + '"]').click()
+                    await asyncio.sleep(0.2)
+            permission_task = asyncio.create_task(answer_system_queries())
         profiler = None
         if args.profile:
             profiler = await page.context.new_cdp_session(page)
@@ -130,6 +143,9 @@ async def run(args):
                     await page.locator('[data-key="' + key + '"]').first.click(delay=300, timeout=5000)
                     await asyncio.sleep(args.key_interval)
                     await page.screenshot(path=str(args.output / f'key-{index}-{key}.png'), timeout=15000)
+                after_keys = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
+                assert any(line.startswith('j9midps60[') and 'exit=3/0' in line
+                           for line in after_keys.splitlines()), after_keys
                 assert not page_errors, page_errors
                 print('PASS: JAR entry, guest installation, persisted reload and live cold-started J9.')
                 print('Inspect game.png and key-*.png for menu and gameplay progress.')
@@ -143,6 +159,12 @@ async def run(args):
                     await page.screenshot(path=str(args.output / 'final.png'), timeout=15000)
                 except Exception as error:
                     print('Final screenshot failed:', error)
+                if permission_task:
+                    permission_task.cancel()
+                    try:
+                        await permission_task
+                    except asyncio.CancelledError:
+                        pass
                 await browser.close()
 
 
@@ -165,5 +187,6 @@ if __name__ == '__main__':
     parser.add_argument('--expect-install-error', action='store_true', help='Assert guest rejection and no new MIDlet card')
     parser.add_argument('--key-interval', type=float, default=8, help='Seconds to wait after each game key')
     parser.add_argument('--keys', default='OK,LSK', help='Comma-separated keypad sequence after launch')
+    parser.add_argument('--query-choice', type=int, choices=(0, 1), help='Click this system-dialog button in the isolated test browser')
     parser.add_argument('--profile', action='store_true', help='Capture a renderer CPU profile through cold launch')
     asyncio.run(run(parser.parse_args()))

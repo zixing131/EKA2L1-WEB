@@ -26,6 +26,31 @@ namespace eka2l1 {
     class kernel_system;
 
     namespace epoc::notifier {
+        struct global_message_query {
+            std::uint32_t softkeys;
+            std::u16string text;
+            std::u16string header;
+        };
+
+        struct query_button {
+            std::int16_t command;
+            std::u16string text;
+        };
+
+        bool parse_global_message_query(const std::uint8_t *data, std::size_t size, global_message_query &query);
+        bool parse_query_buttons(const std::vector<std::uint8_t> &resource, std::vector<query_button> &buttons);
+
+        class global_message_query_plugin : public plugin_base {
+            struct request_state;
+            std::shared_ptr<request_state> state_;
+
+        public:
+            explicit global_message_query_plugin(kernel_system *kern);
+            epoc::uid unique_id() const override { return 0x100059CB; }
+            void handle(epoc::desc8 *request, epoc::des8 *response, epoc::notify_info &complete_info) override;
+            void cancel() override;
+        };
+
         class memory_card_dialog_plugin : public plugin_base {
         public:
             explicit memory_card_dialog_plugin(kernel_system *kern)

@@ -9,6 +9,7 @@ add_executable(ekatests
     web_frame_pacer.cpp
     game_patches.cpp
     j2me_manifest.cpp
+    notifier_queries.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 

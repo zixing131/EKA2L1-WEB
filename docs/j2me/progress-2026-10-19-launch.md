@@ -270,3 +270,26 @@ MusicBox 启动仍未通过：J9 输出 `BaseScreen.layout → sizeChanged` 的 
 新增 `node --test buildscript/test_wasmjit_module_cache.cjs` 四个回归全部通过，使用真正的 WebAssembly 模块覆盖字节快照、实例隔离、槽复用、哈希碰撞、LRU/容量淘汰及失败处理。最终构建 **`7d7a62b3e8d7`**；缓存版本第一关计时到 0:13，方向键响应，末帧约 12 FPS。上述约 58% 降幅仅指这轮模块构造计时，不能当作整体帧率提升比例。完整日志、CPU profile 和截图在 `/tmp/j2me-e72/5320-profile25/`、`/tmp/j2me-e72/5320-cache25/`。
 
 最终缓存构建另跑原始 MusicBox：首次安装、重复安装、保存和刷新均完成，启动后的同一空指针异常与 VM 退出仍存在（`/tmp/j2me-e72/musicbox-final25/`），不标记启动 PASS。不支持 CLDC 版本的负例继续被 guest 拒绝且不新增卡片（`/tmp/j2me-e72/reject25/`）；未将错误码改为成功。Node 缓存/保存六个用例、原生 manifest 两个用例、Python 语法及 `git diff --check` 通过。
+
+
+## MusicBox 源码初始化与系统权限查询（2026-10-19 晚）
+
+用户提供源码 `/Users/zixing/Documents/zixing/github/JavaQQServer/qqmusic-midlet`。已在该仓库修复 `BaseScreen`：构造器不再调用会同步触发尺寸回调的 `setFullScreenMode`，首次 `showNotify` 才进入全屏；`sizeChanged` 在首次显示前不进入虚方法布局。保护不仅针对尚未赋值的字体，也避免在父类构造期间调用依赖子类字段的 `HomeScreen.onLayout`。由原构建脚本生成、经 CLDC 预验证的正式 JAR 为 `dist/musicbox_202610192200.jar`，没有更改默认首页或移除联网代码，原 myjump JAR 保留。
+
+仅改 Java 初始化后，空指针消失，但联网启动仍退出（`/tmp/j2me-e72/musicbox-source1/`）。临时离线对照包把默认页改为用户页后保持运行（`musicbox-offline26-test/`）；该包只用于定位，不作为交付。后续查到文件/联网权限触发 `KAknGlobalMsgQueryUid=0x100059CB`，旧 notifier 缺失时直接返回 0，既没有展示问题，也没有返回有效的软键命令。
+
+现在内置 global message query 插件按 signature、长度和 SCSU 解析文本，从当前 ROM 的本地化 `avkon.rsc` 读取 CBA 按钮文字及命令值。支持普通/Avkon CBA 的两侧软键，第三项中键不另展示；未知资源、非支持的版本返回错误，不猜测同意结果。完成值是实际软键命令（例如 Yes=3005、No=3006、Cancel=-1），写入请求状态；一字节 response 是协议中的未使用占位符。异步状态使用线程 UID、弱引用和代数，检查线程与请求仍 pending，避免取消/退出后的旧回调再次完成请求。
+
+协议依据为 SymbianSource classicui 的 [AknGlobalMsgQuery 客户端](https://github.com/SymbianSource/oss.FCL.sf.mw.classicui/blob/master/uifw/AvKon/notifsrc/aknglobalmsgquery.cpp)、[系统查询完成路径](https://github.com/SymbianSource/oss.FCL.sf.mw.classicui/blob/master/uifw/AknGlobalUI/OldStyleNotif/Src/aknsystemmsgpopup.cpp) 与 [Avkon 定义](https://github.com/SymbianSource/oss.FCL.sf.mw.classicui/blob/master/classicui_plat/ui_framework_definitions_api/inc/avkon.hrh)。
+
+Web `show_yes_no_dialog` 不再自动选按钮，改为非阻塞 HTML dialog，用户必须明确选择；默认聚焦第二按钮，Escape 返回取消。文本按 textContent 展示，键盘事件不传给手机按键，多个 host 问题排队。测试脚本的 `--query-choice` 只在隔离浏览器测试中点击指定按钮，不是产品自动授权。
+
+验证：
+
+- 原生 `[notifier],[j2me][manifest]` 共 5 个用例、127 条断言通过，包含真实 5320 网络权限报文、截断输入、SCSU 中文和 CBA 布局。
+- `buildscript/test_web_question.py` 在真实 Chromium 验证队列、两个选择、Escape、文本转义、焦点恢复、事件隔离及弹窗期间动画帧仍推进。
+- 正式构建 **`0454e96ad6b8`**，`musicbox-final27/`：原始默认联网首页的新源码包首次安装、重装、保存、刷新后启动成功，J9 保持 `exit=3/0`，主页、左右换页、菜单和下键均有截图。早期构建 `ff2b6f462887` 的同流程也通过（`musicbox-query26/`）。
+
+- `musicbox-deny27/`：拒绝所有文件与联网权限后仍能进入主页、打开菜单并按下键；允许/拒绝两组在全部按键之后均确认 VM 存活，无 NullPointerException、无页面异常。
+
+当前边界：主页可以显示、菜单可操作，但在线数据和播放没有通过。Web 服务构建明确使用 `internet/protocols/overall_null.cpp`，没有注册 TCP；请求继续到 HTTP 层后日志为 `Can't find protocol named tcp`，页面显示“暂无内容”。这不是新的安装失败，也不能把无内容解释成线上接口返回了空列表。要提供在线能力仍需 Web 网络后端/代理方案，不应仅将连接错误伪装成成功。
