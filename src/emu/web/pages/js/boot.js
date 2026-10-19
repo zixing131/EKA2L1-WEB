@@ -201,7 +201,10 @@
 
                 onProgress(62, EKA2L1.t('progress.restoringData'));
                 mod.FS.syncfs(true, function (err) {
-                    if (err) console.warn('[EKA2L1] initial restore error (OK on first run):', err);
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
 
                     onProgress(82, EKA2L1.t('progress.startingCore'));
                     // Re-apply after sync in case anything reset defaults.
@@ -229,28 +232,31 @@
 
     // ---- persistence -------------------------------------------------------
 
-    var syncInFlight = false;
+    var saveTail = Promise.resolve();
 
     /** Flush /eka2l1 (MEMFS) to IndexedDB. Returns a Promise. */
     EKA2L1.save = function () {
-        return new Promise(function (resolve, reject) {
-            var mod = EKA2L1.module;
-            if (!mod || !mod.FS) { resolve(); return; }
-            if (syncInFlight) { resolve(); return; }
-            syncInFlight = true;
-            var t0 = performance.now();
-            mod.FS.syncfs(false, function (err) {
-                syncInFlight = false;
-                if (err) {
-                    console.warn('[EKA2L1] syncfs failed:', err);
-                    reject(err);
-                } else {
-                    console.log('[EKA2L1] saved to IndexedDB in ' +
-                        (performance.now() - t0).toFixed(0) + 'ms');
-                    resolve();
-                }
+        // Every caller waits for its own sync, including changes made while a
+        // previous snapshot was being written. A busy save is not a success.
+        var operation = saveTail.catch(function () {}).then(function () {
+            return new Promise(function (resolve, reject) {
+                var mod = EKA2L1.module;
+                if (!mod || !mod.FS) { resolve(); return; }
+                var t0 = performance.now();
+                mod.FS.syncfs(false, function (err) {
+                    if (err) {
+                        console.warn('[EKA2L1] syncfs failed:', err);
+                        reject(err);
+                    } else {
+                        console.log('[EKA2L1] saved to IndexedDB in ' +
+                            (performance.now() - t0).toFixed(0) + 'ms');
+                        resolve();
+                    }
+                });
             });
         });
+        saveTail = operation;
+        return operation;
     };
 
     /**

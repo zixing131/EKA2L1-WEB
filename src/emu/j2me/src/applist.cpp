@@ -162,14 +162,14 @@ namespace eka2l1::j2me {
             static const char *UPDATE_ENTRY_STMT = "UPDATE apps SET "
                 "name=:name,"
                 "author=:author,"
-                "iconPath=iconPath,"
+                "iconPath=:iconPath,"
                 "title=:title,"
                 "originalTitle=:originalTitle,"
                 "version=:version WHERE id=:id";
 
             if (sqlite3_prepare(database_, UPDATE_ENTRY_STMT, -1, &update_entry_stmt_, nullptr) != SQLITE_OK) {
                 LOG_ERROR(J2ME, "Failed to prepare update entry statement! Error: {}", sqlite3_errmsg(database_));
-                return false;
+                return static_cast<std::uint32_t>(-1);
             }
         }
 
@@ -208,10 +208,14 @@ namespace eka2l1::j2me {
         if (res == SQLITE_DONE) {
             // No entry, just add it
             if (!execute_insert(entry)) {
-                return false;
+                return static_cast<std::uint32_t>(-1);
             }
 
-            return true;
+            return static_cast<std::uint32_t>(sqlite3_last_insert_rowid(database_));
+        }
+        if (res != SQLITE_ROW) {
+            LOG_ERROR(J2ME, "Failed to query existing app entry: {}", sqlite3_errmsg(database_));
+            return static_cast<std::uint32_t>(-1);
         }
 
         if (!replace_existing) {

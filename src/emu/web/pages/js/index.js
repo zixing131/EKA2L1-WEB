@@ -628,10 +628,12 @@
             })
             .then(function () {
                 EKA2L1.setPaused(true);
-                refreshApps();
+                setStatus('yellow', EKA2L1.t('status.savingToBrowser'));
                 return EKA2L1.save();
             })
             .then(function () {
+                // Cache launchable cards only after their guest files are saved.
+                refreshApps();
                 setStatus('green', EKA2L1.t('status.ready'));
                 EKA2L1.toast(EKA2L1.t('toast.installedNamed', { name: file.name }));
             })
@@ -640,8 +642,6 @@
                 try { EKA2L1.module.FS.unlink(target); } catch (e) {}
                 console.error('[EKA2L1] Java ME install failed:', err);
                 setStatus('red', EKA2L1.t('status.installFailed'));
-
-                refreshApps();
 
                 var msg = err.message || String(err);
                 showError(EKA2L1.t('error.jarInstallFailed', { msg: msg }));
@@ -1038,6 +1038,9 @@
                 // Stale eka2l1_has_device after delete/corrupt IDBFS used to
                 // force a boot and hit "ROM file not found: " with empty path.
                 try { localStorage.removeItem(HAS_DEVICE_KEY); } catch (e) {}
+                try { localStorage.removeItem(APPS_CACHE_KEY); } catch (e) {}
+                apps = [];
+                renderGameList();
                 hasDevice = false;
                 setStatus('yellow', EKA2L1.t('status.noDevice'));
                 setDeviceStatusText(EKA2L1.t('device.status.notInstalled'));

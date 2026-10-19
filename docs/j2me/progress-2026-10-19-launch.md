@@ -155,3 +155,35 @@ python3 buildscript/test_export_trampoline.py
 ```
 
 `test_export_trampoline.py` 另需 C++17 编译器和 Python `unicorn`。前端回归脚本 PASS 验证真实安装、持久化和存活 VM，菜单/按键画面仍需查看截图。
+
+## localhost:8080 安装卡住的后续修复
+
+先提交前述启动和音频工作：`3c93f82ed`。随后在正式首页复现“安装 BounceTales.jar…”一直不结束，发现两个独立原因：
+
+- `app_list::add_entry` 插入成功返回了布尔值 `true`，而调用者需要数据库 ID。已有其他应用时，Bounce Tales 的真实 ID 为 2，状态查询却一直查 ID 1。现在返回 `sqlite3_last_insert_rowid`，失败统一返回错误 ID。同时修正 UPDATE 中缺失的 `:iconPath` 参数，它会导致后续绑定和 WHERE ID 错位。
+- 重装相同 JAR 时，ROM 可以跳过已有套件，既不改 AppArc 注册时间，也不退出空闲 Installer。现在核对已有套件的名称、厂商、版本和完整 JAR 字节；只有内容完全一致且旧 UID 仍有效时才接受未变化的注册。完成判定仍等待 MIDP silent installer 发出的 opcode 516 请求结束；普通新安装仍等待 Installer 退出。
+
+首页在保存成功后才刷新应用列表和图标缓存，失败不再刷新缓存；`EKA2L1.save()` 将并发保存排队，每个调用者等待自己的同步结束，失败后允许下次重试。初始 IndexedDB 恢复失败会中止启动并清除陈旧列表缓存。
+
+Release 构建 **`7ef71bf5b0db`** 已在 `http://localhost:8080/index.html` 验证：
+
+- 在隔离浏览器中预置 ID 1 的其他应用，再安装真实 Bounce Tales，确认得到 ID 2 并完成保存。
+- 刷新后重新安装同一 JAR，再保存、刷新，从应用卡片冷启动；60 秒后 J9 仍存活。
+- 人工查看 `game.png` 为主菜单，`key-OK.png` 为 `Chapter 1: Misty Morning` 章节选择。
+- 失败基线位于 `/tmp/j2me-reinstall/baseline/`，修复后的完整记录位于 `/tmp/j2me-reinstall/final/`。仍未把章节选择等同于完整关卡或可听声音验收。
+
+回归命令：
+
+```sh
+python3 buildscript/test_j2me_frontend.py \
+  --url http://localhost:8080/index.html \
+  --rom /absolute/path/SYM.ROM --rpkg /absolute/path/SYM.RPKG \
+  --jar /absolute/path/BounceTales.jar \
+  --output /tmp/j2me-reinstall/final --observe 60 --angle-backend metal \
+  --seed-existing-app --reinstall --install-timeout 60
+node --test buildscript/test_web_save.cjs
+```
+
+Node 回归覆盖并发保存必须等待后续快照，以及失败调用拒绝但后续保存可恢复这两条行为。
+
+另做保存失败注入：将 `EKA2L1.save()` 替换成 rejected Promise 后，首页显示失败且应用缓存保持不变；但“刷新后一定没有新 host 条目”的额外断言失败。追踪发现当前 Emscripten 的 `_fd_sync` 会直接调用挂载的 `syncfs`，SQLite 在最终前端保存前就能写入 IndexedDB（证据 `/tmp/j2me-reinstall/save-failure4/console.log` 的 `SYNCCALL` / `DBPUT`）。因此这次修改不提供整个安装事务的存储回滚，也不能把保存队列等同于所有底层同步的全局串行化；实际存储故障后的原子恢复仍需单独设计。该注入结果不影响上面正常安装、重复安装及冷启动的通过结论。

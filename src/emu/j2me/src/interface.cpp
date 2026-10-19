@@ -879,7 +879,7 @@ namespace eka2l1::j2me {
         return out;
     }
 
-    std::uint32_t installed_app_uid(system *sys, const app_entry &entry) {
+    std::uint32_t installed_app_uid(system *sys, const app_entry &entry, const std::string &jar_path) {
         // The guest uids file contains the suite UID followed by each MIDlet's
         // AppArc UID. Neither is the internal AMS ID stored in opaque data.
         auto *io = sys->get_io_system();
@@ -913,6 +913,18 @@ namespace eka2l1::j2me {
             std::uint32_t ids[2] = {};
             if (!uids || uids->read_file(ids, 1, sizeof(ids)) != sizeof(ids)) continue;
             if (result && result != ids[1]) return 0; // Ambiguous installation.
+            if (!jar_path.empty()) {
+                auto installed = io->open_file(folder + u"m.jar", READ_MODE | BIN_MODE);
+                std::unique_ptr<FILE, decltype(&fclose)> requested(fopen(jar_path.c_str(), "rb"), fclose);
+                if (!installed || !requested) return 0;
+                char source[16384], target[16384];
+                for (;;) {
+                    const auto size = fread(source, 1, sizeof(source), requested.get());
+                    const auto stored = installed->read_file(target, 1, sizeof(target));
+                    if (ferror(requested.get()) || size != stored || std::memcmp(source, target, size) != 0) return 0;
+                    if (!size) break;
+                }
+            }
             result = ids[1];
         }
         return result;
