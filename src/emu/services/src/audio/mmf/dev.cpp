@@ -186,7 +186,9 @@ namespace eka2l1 {
         , left_balance_(50)
         , right_balance_(50)
         , underflow_event_(0)
-        , volume_ramp_us_(0) {
+        , volume_ramp_us_(0)
+        , evt_msg_queue_(nullptr)
+        , a3f_protocol_(serv->get_kernel_object_owner()->get_epoc_version() >= epocver::epoc95) {
         conf_.channels_ = 1;
         conf_.rate_ = epoc::mmf_sample_rate_8000hz;
         conf_.buffer_size_ = MMF_BUFFER_SIZE_DEFAULT;
@@ -478,6 +480,7 @@ namespace eka2l1 {
         if ((state_wanted != epoc::mmf_state_playing) && (state_wanted != epoc::mmf_state_tone_playing)
             && (state_wanted != epoc::mmf_state_playing_recording)) {
             ctx->complete(epoc::error_not_supported);
+            return;
         }
 
         std::uint32_t target_fourcc = state_settings->four_cc_;
@@ -533,6 +536,7 @@ namespace eka2l1 {
         if ((state_wanted != epoc::mmf_state_playing) && (state_wanted != epoc::mmf_state_tone_playing)
             && (state_wanted != epoc::mmf_state_playing_recording)) {
             ctx->complete(epoc::error_not_supported);
+            return;
         }
 
         desired_state_ = state_wanted;
@@ -633,7 +637,7 @@ namespace eka2l1 {
 
     void mmf_dev_server_session::set_volume_ramp(service::ipc_context *ctx) {
         std::optional<epoc::mmf_dev_sound_proxy_settings> settings
-            = ctx->get_argument_data_from_descriptor<epoc::mmf_dev_sound_proxy_settings>(2);
+            = ctx->get_argument_data_from_descriptor<epoc::mmf_dev_sound_proxy_settings>(1);
 
         if (!settings) {
             ctx->complete(epoc::error_argument);
@@ -650,7 +654,10 @@ namespace eka2l1 {
     }
 
     void mmf_dev_server_session::stop() {
-        stream_->stop();
+        // PostOpen may be followed by Close without a successful Initialize.
+        if (stream_) {
+            stream_->stop();
+        }
         stream_state_ = epoc::mmf_state_idle;
 
         mmf_dev_server *serv = server<mmf_dev_server>();
@@ -834,15 +841,13 @@ namespace eka2l1 {
     kernel::handle mmf_dev_server_session::do_set_buffer_buf_and_get_return_value() {
         mmf_dev_server *serv = server<mmf_dev_server>();
         kernel_system *kern = serv->get_kernel_object_owner();
-        epocver ver_use = kern->get_epoc_version();
-
         kernel::handle return_value = 0;
 
         if (prepare_audio_buffer_chunk()) {
             last_buffer_handle_ = kern->open_handle_with_thread(buffer_info_.requester, buffer_chunk_, kernel::owner_type::thread);
             return_value = last_buffer_handle_;
 
-            if (ver_use <= epocver::epoc94) {
+            if (!a3f_protocol_) {
                 (reinterpret_cast<epoc::mmf_dev_hw_buf_v1 *>(buffer_buf_))->chunk_op_ = epoc::mmf_dev_chunk_op_open;
             } else {
                 buffer_buf_->chunk_op_ = epoc::mmf_dev_chunk_op_open;
@@ -850,7 +855,7 @@ namespace eka2l1 {
         } else {
             last_buffer_handle_ = 0;
 
-            if (ver_use <= epocver::epoc94) {
+            if (!a3f_protocol_) {
                 (reinterpret_cast<epoc::mmf_dev_hw_buf_v1 *>(buffer_buf_))->chunk_op_ = epoc::mmf_dev_chunk_op_none;
             } else {
                 buffer_buf_->chunk_op_ = epoc::mmf_dev_chunk_op_none;
@@ -863,7 +868,7 @@ namespace eka2l1 {
 
         const std::uint32_t max_request_size_align = common::align(conf_.buffer_size_, MMF_BUFFER_SIZE_ALIGN, 1);
 
-        if (ver_use <= epocver::epoc94) {
+        if (!a3f_protocol_) {
             auto buf_old = (reinterpret_cast<epoc::mmf_dev_hw_buf_v1 *>(buffer_buf_));
 
             buf_old->buffer_size_ = max_request_size_align;
@@ -974,10 +979,7 @@ namespace eka2l1 {
             return;
         }
 
-        mmf_dev_server *serv = server<mmf_dev_server>();
-        kernel_system *kern = serv->get_kernel_object_owner();
-
-        if (kern->get_epoc_version() >= epocver::epoc95) {
+        if (a3f_protocol_) {
             // This must be called after a BTBF is reported
             if (!is_recording_stream()) {
                 do_set_buffer_to_be_filled();
@@ -1019,10 +1021,8 @@ namespace eka2l1 {
             timing->unschedule_event(underflow_event_, reinterpret_cast<std::uint64_t>(this));
         }
 
-        epocver ver_use = kern->get_epoc_version();
-
         std::uint32_t supplied_size = 0;
-        if (ver_use <= epocver::epoc94) {
+        if (!a3f_protocol_) {
             std::optional<epoc::mmf_dev_hw_buf_v1> buf_old = ctx->get_argument_data_from_descriptor<epoc::mmf_dev_hw_buf_v1>(1);
             if (!buf_old.has_value()) {
                 ctx->complete(epoc::error_argument);
@@ -1059,7 +1059,19 @@ namespace eka2l1 {
     void mmf_dev_server_session::fetch(service::ipc_context *ctx) {
         const epocver ver = server<mmf_dev_server>()->get_kernel_object_owner()->get_epoc_version();
 
-        if ((ver == epocver::epoc91) || (ver == epocver::epoc93fp1) || (ver == epocver::epoc93fp2) || (ver == epocver::epoc94)) {
+        // Legacy Initialize0 carries settings in slot 1. A3F PostOpen has
+        // only the destination package in slot 0, even on pre-Symbian^3 ROMs.
+        // Unused TIpcArgs slots contain unspecified stack bytes; inspect types.
+        if (!a3f_protocol_ && !stream_ && ctx->msg->function == epoc::mmf_dev_newarch_post_open
+            && ctx->msg->args.get_arg_type(0) == ipc_arg_type::desc8
+            && ctx->msg->args.get_arg_type(1) == ipc_arg_type::unspecified
+            && ctx->get_descriptor_argument_ptr(0)
+            && ctx->get_argument_data_size(0) == sizeof(epoc::mmf_msg_destination)) {
+            a3f_protocol_ = true;
+            LOG_INFO(SERVICE_MMFAUD, "Selected A3F DevSound protocol from PostOpen");
+        }
+
+        if (!a3f_protocol_) {
             switch (ctx->msg->function) {
             case epoc::mmf_dev_init0:
             case epoc::mmf_dev_init1:
@@ -1184,7 +1196,12 @@ namespace eka2l1 {
                 break;
             }
         } else {
-            switch (ctx->msg->function) {
+            // S60 A3F has an additional request at 42. Verified in E72's
+            // proxy: SamplesPlayed=44, Priority=46, BTBF=56, Close=63,
+            // GetTimePlayed=65. Translate its later requests to our enum.
+            const int opcode = (ver <= epocver::epoc94 && ctx->msg->function >= 43
+                && ctx->msg->function <= 65) ? ctx->msg->function - 1 : ctx->msg->function;
+            switch (opcode) {
             case epoc::mmf_dev_newarch_post_open:
                 // Nothing todo... :D
                 ctx->complete(epoc::error_none);
@@ -1220,6 +1237,18 @@ namespace eka2l1 {
 
             case epoc::mmf_dev_newarch_set_volume:
                 set_volume(ctx);
+                break;
+
+            case epoc::mmf_dev_newarch_get_supported_input_data_types:
+                get_supported_input_data_types(ctx);
+                break;
+
+            case epoc::mmf_dev_newarch_copy_fourcc_array_data:
+                copy_fourcc_array(ctx);
+                break;
+
+            case epoc::mmf_dev_newarch_set_volume_ramp:
+                set_volume_ramp(ctx);
                 break;
 
             case epoc::mmf_dev_newarch_play_init:
@@ -1263,6 +1292,7 @@ namespace eka2l1 {
 
             default:
                 LOG_ERROR(SERVICE_MMFAUD, "Unimplemented MMF dev server session opcode {}", ctx->msg->function);
+                ctx->complete(epoc::error_not_supported);
                 break;
             }
         }

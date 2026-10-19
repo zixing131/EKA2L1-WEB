@@ -218,4 +218,22 @@ Node 回归覆盖并发保存必须等待后续快照，以及失败调用拒绝
 
 构建 `37664e468fb7` 在可见 Edge 窗口验证：5320 安装/保存/刷新后只有一个 Bounce Tales 卡片，进入第一关并能推进剧情提示，原有 browser hang 不再复现（`/tmp/j2me-e72/5320-final18/`）。E72 同样进入关卡，但首帧后 FPS 归零、移动未通过，浏览器仍可响应诊断（`/tmp/j2me-e72/e72-play18/`）；这条剩余问题继续跟踪，尚不能称为完整游戏验收。
 
-另外 E72 将安装后的 JAR 改名为 `midlet.jar`（运行时 RFs Open 日志已验证），而不是 5320 的 `m.jar`。相同 JAR 重装校验增加这一文件名分支，仍要求逐字节一致和有效 AppArc UID，未放松内容校验。修复后的重复安装正在回归。另有 `[mem-global]` 4 个用例、23 条断言通过。
+另外 E72 将安装后的 JAR 改名为 `midlet.jar`（运行时 RFs Open 日志已验证），而不是 5320 的 `m.jar`。相同 JAR 重装校验增加这一文件名分支，仍要求逐字节一致和有效 AppArc UID，未放松内容校验。构建 `fa504c9c765c` 已通过 E72 重复安装、保存、刷新并保持单卡片的回归（`/tmp/j2me-e72/e72-nojit19/`）。另有 `[mem-global]` 4 个用例、23 条断言通过。
+
+5320 在构建 `fa504c9c765c` 的进一步回归中已经越过剧情提示，第一关计时推进到 0:16、0:20、0:25，方向键使角色和场景变化，末尾约 13 FPS（`/tmp/j2me-e72/5320-play19/`）。这次验证包含实际关卡操作，仍不代表完整通关或可听音频验收。相关安装、内存与内核修复已提交为 `4134d5ba7`。
+
+
+### E72 的 A3F 音频协议
+
+E72 虽然属于 S60 3rd Edition，但 `mmfdevsoundproxy.dll` 发送的是 A3F `PostOpen(0)`。原先仅按系统版本选择 legacy 协议，将它当成要求 slot 1 settings 的 Initialize0，直接返回 -6，MIDI controller 随后清理退出。
+
+会话现在根据首个 PostOpen 的参数类型选择 A3F：slot 0 为只读 8-bit destination package、slot 1 未指定。不能要求 slot 1 的值为零，ROM 的 TIpcArgs helper 并不初始化未使用的参数槽。播放缓冲区布局与完成通知路径也跟随会话协议，不再仅看 OS 版本。
+
+核对 E72 ROM 的发送指令后确认，S60 A3F 在 42 多一个请求，后续 SamplesPlayed=44、Priority=46、BTBF=56、Close=63、GetTimePlayed=65；会话将 43–65 转换到现有后续 A3F 枚举。补上 A3F 已有后端能力的输入格式枚举、FourCC 数组及音量渐变分派；音量渐变读取正确的 slot 1。消息队列指针初始化为空，Close 允许初始化前调用，不支持的同步请求返回 NotSupported，非法初始化状态完成后立即返回。
+
+诊断构建的 E72 安装、重装、持久化和主菜单继续通过，原先 PostOpen -6、未实现 39/38/63 已消失，MIDI controller 不再在该初始化点退出。但第一关首帧仍不推进（`/tmp/j2me-e72/e72-ws22/`），不能据此宣称 E72 已能正常游玩。窗口采样显示后续主要是查询屏幕尺寸和焦点；没有证据证明游戏 JAR 横屏异常是根因。临时窗口探针及强制合成已移除，所有诊断 JAR 仅保存在 `/tmp`，不修改用户原始游戏或固件。
+
+
+正式构建 **`46f3e07cd591`** 已更新到 `localhost:8080`。`/tmp/j2me-e72/5320-release23/` 再次通过原始 Bounce Tales 的安装、同 JAR 重装、保存后刷新、单卡片和冷启动；按键截图显示第一关计时达到 0:25、角色和场景响应方向键，约 12 FPS。临时诊断 JAR 的结果不计入此验收。
+
+同一正式构建还通过真实 AppArc UID 的启动入口回归（`test_j2me_launch.py --launch-via-app-uid --angle-backend metal --observe 30`，证据 `/tmp/j2me-e72/5320-nativeuid23/`）。

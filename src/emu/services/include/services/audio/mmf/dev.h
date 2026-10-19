@@ -87,6 +87,9 @@ namespace eka2l1 {
         int underflow_event_;
 
         kernel::msg_queue *evt_msg_queue_;
+        // Some S60 3rd Edition ROMs (including E72) ship the A3F client.
+        // Negotiate from PostOpen instead of relying on the OS version alone.
+        bool a3f_protocol_;
 
     protected:
         kernel::handle do_set_buffer_buf_and_get_return_value();
