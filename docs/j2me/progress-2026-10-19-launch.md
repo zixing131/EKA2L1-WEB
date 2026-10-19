@@ -237,3 +237,36 @@ E72 虽然属于 S60 3rd Edition，但 `mmfdevsoundproxy.dll` 发送的是 A3F `
 正式构建 **`46f3e07cd591`** 已更新到 `localhost:8080`。`/tmp/j2me-e72/5320-release23/` 再次通过原始 Bounce Tales 的安装、同 JAR 重装、保存后刷新、单卡片和冷启动；按键截图显示第一关计时达到 0:25、角色和场景响应方向键，约 12 FPS。临时诊断 JAR 的结果不计入此验收。
 
 同一正式构建还通过真实 AppArc UID 的启动入口回归（`test_j2me_launch.py --launch-via-app-uid --angle-backend metal --observe 30`，证据 `/tmp/j2me-e72/5320-nativeuid23/`）。
+
+
+## MusicBox 的 -30472 与运行日志开销
+
+用户提供 `/Users/zixing/Documents/GitHub/myjump/java/jar/musicbox.jar`（SHA-256 `9e59601c233668947f7d1c34e1524f0a3e8c42800c44f0ba8bec87b21c006942`）。在全新 5320 数据中复现 `SWInst opcode 516 result=-30472`，证据 `/tmp/j2me-e72/musicbox24/`，因此并非仅由残留安装记录引起。
+
+根因是 host 将 manifest 原样复制成 JAD。该 JAR 的 `MIDlet-Permissions` 在 `javax.microedit` 后按 manifest 规则折行，下一行以空格接续；直接作为 JAD 后，权限属性被截断。对照测试只展开暂存 JAD 的续行、不改原始 JAR，即安装成功（`/tmp/j2me-e72/musicbox-unfold25/`）。ZIP 压缩标志、JDK 版本、UTF-8 描述中的中点均保持原样，无须重打包或绕过 SWInst 错误。格式依据：[MIDP 2.0 Manifest / Application Descriptor](https://docs.oracle.com/javame/config/cldc/ref-impl/midp2.0/jsr118/javax/microedition/midlet/package-summary.html)。
+
+新增统一 `jad_from_manifest`，按字节展开主段续行、保留 UTF-8 和属性值、排除文件独立段，并写入实际 JAR URL/大小。安装与缺失 JAD 的补建路径共用转换。原生 `[j2me][manifest]` 两个测试、五条断言通过，覆盖权限折行、UTF-8 字节跨行、CR/LF/CRLF、文件独立段和已有 URL/大小替换。
+
+正式构建 **`cc9e801e27cb`**：原始 MusicBox 首次安装、相同 JAR 重装、保存、刷新和单图标通过（`/tmp/j2me-e72/musicbox-fixed24/`）。前端回归增加 `--install-only`，单独验收安装而不把它混同于启动成功。`localhost:8080` 的实际前端测试也完成安装和重装（`/tmp/j2me-e72/musicbox-launch24/`）。
+
+MusicBox 启动仍未通过：J9 输出 `BaseScreen.layout → sizeChanged` 的 `NullPointerException`，随后观察到 VM `exit=0/0`。字节码显示 `BaseScreen` 构造器先调用 `setFullScreenMode`，后初始化 `font`，而 `sizeChanged` 立即调用读取 `font` 的 `layout`。这是早期回调的初始化风险；目前没有证明该回调异常就是随后退出的唯一原因。myjump 中未找到匹配源码，原 JAR 未修改。
+
+性能方面，把逐条 J9 窗口 IPC、成功握手和动态函数查找日志放到 `log_ipc` / leave probe 开关后，保留安装结果和 Java 输出。相同 Bounce Tales 按键流程中日志从 22693 行降到 4569 行；首次安装、重装、持久化和第一关方向键回归继续通过，计时到 0:25（`/tmp/j2me-e72/5320-perf24/`）。本轮画面约 8 FPS，较早回归约 12 FPS，测试时机不同，不能声称已获得帧率提升或卡顿完全解决。
+
+### 有界 WebAssembly 模块缓存
+
+进一步对相同 5320 / Bounce Tales、15 秒启动观察与九次按键序列采样（Edge 默认 GPU，CDP CPU profiler）：
+
+| 指标 | 未缓存（`5320-profile25`） | 缓存（`5320-cache25`） |
+|---|---:|---:|
+| 观察采样时间 | 46.51 秒 | 47.00 秒 |
+| `WebAssembly.Module` 构造次数 | 255517 | 62371 |
+| 构造计时总和 | 5.048 秒 | 2.112 秒 |
+| 缓存命中 | — | 202851（约 76.5%） |
+| 新增 table 槽数量 | 4555 | 4490 |
+
+这表明此前 `compiled` 的持续增长主要不能直接当成活动 table 槽数量：大量失效后的重复构造可以复用模块编译结果。新增缓存以 FNV hash 查找，再完整比较生成字节，包括地址和链目标；仅复用不可变 `WebAssembly.Module`，每次仍创建新实例绑定当前 memory/table，原失效与槽回收逻辑不变。LRU 上限 8192 条、16 MiB 原始模块字节（不包括 V8 编译代码内存）；本轮结束 8192 条、约 5.7 MB 原始字节。哈希碰撞视为未命中，编译失败不缓存，超大模块可执行但不保留。
+
+新增 `node --test buildscript/test_wasmjit_module_cache.cjs` 四个回归全部通过，使用真正的 WebAssembly 模块覆盖字节快照、实例隔离、槽复用、哈希碰撞、LRU/容量淘汰及失败处理。最终构建 **`7d7a62b3e8d7`**；缓存版本第一关计时到 0:13，方向键响应，末帧约 12 FPS。上述约 58% 降幅仅指这轮模块构造计时，不能当作整体帧率提升比例。完整日志、CPU profile 和截图在 `/tmp/j2me-e72/5320-profile25/`、`/tmp/j2me-e72/5320-cache25/`。
+
+最终缓存构建另跑原始 MusicBox：首次安装、重复安装、保存和刷新均完成，启动后的同一空指针异常与 VM 退出仍存在（`/tmp/j2me-e72/musicbox-final25/`），不标记启动 PASS。不支持 CLDC 版本的负例继续被 guest 拒绝且不新增卡片（`/tmp/j2me-e72/reject25/`）；未将错误码改为成功。Node 缓存/保存六个用例、原生 manifest 两个用例、Python 语法及 `git diff --check` 通过。

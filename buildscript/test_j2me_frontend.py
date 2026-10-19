@@ -105,6 +105,10 @@ async def run(args):
                 (args.output / 'apps.json').write_text(json.dumps(restored, indent=2, ensure_ascii=False))
                 assert next(app for app in restored if app.get('j2me') and app['uid'] == midlet['uid']) == midlet, restored
                 assert sum(app['name'] == midlet['name'] for app in restored) == 1, restored
+                if args.install_only:
+                    assert not page_errors, page_errors
+                    print('PASS: guest installation, persisted reload and a single MIDlet card.', flush=True)
+                    return
                 # Scope to the visible library; settings also contain app names.
                 card = page.locator('.game-item').filter(has=page.locator(
                     '.game-item-sub', has_text='0x' + format(midlet['uid'], 'X')))
@@ -153,6 +157,7 @@ if __name__ == '__main__':
     parser.add_argument('--install-timeout', type=int, default=180)
     parser.add_argument('--seed-existing-app', action='store_true', help='Seed an unrelated host DB entry before installing the JAR')
     parser.add_argument('--reinstall', action='store_true', help='Reinstall the same JAR after restoring persisted storage')
+    parser.add_argument('--install-only', action='store_true', help='Verify installation and persistence without launching the MIDlet')
     parser.add_argument('--angle-backend', choices=('default', 'swiftshader', 'metal'), default='swiftshader')
     parser.add_argument('--browser-channel', choices=('chrome', 'msedge'), help='Use an installed browser instead of bundled Chromium')
     parser.add_argument('--headed', action='store_true', help='Exercise the normal browser window and GPU path')

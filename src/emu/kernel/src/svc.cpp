@@ -918,7 +918,8 @@ namespace eka2l1::epoc {
                 || (client_name == "installer");
             // StubMIDP2's primary thread is named "Main"; ping Complete(0) is
             // the success path, so it must be logged even when val==0.
-            if (stub_client || (j9_client && (val != 0))
+            if (((eka2l1_leave_probe || kern->get_config()->log_ipc)
+                    && (stub_client || (j9_client && (val != 0))))
                 || (installer_client && (val != 0))
                 || ((server_name.find("AppServer") != std::string::npos) && (msg->function == 516))) {
                 LOG_WARN(KERNEL,
@@ -1600,13 +1601,13 @@ namespace eka2l1::epoc {
                 server_name, ord, arg.args[0], arg.args[1], arg.args[2], arg.args[3]);
         }
 
-        const bool j9_interesting = j9_proc
+        const bool j9_interesting = (eka2l1_leave_probe || kern->get_config()->log_ipc) && j9_proc
             && ((server_name.find("SystemAMS") != std::string::npos)
                 || (server_name.find("MIDP") != std::string::npos)
                 || (server_name.find("Windowserver") != std::string::npos)
                 || (server_name.find("MIDletSuiteAMS") != std::string::npos)
                 || (server_name.find("Java.Redir") != std::string::npos));
-        if (stub_proc || j9_interesting) {
+        if ((stub_proc && (eka2l1_leave_probe || kern->get_config()->log_ipc)) || j9_interesting) {
             kernel::thread *sender = kern->crr_thread();
             LOG_WARN(KERNEL, "[ams-ipc] server='{}' opcode={} args=[0x{:X},0x{:X},0x{:X},0x{:X}] from {} thread={}",
                 server_name, ord, arg.args[0], arg.args[1], arg.args[2], arg.args[3], proc_name,
@@ -2626,7 +2627,7 @@ namespace eka2l1::epoc {
         kernel::process *pr = kern->crr_process();
         std::optional<uint32_t> func_addr = lib->get_ordinal_address(pr, ord_index);
 
-        if (pr) {
+        if (pr && (eka2l1_leave_probe || kern->get_config()->log_ipc)) {
             const std::string pname = common::lowercase_string(pr->name());
             if (pname.find("j9") != std::string::npos) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] Lookup {} ord={} -> 0x{:X} from {}",

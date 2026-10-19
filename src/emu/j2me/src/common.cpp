@@ -33,6 +33,49 @@
 #include <sstream>
 
 namespace eka2l1::j2me {
+    std::string jad_from_manifest(std::string_view manifest, std::string_view jar_url, std::uint64_t jar_size) {
+        // Manifest continuation lines are not JAD attributes. Unfold the main
+        // section before handing it to the ROM installer, including splits
+        // inside permission names or UTF-8 sequences. Per-entry sections must
+        // not become suite properties.
+        std::string jad;
+        std::string attribute;
+        const auto append_attribute = [&]() {
+            if (!attribute.empty()
+                && attribute.compare(0, 15, "MIDlet-Jar-URL:") != 0
+                && attribute.compare(0, 16, "MIDlet-Jar-Size:") != 0) {
+                jad += attribute;
+                jad += "\r\n";
+            }
+            attribute.clear();
+        };
+        while (!manifest.empty()) {
+            const std::size_t end = manifest.find_first_of("\r\n");
+            const std::string_view line = manifest.substr(0, end);
+            if (end == std::string_view::npos) {
+                manifest = {};
+            } else {
+                const std::size_t newline_size = (manifest[end] == '\r'
+                    && end + 1 < manifest.size() && manifest[end + 1] == '\n') ? 2 : 1;
+                manifest.remove_prefix(end + newline_size);
+            }
+            if (line.empty()) {
+                break;
+            }
+            if (line.front() == ' ' && !attribute.empty()) {
+                attribute.append(line.data() + 1, line.size() - 1);
+            } else {
+                append_attribute();
+                attribute.assign(line.data(), line.size());
+            }
+        }
+        append_attribute();
+        jad += "MIDlet-Jar-URL: ";
+        jad.append(jar_url.data(), jar_url.size());
+        jad += fmt::format("\r\nMIDlet-Jar-Size: {}\r\n", jar_size);
+        return jad;
+    }
+
     static bool locate_file_in_zip(mz_zip_archive *archive, const std::string &full_path, mz_uint &index, std::uint64_t &size) {
         mz_zip_archive_file_stat stat;
         for (mz_uint i = 0; i < mz_zip_reader_get_num_files(archive); i++) {
@@ -78,18 +121,8 @@ namespace eka2l1::j2me {
         fseek(jar_file_handle, 0, SEEK_END);
         long file_size = ftell(jar_file_handle);
 
-        jad_content = std::string(string_buffer, fsize);
-
-        // The attributes have to stay in one unbroken block: a blank line ends
-        // the section for a manifest parser, which would then never see the
-        // JAR location and size, both mandatory for a JAD-driven install.
-        while (!jad_content.empty()
-            && ((jad_content.back() == '\n') || (jad_content.back() == '\r'))) {
-            jad_content.pop_back();
-        }
-
-        jad_content += "\r\nMIDlet-Jar-URL: https://12z1.com/jar/fake.jar\r\n";
-        jad_content += fmt::format("MIDlet-Jar-Size: {}\r\n", file_size);
+        jad_content = jad_from_manifest(std::string_view(string_buffer, fsize),
+            "https://12z1.com/jar/fake.jar", file_size);
 
         delete[] string_buffer;
         return INSTALL_ERROR_JAR_SUCCESS;

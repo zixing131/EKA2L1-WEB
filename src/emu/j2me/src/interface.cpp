@@ -1203,11 +1203,7 @@ namespace eka2l1::j2me {
         }
         mz_zip_reader_end(&archive);
 
-        while (!manifest.empty() && ((manifest.back() == '\n') || (manifest.back() == '\r'))) {
-            manifest.pop_back();
-        }
-        manifest += "\r\nMIDlet-Jar-URL: m.jar\r\n";
-        manifest += fmt::format("MIDlet-Jar-Size: {}\r\n", jar_size);
+        manifest = jad_from_manifest(manifest, "m.jar", jar_size);
 
         io->delete_entry(jad_path);
         symfile out = io->open_file(jad_path, WRITE_MODE | BIN_MODE);
