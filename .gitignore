@@ -30,3 +30,4 @@ CMakeCache.txt
 /logs
 /build_wasm_vmsy
 *.pyc
+*.log
