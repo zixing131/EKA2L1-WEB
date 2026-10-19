@@ -266,7 +266,6 @@ namespace eka2l1 {
             , exception_handler(0)
             , exception_mask(0)
             , trap_stack(0)
-            , cached_detach(false)
             , sleep_level(0)
             , metadata(nullptr)
             , backup_state(thread_state::stop)
@@ -405,7 +404,7 @@ namespace eka2l1 {
                 thread_handles.reset();
 
             kern->free_msg(sync_msg);
-            cleanup_detachs();
+            cleanup_detachs(true);
         }
 
         std::optional<tls_slot> thread::get_tls_slot_no_uid(const std::uint32_t handle) {
@@ -1085,51 +1084,37 @@ namespace eka2l1 {
             return E_LOFF(process_thread_link.next, kernel::thread, process_thread_link);
         }
 
-        std::vector<std::uint32_t> thread::get_detach_eps() {
-            std::vector<std::uint32_t> results;
-
-            common::double_linked_queue_element *first = closing_libs.first();
-            common::double_linked_queue_element *end = closing_libs.end();
-
-            do {
-                if (!first) {
-                    break;
-                }
-
-                kernel::codeseg::attached_info *info = E_LOFF(first, kernel::codeseg::attached_info, closing_lib_link);
-
-                info->parent_seg->detaching_report(info->attached_process);
-                results.push_back(info->parent_seg->get_entry_point(info->attached_process));
-
-                first = first->next;
-            } while (first != end);
-
-            return results;
-        }
-
         std::int32_t thread::get_detach_eps_limit(std::int32_t *count, address *addrs) {
-            if (!cached_detach) {
-                cached_detach_eps = get_detach_eps();
-                cached_detach = true;
+            if (!count || !addrs || *count <= 0) {
+                return epoc::error_argument;
+            }
+            if (!detaching_libs.empty()) {
+                return epoc::error_in_use;
             }
 
-            *count = common::min<std::int32_t>(*count, static_cast<std::int32_t>(cached_detach_eps.size()));
-            if (*count) {
-                std::memcpy(addrs, cached_detach_eps.data(), *count * sizeof(address));
-                cached_detach_eps.erase(cached_detach_eps.begin(), cached_detach_eps.begin() + *count);
-
-                return epoc::error_none;
+            // Destructors may close more libraries. Keep this reported batch
+            // separate so LibraryDetached cannot discard newly queued callbacks.
+            const auto capacity = *count;
+            *count = 0;
+            while (!closing_libs.empty() && *count < capacity) {
+                auto *link = closing_libs.first()->deque();
+                auto *info = E_LOFF(link, kernel::codeseg::attached_info, closing_lib_link);
+                detaching_libs.push(link);
+                info->parent_seg->detaching_report(info->attached_process);
+                addrs[(*count)++] = info->parent_seg->get_entry_point(info->attached_process);
             }
-
-            cached_detach = false;
-            return epoc::error_eof;
+            return *count ? epoc::error_none : epoc::error_eof;
         }
 
-        void thread::cleanup_detachs() {
-            while (!closing_libs.empty()) {
-                kernel::codeseg::attached_info *info = E_LOFF(closing_libs.first()->deque(), kernel::codeseg::attached_info, closing_lib_link);
-                info->parent_seg->detach(info->attached_process);
-            }
+        void thread::cleanup_detachs(bool all) {
+            auto cleanup = [](common::roundabout &queue) {
+                while (!queue.empty()) {
+                    auto *info = E_LOFF(queue.first()->deque(), kernel::codeseg::attached_info, closing_lib_link);
+                    info->parent_seg->detach(info->attached_process);
+                }
+            };
+            cleanup(detaching_libs);
+            if (all) cleanup(closing_libs);
         }
 
         void thread::real_time_active_begin() {

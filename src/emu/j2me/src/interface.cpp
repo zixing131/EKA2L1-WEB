@@ -915,6 +915,12 @@ namespace eka2l1::j2me {
             if (result && result != ids[1]) return 0; // Ambiguous installation.
             if (!jar_path.empty()) {
                 auto installed = io->open_file(folder + u"m.jar", READ_MODE | BIN_MODE);
+                // E72's installer keeps the uploaded JAD name but renames the
+                // installed archive to midlet.jar. Verify that archive too so
+                // an identical reinstall can finish without a new SWInst IPC.
+                if (!installed) {
+                    installed = io->open_file(folder + u"midlet.jar", READ_MODE | BIN_MODE);
+                }
                 std::unique_ptr<FILE, decltype(&fclose)> requested(fopen(jar_path.c_str(), "rb"), fclose);
                 if (!installed || !requested) return 0;
                 char source[16384], target[16384];

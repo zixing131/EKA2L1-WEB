@@ -485,7 +485,7 @@ namespace eka2l1 {
             servers_.push_back(std::move(svr));
         }
 
-        bool destroy(kernel_obj_ptr obj);
+        bool destroy(kernel_obj_ptr obj, int *close_result = nullptr);
         int close(kernel::handle handle);
         bool get_info(kernel_obj_ptr obj, kernel::handle_info &info);
 

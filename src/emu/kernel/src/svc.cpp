@@ -2663,7 +2663,7 @@ namespace eka2l1::epoc {
 
     BRIDGE_FUNC(std::int32_t, library_detached) {
         kern->crr_thread()->cleanup_detachs();
-        return epoc::error_none;
+        return kern->crr_thread()->has_closing_libraries() ? epoc::error_none : epoc::error_eof;
     }
 
     BRIDGE_FUNC(std::int32_t, library_get_memory_info, kernel::handle h, kernel::memory_info *info) {
@@ -3955,7 +3955,13 @@ namespace eka2l1::epoc {
     BRIDGE_FUNC(std::int32_t, safe_inc_32, eka2l1::ptr<std::int32_t> val_ptr) {
         std::int32_t *val = val_ptr.get(kern->crr_process());
         std::int32_t org_val = *val;
-        *val > 0 ? val++ : 0;
+        // SafeInc returns the old count and only opens a live reference.
+        // Increment the guest value, not the temporary host pointer: shared
+        // RHeaps otherwise keep a count of one and a worker closes the main
+        // thread's heap when it exits (notably the E72 MIDlet installer).
+        if (org_val > 0) {
+            *val = static_cast<std::int32_t>(static_cast<std::uint32_t>(org_val) + 1);
+        }
 
         return org_val;
     }
@@ -3963,7 +3969,9 @@ namespace eka2l1::epoc {
     BRIDGE_FUNC(std::int32_t, safe_dec_32, eka2l1::ptr<std::int32_t> val_ptr) {
         std::int32_t *val = val_ptr.get(kern->crr_process());
         std::int32_t org_val = *val;
-        *val > 0 ? val-- : 0;
+        if (org_val > 0) {
+            *val = org_val - 1;
+        }
 
         return org_val;
     }

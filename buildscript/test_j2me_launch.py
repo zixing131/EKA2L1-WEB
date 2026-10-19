@@ -37,8 +37,20 @@ async def run(args):
                 midlet = next(app for app in apps if app.get('j2me'))
                 api = 'wasm_launch_midlet'
                 if args.launch_via_app_uid:
-                    midlet = next(app for app in apps if not app.get('j2me')
-                                  and app['name'] == midlet['name'] and not app.get('sys'))
+                    # The library deliberately shows only one card. Resolve
+                    # the real AppArc UID from this fresh fixture's guest suite.
+                    guest_uid = await page.evaluate(r'''() => {
+                        const fs = EKA2L1.module.FS;
+                        const child = (dir, name) => dir + '/' + fs.readdir(dir).find(
+                            entry => entry.toLowerCase() === name.toLowerCase());
+                        let dir = '/eka2l1/drives/c';
+                        for (const name of ['private', '102033e6', 'midlets']) dir = child(dir, name);
+                        const suites = fs.readdir(dir).filter(name => /^\[[0-9a-f]{8}\]$/i.test(name));
+                        if (suites.length !== 1) throw new Error('Expected one installed suite: ' + suites);
+                        const ids = fs.readFile(child(dir + '/' + suites[0], 'uids'));
+                        return new DataView(ids.buffer, ids.byteOffset, ids.byteLength).getUint32(4, true);
+                    }''')
+                    midlet = {'uid': guest_uid}
                     api = 'wasm_launch_app'
                 for _ in range(30):
                     result = await page.evaluate("args => EKA2L1.module.ccall(args.api, 'number', ['number'], [args.uid])",

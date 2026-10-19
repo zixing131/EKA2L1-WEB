@@ -37,7 +37,14 @@ namespace eka2l1::kernel {
         obj_type = object_type::condvar;
 
         timeout_event_ = timing_->register_event(fmt::format("CondVar{}TimeoutEvt", unique_id()),
-            std::bind(&condvar::on_timeout, this, std::placeholders::_1, std::placeholders::_2));
+            [kern, id = unique_id()](std::uint64_t token, int late) {
+                // The timer may have dequeued the callback before destruction.
+                // Resolve under the kernel lock instead of retaining a raw this.
+                const std::lock_guard<kernel_system> guard(*kern);
+                if (auto *cv = kern->get_by_id<condvar>(id)) {
+                    cv->on_timeout(token, late);
+                }
+            });
     }
 
     condvar::~condvar() {
@@ -53,8 +60,9 @@ namespace eka2l1::kernel {
             thr->get_scheduler()->dewait(thr);
         }
 
-        for (thread *timing_thr: timing_out_thrs_) {
-            timing_thr->decrease_access_count();
+        for (const auto &[thr, token] : timing_out_thrs_) {
+            timing_->unschedule_event(timeout_event_, token);
+            thr->decrease_access_count();
         }
 
         timing_->remove_event(timeout_event_);
@@ -97,10 +105,11 @@ namespace eka2l1::kernel {
         thr->wait_obj = this;
 
         if (timeout > 0) {
-            timing_out_thrs_.insert(thr);
+            const auto token = ++next_timeout_;
+            timing_out_thrs_.emplace(thr, token);
             thr->increase_access_count();
 
-            timing_->schedule_event(timeout, timeout_event_, thr->unique_id());
+            timing_->schedule_event(timeout, timeout_event_, token);
         }
 
         waits.emplace(thr);
@@ -108,16 +117,19 @@ namespace eka2l1::kernel {
     }
 
     void condvar::on_timeout(std::uint64_t userdata, int late) {
-        kernel::uid thr_id = static_cast<std::uint64_t>(userdata);
-        kernel_system *kern = get_kernel_object_owner();
-
-        kern->lock();
-        thread *thr = kern->get_by_id<thread>(thr_id);
-
-        if (!thr) {
-            LOG_ERROR(KERNEL, "Thread with id {} hit timeout on condvar, but disappear magically!", thr_id);
-            kern->unlock();
-
+        const auto pending = std::find_if(timing_out_thrs_.begin(), timing_out_thrs_.end(),
+            [userdata](const auto &entry) { return entry.second == userdata; });
+        // Signal can cancel a callback that is already waiting for the kernel
+        // lock. Never let that old callback wake a later semaphore/mutex wait,
+        // or even a newer wait on this same condvar.
+        if (pending == timing_out_thrs_.end()) {
+            return;
+        }
+        thread *thr = pending->first;
+        if (thr->wait_obj != this || (thr->state != thread_state::wait_condvar
+                && thr->state != thread_state::wait_condvar_suspend)) {
+            timing_out_thrs_.erase(pending);
+            thr->decrease_access_count();
             return;
         }
 
@@ -131,8 +143,6 @@ namespace eka2l1::kernel {
         thr->ctx.cpu_registers[0] = epoc::error_timed_out;
         unblock_thread(thr);
 
-        timing_out_thrs_.erase(thr);
-        kern->unlock();
     }
 
     void condvar::unblock_thread(thread *thr) {
@@ -145,10 +155,16 @@ namespace eka2l1::kernel {
             thr->condvar_lock_count_ = 0;
         }
         thr->wait_obj = nullptr;
-        timing_->unschedule_event(timeout_event_, thr->unique_id());
+        const auto pending = timing_out_thrs_.find(thr);
+        const bool had_timeout = pending != timing_out_thrs_.end();
+        if (had_timeout) {
+            timing_->unschedule_event(timeout_event_, pending->second);
+            timing_out_thrs_.erase(pending);
+        }
 
         if (!mut) {
             thr->get_scheduler()->dewait(thr);
+            if (had_timeout) thr->decrease_access_count();
             return;
         }
 
@@ -167,6 +183,7 @@ namespace eka2l1::kernel {
         if (waits.empty() && suspended.empty()) {
             holding_ = nullptr;
         }
+        if (had_timeout) thr->decrease_access_count();
     }
 
     void condvar::signal() {

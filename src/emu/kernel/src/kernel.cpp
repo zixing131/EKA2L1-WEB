@@ -837,7 +837,7 @@ namespace eka2l1 {
         return msgs_[handle - 1].get();
     }
 
-    static bool destroy_object_in_container(std::vector<kernel_obj_unq_ptr> &container, kernel_obj_ptr obj) {
+    static bool destroy_object_in_container(std::vector<kernel_obj_unq_ptr> &container, kernel_obj_ptr obj, int *close_result) {
         auto locate = [&]() {
             return std::lower_bound(container.begin(), container.end(), obj, [](const auto &lhs, const auto &rhs) {
                 return lhs->unique_id() < rhs->unique_id();
@@ -854,7 +854,10 @@ namespace eka2l1 {
             return false;
         }
 
-        obj->destroy();
+        const int result = obj->destroy();
+        if (close_result) {
+            *close_result = result;
+        }
 
         // destroy() can destroy other objects of the same type: a codeseg drops the
         // references it holds on its dependencies, a thread releases its owner. Each
@@ -869,7 +872,10 @@ namespace eka2l1 {
         return true;
     }
 
-    bool kernel_system::destroy(kernel_obj_ptr obj) {
+    bool kernel_system::destroy(kernel_obj_ptr obj, int *close_result) {
+        if (close_result) {
+            *close_result = 0;
+        }
         if (!obj || wiping_) {
             return true;
         }
@@ -877,7 +883,7 @@ namespace eka2l1 {
         switch (obj->get_object_type()) {
 #define OBJECT_SEARCH(obj_type, obj_map)                  \
     case kernel::object_type::obj_type: {                 \
-        return destroy_object_in_container(obj_map, obj); \
+        return destroy_object_in_container(obj_map, obj, close_result); \
     }
 
             OBJECT_SEARCH(mutex, mutexes_)

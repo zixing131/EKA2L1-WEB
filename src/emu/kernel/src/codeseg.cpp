@@ -22,6 +22,7 @@
 #include <common/log.h>
 #include <kernel/codeseg.h>
 #include <kernel/kernel.h>
+#include <kernel/libmanager.h>
 #include <loader/common.h>
 #include <xxHash/xxhash.h>
 
@@ -456,6 +457,9 @@ namespace eka2l1::kernel {
         if (new_foe)
             new_foe->codeseg_list.push(&attaches.back()->process_link);
 
+        if (!is_rom()) {
+            hle::apply_midlet_install_policy(this, new_foe);
+        }
         kern->run_codeseg_loaded_callback(obj_name, new_foe, this);
 
         return true;

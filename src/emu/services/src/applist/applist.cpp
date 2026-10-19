@@ -1474,7 +1474,7 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::prepare_non_native_app_updates(service::ipc_context &ctx) {
+    void applist_session::prepare_non_native_app_updates(service::ipc_context &ctx) {
         if (non_native_update_prepared_) {
             ctx.complete(epoc::error_in_use);
             return;
@@ -1485,7 +1485,7 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::register_non_native_app(service::ipc_context &ctx) {
+    void applist_session::register_non_native_app(service::ipc_context &ctx) {
         if (!non_native_update_prepared_) {
             ctx.complete(epoc::error_not_ready);
             return;
@@ -1544,7 +1544,7 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::deregister_non_native_app(service::ipc_context &ctx) {
+    void applist_session::deregister_non_native_app(service::ipc_context &ctx) {
         if (!non_native_update_prepared_) {
             ctx.complete(epoc::error_not_ready);
             return;
@@ -1556,7 +1556,7 @@ namespace eka2l1 {
             return;
         }
 
-        apa_app_registry *reg = get_registration(*app_uid);
+        apa_app_registry *reg = server<applist_server>()->get_registration(*app_uid);
         if (!reg || !(reg->caps.flags & apa_capability::non_native)) {
             ctx.complete(epoc::error_not_found);
             return;
@@ -1571,13 +1571,13 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::commit_non_native_app_updates(service::ipc_context &ctx) {
+    void applist_session::commit_non_native_app_updates(service::ipc_context &ctx) {
         if (!non_native_update_prepared_) {
             ctx.complete(epoc::error_not_ready);
             return;
         }
 
-        io_system *io = sys->get_io_system();
+        io_system *io = ctx.sys->get_io_system();
         bool succeeded = true;
         for (const pending_non_native_update &update : pending_non_native_updates_) {
             const std::u16string base = std::u16string(1, drive_to_char16(update.drive_)) + u":" + NON_NATIVE_RESOURCE_DIRECTORY;
@@ -1625,11 +1625,11 @@ namespace eka2l1 {
             return;
         }
 
-        rescan_registries(io);
+        server<applist_server>()->rescan_registries(io);
         ctx.complete(epoc::error_none);
     }
 
-    void applist_server::rollback_non_native_app_updates(service::ipc_context &ctx) {
+    void applist_session::rollback_non_native_app_updates(service::ipc_context &ctx) {
         pending_non_native_updates_.clear();
         non_native_update_prepared_ = false;
         ctx.complete(epoc::error_none);
@@ -1881,23 +1881,23 @@ namespace eka2l1 {
                 break;
 
             case applist_request_prepare_non_native_app_updates:
-                server<applist_server>()->prepare_non_native_app_updates(*ctx);
+                prepare_non_native_app_updates(*ctx);
                 break;
 
             case applist_request_register_non_native_app:
-                server<applist_server>()->register_non_native_app(*ctx);
+                register_non_native_app(*ctx);
                 break;
 
             case applist_request_deregister_non_native_app:
-                server<applist_server>()->deregister_non_native_app(*ctx);
+                deregister_non_native_app(*ctx);
                 break;
 
             case applist_request_commit_non_native_application:
-                server<applist_server>()->commit_non_native_app_updates(*ctx);
+                commit_non_native_app_updates(*ctx);
                 break;
 
             case applist_request_rollback_non_native_application:
-                server<applist_server>()->rollback_non_native_app_updates(*ctx);
+                rollback_non_native_app_updates(*ctx);
                 break;
 
             case applist_request_get_app_type:

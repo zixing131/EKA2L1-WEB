@@ -8,7 +8,7 @@
  *  - 其他同源资源               : 过时时重新验证（stale-while-revalidate）
  *
  * 版本更新：
- *  - BUILD_ID 变化 → 新 CACHE_NAME → 删除旧缓存 → skipWaiting → 刷新已开标签页
+ *  - BUILD_ID 变化 → 新 CACHE_NAME → 删除旧缓存 → skipWaiting → 下次导航使用新版本
  *  - HTML 中 sw.js 引用带 ?v=BUILD_ID，确保浏览器检测到 SW 脚本变更
  *
  * COOP/COEP 头注入：
@@ -63,7 +63,7 @@ self.addEventListener('install', (event) => {
     );
 });
 
-// ─── 激活：清理旧版本缓存，并刷新已打开的标签页 ─────────────────────────────
+// ─── 激活：清理旧版本缓存，并通知已打开的标签页 ─────────────────────────────
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys()
@@ -73,11 +73,8 @@ self.addEventListener('activate', (event) => {
                     .map((k) => caches.delete(k))
             ))
             .then(() => self.clients.claim())
-            // New build: ask every open tab to reload so it picks up the
-            // stamped HTML instead of a stale shell. Do NOT use
-            // Clients.navigate() here — with COOP same-origin it rejects
-            // ("Cannot navigate to URL") and aborts this activate handler,
-            // which leaves the page mid-boot and makes app launch look dead.
+            // Notify without forcing a reload: an open tab may be installing
+            // a JAR or have unsaved game state. Navigation fetches fresh HTML.
             .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
             .then((clients) => Promise.all(
                 clients.map((client) => {

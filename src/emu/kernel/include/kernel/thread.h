@@ -240,14 +240,12 @@ namespace eka2l1 {
             common::double_linked_queue_element process_thread_link;
 
             common::roundabout closing_libs;
+            common::roundabout detaching_libs;
 
             address exception_handler;
             std::uint32_t exception_mask;
 
             address trap_stack;
-
-            std::vector<address> cached_detach_eps;
-            bool cached_detach;
 
             int wait_object_timeout_callback_type;
             bool is_in_timeout;
@@ -446,9 +444,11 @@ namespace eka2l1 {
 
             kernel::thread *next_in_process();
 
-            std::vector<std::uint32_t> get_detach_eps();
             std::int32_t get_detach_eps_limit(std::int32_t *count, address *addrs);
-            void cleanup_detachs();
+            void cleanup_detachs(bool all = false);
+            bool has_closing_libraries() const {
+                return !closing_libs.empty() || !detaching_libs.empty();
+            }
 
             thread_state current_state() const {
                 return state;

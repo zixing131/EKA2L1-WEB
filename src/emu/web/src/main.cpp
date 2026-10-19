@@ -199,6 +199,8 @@ namespace eka2l1::web {
         std::uint32_t midlet_install_unchanged_uid = 0;
         std::vector<std::pair<std::uint32_t, std::uint64_t>> midlet_install_previous;
         std::uint64_t midlet_install_generation = 0;
+        std::size_t midlet_install_complete_callback = 0;
+        std::atomic<bool> midlet_install_request_completed{ false };
     };
 
     static wasm_state g_state;
@@ -1892,10 +1894,15 @@ int wasm_install_midlet(const char *jar_path) {
     }
 
     const auto generation = ++g_state.midlet_install_generation;
+    auto *install_kern = g_state.symsys->get_kernel_system();
+    if (g_state.midlet_install_complete_callback) {
+        install_kern->unregister_ipc_complete_callback(g_state.midlet_install_complete_callback);
+        g_state.midlet_install_complete_callback = 0;
+    }
     g_state.midlet_install_id = 0;
     g_state.midlet_install_unchanged_uid = 0;
+    g_state.midlet_install_request_completed.store(false, std::memory_order_release);
     g_state.midlet_install_previous.clear();
-    auto *install_kern = g_state.symsys->get_kernel_system();
     auto *install_apps = reinterpret_cast<eka2l1::applist_server *>(install_kern->get_by_name<eka2l1::service::server>(
         eka2l1::get_app_list_server_name_by_epocver(install_kern->get_epoc_version())));
     if (install_apps) {
@@ -1964,6 +1971,43 @@ int wasm_install_midlet(const char *jar_path) {
     if (result != eka2l1::j2me::INSTALL_ERROR_JAR_SUCCESS) {
         g_state.midlet_install_state.store(0, std::memory_order_release);
     } else if (eka2l1_j9_raw) {
+        // The silent installer and (on E72) SWInst stay alive after a request.
+        // Their process logons cannot report completion: observe the actual reply
+        // from AppServer, restricted to the newly spawned installer instance.
+        std::uint64_t installer_id = 0;
+        for (const auto &object : install_kern->get_process_list()) {
+            auto *process = static_cast<eka2l1::kernel::process *>(object.get());
+            if (process->get_uid() == 0x10208907
+                && process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending) {
+                installer_id = std::max(installer_id, static_cast<std::uint64_t>(process->unique_id()));
+            }
+        }
+        if (installer_id) {
+            g_state.midlet_install_complete_callback = install_kern->register_ipc_complete_callback(
+                [generation, installer_id](eka2l1::ipc_msg *message, const std::int32_t result) {
+                    if (generation != g_state.midlet_install_generation
+                        || g_state.midlet_install_state.load(std::memory_order_acquire) != 1
+                        || !message || message->function != 516 || !message->own_thr
+                        || message->own_thr->owning_process()->unique_id() != installer_id
+                        || message->debug_server_name.find("AppServer") == std::string::npos) return;
+                    auto *sender = message->own_thr->owning_process();
+                    auto *filename = eka2l1::ptr<eka2l1::epoc::desc16>(message->args.args[0]).get(sender);
+                    const auto path = filename && filename->is_valid_descriptor()
+                            && filename->get_length() < 256 && filename->get_pointer(sender)
+                        ? eka2l1::common::lowercase_string(eka2l1::common::ucs2_to_utf8(filename->to_std_string(sender)))
+                        : std::string{};
+                    // The monitor also attempts firmware-bundled preinstalls;
+                    // their failures must not reject the uploaded target.
+                    if (path != "e:\\system\\data\\midp2\\preinstall\\m.jad"
+                        && path != "e:\\system\\data\\midp2\\preinstall\\m.jar") return;
+                    if (result < 0) {
+                        LOG_ERROR(FRONTEND_CMDLINE, "Guest MIDlet installation rejected by SWInst: {}", result);
+                        g_state.midlet_install_state.store(result, std::memory_order_release);
+                    } else {
+                        g_state.midlet_install_request_completed.store(true, std::memory_order_release);
+                    }
+                });
+        }
         // The ROM preinstaller skips an identical suite already in its DB.
         // Such a no-op does not rewrite the AppArc timestamp. Verify the actual
         // guest JAR while the uploaded file still exists, not just its title.
@@ -2000,9 +2044,15 @@ int wasm_midlet_install_status() {
             }
         });
         if (install_request_pending) return 1;
+        // A successful SWInst reply wakes the monitor before it has finished
+        // its DB work. Let the guest reach an idle point before pausing/saving.
+        // E72 keeps SWInst alive there, unlike ROMs whose installer exits.
+        if (g_state.midlet_install_request_completed.load(std::memory_order_acquire)
+            && (kern->crr_thread() || kern->get_thread_scheduler()->has_ready_threads())) return 1;
         for (const auto &object : kern->get_process_list()) {
             auto *process = static_cast<eka2l1::kernel::process *>(object.get());
-            if (!g_state.midlet_install_unchanged_uid && process && process->get_uid() == 0x101F875A
+            if (!g_state.midlet_install_request_completed.load(std::memory_order_acquire)
+                && !g_state.midlet_install_unchanged_uid && process && process->get_uid() == 0x101F875A
                 && process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending) {
                 return 1;
             }
@@ -2022,7 +2072,12 @@ int wasm_midlet_install_status() {
             }
         }
     }
-    return g_state.midlet_install_state.load(std::memory_order_acquire);
+    const auto state = g_state.midlet_install_state.load(std::memory_order_acquire);
+    if (state != 1 && g_state.symsys && g_state.midlet_install_complete_callback) {
+        g_state.symsys->get_kernel_system()->unregister_ipc_complete_callback(g_state.midlet_install_complete_callback);
+        g_state.midlet_install_complete_callback = 0;
+    }
+    return state;
 }
 
 // TEMPORARY bring-up probe storage for the S60v3 Java (J9) runtime.
@@ -3160,8 +3215,28 @@ const char *wasm_get_app_list() {
     std::string json = "[";
     bool first = true;
 
+    // AppArc and the host JAR list describe the same installed MIDlet. Keep
+    // the host card (stable virtual UID and JAR icon), suppressing only the
+    // exact guest UID resolved from the suite's identity and uids file.
+    auto *j2me_list = g_state.symsys->get_j2me_applist();
+    std::vector<eka2l1::j2me::app_entry> midlets;
+    std::set<std::uint32_t> represented_midlets;
+    if (j2me_list) {
+        for (const auto &entry : j2me_list->get_entries()) {
+            const auto uid = eka2l1::j2me::installed_app_uid(g_state.symsys.get(), entry);
+            const auto *reg = uid ? alserv->get_registration(uid) : nullptr;
+            // The host DB also contains staged/failed uploads. In raw MIDP2
+            // mode a launchable card needs the ROM installer's registration.
+            if (eka2l1_j9_raw && !kern->is_eka1()
+                && (!reg || reg->non_native_opaque_data.empty())) continue;
+            if (uid) represented_midlets.insert(uid);
+            midlets.push_back(entry);
+        }
+    }
+
     for (auto &reg : alserv->get_registerations()) {
         if (reg.caps.is_hidden) continue;
+        if (represented_midlets.count(reg.mandatory_info.uid)) continue;
 
         std::string name = eka2l1::common::ucs2_to_utf8(
             reg.mandatory_info.long_caption.to_std_string(nullptr));
@@ -3195,13 +3270,12 @@ const char *wasm_get_app_list() {
     // registered in AppArc by the ROM silent installer. Using a high UID bit
     // (0x7E000000) avoids collisions with real Symbian UIDs; the web frontend
     // routes launches through wasm_launch_midlet for this range.
-    eka2l1::j2me::app_list *j2me_list = g_state.symsys->get_j2me_applist();
     if (j2me_list) {
         const bool had_native = (json.size() > 2); // more than just "[]"
         json.pop_back(); // remove trailing ']'
 
         bool j2me_first = true;
-        for (auto &entry : j2me_list->get_entries()) {
+        for (const auto &entry : midlets) {
             const std::uint32_t virtual_uid = entry.id_ | J2ME_VIRTUAL_UID_PREFIX;
             std::string name = entry.title_.empty() ? entry.name_ : entry.title_;
             std::string escaped;
@@ -3968,6 +4042,11 @@ void wasm_reset() {
         g_state.running = false;
 
         // Reset the system
+        if (g_state.midlet_install_complete_callback) {
+            g_state.symsys->get_kernel_system()->unregister_ipc_complete_callback(g_state.midlet_install_complete_callback);
+            g_state.midlet_install_complete_callback = 0;
+        }
+        g_state.midlet_install_state.store(0, std::memory_order_release);
         g_state.symsys.reset();
         g_state.initialized = false;
     }

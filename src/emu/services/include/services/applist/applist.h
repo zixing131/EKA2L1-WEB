@@ -199,31 +199,8 @@ namespace eka2l1 {
         app_filter_method filter_method_;
         std::vector<std::uint8_t> pending_opaque_data_;
 
-    public:
-        explicit applist_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_ver);
-        void fetch(service::ipc_context *ctx);
-
-        void get_filtered_apps_by_flags(service::ipc_context &ctx);
-        void get_next_app(service::ipc_context &ctx);
-        void get_native_executable_name_if_non_native(service::ipc_context &ctx);
-        void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
-        void get_opaque_data(service::ipc_context &ctx);
-    };
-
-    /*! \brief Applist services
-     *
-     * Provide external information about application management,
-     * and HAL information regards to each app.
-	 *
-	 * Disable for LLE testings.
-     */
-    class applist_server : public service::typical_server {
-        friend class applist_session;
-
-        std::vector<apa_app_registry> regs;
-        std::unordered_map<epoc::uid, std::u16string> uids_app_to_executable;
-        std::unordered_map<epoc::uid, std::u16string> non_native_app_types_;
-
+        // AppArc updates belong to one RApaLsSession. Another client may
+        // roll back its own startup transaction while an installer is active.
         struct pending_non_native_update {
             enum class kind {
                 register_app,
@@ -239,6 +216,36 @@ namespace eka2l1 {
 
         bool non_native_update_prepared_{ false };
         std::vector<pending_non_native_update> pending_non_native_updates_;
+
+    public:
+        explicit applist_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_ver);
+        void fetch(service::ipc_context *ctx);
+
+        void get_filtered_apps_by_flags(service::ipc_context &ctx);
+        void get_next_app(service::ipc_context &ctx);
+        void get_native_executable_name_if_non_native(service::ipc_context &ctx);
+        void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
+        void get_opaque_data(service::ipc_context &ctx);
+        void prepare_non_native_app_updates(service::ipc_context &ctx);
+        void register_non_native_app(service::ipc_context &ctx);
+        void deregister_non_native_app(service::ipc_context &ctx);
+        void commit_non_native_app_updates(service::ipc_context &ctx);
+        void rollback_non_native_app_updates(service::ipc_context &ctx);
+    };
+
+    /*! \brief Applist services
+     *
+     * Provide external information about application management,
+     * and HAL information regards to each app.
+	 *
+	 * Disable for LLE testings.
+     */
+    class applist_server : public service::typical_server {
+        friend class applist_session;
+
+        std::vector<apa_app_registry> regs;
+        std::unordered_map<epoc::uid, std::u16string> uids_app_to_executable;
+        std::unordered_map<epoc::uid, std::u16string> non_native_app_types_;
 
         std::uint32_t flags{ 0 };
         std::uint32_t avail_drives_{ 0 };
@@ -346,11 +353,6 @@ namespace eka2l1 {
 
         void register_non_native_app_type(service::ipc_context &ctx);
         void deregister_non_native_app_type(service::ipc_context &ctx);
-        void prepare_non_native_app_updates(service::ipc_context &ctx);
-        void register_non_native_app(service::ipc_context &ctx);
-        void deregister_non_native_app(service::ipc_context &ctx);
-        void commit_non_native_app_updates(service::ipc_context &ctx);
-        void rollback_non_native_app_updates(service::ipc_context &ctx);
         void get_app_type(service::ipc_context &ctx);
 
         std::u16string native_executable_for_non_native_type(epoc::uid type) const;

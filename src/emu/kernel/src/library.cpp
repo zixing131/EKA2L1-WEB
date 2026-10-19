@@ -81,13 +81,18 @@ namespace eka2l1 {
         }
 
         int library::destroy() {
+            auto *thr = kern->crr_thread();
+            const bool first_close = thr && !thr->has_closing_libraries();
             if (reffed) {
-                codeseg->deref(kern->crr_thread());
+                codeseg->deref(thr);
                 codeseg->unmark();
             }
 
             codeseg->decrease_access_count();
-            return 1;
+            // A close inside a DLL destructor only queues more work for the
+            // outer RLibrary::Close. Re-entering its ~1 KB stack frame can
+            // overflow J9's worker stack while unloading AMMS dependencies.
+            return first_close && thr->has_closing_libraries() ? 1 : 0;
         }
 
         bool library::attached(kernel::process *pr) {

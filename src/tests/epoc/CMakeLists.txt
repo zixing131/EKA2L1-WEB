@@ -6,6 +6,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/mem.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vfs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/ipc_arg.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/handle_close.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/message.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/property.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/timer.cpp

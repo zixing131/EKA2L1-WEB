@@ -4,7 +4,7 @@
 #include <kernel/thread.h>
 
 #include <common/linked.h>
-#include <set>
+#include <map>
 
 namespace eka2l1::kernel {
     class mutex;
@@ -18,7 +18,8 @@ namespace eka2l1::kernel {
         ntimer *timing_;
 
         int timeout_event_;
-        std::set<thread*> timing_out_thrs_;
+        std::map<thread *, std::uint64_t> timing_out_thrs_;
+        std::uint64_t next_timeout_ = 0;
 
         void unblock_thread(thread *thr);
 

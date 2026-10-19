@@ -361,11 +361,12 @@
 <script>
 // Service Worker 注册（PWA 离线支持 + COOP/COEP 头注入）
 if ('serviceWorker' in navigator) {
-    // SW activate posts this when CACHE_VERSION changes (replaces Clients.navigate,
-    // which rejects under COOP same-origin and breaks boot mid-flight).
+    // Activating a worker must not interrupt a live install or game. The next
+    // navigation fetches current HTML; stamped URLs keep this page consistent.
     navigator.serviceWorker.addEventListener('message', function (ev) {
-        if (ev.data && ev.data.type === 'eka2l1-sw-updated') {
-            location.reload();
+        if (ev.data && ev.data.type === 'eka2l1-sw-updated' &&
+                ev.data.version !== window.EKA2L1_BUILD_ID) {
+            console.info('[SW] Update ready; it will apply on the next navigation.');
         }
     });
     window.addEventListener('load', function () {
@@ -383,9 +384,7 @@ if ('serviceWorker' in navigator) {
                 navigator.serviceWorker.getRegistrations().then(function (regs) {
                     return Promise.all(regs.map(function (r) { return r.unregister(); }));
                 }).then(function () {
-                    if (sessionStorage.getItem('eka2l1-sw-retry') === buildId) return;
-                    sessionStorage.setItem('eka2l1-sw-retry', buildId);
-                    location.reload();
+                    console.info('[SW] Cleared old worker; retry on the next navigation.');
                 }).catch(function () {});
             });
     });

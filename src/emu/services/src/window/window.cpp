@@ -2358,15 +2358,18 @@ namespace eka2l1 {
             [this](std::uint64_t userdata, std::uint64_t microsecs_late) {
                 epoc::canvas_base *cv = reinterpret_cast<epoc::canvas_base *>(userdata);
                 if (cv) {
+                    // Match guest dispatch and animation redraw: kernel first,
+                    // then screen. The timer callback used the reverse order,
+                    // deadlocking against the browser's deferred redraw when
+                    // J9 reports visibility during startup or a screen change.
+                    const std::lock_guard<kernel_system> kernel_guard(*kern);
                     const std::lock_guard<std::mutex> guard(cv->scr->screen_mutex);
-                    kern->lock();
 
                     if (cv->scr->need_update_visible_regions()) {
                         cv->scr->recalculate_visible_regions();
                     }
 
                     cv->report_visiblity_change(true);
-                    kern->unlock();
                 }
             });
     }

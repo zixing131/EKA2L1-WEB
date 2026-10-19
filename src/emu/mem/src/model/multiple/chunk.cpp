@@ -32,10 +32,17 @@
 
 namespace eka2l1::mem {
     std::size_t multiple_mem_model_chunk::commit(const vm_address offset, const std::size_t size, bool ignore_committed) {
-        // Align the offset
-        vm_address running_offset = offset;
-        vm_address end_offset = common::min(static_cast<vm_address>(max_size_),
-            static_cast<vm_address>(offset + size));
+        if (!size || offset >= max_size_) {
+            return 0;
+        }
+        // Commit every page touched by the byte range. An unaligned tail
+        // otherwise produces page_num == 0 and never advances this loop.
+        // Clamp before addition so oversized guest requests cannot wrap.
+        const vm_address page_mask = control_->page_size() - 1;
+        const vm_address start_offset = offset & ~page_mask;
+        vm_address running_offset = start_offset;
+        const vm_address end_offset = static_cast<vm_address>(
+            (offset + std::min(size, max_size_ - offset) + page_mask) & ~std::size_t(page_mask));
 
         while (running_offset < end_offset) {
             // The number of page sastify the request
@@ -69,7 +76,7 @@ namespace eka2l1::mem {
 
             // Commit the memory to the host
             if (!is_external_host && !common::commit(host_commit_ptr, host_commit_size, permission_)) {
-                return running_offset - offset;
+                return running_offset - start_offset;
             }
 
             const vm_address crr_base_addr = base_;
@@ -150,14 +157,17 @@ namespace eka2l1::mem {
             running_offset += (page_num << control_->page_size_bits_);
         }
 
-        return running_offset - offset;
+        return running_offset - start_offset;
     }
 
     void multiple_mem_model_chunk::decommit(const vm_address offset, const std::size_t size) {
-        // Align the offset
-        vm_address running_offset = offset;
-        vm_address end_offset = common::min(static_cast<vm_address>(offset + max_size_),
-            static_cast<vm_address>(offset + size));
+        if (!size || offset >= max_size_) {
+            return;
+        }
+        const vm_address page_mask = control_->page_size() - 1;
+        vm_address running_offset = offset & ~page_mask;
+        const vm_address end_offset = static_cast<vm_address>(
+            (offset + std::min(size, max_size_ - offset) + page_mask) & ~std::size_t(page_mask));
 
         while (running_offset < end_offset) {
             // The number of page sastify the request

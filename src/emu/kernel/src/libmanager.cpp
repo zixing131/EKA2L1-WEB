@@ -1499,7 +1499,10 @@ namespace eka2l1::hle {
         }
     }
 
-    static void apply_silent_midlet_installer_compat_patch(codeseg_ptr cs) {
+    void apply_midlet_install_policy(codeseg_ptr cs, kernel::process *process) {
+        if (common::lowercase_string(cs->name()).find("midp2silentmidletinstall") == std::string::npos) {
+            return;
+        }
         // The S60v3 release build of MIDP2SilentMIDletInstall hard-codes
         // TInstallOptions::iUntrusted to EPolicyNotAllowed.  Consequently every
         // unsigned MIDlet is rejected by SWInst before the Java/AppArc
@@ -1524,7 +1527,7 @@ namespace eka2l1::hle {
         };
 
         std::uint8_t *base = nullptr;
-        address run_addr = cs->get_code_run_addr(nullptr, &base);
+        address run_addr = cs->get_code_run_addr(process, &base);
         if (run_addr) {
             run_addr &= ~1u;
         }
@@ -1548,6 +1551,7 @@ namespace eka2l1::hle {
 
         auto apply_at = [&](const std::uint32_t off) {
             base[off + 4] = 0x00; // movs r1, #0  (EPolicyAllowed)
+            cs->get_kernel_object_owner()->get_cpu()->imb_range(run_addr + off + 4, 2);
             LOG_WARN(KERNEL, "{} unsigned-MIDlet policy patch applied at codeseg offset 0x{:X} (run addr 0x{:X} size={})",
                 cs->name(), off, run_addr + off, code_size);
         };
@@ -17746,7 +17750,9 @@ namespace eka2l1::hle {
         }
 
         if (name.find("midp2silentmidletinstall") != std::string::npos) {
-            apply_silent_midlet_installer_compat_patch(cs);
+            if (cs->is_rom()) {
+                apply_midlet_install_policy(cs, nullptr);
+            }
         } else if ((name == "midp2installerplugin.dll") && !eka2l1_j9_raw) {
             apply_installer_compat_patch(cs);
         } else if ((name == "ifeui.dll") && !eka2l1_j9_raw) {

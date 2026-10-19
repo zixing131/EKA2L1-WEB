@@ -85,7 +85,7 @@ python3 buildscript/test_j2me_launch.py \
 
 测试脚本需要 Python Playwright 和 Chromium。页面使用 MEMFS，不读取或覆盖正常启动器保存的设备。`autolaunch=0` 防止同时启动计算器；脚本记录 console、AppArc 列表、runtime 和截图。脚本 PASS 的范围是“guest 安装提交、AMS 拉起仍存活的 J9”；画面和按键需另外核验。
 
-可加 `--launch-via-app-uid` 覆盖真实 AppArc UID 的入口（页面中重复的 Bounce Tales 条目），默认入口是 host 列表的 virtual UID；二者最终都必须进入真实 guest AMS 启动链。
+可加 `--launch-via-app-uid` 覆盖真实 AppArc UID 的入口；脚本从 guest 套件的 `uids` 文件读取该 UID，不依赖页面显示重复条目。默认入口是 host 列表的 virtual UID，二者最终都必须进入真实 guest AMS 启动链。
 
 最终构建 `fc41009787cd` 的验证：Release 构建、`git diff --check`、Python 语法、smoke 页 JavaScript 语法检查通过。原生 Calculator 回归成功启动，进程保持 pending、focus group=40。J2ME 的 60 秒观察回归**未通过**：安装提交、J9 启动后 `probeJavaRuntime()` 超时，诊断捕获也超时。保留完整日志于本机 `/tmp/j2me-run/final2/`，不能将此轮标记为完整游戏启动成功。
 
@@ -187,3 +187,35 @@ node --test buildscript/test_web_save.cjs
 Node 回归覆盖并发保存必须等待后续快照，以及失败调用拒绝但后续保存可恢复这两条行为。
 
 另做保存失败注入：将 `EKA2L1.save()` 替换成 rejected Promise 后，首页显示失败且应用缓存保持不变；但“刷新后一定没有新 host 条目”的额外断言失败。追踪发现当前 Emscripten 的 `_fd_sync` 会直接调用挂载的 `syncfs`，SQLite 在最终前端保存前就能写入 IndexedDB（证据 `/tmp/j2me-reinstall/save-failure4/console.log` 的 `SYNCCALL` / `DBPUT`）。因此这次修改不提供整个安装事务的存储回滚，也不能把保存队列等同于所有底层同步的全局串行化；实际存储故障后的原子恢复仍需单独设计。该注入结果不影响上面正常安装、重复安装及冷启动的通过结论。
+
+
+## E72 安装、5320 重复图标及浏览器死锁
+
+使用用户的 `/Users/zixing/Downloads/e72/e72.rom`、`e72.RPKG` 和 Bounce Tales 继续回归，发现安装链有多处独立问题：
+
+- E72 的 silent installer 是 ROFS 上的 E32，原未签名安装策略补丁在代码 attach 前查不到运行地址。现在在非 ROM codeseg attach 后按进程地址应用相同的指令匹配，并使修改范围的 CPU 代码缓存失效。ROM/XIP 路径保留。
+- 内核 `SafeInc32` / `SafeDec32` 错把 host 指针加减，没有修改 guest 引用计数。E72 安装器的辅助线程退出后提前关闭共享堆，主线程随后访问已解除映射的 `0x007009E8`。修复为修改 guest 数值并返回旧计数；不再用绕过堆释放掩盖问题。
+- AppArc 非原生应用事务此前保存在整个 server 上。E72 AMS 的 Lifecycle 线程在安装期间回滚自己的事务，清掉了另一个会话已准备的注册状态，目标注册返回 NotReady，SWInst 最后返回 -30471。事务现在属于各自 `applist_session`。
+- E72 SWInst 在成功完成 opcode 516 后仍常驻，单纯等待 UID `0x101F875A` 退出会永远停在“安装中”。现在观察本次 silent installer 实例发给 AppServer 的目标 `m.jad/m.jar` 请求回包，再核对已提交的目标注册；负结果直接传给前端。固件自带的 GuitarRockTour/Widsets 安装失败不会误伤用户上传的 JAR。
+
+5320 的两个图标分别来自 AppArc 注册和 host JAR 数据库。列表按 guest JAD 身份及 `uids` 文件解析出的真实 UID 去重，保留有 JAR 图标的 virtual UID 卡片。raw 模式下只有暂存 host 记录、没有完成 guest 注册的失败安装不显示为可启动游戏。
+
+此外，Service Worker 激活通知不再强制刷新正在安装或运行游戏的页面；新版本在下一次导航生效。
+
+浏览器失响应与 guest 音频等待是两个问题。可见 Edge 窗口中复现过启动阶段、以及进入章节选择后截图/脚本全部超时。代码核验发现：`WsDeliverReportVisiblityEvent` 的 ntimer 回调先取 screen mutex、再取 kernel lock，而主线程的 deferred animation redraw 先取 kernel lock、再取 screen mutex。两条路径存在 AB/BA 死锁。已统一为 kernel → screen，并用 RAII 释放；没有把 guest 请求强行完成或给锁等待伪造超时。
+
+安装错误回归使用 Bounce JAR 的本地副本，将 manifest 的 CLDC 版本改为不支持的值，确认 guest 拒绝可到达 UI 且不会新增游戏卡片；测试副本不入库。`/tmp/j2me-e72/reject10/` 已通过。
+
+### 继续定位到关卡加载
+
+上述锁顺序修复并未解决所有卡死。用真实菜单按键继续推进，另外定位并修复了三处问题：
+
+- 普通内核对象最后一个句柄关闭时，`kernel_system::destroy()` 的“删除成功”布尔值被当成 guest Close 返回值。结果所有对象销毁都返回 1，触发 guest `RLibrary::Close` 的 DLL 析构流程；E72 J9 栈最终越过 `0x06700000` 下界。现在分离对象删除结果与 Close 动作返回值；只有最外层真正产生 DLL 卸载工作才返回 1。待报告与已报告的 DLL 析构批次分开管理，嵌套关闭只排队，`LibraryDetached` 在全部完成时返回 EOF。
+- 条件变量 signal 取消计时事件时没有移除超时记录，已出队的旧回调也不验证线程当前等待对象。线程进入下一次信号量等待后，旧回调会错误唤醒它，导致 J9 队列空读、USER 130 或菜单停住。现在每次等待分配独立 token，signal/timeout 只消费对应记录并平衡引用，回调在内核锁下按 UID 查找仍存活的条件变量。
+- 5320 进入章节后，浏览器最后停在 `SVC 0x6B` 的 `ChunkAdjust(type=2)`；关闭 JIT 仍停在同一调用。multiple memory model 的 commit/decommit 没有实际对齐页边界，剩余不足一页时 `page_num` 为 0，循环永远不前进。现在先夹取合法范围，再向外按页对齐；零长度和越界起点立即返回。decommit 上限同时修正为 chunk 最大长度，而不是 `offset + max_size`。
+
+本机 x64/Rosetta `ekatests '[mem-chunk],[handle],[property],[timer]'` 已通过 9 个用例、86 条断言，覆盖最后句柄关闭返回值、非整页提交/释放、跨页表边界、零长度、超大长度和越界起点。浏览器回归仍须以实际关卡画面与按键响应为准，不能仅用 J9 存活或章节选择截图判定完成。
+
+构建 `37664e468fb7` 在可见 Edge 窗口验证：5320 安装/保存/刷新后只有一个 Bounce Tales 卡片，进入第一关并能推进剧情提示，原有 browser hang 不再复现（`/tmp/j2me-e72/5320-final18/`）。E72 同样进入关卡，但首帧后 FPS 归零、移动未通过，浏览器仍可响应诊断（`/tmp/j2me-e72/e72-play18/`）；这条剩余问题继续跟踪，尚不能称为完整游戏验收。
+
+另外 E72 将安装后的 JAR 改名为 `midlet.jar`（运行时 RFs Open 日志已验证），而不是 5320 的 `m.jar`。相同 JAR 重装校验增加这一文件名分支，仍要求逐字节一致和有效 AppArc UID，未放松内容校验。修复后的重复安装正在回归。另有 `[mem-global]` 4 个用例、23 条断言通过。

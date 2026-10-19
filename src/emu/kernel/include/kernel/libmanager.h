@@ -105,6 +105,9 @@ namespace eka2l1 {
         // S60 Java runtime code segments before their first instruction runs.
         void apply_j2me_compat_patches(codeseg_ptr cs, const std::string &name_hint = {});
 
+        // ROFS E32 images have no run address until attached to a process.
+        void apply_midlet_install_policy(codeseg_ptr cs, kernel::process *process);
+
         /**
          * \brief Manage libraries and HLE functions.
 		 * 

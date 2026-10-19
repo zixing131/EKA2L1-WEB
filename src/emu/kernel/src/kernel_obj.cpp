@@ -75,7 +75,13 @@ namespace eka2l1 {
         int kernel_obj::decrease_access_count() {
             if (!kern->wipeout_in_progress()) {
                 if (--access_count == 0) {
-                    return kern->destroy(this);
+                    // HandleClose returns the object's close action (not whether
+                    // it was removed). Only an outer DLL close may request
+                    // guest destructor calls; returning true for every object
+                    // destruction recursively re-enters RLibrary::Close.
+                    int close_result = 0;
+                    kern->destroy(this, &close_result);
+                    return close_result;
                 }
             }
 

@@ -27,8 +27,50 @@
 #include <mem/model/multiple/chunk.h>
 #include <mem/process.h>
 #include <mem/model/multiple/mmu.h>
+#include <limits>
 
 using namespace eka2l1;
+
+TEST_CASE("multiple-model chunk byte ranges cover whole pages without hanging", "[mem-chunk]") {
+    config::state conf;
+    mem::basic_page_table_allocator alloc;
+    auto control = mem::make_new_control(nullptr, &alloc, &conf, 12, false,
+        mem::mem_model_type::multiple);
+    auto process = mem::make_new_mem_model_process(control.get(), mem::mem_model_type::multiple);
+    mem::mem_model_chunk_creation_info info{};
+    info.size = 0x200000;
+    info.addr = 0x78100000;
+    info.flags = mem::MEM_MODEL_CHUNK_TYPE_DISCONNECT | mem::MEM_MODEL_CHUNK_REGION_USER_CODE;
+    info.perm = prot_read_write_exec;
+    mem::mem_model_chunk *chunk = nullptr;
+    REQUIRE(process->create_chunk(chunk, info) == mem::MEM_MODEL_CHUNK_ERR_OK);
+
+    // J9 commits byte-sized heap ranges when loading a Bounce Tales level.
+    REQUIRE(chunk->commit(0xFFF, 2, false) == 0x2000);
+    REQUIRE(chunk->committed() == 0x2000);
+    const auto base = chunk->base(nullptr);
+    REQUIRE(process->get_pointer(base) != nullptr);
+    REQUIRE(process->get_pointer(base + 0x1FFF) != nullptr);
+    REQUIRE(chunk->commit(0xFFF, 2, false) == std::size_t(-1));
+    chunk->decommit(0xFFF, 2);
+    REQUIRE(chunk->committed() == 0);
+    REQUIRE(process->get_pointer(base) == nullptr);
+    REQUIRE(process->get_pointer(base + 0x1000) == nullptr);
+
+    // Cross a page-table boundary, then clip oversized requests at chunk end.
+    REQUIRE(chunk->commit(0xFFFFF, 2) == 0x2000);
+    chunk->decommit(0xFFFFF, 2);
+    REQUIRE(chunk->committed() == 0);
+    REQUIRE(chunk->commit(0x1FFFFF, std::numeric_limits<std::size_t>::max()) == 0x1000);
+    chunk->decommit(0x1FFFFF, std::numeric_limits<std::size_t>::max());
+    REQUIRE(chunk->committed() == 0);
+    REQUIRE(chunk->commit(1, 0) == 0);
+    REQUIRE(chunk->commit(0x200000, 1) == 0);
+    REQUIRE(chunk->commit(0xFFFFFFFF, 2) == 0);
+    chunk->decommit(1, 0);
+    chunk->decommit(0xFFFFFFFF, 2);
+    REQUIRE(chunk->committed() == 0);
+}
 
 TEST_CASE("new processes can read pre-existing global ROM mappings", "[mem-global]") {
     config::state conf;
