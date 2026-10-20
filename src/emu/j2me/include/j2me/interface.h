@@ -61,7 +61,8 @@ namespace eka2l1::j2me {
 
     // Launch the guest-installed app using its AMS opaque IDs, then track J9.
     // When jar_path is supplied, also require byte-identical installed content.
-    std::uint32_t installed_app_uid(system *sys, const app_entry &entry, const std::string &jar_path = {});
+    std::uint32_t installed_app_uid(system *sys, const app_entry &entry, const std::string &jar_path = {},
+        bool suite_uid = false);
 
     bool launch_registered(system *sys, std::uint32_t app_uid, std::function<bool()> launch_stub,
         std::function<void(kernel::process*)> exit_cb);
@@ -91,8 +92,10 @@ namespace eka2l1::j2me {
      */
     bool stage_midlet_for_launch(system *sys, const std::uint32_t app_id, std::u16string &jad_path_out);
     install_error install(system *sys, const std::string &path, app_entry &entry_info,
-        std::function<void(kernel::process*)> install_exit_cb = nullptr);
+        std::function<void(kernel::process*)> install_exit_cb = nullptr, std::string_view keypad = {});
     bool uninstall(system *sys, const std::uint32_t app_id);
+    bool uninstall_guest(system *sys, const std::uint32_t app_id,
+        std::function<void(kernel::process*)> exit_cb);
 
     /**
      * @brief 直接从已存储的 JAR 中提取 MIDlet 图标的原始字节（通常为 PNG）。

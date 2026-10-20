@@ -97,6 +97,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::read_16bit_data(const vm_address addr, std::uint16_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 1) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 2; ++i) {
+                if (!read_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;
@@ -117,6 +124,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::read_32bit_data(const vm_address addr, std::uint32_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 3) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                if (!read_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;
@@ -137,6 +151,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::read_64bit_data(const vm_address addr, std::uint64_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 7) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 8; ++i) {
+                if (!read_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;
@@ -177,6 +198,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::write_16bit_data(const vm_address addr, std::uint16_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 1) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 2; ++i) {
+                if (!write_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;
@@ -197,6 +225,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::write_32bit_data(const vm_address addr, std::uint32_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 3) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                if (!write_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;
@@ -217,6 +252,13 @@ namespace eka2l1::mem {
     }
 
     bool mmu_base::write_64bit_data(const vm_address addr, std::uint64_t *data) {
+        if ((addr & manager_->offset_mask_) > manager_->offset_mask_ - 7) {
+            auto *bytes = reinterpret_cast<std::uint8_t *>(data);
+            for (std::uint32_t i = 0; i < 8; ++i) {
+                if (!write_8bit_data(addr + i, bytes + i)) return false;
+            }
+            return true;
+        }
         page_info *inf = manager_->get_page_info(current_addr_space(), addr);
         if (!inf || !inf->host_addr) {
             return false;

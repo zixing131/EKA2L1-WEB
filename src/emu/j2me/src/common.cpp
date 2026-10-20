@@ -33,6 +33,25 @@
 #include <sstream>
 
 namespace eka2l1::j2me {
+    void set_jad_keypad(std::string &jad, std::string_view mode) {
+        if (mode != "no" && mode != "gameactions" && mode != "navigationkeys") return;
+        constexpr std::string_view key = "Nokia-MIDlet-On-Screen-Keypad:";
+        std::string output;
+        std::istringstream input(jad);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.compare(0, key.size(), key) != 0 && !line.empty()) {
+                output += line + "\r\n";
+            }
+        }
+        output.append(key);
+        output += " ";
+        output.append(mode);
+        output += "\r\n";
+        jad = std::move(output);
+    }
+
     std::string jad_from_manifest(std::string_view manifest, std::string_view jar_url, std::uint64_t jar_size) {
         // Manifest continuation lines are not JAD attributes. Unfold the main
         // section before handing it to the ROM installer, including splits

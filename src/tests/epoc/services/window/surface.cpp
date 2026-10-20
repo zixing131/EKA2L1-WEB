@@ -406,3 +406,31 @@ TEST_CASE("Retained GDI accepts both straight and premultiplied alpha bitmaps", 
         REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 128, 0, 0, 128 });
     }
 }
+
+TEST_CASE("Opaque legacy GDI preserves RGB when the unused bitmap byte is zero", "[window_surface]") {
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto ui = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    const auto bitmap = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    builder.bind_bitmap(ui);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip, false);
+    epoc::bitwise_bitmap source{};
+    source.header_.size_pixels = object_size(1, 1);
+    source.settings_.current_display_mode(epoc::display_mode::color16mu);
+    epoc::gdi_store_command draw;
+    draw.opcode_ = epoc::gdi_store_command_draw_bitmap;
+    auto &data = draw.get_data_struct<epoc::gdi_store_command_draw_bitmap_data>();
+    data = {};
+    data.main_fbs_bitmap_ = &source;
+    data.main_drv_ = bitmap;
+    data.gdi_flags_ = epoc::GDI_STORE_COMMAND_MAIN_RAW;
+    data.dest_rect_ = data.source_rect_ = rect({ 0, 0 }, { 1, 1 });
+    driver.images[bitmap] = { 192, 96, 48, 0 };
+    gdi.build_single_command(draw);
+    submit(driver, builder);
+    REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 192, 96, 48, 0 });
+}

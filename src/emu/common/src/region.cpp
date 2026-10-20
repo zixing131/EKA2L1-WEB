@@ -28,6 +28,7 @@ namespace eka2l1::common {
      */
 
     eka2l1::rect region::bounding_rect() const {
+        if (rects_.empty()) return eka2l1::rect({0, 0}, {0, 0});
         eka2l1::vec2 tl{ INT_MAX, INT_MAX };
         eka2l1::vec2 br{ INT_MIN, INT_MIN };
 
@@ -42,56 +43,26 @@ namespace eka2l1::common {
     }
 
     bool region::add_rect(const eka2l1::rect &rect) {
-        if (rect.empty()) {
+        if (rect.size.x <= 0 || rect.size.y <= 0) return false;
+        if (!rects_.empty() && rect.contains(bounding_rect())) {
+            if (rects_.size() == 1 && rects_.front() == rect) return false;
+            const auto copy = rect;
+            rects_ = {copy};
             return true;
         }
-
-        if (rects_.empty()) {
-            rects_.push_back(rect);
-            return true;
-        }
-
-        if (rect.contains(bounding_rect())) {
-            rects_.clear();
-            rects_.push_back(rect);
-
-            return true;
-        }
-
-        for (std::size_t i = 0; i < rects_.size(); i++) {
-            if ((rects_[i].top.x + rects_[i].size.x <= rect.top.x) || (rects_[i].top.x >= rect.top.x + rect.size.x) || (rects_[i].top.y + rects_[i].size.y <= rect.top.y) || (rects_[i].top.y >= rect.top.y + rect.size.y))
-                continue;
-
-            if ((rects_[i].top.x <= rect.top.x) && (rects_[i].top.y <= rect.top.y) && (rects_[i].top.x + rects_[i].size.x >= rect.top.x + rect.size.x) && (rects_[i].top.y + rects_[i].size.y >= rect.top.y + rect.size.y)) {
-                // This rectangle already covers the new rectangle, no modification done
-                return false;
-            }
-
-            eka2l1::rect intersector;
-            intersector = rect.intersect(rects_[i]);
-
-            if (intersector.top.y + intersector.size.y != rect.top.y + rect.size.y)
-                rects_.push_back(eka2l1::rect({ rect.top.x, intersector.top.y }, { rect.size.x, rect.size.y + rect.top.y - intersector.top.y }));
-
-            if (intersector.top.y != rect.top.y)
-                rects_.push_back(eka2l1::rect({ rect.top.x, rect.top.y }, { rect.size.x, intersector.top.y - rect.top.y }));
-
-            if (intersector.top.x + intersector.size.x != rect.top.x + rect.size.x)
-                rects_.push_back(eka2l1::rect({ intersector.top.x + intersector.size.x, intersector.top.y },
-                    { rect.top.x + rect.size.x - intersector.top.x - intersector.size.x, intersector.size.y }));
-
-            if (intersector.top.x != rect.top.x)
-                rects_.push_back(eka2l1::rect({ rect.top.x, intersector.top.y }, { intersector.top.x - rect.top.x, intersector.size.y }));
-
-            rects_.erase(rects_.begin() + i);
-            return true;
-        }
-
-        rects_.push_back(rect);
+        // Add only the uncovered pieces. The previous implementation removed
+        // the existing rectangle and kept pieces of the new one, losing their
+        // intersection and sometimes introducing overlapping rectangles.
+        region remaining;
+        remaining.rects_.push_back(rect);
+        for (const auto &existing : rects_) remaining.eliminate(existing);
+        if (remaining.empty()) return false;
+        rects_.insert(rects_.end(), remaining.rects_.begin(), remaining.rects_.end());
         return true;
     }
 
     bool region::add_region(const region &rg) {
+        if (this == &rg) return false;
         bool modded = false;
         for (std::size_t i = 0; i < rg.rects_.size(); i++) {
             if (add_rect(rg.rects_[i])) {
@@ -103,53 +74,30 @@ namespace eka2l1::common {
     }
 
     void region::eliminate(const eka2l1::rect &rect) {
-        if (rect.empty()) {
-            return;
-        }
-
-        std::size_t limit = rects_.size();
-
-        for (std::size_t i = 0; i < limit; i++) {
-            if ((rect.top == rects_[i].top) && (rect.size == rects_[i].size)) {
-                rects_.erase(rects_.begin() + i);
-                return;
+        if (rect.size.x <= 0 || rect.size.y <= 0) return;
+        std::vector<eka2l1::rect> remaining;
+        for (const auto &original : rects_) {
+            const auto intersection = original.intersect(rect);
+            if (intersection.empty()) {
+                remaining.push_back(original);
+                continue;
             }
-
-            const eka2l1::rect intersection_reg = rect.intersect(rects_[i]);
-
-            if (!intersection_reg.empty()) {
-                const eka2l1::rect original_iterate = rects_[i];
-                rects_.erase(rects_.begin() + i);
-
-                const eka2l1::vec2 intersect_reg_br = intersection_reg.bottom_right();
-                const eka2l1::vec2 iterate_br = original_iterate.bottom_right();
-
-                if (iterate_br.y != intersect_reg_br.y) {
-                    rects_.push_back(eka2l1::rect({ original_iterate.top.x, intersect_reg_br.y }, { iterate_br.x, iterate_br.y }));
-                    rects_.back().transform_from_symbian_rectangle();
-                }
-
-                if (iterate_br.x != intersect_reg_br.x) {
-                    rects_.push_back(eka2l1::rect({ intersect_reg_br.x, intersection_reg.top.y }, { iterate_br.x, intersect_reg_br.y }));
-                    rects_.back().transform_from_symbian_rectangle();
-                }
-
-                if (intersection_reg.top.x != original_iterate.top.x) {
-                    rects_.push_back(eka2l1::rect({ original_iterate.top.x, intersection_reg.top.y }, { intersection_reg.top.x, intersect_reg_br.y }));
-                    rects_.back().transform_from_symbian_rectangle();
-                }
-
-                if (intersection_reg.top.y != original_iterate.top.y) {
-                    rects_.push_back(eka2l1::rect(original_iterate.top, { iterate_br.x, intersection_reg.top.y }));
-                    rects_.back().transform_from_symbian_rectangle();
-                }
-
-                limit--;
-            }
+            const auto end = original.bottom_right();
+            const auto cut_end = intersection.bottom_right();
+            auto piece = [&](vec2 top, vec2 bottom) {
+                const eka2l1::rect part(top, bottom - top);
+                if (part.size.x > 0 && part.size.y > 0) remaining.push_back(part);
+            };
+            piece(original.top, {end.x, intersection.top.y});
+            piece({original.top.x, cut_end.y}, end);
+            piece({original.top.x, intersection.top.y}, {intersection.top.x, cut_end.y});
+            piece({cut_end.x, intersection.top.y}, {end.x, cut_end.y});
         }
+        rects_ = std::move(remaining);
     }
 
     void region::eliminate(const region &reg) {
+        if (this == &reg) { make_empty(); return; }
         for (std::size_t i = 0; i < reg.rects_.size(); i++) {
             eliminate(reg.rects_[i]);
         }
@@ -162,7 +110,7 @@ namespace eka2l1::common {
             for (std::size_t j = 0; j < target.rects_.size(); j++) {
                 eka2l1::rect the_intersect = target.rects_[j].intersect(rects_[i]);
 
-                if (!the_intersect.empty()) {
+                if (the_intersect.size.x > 0 && the_intersect.size.y > 0) {
                     intersection.rects_.push_back(the_intersect);
                 }
             }

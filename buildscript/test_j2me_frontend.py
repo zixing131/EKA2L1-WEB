@@ -88,6 +88,14 @@ async def run(args):
             page.on('pageerror', record_error)
             try:
                 await page.goto(args.url)
+                await page.wait_for_function("typeof openInstallSheet === 'function'")
+                if args.j2me_keypad is not None:
+                    await page.click('[data-tab="settings"]')
+                    await page.select_option('#prefJ2meKeypad', args.j2me_keypad)
+                    await page.reload()
+                    await page.wait_for_function("typeof openInstallSheet === 'function'")
+                    assert await page.locator('#prefJ2meKeypad').input_value() == args.j2me_keypad
+                    await page.click('[data-tab="games"]')
                 await page.click('#fab')
                 jar_button = page.locator('[onclick="closeSheets();pickJar()"]')
                 assert await jar_button.is_visible(), 'JAR install entry is missing'
@@ -153,17 +161,79 @@ async def run(args):
                 (args.output / 'apps.json').write_text(json.dumps(restored, indent=2, ensure_ascii=False))
                 assert next(app for app in restored if app.get('j2me') and app['uid'] == midlet['uid']) == midlet, restored
                 assert sum(app['name'] == midlet['name'] for app in restored) == 1, restored
+                if args.uninstall_reinstall:
+                    await page.evaluate("""() => {
+                        const mod = EKA2L1.module, original = mod.ccall;
+                        mod.ccall = function(name, type, types, args) {
+                            const result = original.apply(this, arguments);
+                            if (name.startsWith('wasm_uninstall_')) {
+                                window.__uninstallResult = result;
+                                if (result !== 1) console.log('UNINSTALL', name, args, result);
+                            }
+                            return result;
+                        };
+                    }""")
+                    guest_suites = await page.evaluate("""() => {
+                        const fs = EKA2L1.module.FS, result = {};
+                        function walk(path, depth) {
+                            if (depth > 4) return;
+                            for (const name of fs.readdir(path)) {
+                                if (name === '.' || name === '..') continue;
+                                const child = path + '/' + name;
+                                if (fs.isDir(fs.stat(child).mode)) walk(child, depth + 1);
+                                else if (name === 'm.jad') result[child] = fs.readFile(child, {encoding:'utf8'});
+                                else if (name === 'uids') result[child] = Array.from(fs.readFile(child));
+                            }
+                        }
+                        walk('/eka2l1/drives/c', 0); return result;
+                    }""")
+                    (args.output / 'guest-suites-before-uninstall.json').write_text(json.dumps(guest_suites, indent=2))
+                    await page.click('[data-tab="settings"]')
+                    row = page.locator('#pkgList .pref-item').filter(
+                        has=page.locator('.pref-label', has_text=midlet['name']))
+                    page.once('dialog', lambda dialog: asyncio.create_task(dialog.accept()))
+                    await row.locator('button').click()
+                    await page.wait_for_function("window.__uninstallResult === 0", timeout=130000)
+                    await page.wait_for_function("name => !EKA2L1.appList().some(a => a.name === name)", arg=midlet['name'], timeout=130000)
+                    await page.evaluate('EKA2L1.save()')
+                    await page.reload()
+                    await page.wait_for_function("document.getElementById('coreStatusDot').classList.contains('green')", timeout=180000)
+                    removed = await page.evaluate('EKA2L1.appList()')
+                    assert not any(app['name'] == midlet['name'] for app in removed), removed
+                    await page.screenshot(path=str(args.output / 'uninstalled.png'))
+                    await page.set_input_files('#jarInput', str(args.jar.resolve()))
+                    await page.wait_for_function("EKA2L1.midletInstallStatus() < 0 || (EKA2L1.midletInstallStatus() === 2"
+                                                 " && document.getElementById('coreStatusDot').classList.contains('green'))",
+                                                 timeout=args.install_timeout * 1000)
+                    assert await page.evaluate('EKA2L1.midletInstallStatus()') == 2
+                    restored = await page.evaluate('EKA2L1.appList()')
+                    midlet = next(app for app in restored if app.get('j2me') and app['name'] == midlet['name'])
+                    assert sum(app['name'] == midlet['name'] for app in restored) == 1, restored
+                    print('Uninstall, persisted disappearance and reinstall passed', flush=True)
                 if args.install_only:
                     assert not page_errors, page_errors
                     print('PASS: guest installation, persisted reload and a single MIDlet card.', flush=True)
                     return
+                if args.launch_url:
+                    # A sanitizer build can share this origin's IndexedDB with
+                    # a release installer, avoiding guest startup timeouts
+                    # caused solely by instrumentation overhead.
+                    await page.goto(args.launch_url)
+                    await page.wait_for_function("document.getElementById('coreStatusDot').classList.contains('green')", timeout=240000)
                 # Scope to the visible library; settings also contain app names.
                 card = page.locator('.game-item').filter(has=page.locator(
                     '.game-item-sub', has_text='0x' + format(midlet['uid'], 'X')))
                 await card.click(timeout=30000)
                 await page.wait_for_url('**/run.html?**')
                 print('Persisted MIDlet launched', flush=True)
-                await asyncio.sleep(args.observe)
+                await asyncio.sleep(args.startup_wait if args.startup_wait is not None else args.observe)
+                if args.require_network:
+                    # Instrumented cores can still be starting J9 after the
+                    # fixed delay. Wait for the online application's response
+                    # before sending menu keys into an unfinished constructor.
+                    await page.wait_for_function(
+                        "EKA2L1.module.ekaNetwork && EKA2L1.module.ekaNetwork.stats.received > 1000",
+                        timeout=300000)
                 if profiler:
                     profile = await asyncio.wait_for(profiler.send('Profiler.stop'), 15)
                     (args.output / 'cpu-profile.json').write_text(json.dumps(profile))
@@ -174,9 +244,21 @@ async def run(args):
                 await page.screenshot(path=str(args.output / 'game.png'), timeout=15000)
                 await page.click('[onclick="toggleKeypad()"]')
                 for index, key in enumerate(filter(None, args.keys.split(',')), 1):
-                    await page.locator('[data-key="' + key + '"]').first.click(delay=300, timeout=30000)
+                    # Stay below the guest's key-repeat delay: a held arrow
+                    # can skip two tabs on a faster release build.
+                    await page.locator('[data-key="' + key + '"]').first.click(delay=80, timeout=30000)
                     await asyncio.sleep(args.key_interval)
                     await page.screenshot(path=str(args.output / f'key-{index}-{key}.png'), timeout=15000)
+                if args.touch_keypad:
+                    box = await page.locator('#canvas').bounding_box()
+                    await page.mouse.move(box['x'] + box['width'] * .5, box['y'] + box['height'] * .8)
+                    await page.mouse.down()
+                    await asyncio.sleep(.5)
+                    await page.screenshot(path=str(args.output / 'touch-down.png'))
+                    await page.mouse.up()
+                    for index in range(8):
+                        await asyncio.sleep(.3 if index < 4 else 1)
+                        await page.screenshot(path=str(args.output / f'touch-up-{index}.png'))
                 after_keys = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
                 assert_live_j9(after_keys)
                 audio = await page.evaluate('window.__audioProbe');
@@ -237,6 +319,11 @@ if __name__ == '__main__':
     parser.add_argument('--install-timeout', type=int, default=180)
     parser.add_argument('--seed-existing-app', action='store_true', help='Seed an unrelated host DB entry before installing the JAR')
     parser.add_argument('--reinstall', action='store_true', help='Reinstall the same JAR after restoring persisted storage')
+    parser.add_argument('--uninstall-reinstall', action='store_true', help='Uninstall through program manager, reload and reinstall')
+    parser.add_argument('--startup-wait', type=float, help='Initial guest boot allowance; defaults to --observe')
+    parser.add_argument('--touch-keypad', action='store_true', help='Press the native touchscreen keypad and capture idle frames after release')
+    parser.add_argument('--j2me-keypad', choices=['', 'no', 'gameactions', 'navigationkeys'], help='Set and verify the ROM Java keypad preference before installing')
+    parser.add_argument('--launch-url', help='Optional same-origin alternate build page to launch the persisted suite')
     parser.add_argument('--install-only', action='store_true', help='Verify installation and persistence without launching the MIDlet')
     parser.add_argument('--angle-backend', choices=('default', 'swiftshader', 'metal'), default='swiftshader')
     parser.add_argument('--browser-channel', choices=('chrome', 'msedge'), help='Use an installed browser instead of bundled Chromium')

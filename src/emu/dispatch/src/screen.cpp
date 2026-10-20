@@ -532,23 +532,19 @@ namespace eka2l1::dispatch {
                 const bool auto_transposed = (verdict_count == -1);
                 const float rotation_draw = (!auto_transposed && ((mode_info.rotation == 90) || (mode_info.rotation == 180))) ? 180.0f : 0.0f;
 
-                eka2l1::rect source_rect { eka2l1::vec2(0, 0), mode_info.size };
-                eka2l1::rect dest_rect = source_rect;
-                if (rotation_draw != 0.0f) {
-                    // Advance position for rotation origin. We can't gurantee the origin to be exactly div by 2.
-                    // So do this for safety and soverginity.
-                    dest_rect.top = dest_rect.size;
-                }
-
-                dest_rect.scale(scr->display_scale_factor);
-
                 builder.bind_bitmap(scr->screen_texture);
-                builder.set_feature(drivers::graphics_feature::clipping, false);
+                // The shared framebuffer also contains pixels belonging to
+                // ordinary WSERV windows (notably the S60 Java touch keypad).
+                // A DSA client's update must not overwrite those windows.
+                auto access = scr->direct_access_region();
+                if (!scr->active_dsa_count_) access.add_rect(eka2l1::rect({0, 0}, screen_size));
+                scr->dsa_content_size = screen_size;
+                scr->dsa_content_rotation = rotation_draw;
 
                 builder.set_texture_filter(scr->dsa_texture, true, filter);
                 builder.set_texture_filter(scr->dsa_texture, false, filter);
 
-                builder.draw_bitmap(scr->dsa_texture, 0, dest_rect, source_rect, eka2l1::vec2(0, 0), rotation_draw, 0);
+                scr->draw_direct_access(builder, access);
                 builder.bind_bitmap(0);
 
                 drivers::command_list retrieved = builder.retrieve_command_list();

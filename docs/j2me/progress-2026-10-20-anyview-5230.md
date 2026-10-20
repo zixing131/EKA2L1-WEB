@@ -1,5 +1,7 @@
 # Anyview 4.0 与 Nokia 5230 的 J2ME 启动
 
+后续的触屏键盘、闪屏、卸载重装及播放稳定性修复见 [音频、显示与卸载回归](progress-2026-10-20-audio-display-uninstall.md)。
+
 接 [Web 联网、MP3 与权限设置](progress-2026-10-20-network.md)。输入为用户提供的原始 `Anyview4.0.jar`（manifest 版本 4.0.12）以及 `5230 [ROM + RPKG dump]/5230.rom`、`5230.RPKG`；未改写 JAR 或固件。
 
 ## Anyview 的短信初始化等待

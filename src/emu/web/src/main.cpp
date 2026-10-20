@@ -201,6 +201,11 @@ namespace eka2l1::web {
         std::uint64_t midlet_install_generation = 0;
         std::size_t midlet_install_complete_callback = 0;
         std::atomic<bool> midlet_install_request_completed{ false };
+        std::uint32_t midlet_uninstall_uid = 0, midlet_uninstall_guest_uid = 0;
+        int midlet_uninstall_status = 0;
+        std::uint64_t midlet_uninstall_generation = 0;
+        bool storage_syncing = false;
+        bool presentation_invalidated = true;
     };
 
     static wasm_state g_state;
@@ -799,13 +804,11 @@ static void sync_canvas_to_screen(epoc::screen *scr) {
     g_state.window_height = canvas_h;
 }
 
-// WebGL's default backbuffer is invalidated after every swap.  The window
-// server only recomposes when guest content changes, so presenting from its
-// retained screen texture must happen every RAF; otherwise the next empty
-// SDL_GL_SwapWindow replaces a perfectly valid ROM frame with black.
-static void present_emulated_screen() {
+// boot.js requests a preserved backbuffer. Present only a completed guest
+// redraw or a display-setting change; idle RAFs must not clear/repaint it.
+static bool present_emulated_screen() {
     if (!g_state.graphics_driver || !g_state.winserv) {
-        return;
+        return false;
     }
 
     epoc::screen *scr = g_state.winserv->get_current_focus_screen();
@@ -813,10 +816,19 @@ static void present_emulated_screen() {
         scr = g_state.winserv->get_screens();
     }
     if (!scr || !scr->screen_texture) {
-        return;
+        return false;
     }
 
     sync_canvas_to_screen(scr);
+    static std::uint64_t previous_redraw = ~std::uint64_t(0);
+    static epoc::screen *previous_screen = nullptr;
+    static eka2l1::drivers::handle previous_texture = 0;
+    static int previous_width = 0, previous_height = 0, previous_rotation = -1;
+    static bool previous_filter = false;
+    const auto redraw = s_redraw_cb_count.load();
+    if (!g_state.presentation_invalidated && previous_redraw == redraw && previous_screen == scr && previous_texture == scr->screen_texture
+        && previous_width == g_state.window_width && previous_height == g_state.window_height
+        && previous_rotation == scr->ui_rotation && previous_filter == g_screen_filter_nearest) return false;
 
     eka2l1::drivers::graphics_command_builder builder;
     draw_emulated_screen(builder, scr,
@@ -824,6 +836,15 @@ static void present_emulated_screen() {
         static_cast<std::uint32_t>(g_state.window_height));
     eka2l1::drivers::command_list list = builder.retrieve_command_list();
     g_state.graphics_driver->submit_command_list(list);
+    previous_redraw = redraw;
+    previous_screen = scr;
+    previous_texture = scr->screen_texture;
+    previous_width = g_state.window_width;
+    previous_height = g_state.window_height;
+    previous_rotation = scr->ui_rotation;
+    previous_filter = g_screen_filter_nearest;
+    g_state.presentation_invalidated = false;
+    return true;
 }
 
 // Create the build-info watermark texture once, on the main thread. Safe to
@@ -853,9 +874,8 @@ static void ensure_watermark_texture() {
     g_state.watermark_h = h;
 }
 
-// Counterpart of the Android frontend's register_draw_callback().  The actual
-// presentation occurs every RAF from the retained screen texture; a WebGL
-// backbuffer cannot retain the single callback frame across later swaps.
+// Counterpart of Android's register_draw_callback(). Mark a completed guest
+// redraw; the next RAF presents it once to the preserved WebGL backbuffer.
 static void register_screen_draw_callbacks() {
     if (!g_state.winserv) {
         return;
@@ -1161,11 +1181,12 @@ static void main_loop() {
         g_state.winserv->get_anim_scheduler()->flush_pending_redraws();
     }
 
-    if (g_state.paused) {
+    if (g_state.paused || g_state.storage_syncing) {
         // Still flush pending GPU work (e.g. texture uploads queued before pausing).
         if (g_state.graphics_driver) {
             g_state.graphics_driver->pump();
         }
+        if (present_emulated_screen()) SDL_GL_SwapWindow(g_window);
         return;
     }
 
@@ -1413,7 +1434,7 @@ static void main_loop() {
     // Keep the ROM-composed screen texture in the default framebuffer for the
     // upcoming swap.  This is intentionally after the command-queue pump, so
     // a screen::redraw submitted this tick is immediately visible.
-    present_emulated_screen();
+    const bool presented = present_emulated_screen();
 
     // Feed Web Audio: pull PCM from playing guest streams and schedule it.
     if (g_state.audio_driver) {
@@ -1421,7 +1442,7 @@ static void main_loop() {
     }
 
     // Swap buffers
-    SDL_GL_SwapWindow(g_window);
+    if (presented) SDL_GL_SwapWindow(g_window);
 
     // FPS counting: report the guest's actual render rate (screen-redraw
     // callbacks = frames the window server really composed) rather than the
@@ -1830,6 +1851,7 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
                 eka2l1::get_winserv_name_by_epocver(g_state.symsys->get_symbian_version_use())));
 
         if (g_state.winserv) {
+            g_state.presentation_invalidated = true;
             register_screen_draw_callbacks();
         } else {
             LOG_ERROR(FRONTEND_CMDLINE, "Window server not found; no display output will be presented");
@@ -1919,6 +1941,13 @@ int wasm_install_midlet(const char *jar_path) {
     }
     g_state.midlet_install_state.store(1, std::memory_order_release);
     eka2l1::j2me::app_entry entry{};
+    const int keypad = EM_ASM_INT({
+        try {
+            return (["", "no", "gameactions", "navigationkeys"]).indexOf(
+                localStorage.getItem("eka2l1_j2me_keypad") || "");
+        } catch (_) { return 0; }
+    });
+    const char *keypad_modes[] = {"", "no", "gameactions", "navigationkeys"};
     const eka2l1::j2me::install_error result = eka2l1::j2me::install(
         g_state.symsys.get(), jar_path, entry, [generation](eka2l1::kernel::process *installer) {
             if (generation != g_state.midlet_install_generation
@@ -1969,10 +1998,14 @@ int wasm_install_midlet(const char *jar_path) {
                     eka2l1::common::ucs2_to_utf8(installer->get_exit_category()));
             }
             // Raw success is confirmed by the committed target registration.
-            if (!eka2l1_j9_raw || !success) {
-                g_state.midlet_install_state.store(success ? 2 : -4, std::memory_order_release);
+            if (success && installer->raw_name() == "eka_midlet_install") {
+                g_state.midlet_install_request_completed.store(true, std::memory_order_release);
             }
-        });
+            if (!eka2l1_j9_raw || !success) {
+                g_state.midlet_install_state.store(success ? 2
+                    : (installer->get_exit_reason() < 0 ? installer->get_exit_reason() : -4), std::memory_order_release);
+            }
+        }, keypad_modes[keypad >= 0 && keypad <= 3 ? keypad : 0]);
 
     g_state.midlet_install_id = entry.id_;
     if (result != eka2l1::j2me::INSTALL_ERROR_JAR_SUCCESS) {
@@ -2003,6 +2036,7 @@ int wasm_install_midlet(const char *jar_path) {
                             && filename->get_length() < 256 && filename->get_pointer(sender)
                         ? eka2l1::common::lowercase_string(eka2l1::common::ucs2_to_utf8(filename->to_std_string(sender)))
                         : std::string{};
+                    LOG_WARN(FRONTEND_CMDLINE, "MIDP completion: path='{}' result={}", path, result);
                     // The monitor also attempts firmware-bundled preinstalls;
                     // their failures must not reject the uploaded target.
                     if (path != "e:\\system\\data\\midp2\\preinstall\\m.jad"
@@ -2043,6 +2077,7 @@ int wasm_midlet_install_status() {
     if (eka2l1_j9_raw && g_state.symsys
         && g_state.midlet_install_state.load(std::memory_order_acquire) == 1) {
         auto *kern = g_state.symsys->get_kernel_system();
+        if (!g_state.midlet_install_request_completed.load(std::memory_order_acquire)) return 1;
         bool install_request_pending = false;
         kern->for_each_inflight_ipc_message([&](eka2l1::ipc_msg *message) {
             if (message->function == 516 && message->own_thr
@@ -3155,12 +3190,15 @@ int wasm_uninstall_package(unsigned int uid) {
 
 /**
  * Uninstall a J2ME (Java ME) MIDlet by its virtual UID (0x7Exxxxxx).
- * Returns 0 on success. Removes the JAR/JAD/icon from per-MIDlet storage and
- * deletes the entry from the host j2me app list (sqlite DB). The caller should
- * persist (IDBFS sync) and refresh afterwards.
+ * Returns 1 while the ROM SWInst uninstall transaction is pending, 0 on
+ * success, or a negative error. Only after guest success remove the host
+ * JAR/JAD/icon and app entry; the caller then persists and refreshes.
  */
 EMSCRIPTEN_KEEPALIVE
 int wasm_uninstall_midlet(unsigned int virtual_uid) {
+    auto &pending_uid = g_state.midlet_uninstall_uid;
+    auto &pending_guest_uid = g_state.midlet_uninstall_guest_uid;
+    auto &guest_status = g_state.midlet_uninstall_status;
     if (!g_state.symsys) {
         return -1;
     }
@@ -3170,6 +3208,62 @@ int wasm_uninstall_midlet(unsigned int virtual_uid) {
         return -2; // not a j2me virtual UID
     }
     const std::uint32_t j2me_id = j2me_id_from_virtual_uid(uid32);
+
+    // Remove the exact guest registration before dropping the host identity.
+    // Otherwise appList no longer recognizes the AppArc entry as the same
+    // MIDlet and exposes it as a second, iconless native application.
+    auto *entry_list = g_state.symsys->get_j2me_applist();
+    const auto entry = entry_list->get_entry(j2me_id);
+    if (!entry) return -3;
+    auto guest_uid = eka2l1::j2me::installed_app_uid(g_state.symsys.get(), *entry);
+    if (!pending_uid) LOG_INFO(FRONTEND_CMDLINE, "MIDP uninstall: host={} guest=0x{:X} suite='{}' vendor='{}' version='{}'",
+        j2me_id, guest_uid, entry->name_, entry->author_, entry->version_);
+    if (pending_uid && pending_uid != uid32) {
+        if (guest_status != 0) return -14;
+        // Runtime preparation has not started a guest transaction. A timed
+        // out caller must not reserve the uninstaller indefinitely.
+        pending_uid = 0;
+    }
+    if (pending_uid == uid32) guest_uid = pending_guest_uid;
+    if (guest_uid && guest_status == 0) {
+        g_state.paused = false;
+        pending_uid = uid32;
+        pending_guest_uid = guest_uid;
+        const auto ready = eka2l1::j2me::prepare_runtime_for_install(g_state.symsys.get());
+        if (ready != 0) {
+            if (ready < 0) pending_uid = 0;
+            return ready;
+        }
+        guest_status = 1;
+        const auto generation = ++g_state.midlet_uninstall_generation;
+        if (!eka2l1::j2me::uninstall_guest(g_state.symsys.get(), j2me_id, [generation](eka2l1::kernel::process *finished) {
+            if (generation != g_state.midlet_uninstall_generation) return;
+            const int reason = finished->get_exit_reason();
+            const bool success = reason == 0 && finished->get_exit_type() != eka2l1::kernel::entity_exit_type::panic;
+            g_state.midlet_uninstall_status = success ? 2 : (reason < 0 ? reason : -2);
+            LOG_INFO(FRONTEND_CMDLINE, "Guest MIDP uninstall completed: type={}, reason={}",
+                static_cast<int>(finished->get_exit_type()), reason);
+        })) {
+            pending_uid = 0;
+            guest_status = 0;
+            return -5;
+        }
+        return 1;
+    }
+    if (guest_status == 1) return 1;
+    if (guest_status < 0) {
+        const int result = guest_status;
+        guest_status = 0;
+        pending_uid = 0;
+        return result;
+    }
+    guest_status = 0;
+    pending_uid = 0;
+    auto *kernel = g_state.symsys->get_kernel_system();
+    auto *registry = static_cast<eka2l1::applist_server *>(kernel->get_by_name<eka2l1::service::server>(
+        eka2l1::get_app_list_server_name_by_epocver(kernel->get_epoc_version())));
+    if (guest_uid && (!registry || !registry->remove_non_native_registration(
+        g_state.symsys->get_io_system(), guest_uid))) return -4;
 
     if (!eka2l1::j2me::uninstall(g_state.symsys.get(), j2me_id)) {
         return -3;
@@ -4054,6 +4148,10 @@ void wasm_reset() {
             g_state.midlet_install_complete_callback = 0;
         }
         g_state.midlet_install_state.store(0, std::memory_order_release);
+        ++g_state.midlet_uninstall_generation;
+        g_state.midlet_uninstall_uid = g_state.midlet_uninstall_guest_uid = 0;
+        g_state.midlet_uninstall_status = 0;
+        g_state.presentation_invalidated = true;
         g_state.symsys.reset();
         g_state.initialized = false;
     }
@@ -4075,6 +4173,13 @@ void wasm_set_volume(int volume) {
 EMSCRIPTEN_KEEPALIVE
 void wasm_set_paused(int paused) {
     g_state.paused = (paused != 0);
+}
+
+// Keep the MEMFS tree stable across IDBFS's asynchronous enumeration/write.
+// Independent from the user's pause choice, which must survive a save.
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_storage_syncing(int syncing) {
+    g_state.storage_syncing = syncing != 0;
 }
 
 // A real S60 handset lets AknCapServer and the Phone application turn the

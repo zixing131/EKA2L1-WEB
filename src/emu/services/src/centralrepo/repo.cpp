@@ -359,6 +359,23 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void central_repo_client_subsession::delete_value(service::ipc_context *ctx) {
+        const auto key = ctx->get_argument_value<std::uint32_t>(0);
+        if (!key) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        const auto entry = std::find_if(attach_repo->entries.begin(), attach_repo->entries.end(),
+            [&](const central_repo_entry &value) { return value.key == *key; });
+        if (entry == attach_repo->entries.end()) {
+            ctx->complete(epoc::error_not_found);
+            return;
+        }
+        attach_repo->entries.erase(entry);
+        modification_success(*key);
+        ctx->complete(epoc::error_none);
+    }
+
     void central_repo_client_subsession::set_value(service::ipc_context *ctx) {
         // We get the entry.
         // Use mode 1 (write) to get the entry, since we are modifying data.

@@ -383,6 +383,7 @@ namespace eka2l1 {
          * \param rsc_path Path of the registeration file the entry was read from.
          */
         bool delete_registry(const std::u16string &rsc_path);
+        bool remove_non_native_registration(io_system *io, epoc::uid uid);
 
         /**
          * @brief       Get the legacy level of the server.

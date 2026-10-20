@@ -570,7 +570,7 @@ namespace eka2l1::epoc {
                     fully_visible = visible_region.identical(shape_region);
                 } else {
                     fully_visible = (visible_region.rects_.size() == 1) &&
-                        (visible_region.rects_[0] == bounding_rect());
+                        (visible_region.rects_[0] == abs_rect);
                 }
             }
 
@@ -1089,6 +1089,10 @@ namespace eka2l1::epoc {
     }
 
     void redraw_msg_canvas::update_surface_ui(drivers::graphics_command_builder &builder) {
+        // Legacy opaque windows ignore the unused byte of EColor16MU pixels.
+        // Premultiplying it would blacken decoded J9 images on WebGL, which
+        // cannot apply the desktop texture alpha swizzle.
+        const bool premultiplied = scr->is_screenplay_architecture() || is_display_mode_alpha(display_mode());
         auto *driver = client->get_ws().get_graphics_driver();
         const eka2l1::vec2 pixel_size = size() * scr->display_scale_factor;
         const bool initialise = !surface_ui_;
@@ -1119,23 +1123,23 @@ namespace eka2l1::epoc {
         builder.set_feature(drivers::graphics_feature::blend, false);
         builder.clip_bitmap_region(full_region, scr->display_scale_factor);
 
-        if (initialise) {
+        if (initialise && scr->is_screenplay_architecture()) {
             // Cache hashes may already describe uploads queued only in pending_segment_.
             if (pending_segment_) {
                 gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                    { 0, 0 }, scr->display_scale_factor, full_region, true);
+                    { 0, 0 }, scr->display_scale_factor, full_region, premultiplied);
                 gdi_builder.build_texture_updates(*pending_segment_);
             }
             for (const auto &segment : redraw_segments_.get_segments()) {
                 const auto clip = segment->region_.intersect(full_region);
                 builder.clip_bitmap_region(clip, scr->display_scale_factor);
                 gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                    { 0, 0 }, scr->display_scale_factor, clip, true);
+                    { 0, 0 }, scr->display_scale_factor, clip, premultiplied);
                 gdi_builder.build_segment(*segment);
             }
         } else if (pending_segment_) {
             gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                { 0, 0 }, scr->display_scale_factor, full_region, true);
+                { 0, 0 }, scr->display_scale_factor, full_region, premultiplied);
             gdi_builder.build_segment(*pending_segment_);
         }
         pending_segment_.reset();
@@ -1166,13 +1170,15 @@ namespace eka2l1::epoc {
         draw_surface(builder, background_surface_);
 
         builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
-        builder.set_feature(drivers::graphics_feature::blend, true);
+        builder.set_feature(drivers::graphics_feature::blend,
+            scr->is_screenplay_architecture() || is_display_mode_alpha(display_mode()));
         builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
             drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha,
             drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
         builder.draw_bitmap(surface_ui_, 0, eka2l1::rect(abs_rect.top * scr->display_scale_factor, size() * scr->display_scale_factor),
             eka2l1::rect({ 0, 0 }, surface_ui_size_));
         builder.set_feature(drivers::graphics_feature::blend, false);
+        draw_surface(builder, direct_surface_);
         return true;
     }
 
@@ -1306,7 +1312,7 @@ namespace eka2l1::epoc {
         client->remove_redraws(this);
         redraw_segments_.add_new_segment(redraw_rect_curr, epoc::gdi_store_command_segment_pending_redraw);
 
-        if (surface_ui_) {
+        if (surface_ui_ && scr->is_screenplay_architecture()) {
             gdi_store_command clear;
             clear.opcode_ = gdi_store_command_set_clip_rect_single;
             clear.get_data_struct<gdi_store_command_set_clip_rect_single_data>().clipping_rect_ = redraw_rect_curr;
@@ -1405,7 +1411,12 @@ namespace eka2l1::epoc {
             return false;
         }
 
-        if (scr->is_screenplay_architecture() && (background_surface_.surface || surface_ui_)) {
+        // Legacy flicker-free windows also need retained pixels. J9 commonly
+        // redraws just the changed selection while an overlaid player bar
+        // forces a server recomposite. Replaying only the newest command
+        // segments would lose untouched rows.
+        if ((!scr->is_screenplay_architecture() && scr->scr_config.flicker_free)
+            || (scr->is_screenplay_architecture() && (background_surface_.surface || surface_ui_))) {
             return draw_surface_window(builder);
         }
 
@@ -1462,12 +1473,18 @@ namespace eka2l1::epoc {
             if (!segments.empty()) {
                 builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
 
-                gdi_command_builder gdi_builder(client->get_ws().get_graphics_driver(), builder,
-                    *client->get_ws().get_bitmap_cache(), filter, abs_rect.top, scr->display_scale_factor,
-                    visible_region);
-
                 for (std::size_t i = 0; i < segments.size(); i++) {
                     if (segments[i]->type_ != gdi_store_command_segment_pending_redraw) {
+                        // Later Begin/EndRedraw transactions subtract their
+                        // region from old segments. Replaying an old full-window
+                        // clear outside its remaining region erases newer UI.
+                        auto clip = segments[i]->region_;
+                        clip.advance(abs_rect.top);
+                        clip = clip.intersect(visible_region);
+                        if (clip.empty()) continue;
+                        builder.clip_bitmap_region(clip, scr->display_scale_factor);
+                        gdi_command_builder gdi_builder(client->get_ws().get_graphics_driver(), builder,
+                            *client->get_ws().get_bitmap_cache(), filter, abs_rect.top, scr->display_scale_factor, clip);
                         gdi_builder.build_segment(*segments[i]);
                     }
                 }

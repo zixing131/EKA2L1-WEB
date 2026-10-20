@@ -60,7 +60,10 @@ namespace eka2l1::epoc {
                 streaming_window_ = cv;
             }
 
-            if (cv->draw(builder_))
+            if (cv->is_dsa_active() && cv->can_be_physically_seen()
+                && cv->scr->draw_direct_access(builder_, cv->visible_region)) {
+                total_redrawed_++;
+            } else if (cv->draw(builder_))
                 total_redrawed_++;
 
             return false;
@@ -255,6 +258,34 @@ namespace eka2l1::epoc {
         for (std::int32_t y = 0; y < crrmode.size.y; y++) {
             std::memcpy(buffer_ptr + y * framebuffer_pitch, tight_buffer.data() + y * tight_pitch, tight_pitch);
         }
+    }
+
+    common::region screen::direct_access_region() {
+        struct walker : window_tree_walker {
+            common::region region;
+            bool do_it(window *win) override {
+                if (win->type == window_kind::client) {
+                    auto *canvas = static_cast<canvas_base *>(win);
+                    if (canvas->is_dsa_active() && canvas->can_be_physically_seen())
+                        region.add_region(canvas->visible_region);
+                }
+                return false;
+            }
+        } collect;
+        root->walk_tree_back_to_front(&collect);
+        return collect.region;
+    }
+
+    bool screen::draw_direct_access(drivers::graphics_command_builder &builder, const common::region &clip) {
+        if (!dsa_texture || dsa_content_size != current_mode().size || clip.empty()) return false;
+        const eka2l1::rect source({0, 0}, dsa_content_size);
+        auto destination = source;
+        if (dsa_content_rotation != 0.0f) destination.top = destination.size;
+        destination.scale(display_scale_factor);
+        builder.clip_bitmap_region(clip, display_scale_factor);
+        builder.set_feature(drivers::graphics_feature::blend, false);
+        builder.draw_bitmap(dsa_texture, 0, destination, source, {0, 0}, dsa_content_rotation, 0);
+        return true;
     }
 
     bool screen::redraw(drivers::graphics_command_builder &builder, const bool need_bind) {
@@ -583,6 +614,7 @@ namespace eka2l1::epoc {
         if (crr_mode != mode) {
             LOG_TRACE(SERVICE_WINDOW, "Screen mode changed to {}", mode);
             really_changed = true;
+            dsa_content_size = {};
         }
 
         if (eka2l1_leave_probe) {

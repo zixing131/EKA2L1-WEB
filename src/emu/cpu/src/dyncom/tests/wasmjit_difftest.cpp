@@ -119,7 +119,53 @@ cpu_state benchmark(dyncom_core &core, diff_env &env, bool jit, double &median_m
 }
 }
 
+bool check_memory_bailouts() {
+    diff_env env;
+    auto core = make_core(env);
+    dyncom_jit::enabled_default = 1;
+    for (const bool store : {false, true}) {
+        const std::uint32_t code[] = {store ? 0xE5810000u : 0xE5910000u, 0xE12FFF1E}; // STR/LDR r0,[r1]; BX lr
+        std::memcpy(env.mem.data() + code_base, code, sizeof(code));
+        core->clear_instruction_cache();
+        auto run = [&](std::uint32_t address) {
+            cpu_state input{};
+            input.reg[0] = 0x11223344;
+            input.reg[1] = address;
+            input.reg[14] = return_pc;
+            input.reg[15] = code_base;
+            input.cpsr = 0x10;
+            write_state(*core, input);
+            core->run(2);
+        };
+        const auto before = dyncom_jit::stat_jit_instrs;
+        for (unsigned i = 0; i < 40; ++i) run(0x3000);
+        if (dyncom_jit::stat_jit_instrs == before) return false;
+
+        // Page-zero permission sentinel collides with a resident read-only
+        // page in the same TLB slot. Neither loads nor stores may use it.
+        std::memset(env.mem.data() + 0x8000, 0xCC, 4096 + 4);
+        const std::uint32_t expected = 0x11223344;
+        std::memcpy(env.mem.data(), &expected, 4);
+        core->set_tlb_page(0x200000, env.mem.data() + 0x8000, prot_read);
+        run(0);
+        if (core->get_reg(0) != expected || env.mem[0x8000] != 0xCC) return false;
+
+        // A word straddling a guest boundary must use the slow path, not
+        // the bytes beyond the first cached host page.
+        std::memcpy(env.mem.data() + 0x3FFE, &expected, 4);
+        core->set_tlb_page(0x3000, env.mem.data() + 0x8000, prot_read_write);
+        run(0x3FFE);
+        if (core->get_reg(0) != expected || env.mem[0x8FFE] != 0xCC) return false;
+    }
+    std::printf("PASS: compiled loads/stores bail on page-zero aliases and split pages\n");
+    return true;
+}
+
 int main() {
+    if (!check_memory_bailouts()) {
+        std::printf("FAIL: compiled memory access boundary checks\n");
+        return 1;
+    }
     diff_env interp_env, jit_env;
     auto interp = make_core(interp_env), jit = make_core(jit_env);
     std::mt19937 rng(0xA32);

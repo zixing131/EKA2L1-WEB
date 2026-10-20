@@ -131,6 +131,18 @@ namespace eka2l1::arm::r12l1 {
             return nullptr;
         }
 
+        // Multi-byte accesses must fit wholly in a single mapped host page.
+        // Otherwise the MMU resolves each page rather than crossing a host
+        // allocation boundary. Unlike lookup(), these respect access type.
+        std::uint8_t *lookup_data(const vaddress addr, const std::size_t size, const bool write) {
+            const auto base = addr & ~page_mask;
+            auto &entry = entries[(addr >> page_bits) & TLB_ENTRY_MASK];
+            const auto offset = addr & page_mask;
+            if (!base || !entry.host_base || size > page_mask + 1 - offset
+                || (write ? entry.write_addr : entry.read_addr) != base) return nullptr;
+            return entry.host_base + offset;
+        }
+
         // Instruction-fetch fast path: hit only on a page mapped executable.
         // ReadCode otherwise always page-walks via core->read_code; this lets a
         // warm code page skip the walk. On a miss the caller falls back to the

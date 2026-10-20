@@ -18,6 +18,7 @@
  */
 
 #pragma once
+#include <common/region.h>
 
 #include <common/container.h>
 #include <common/vecx.h>
@@ -94,6 +95,10 @@ namespace eka2l1::epoc {
         // in the deeper mode their wsini.ini declares.
         epoc::display_mode dsa_disp_mode;
         epoc::display_mode dsa_disp_mode_initial;
+        eka2l1::vec2 dsa_content_size{};
+        float dsa_content_rotation = 0.0f;
+        common::region direct_access_region();
+        bool draw_direct_access(drivers::graphics_command_builder &builder, const common::region &clip);
 
         std::uint64_t last_vsync;
         std::uint64_t last_fps_check;

@@ -25,3 +25,16 @@ TEST_CASE("JAD synthesis uses only suite attributes and the actual archive locat
     REQUIRE(eka2l1::j2me::jad_from_manifest("MIDlet-Name: App", "m.jar", 42)
         == "MIDlet-Name: App\r\nMIDlet-Jar-URL: m.jar\r\nMIDlet-Jar-Size: 42\r\n");
 }
+
+TEST_CASE("JAD keypad override replaces only the suite keypad property", "[j2me][manifest]") {
+    const std::string original = "MIDlet-Name: App\r\nNokia-MIDlet-On-Screen-Keypad: no\r\nMIDlet-Jar-Size: 42\r\n";
+    auto jad = original;
+    eka2l1::j2me::set_jad_keypad(jad, "");
+    REQUIRE(jad == original);
+    eka2l1::j2me::set_jad_keypad(jad, "invalid\r\nMIDlet-Name: Other");
+    REQUIRE(jad == original);
+    eka2l1::j2me::set_jad_keypad(jad, "gameactions");
+    REQUIRE(jad == "MIDlet-Name: App\r\nMIDlet-Jar-Size: 42\r\nNokia-MIDlet-On-Screen-Keypad: gameactions\r\n");
+    eka2l1::j2me::set_jad_keypad(jad, "no");
+    REQUIRE(jad == "MIDlet-Name: App\r\nMIDlet-Jar-Size: 42\r\nNokia-MIDlet-On-Screen-Keypad: no\r\n");
+}

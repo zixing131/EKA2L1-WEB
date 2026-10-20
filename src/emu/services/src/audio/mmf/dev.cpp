@@ -618,6 +618,7 @@ namespace eka2l1 {
         four_ccs_.push_back(PCM8_CC);
         four_ccs_.push_back(PCM16_CC);
         four_ccs_.push_back(MP3_CC);
+        four_ccs_.push_back(drivers::AMR_FOUR_CC_CODE);
         four_ccs_.push_back(AAC_CC);
         four_ccs_.push_back(WAV_CC);
     }

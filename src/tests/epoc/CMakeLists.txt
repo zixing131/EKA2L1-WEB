@@ -32,6 +32,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sensor/rotation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/window/surface.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/window/keycapture.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/window/lifetime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/crebinloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/domain/domain.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/featmgr.cpp

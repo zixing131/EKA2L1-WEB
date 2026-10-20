@@ -203,6 +203,7 @@ namespace eka2l1 {
         void find(service::ipc_context *ctx);
         void reset(service::ipc_context *ctx);
         void set_value(service::ipc_context *ctx);
+        void delete_value(service::ipc_context *ctx);
         void get_value(service::ipc_context *ctx);
         void notify_nof_check(service::ipc_context *ctx);
         void notify(service::ipc_context *ctx);

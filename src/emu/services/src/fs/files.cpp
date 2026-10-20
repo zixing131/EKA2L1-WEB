@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 extern bool eka2l1_shell_leave_probe;
@@ -791,8 +792,17 @@ namespace eka2l1 {
             return;
         }
 
-        std::int32_t write_len = *ctx->get_argument_value<std::int32_t>(1);
-        std::int32_t write_pos_provided = *ctx->get_argument_value<std::int32_t>(2);
+        const auto length_arg = ctx->get_argument_value<std::int32_t>(1);
+        const auto position_arg = ctx->get_argument_value<std::int32_t>(2);
+        if (!length_arg || !position_arg || *length_arg < 0
+            || static_cast<std::size_t>(*length_arg) > write_data->size()
+            || (*position_arg < 0 && *position_arg != -1
+                && *position_arg != std::numeric_limits<std::int32_t>::min())) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        const std::int32_t write_len = *length_arg;
+        const std::int32_t write_pos_provided = *position_arg;
 
         std::uint64_t write_pos = 0;
         std::uint64_t size_of_file = vfs_file->size();
@@ -805,12 +815,19 @@ namespace eka2l1 {
         }
 
         if (write_pos > size_of_file) {
-            // Fill the file with temporary 0
+            // RMS writes may seek beyond EOF. A single zero byte cannot be
+            // passed as a gap-sized buffer: that copied unrelated host memory
+            // into the record store (and trips ASan on MusicBox startup).
             vfs_file->seek(0, file_seek_mode::end);
-            static char ZERO_BYTE = 0;
-
-            if (vfs_file->write_file(&ZERO_BYTE, 1, static_cast<std::uint32_t>(write_pos - size_of_file)) != write_pos - size_of_file) {
-                LOG_WARN(SERVICE_EFSRV, "Unable to supply stubbed bytes for beyond file size write operation!");
+            static constexpr char zeros[4096]{};
+            while (size_of_file < write_pos) {
+                const auto count = static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(sizeof(zeros), write_pos - size_of_file));
+                if (vfs_file->write_file(zeros, 1, count) != count) {
+                    ctx->complete(epoc::error_general);
+                    return;
+                }
+                size_of_file += count;
             }
         }
 

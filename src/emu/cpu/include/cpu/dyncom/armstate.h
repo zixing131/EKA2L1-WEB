@@ -179,32 +179,32 @@ public:
     // after the interpreter loop itself). Misses and big-endian mode take the
     // *Slow out-of-line path, which keeps the original full logic.
     std::uint8_t ReadMemory8(std::uint32_t address) const {
-        if (const std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+        if (const std::uint8_t *ptr = mem_cache_direct->lookup_data(address, 1, false)) {
             return *ptr;
         }
         return ReadMemory8Slow(address);
     }
     std::uint16_t ReadMemory16(std::uint32_t address) const {
-        if (const std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
+        if (const std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup_data(address, 2, false))) {
             return *ptr;
         }
         return ReadMemory16Slow(address);
     }
     std::uint32_t ReadMemory32(std::uint32_t address) const {
-        if (const std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
+        if (const std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup_data(address, 4, false))) {
             return *ptr;
         }
         return ReadMemory32Slow(address);
     }
     std::uint64_t ReadMemory64(std::uint32_t address) const {
-        if (const std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
+        if (const std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup_data(address, 8, false))) {
             return *ptr;
         }
         return ReadMemory64Slow(address);
     }
     std::uint32_t ReadCode(std::uint32_t address) const;
     void WriteMemory8(std::uint32_t address, std::uint8_t data) {
-        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+        if (std::uint8_t *ptr = mem_cache_direct->lookup_data(address, 1, true)) {
             *ptr = data;
             return;
         }
@@ -212,7 +212,7 @@ public:
     }
     void WriteMemory16(std::uint32_t address, std::uint16_t data) {
         if (!InBigEndianMode()) {
-            if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup(address))) {
+            if (std::uint16_t *ptr = reinterpret_cast<std::uint16_t *>(mem_cache_direct->lookup_data(address, 2, true))) {
                 *ptr = data;
                 return;
             }
@@ -221,7 +221,7 @@ public:
     }
     void WriteMemory32(std::uint32_t address, std::uint32_t data) {
         if (!InBigEndianMode()) {
-            if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup(address))) {
+            if (std::uint32_t *ptr = reinterpret_cast<std::uint32_t *>(mem_cache_direct->lookup_data(address, 4, true))) {
                 *ptr = data;
                 return;
             }
@@ -230,7 +230,7 @@ public:
     }
     void WriteMemory64(std::uint32_t address, std::uint64_t data) {
         if (!InBigEndianMode()) {
-            if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup(address))) {
+            if (std::uint64_t *ptr = reinterpret_cast<std::uint64_t *>(mem_cache_direct->lookup_data(address, 8, true))) {
                 *ptr = data;
                 return;
             }
@@ -254,10 +254,10 @@ public:
     std::uint32_t ReadMemory32Block(mem_block_cursor &cur, std::uint32_t address) const {
         const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
         const std::uint32_t page = address - off;
-        if (cur.host && (cur.page == page)) {
+        if (cur.host && (cur.page == page) && off <= mem_cache_direct->page_mask - 3) {
             return *reinterpret_cast<std::uint32_t *>(cur.host + off);
         }
-        if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+        if (std::uint8_t *ptr = mem_cache_direct->lookup_data(address, 4, false)) {
             cur.page = page;
             cur.host = ptr - off;
             return *reinterpret_cast<std::uint32_t *>(ptr);
@@ -270,11 +270,11 @@ public:
         if (!InBigEndianMode()) {
             const std::uint32_t off = address & static_cast<std::uint32_t>(mem_cache_direct->page_mask);
             const std::uint32_t page = address - off;
-            if (cur.host && (cur.page == page)) {
+            if (cur.host && (cur.page == page) && off <= mem_cache_direct->page_mask - 3) {
                 *reinterpret_cast<std::uint32_t *>(cur.host + off) = data;
                 return;
             }
-            if (std::uint8_t *ptr = mem_cache_direct->lookup(address)) {
+            if (std::uint8_t *ptr = mem_cache_direct->lookup_data(address, 4, true)) {
                 cur.page = page;
                 cur.host = ptr - off;
                 *reinterpret_cast<std::uint32_t *>(ptr) = data;
@@ -450,7 +450,8 @@ public:
         instruction_cache.clear();
         trans_cache_buf_top = 0;
         ++block_lookup_generation;
-        code_page_bitmap.fill(0);
+        // JIT blocks survive translation-buffer wrap, so their code pages
+        // must remain tracked for dirty/unmap invalidation as well.
         // Do NOT clear jit_block_map here. Compiled wasm modules do not
         // reference the cream buffer; dropping them on every bump-buffer wrap
         // forces a recompile storm that freezes the browser tab. JIT verdicts
@@ -465,6 +466,7 @@ public:
             }
         }
         jit_block_map.clear();
+        code_page_bitmap.fill(0);
     }
 #endif
 

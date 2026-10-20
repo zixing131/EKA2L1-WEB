@@ -125,7 +125,7 @@ TEST_CASE("MMF MP3 accepts split compressed frames and requests subsequent guest
     CHECK(peak > 100);
     CHECK(requested > 3);
     CHECK(dsp->samples_copied() > 30000);
-    CHECK_FALSE(dsp->format(drivers::AMR_FOUR_CC_CODE));
+    CHECK_FALSE(dsp->format(drivers::make_four_cc('?', '?', '?', '?')));
     REQUIRE(dsp->stop());
 }
 
@@ -170,4 +170,37 @@ TEST_CASE("MP3 custom input owns compressed bytes after opening", "[audio][mp3]"
     REQUIRE(player->play());
     const auto pcm = driver.stream->pull(4096);
     CHECK(std::any_of(pcm.begin(), pcm.end(), [](auto sample) { return std::abs(sample) > 100; }));
+}
+
+TEST_CASE("MMF AMR decodes split frames and restarts without stale decoder state", "[audio][amr]") {
+    using namespace eka2l1;
+    test_driver driver;
+    auto dsp = drivers::new_minimp3_dsp_output(&driver);
+    REQUIRE(dsp->format(drivers::AMR_FOUR_CC_CODE));
+    REQUIRE(dsp->set_properties(8000, 1));
+    common::ro_std_file_stream file("commonassets/audio/tone.amr", true);
+    REQUIRE(file.valid());
+    std::vector<std::uint8_t> bytes(file.size());
+    REQUIRE(file.read(bytes.data(), bytes.size()) == bytes.size());
+    for (int replay = 0; replay < 2; ++replay) {
+        REQUIRE(dsp->start());
+        int peak = 0;
+        for (std::size_t offset = 0; offset < bytes.size();) {
+            const auto size = std::min<std::size_t>(5, bytes.size() - offset);
+            REQUIRE(dsp->write(bytes.data() + offset, size));
+            offset += size;
+            for (auto sample : driver.stream->pull(160)) peak = std::max(peak, std::abs(int(sample)));
+        }
+        CHECK(peak > 100);
+        REQUIRE(dsp->stop());
+        // This fixture contains 20 MR122 (32-byte) storage frames. Padding
+        // bits must not turn valid speech into a fatal decoder error.
+        for (std::size_t offset = 6; offset < bytes.size(); offset += 32)
+            bytes[offset] |= 0x83;
+    }
+    REQUIRE(dsp->start());
+    const std::uint8_t invalid = (12 << 3) | 4;
+    REQUIRE(dsp->write(&invalid, 1));
+    driver.stream->pull(160);
+    CHECK_FALSE(dsp->write(&invalid, 1));
 }

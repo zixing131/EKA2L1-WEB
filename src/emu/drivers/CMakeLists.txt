@@ -233,3 +233,5 @@ if (NOT MSVC)
 endif()
 
 target_include_directories(drivers PRIVATE "${PROJECT_SOURCE_DIR}/src/external/minimp3")
+add_subdirectory("${PROJECT_SOURCE_DIR}/src/external/opencore-amr" "${CMAKE_CURRENT_BINARY_DIR}/opencore-amr")
+target_link_libraries(drivers PRIVATE eka_amrnb)

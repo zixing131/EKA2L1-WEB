@@ -28,6 +28,7 @@
 #include <common/path.h>
 #include <config/config.h>
 #include <kernel/kernel.h>
+#include <kernel/codeseg.h>
 #include <kernel/libmanager.h>
 #include <kernel/server.h>
 #include <services/fs/fs.h>
@@ -898,7 +899,7 @@ namespace eka2l1::j2me {
         return out;
     }
 
-    std::uint32_t installed_app_uid(system *sys, const app_entry &entry, const std::string &jar_path) {
+    std::uint32_t installed_app_uid(system *sys, const app_entry &entry, const std::string &jar_path, const bool suite_uid) {
         // The guest uids file contains the suite UID followed by each MIDlet's
         // AppArc UID. Neither is the internal AMS ID stored in opaque data.
         auto *io = sys->get_io_system();
@@ -931,7 +932,7 @@ namespace eka2l1::j2me {
             auto uids = io->open_file(folder + u"uids", READ_MODE | BIN_MODE);
             std::uint32_t ids[2] = {};
             if (!uids || uids->read_file(ids, 1, sizeof(ids)) != sizeof(ids)) continue;
-            if (result && result != ids[1]) return 0; // Ambiguous installation.
+            if (result && result != ids[suite_uid ? 0 : 1]) return 0; // Ambiguous installation.
             if (!jar_path.empty()) {
                 auto installed = io->open_file(folder + u"m.jar", READ_MODE | BIN_MODE);
                 // E72's installer keeps the uploaded JAD name but renames the
@@ -950,7 +951,7 @@ namespace eka2l1::j2me {
                     if (!size) break;
                 }
             }
-            result = ids[1];
+            result = ids[suite_uid ? 0 : 1];
         }
         return result;
     }
@@ -2352,6 +2353,91 @@ namespace eka2l1::j2me {
         return true;
     }
 
+    static bool run_guest_swinst(system *sys, const std::uint32_t suite_uid,
+        const std::u16string &jad_path, std::function<void(kernel::process*)> exit_cb) {
+        const bool uninstalling = jad_path.empty();
+        auto *kern = sys->get_kernel_system();
+        auto *client = kern->get_lib_manager()->load(u"Z:\\sys\\bin\\swinstcli.dll");
+        auto *euser = kern->get_lib_manager()->load(u"Z:\\sys\\bin\\euser.dll");
+        if (!client || !euser) return false;
+
+        // Run the ROM SWInst transaction, including JavaRegistry and AppArc.
+        // Installation uses RSWInstSilentLauncher: the ordinary launcher's
+        // service still asks the S60v5 MIDP plugin for interactive consent,
+        // even when the operation itself is SilentInstall.
+        // Guest bootstrap: SetupThreadHeap, InitProcess, launcher ctor,
+        // Connect, operation, Close, Exit.
+        // ARM source and import slots: guest/uninstall.S.
+        std::vector<std::uint32_t> code = {
+            0xE24DD080, 0xE3A00000, 0xE59FC08C, 0xE12FFF3C,
+            0xE3500000, 0x1A00001D, 0xE59FC080, 0xE12FFF3C,
+            0xE59FC090, 0xE12FFF3C, 0xE3500000, 0x03E00003,
+            0x0A000016, 0xE1A06000, 0xE1A0000D, 0xE59FC060,
+            0xE12FFF3C, 0xE1A0000D, 0xE59FC058, 0xE12FFF3C,
+            0xE3500000, 0x1A00000D, 0xE1A0000D, 0xE28F105C,
+            0xE28F205C, 0xE28F3064, 0xE59FC03C, 0xE12FFF3C,
+            0xE1A04000, 0xE1A0000D, 0xE59FC030, 0xE12FFF3C,
+            0xE1A00006, 0xE59FC030, 0xE12FFF3C, 0xE1A00004,
+            0xE59FC01C, 0xE12FFF3C, 0xEAFFFFFE, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000008, 0x00000000, 0x00000001,
+            0x00000018, 0x6C707061, 0x74616369, 0x2F6E6F69,
+            0x6176616A, 0x6372612D, 0x65766968, 0xA0000000,
+        };
+        if (uninstalling) {
+            code[48] = suite_uid;
+            if (!suite_uid) return false;
+        } else {
+            // The ROM preinstall monitor intentionally remembers user-removed
+            // suites. An explicit user install must call SWInst directly.
+            // Reuse the bootstrap with TBufC16 filename + TInstallOptionsPckg.
+            code.resize(48);
+            code.push_back(static_cast<std::uint32_t>(jad_path.size()));
+            for (std::size_t i = 0; i < jad_path.size(); i += 2) {
+                code.push_back(jad_path[i] | ((i + 1 < jad_path.size() ? jad_path[i + 1] : 0) << 16));
+            }
+            const auto options_offset = code.size() * 4;
+            if (options_offset - 104 > 255) return false;
+            code[24] = 0xE28F2000 | (options_offset - 104); // adr r2, options
+            code[25] = 0xE1A00000; // no MIME argument for SilentInstall
+            code.push_back(200); // TBufC8 descriptor length
+            const auto options = code.size();
+            code.resize(options + 50, 0);
+            code[options + 8] = 1; // Do not overwrite unrelated files (ROM preinstaller default)
+            code[options + 10] = 0x30000000; // empty TBuf<32> login
+            code[options + 11] = 32;
+            code[options + 28] = 0x30000000; // empty TBuf<32> password
+            code[options + 29] = 32;
+            code[options + 46] = 'C';
+            code[options + 47] = 0xFFFF; // ELangNone; use the phone language
+            code[options + 48] = 1;
+        }
+        kernel::codeseg_create_info info{};
+        info.full_path = uninstalling ? u"C:\\sys\\bin\\eka_midlet_uninstall.exe" : u"C:\\sys\\bin\\eka_midlet_install.exe";
+        info.code_data = reinterpret_cast<std::uint8_t *>(code.data());
+        info.code_size = info.text_size = static_cast<std::uint32_t>(code.size() * 4);
+        info.uids[0] = 0x1000007A;
+        info.sinfo = client->get_sec_info();
+        auto *segment = kern->create<kernel::codeseg>(uninstalling ? "eka_midlet_uninstall.exe" : "eka_midlet_install.exe", info);
+        segment->add_dependency({client, {kernel::make_import_info(164, uninstalling ? 25 : 32),
+            kernel::make_import_info(168, uninstalling ? 14 : 31),
+            kernel::make_import_info(172, uninstalling ? 11 : 8), kernel::make_import_info(176, 13)}});
+        segment->add_dependency({euser, {kernel::make_import_info(156, 1360), kernel::make_import_info(160, 585),
+            kernel::make_import_info(180, 641), kernel::make_import_info(184, 196), kernel::make_import_info(188, 199)}});
+        auto *process = kern->create<kernel::process>(sys->get_memory_system(),
+            uninstalling ? "eka_midlet_uninstall" : "eka_midlet_install", info.full_path, u"");
+        process->construct_with_codeseg(segment, 0x4000, 0x1000, 0x100000, kernel::process_priority::foreground);
+        process->logon(std::move(exit_cb));
+        return process->run();
+    }
+
+    bool uninstall_guest(system *sys, const std::uint32_t app_id,
+        std::function<void(kernel::process*)> exit_cb) {
+        const auto entry = sys->get_j2me_applist()->get_entry(app_id);
+        return entry && run_guest_swinst(sys, installed_app_uid(sys, *entry, {}, true), {}, std::move(exit_cb));
+    }
+
     void uninstall_for_midp2(system *sys, app_list *applist, const app_entry &entry) {
         applist->remove_entry(entry.id_);
 
@@ -2370,7 +2456,7 @@ namespace eka2l1::j2me {
     }
 
     static install_error install_for_midp2(system *sys, app_list *applist, const std::string &path,
-        app_entry &entry_info, std::function<void(kernel::process*)> install_exit_cb) {
+        app_entry &entry_info, std::function<void(kernel::process*)> install_exit_cb, std::string_view keypad) {
         FILE *jar_file = common::open_c_file(path, "rb");
         if (!jar_file) {
             return INSTALL_ERROR_JAR_NOT_FOUND;
@@ -2383,6 +2469,7 @@ namespace eka2l1::j2me {
             fclose(jar_file);
             return parse_result;
         }
+        set_jad_keypad(jad_content, keypad);
 
         // Extract the MIDlet icon from the JAR to host storage (same logic as
         // install_for_kmidrun). Without this, icon_path_ is empty and the web
@@ -2479,7 +2566,8 @@ namespace eka2l1::j2me {
             return INSTALL_ERROR_JAR_SUCCESS;
         }
 
-        static constexpr char16_t PREINSTALL_DIRECTORY[] = u"E:\\system\\data\\midp2\\preinstall\\";
+        const std::u16string PREINSTALL_DIRECTORY = eka2l1_j9_raw
+            ? u"E:\\data\\midp-install\\" : u"E:\\system\\data\\midp2\\preinstall\\";
 
         if (!io->create_directories(PREINSTALL_DIRECTORY)) {
             return INSTALL_ERROR_JAR_CANT_COPY;
@@ -2521,6 +2609,11 @@ namespace eka2l1::j2me {
             return INSTALL_ERROR_JAR_CANT_COPY;
         }
         jad_file->close();
+
+        if (eka2l1_j9_raw) {
+            return run_guest_swinst(sys, 0, guest_jad_path, std::move(install_exit_cb))
+                ? INSTALL_ERROR_JAR_SUCCESS : INSTALL_ERROR_JAVA_INSTALLER_CANT_START;
+        }
 
         kernel_system *kern = sys->get_kernel_system();
 
@@ -2598,13 +2691,13 @@ namespace eka2l1::j2me {
     }
 
     install_error install(system *sys, const std::string &path, app_entry &entry_info,
-        std::function<void(kernel::process*)> install_exit_cb) {
+        std::function<void(kernel::process*)> install_exit_cb, std::string_view keypad) {
         app_list *applist = sys->get_j2me_applist();
         const epocver sysver = sys->get_symbian_version_use();
         if (sysver <= epocver::epoc6) {
             return install_for_kmidrun(sys, applist, path, entry_info);
         }
-        return install_for_midp2(sys, applist, path, entry_info, std::move(install_exit_cb));
+        return install_for_midp2(sys, applist, path, entry_info, std::move(install_exit_cb), keypad);
     }
 
     bool uninstall(system *sys, const std::uint32_t app_id) {

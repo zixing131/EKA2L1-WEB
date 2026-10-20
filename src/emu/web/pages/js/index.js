@@ -787,21 +787,31 @@
                 if (!confirm(EKA2L1.t('confirm.uninstall', { name: p.name }))) return;
                 btn.disabled = true;
                 btn.textContent = EKA2L1.t('action.uninstalling');
-                setTimeout(function () {
+                setTimeout(async function () {
                     var fn = p.j2me ? 'wasm_uninstall_midlet' : 'wasm_uninstall_package';
                     var r = EKA2L1.module.ccall(fn, 'number', ['number'], [p.uid >>> 0]);
+                    var deadline = Date.now() + 120000;
+                    while (p.j2me && r === 1 && Date.now() < deadline) {
+                        await new Promise(function (resolve) { setTimeout(resolve, 100); });
+                        r = EKA2L1.module.ccall(fn, 'number', ['number'], [p.uid >>> 0]);
+                    }
                     if (r !== 0) {
                         EKA2L1.toast(EKA2L1.t('toast.uninstallFailed', { code: r }));
                         btn.disabled = false;
                         btn.textContent = EKA2L1.t('action.uninstall');
                         return;
                     }
-                    EKA2L1.save().catch(function () {}).then(function () {
+                    EKA2L1.save().then(function () {
                         delete iconCache[p.uid];
                         persistIconCache();
                         refreshApps();
                         renderPkgList();
                         EKA2L1.toast(EKA2L1.t('toast.uninstalled', { name: p.name }));
+                    }).catch(function (error) {
+                        console.error('[EKA2L1] uninstall persistence failed', error);
+                        EKA2L1.toast(EKA2L1.t('toast.saveFailedSeeConsole'), 3500);
+                        refreshApps();
+                        renderPkgList();
                     });
                 }, 30);
             });
@@ -950,6 +960,11 @@
     var prefFilter = document.getElementById('prefFilter');
     var prefLang = document.getElementById('prefLang');
     var prefJ2mePermissions = document.getElementById('prefJ2mePermissions');
+    var prefJ2meKeypad = document.getElementById('prefJ2meKeypad');
+    prefJ2meKeypad.value = localStorage.getItem('eka2l1_j2me_keypad') || '';
+    prefJ2meKeypad.addEventListener('change', function () {
+        localStorage.setItem('eka2l1_j2me_keypad', this.value);
+    });
     prefJ2mePermissions.value = localStorage.getItem('eka2l1_j2me_auto_allow') === '0' ? '0' : '1';
     prefJ2mePermissions.addEventListener('change', function () {
         localStorage.setItem('eka2l1_j2me_auto_allow', this.value);

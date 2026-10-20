@@ -1571,6 +1571,20 @@ namespace eka2l1 {
         ctx.complete(epoc::error_none);
     }
 
+    bool applist_server::remove_non_native_registration(io_system *io, epoc::uid uid) {
+        const auto *reg = get_registration(uid);
+        if (!reg) return true;
+        if (!(reg->caps.flags & apa_capability::non_native) || reg->land_drive == drive_z) return false;
+        const std::u16string base = std::u16string(1, drive_to_char16(reg->land_drive))
+            + u":" + NON_NATIVE_RESOURCE_DIRECTORY + common::utf8_to_ucs2(fmt::format("{:08x}", uid));
+        for (const auto *suffix : {u"_reg.rsc", u"_loc.rsc"}) {
+            const auto path = base + suffix;
+            if (io->exist(path) && !io->delete_entry(path)) return false;
+        }
+        rescan_registries(io);
+        return get_registration(uid) == nullptr;
+    }
+
     void applist_session::commit_non_native_app_updates(service::ipc_context &ctx) {
         if (!non_native_update_prepared_) {
             ctx.complete(epoc::error_not_ready);

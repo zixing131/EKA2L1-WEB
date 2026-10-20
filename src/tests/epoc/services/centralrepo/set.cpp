@@ -2,6 +2,30 @@
 #include <services/centralrepo/centralrepo.h>
 #include <services/context.h>
 
+TEST_CASE("CenRep Delete removes only the requested setting", "[centralrepo]") {
+    using namespace eka2l1;
+    central_repo repo{};
+    central_repo_entry_variant value;
+    value.etype = central_repo_entry_type::integer;
+    value.intd = 42;
+    REQUIRE(repo.add_new_entry(0x1000, value));
+    REQUIRE(repo.add_new_entry(0x1001, value));
+    central_repo_client_subsession session;
+    session.attach_repo = &repo;
+    ipc_msg message(nullptr);
+    message.function = cen_rep_delete;
+    message.args.args[0] = 0x1000;
+    service::ipc_context context;
+    context.msg = &message;
+    context.auto_deref = false;
+    session.handle_message(&context);
+    REQUIRE(repo.entries.size() == 1);
+    CHECK_FALSE(repo.find_entry(0x1000));
+    CHECK(repo.find_entry(0x1001)->data.intd == 42);
+    session.handle_message(&context);
+    CHECK(repo.entries.size() == 1);
+}
+
 TEST_CASE("CenRep Set creates a missing integer and updates it in place", "[centralrepo]") {
     using namespace eka2l1;
     central_repo repo{};

@@ -289,6 +289,9 @@ namespace eka2l1::drivers {
 
     void graphics_command_builder::clip_bitmap_region(const common::region &region, const float scale_factor) {
         if (region.rects_.size() == 0) {
+            set_feature(graphics_feature::clipping, true);
+            set_feature(graphics_feature::stencil_test, false);
+            clip_bitmap_rect(eka2l1::rect({0, 0}, {0, 0}));
             return;
         }
 

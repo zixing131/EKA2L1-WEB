@@ -553,7 +553,11 @@ namespace eka2l1::epoc {
                     }
                 }
             } else {
-                if (bmp->settings_.current_display_mode() == epoc::display_mode::color16mu) {
+                auto display_mode = bmp->settings_.current_display_mode();
+                if (display_mode == epoc::display_mode::none) {
+                    display_mode = bmp->settings_.initial_display_mode();
+                }
+                if (display_mode == epoc::display_mode::color16mu) {
                     if (builder) {
                         builder->set_swizzle(driver_textures[idx], drivers::channel_swizzle::red, drivers::channel_swizzle::green,
                             drivers::channel_swizzle::blue, drivers::channel_swizzle::one);

@@ -687,6 +687,14 @@ namespace eka2l1::arm::dyncom_jit {
             // On hit leaves the HOST address on the stack; on miss bails to
             // the interpreter at the current instruction.
             void emit_tlb_host_addr_or_bail(std::uint32_t perm_off) {
+                // Zero is also the TLB's missing-permission sentinel. A
+                // resident non-writable entry in slot zero must not authorize
+                // a guest null write into that unrelated host allocation.
+                w_.local_get(L_ADDR); w_.const_i32(~page_mask_); w_.u8(op::I32_AND);
+                w_.u8(op::I32_EQZ);
+                w_.if_void();
+                emit_exit_const_pc(pc_, count_);
+                w_.end();
                 // T2 = tlb_base + ((addr >> page_bits) & TLB_ENTRY_MASK) * 16
                 w_.local_get(L_ADDR);
                 w_.const_i32(page_bits_); w_.u8(op::I32_SHR_U);
@@ -1005,6 +1013,15 @@ namespace eka2l1::arm::dyncom_jit {
 
             // Resolve the host pointer FIRST (bails happen before any side
             // effect), capture it in T0, then do writeback + the access.
+            const std::uint32_t access_size = cls.ldst_byte ? 1 : (cls.ldst_half ? 2 : 4);
+            if (access_size > 1) {
+                w_.const_i32(page_mask_ - access_size + 1);
+                w_.local_get(L_ADDR); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
+                w_.u8(op::I32_LT_U);
+                w_.if_void();
+                emit_exit_const_pc(pc_, count_);
+                w_.end();
+            }
             emit_tlb_host_addr_or_bail(cls.ldst_load
                 ? static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, read_addr))
                 : static_cast<std::uint32_t>(offsetof(r12l1::tlb_entry, write_addr)));

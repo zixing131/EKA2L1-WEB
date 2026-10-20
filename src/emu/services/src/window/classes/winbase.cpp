@@ -94,6 +94,10 @@ namespace eka2l1::epoc {
     }
 
     window::~window() {
+        // A group's owned top_canvas is destroyed before the group's base
+        // destructor. Unlink every window here, including top_canvas, so the
+        // parent never walks an already freed child.
+        remove_from_sibling_list();
         while (child != nullptr) {
             child->parent = nullptr;
             child = child->sibling;

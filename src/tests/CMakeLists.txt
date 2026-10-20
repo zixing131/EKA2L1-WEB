@@ -11,6 +11,7 @@ add_executable(ekatests
     j2me_manifest.cpp
     notifier_queries.cpp
     mp3_player.cpp
+    dyncom_memory.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 

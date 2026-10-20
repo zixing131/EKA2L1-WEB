@@ -7,6 +7,12 @@
         'settings.j2me.permissions.sub': 'On by default. Allow network, file and other permissions automatically; turn off to confirm each request.',
         'settings.j2me.permissions.on': 'On (allow all)',
         'settings.j2me.permissions.off': 'Off (ask each time)',
+        'settings.j2me.keypad.label': 'Java ME on-screen keypad',
+        'settings.j2me.keypad.sub': 'For firmware with a touch keypad. Applies when installing or reinstalling a JAR.',
+        'settings.j2me.keypad.default': 'Application default',
+        'settings.j2me.keypad.no': 'Hidden',
+        'settings.j2me.keypad.gameactions': 'Game keys',
+        'settings.j2me.keypad.navigationkeys': 'Navigation keys',
 
         // ---- Nav ----------------------------------------------------------------
         'nav.games': 'Apps',

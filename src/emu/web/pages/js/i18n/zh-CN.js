@@ -7,6 +7,12 @@
         'settings.j2me.permissions.sub': '默认开启，自动允许联网、文件等权限；关闭后逐次手动确认',
         'settings.j2me.permissions.on': '开启（全部允许）',
         'settings.j2me.permissions.off': '关闭（手动确认）',
+        'settings.j2me.keypad.label': 'Java ME 屏幕内键盘',
+        'settings.j2me.keypad.sub': '适用于支持触屏键盘的固件；下次安装或重新安装 JAR 时生效',
+        'settings.j2me.keypad.default': '应用默认',
+        'settings.j2me.keypad.no': '隐藏',
+        'settings.j2me.keypad.gameactions': '游戏按键',
+        'settings.j2me.keypad.navigationkeys': '导航按键',
 
         // ---- 通用导航 --------------------------------------------------------
         'nav.games': '程序',

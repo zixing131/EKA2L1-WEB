@@ -788,6 +788,7 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_int, "CenRep::CreateInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_real, "CenRep::CreateReal");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_string, "CenRep::CreateString");
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_delete, "CenRep::Delete");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_close, "CenRep::Close");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_reset, "CenRep::Reset");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_set_int, "CenRep::SetInt");
@@ -1177,6 +1178,9 @@ namespace eka2l1 {
 
     void central_repo_client_subsession::handle_message(service::ipc_context *ctx) {
         switch (ctx->msg->function) {
+        case cen_rep_delete:
+            delete_value(ctx);
+            break;
         // TODO: Faster way
         case cen_rep_create_int:
         case cen_rep_create_real:

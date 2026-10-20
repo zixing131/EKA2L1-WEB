@@ -46,6 +46,9 @@ namespace eka2l1::j2me {
     struct app_entry;
 
     std::string jad_from_manifest(std::string_view manifest, std::string_view jar_url, std::uint64_t jar_size);
+    // Empty/default preserves the application's choice; overrides affect the
+    // generated JAD only, never the original JAR.
+    void set_jad_keypad(std::string &jad, std::string_view mode);
     install_error create_jad_fake_link_from_jar(FILE *jar_file_handle, std::string &jad_content);
     install_error get_app_entry(FILE *jar_file_handle, app_entry &entry, std::string &jad_content, int &midp_ver);
     install_error extract_icon_to_store(FILE *jar_file_handle, const config::state &conf, const app_entry &entry, std::string &final_real_path);

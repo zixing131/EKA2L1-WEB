@@ -70,11 +70,15 @@
                 attrs.powerPreference = attrs.powerPreference || 'high-performance';
                 attrs.alpha = false;
                 attrs.antialias = false;
+                // Keep the last completed guest frame while its windows are
+                // idle. Low-latency/desynchronized presentation can expose the
+                // clear between the emulator's multi-command drawing passes.
+                attrs.preserveDrawingBuffer = true;
                 var first = {};
                 for (var k in attrs) {
                     if (Object.prototype.hasOwnProperty.call(attrs, k)) first[k] = attrs[k];
                 }
-                first.desynchronized = true;
+                first.desynchronized = false;
                 var ctx = original(type, first);
                 if (ctx) {
                     return ctx;
@@ -243,7 +247,10 @@
                 var mod = EKA2L1.module;
                 if (!mod || !mod.FS) { resolve(); return; }
                 var t0 = performance.now();
-                mod.FS.syncfs(false, function (err) {
+                var hold = mod._wasm_set_storage_syncing;
+                if (hold) hold(1);
+                function complete(err) {
+                    if (hold) hold(0);
                     if (err) {
                         console.warn('[EKA2L1] syncfs failed:', err);
                         reject(err);
@@ -252,7 +259,9 @@
                             (performance.now() - t0).toFixed(0) + 'ms');
                         resolve();
                     }
-                });
+                }
+                try { mod.FS.syncfs(false, complete); }
+                catch (err) { complete(err); }
             });
         });
         saveTail = operation;
