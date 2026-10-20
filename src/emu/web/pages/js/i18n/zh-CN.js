@@ -3,6 +3,11 @@
     'use strict';
     window.EKA2L1_LOCALES = window.EKA2L1_LOCALES || {};
     window.EKA2L1_LOCALES['zh-CN'] = {
+        'settings.j2me.permissions.label': '自动允许 J2ME 权限',
+        'settings.j2me.permissions.sub': '默认开启，自动允许联网、文件等权限；关闭后逐次手动确认',
+        'settings.j2me.permissions.on': '开启（全部允许）',
+        'settings.j2me.permissions.off': '关闭（手动确认）',
+
         // ---- 通用导航 --------------------------------------------------------
         'nav.games': '程序',
         'nav.settings': '设置',

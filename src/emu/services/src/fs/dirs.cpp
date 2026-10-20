@@ -193,8 +193,11 @@ namespace eka2l1 {
                     }
                 }
             }
-            if (!node->vfs_node && !ive_lib) {
-                // RDir::Open / GetDir LeaveIfError's any error (j9vmall+0x436C5).
+            if (!node->vfs_node && !ive_lib
+                && lower_dir.size() > 11 && lower_dir.compare(1, 10, ":\\private\\") == 0) {
+                // J9 bootstrap expects its private suite directories to exist.
+                // Never create public paths here: FileConnection probes missing
+                // files using DirOpen(path + '\\'), including MP3/.part files.
                 const std::u16string create_dir = j9_dir_parent_to_create(*dir);
                 if (!create_dir.empty()) {
                     io->create_directories(create_dir);

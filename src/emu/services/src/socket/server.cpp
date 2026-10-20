@@ -278,7 +278,11 @@ namespace eka2l1 {
         des.protocol_ = pr->supported_ids()[0];
         des.ver_ = pr->ver();
         des.bord_ = pr->get_byte_order();
-        //des.sock_type_ = pr->sock_type();
+        des.sock_type_ = 0;
+        if (des.addr_fam_ == 0x800 || des.addr_fam_ == 0x806) {
+            if (des.protocol_ == 6) des.sock_type_ = epoc::socket::socket_type_stream;
+            if (des.protocol_ == 17) des.sock_type_ = epoc::socket::socket_type_datagram;
+        }
         des.message_size_ = pr->message_size();
 
         des.name_.assign(nullptr, pr->name());
@@ -304,7 +308,7 @@ namespace eka2l1 {
             return;
         }
 
-        protocol_description description_to_return;
+        protocol_description description_to_return{};
         fill_protocol_description(result_pr, description_to_return);
 
         ctx->write_data_to_descriptor_argument<protocol_description>(0, description_to_return);

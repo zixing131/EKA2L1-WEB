@@ -36,7 +36,7 @@
 // browser main thread is busy running the emulator — the main thread only
 // has to top the ring up once per frame (or slower, up to the ring size).
 //
-// Fallback path (worklet unavailable / not ready yet): schedule AudioBuffer
+// Fallback path (worklet unavailable): schedule AudioBuffer
 // chunks back-to-back, which needs main-thread service every ~150ms and
 // stutters under load.
 // ============================================================================
@@ -75,7 +75,7 @@ EM_JS(void, ek_webaudio_init, (), {
     //   [0] write position in frames (monotonic, uint32 wrap)
     //   [1] read position in frames (monotonic, uint32 wrap)
     //   [2] volume, 16.16 fixed point
-    //   [3] flags: bit0 = stream dead, processor should self-destruct
+    //   [3] flags: bit0 = stream dead, bit1 = paused, bit2 = discard queue
     var PROC_SRC = ''
         + 'class EkRing extends AudioWorkletProcessor {\n'
         + '  constructor(o) {\n'
@@ -92,6 +92,13 @@ EM_JS(void, ek_webaudio_init, (), {
         + '  }\n'
         + '  process(inputs, outputs) {\n'
         + '    if (Atomics.load(this.c, 3) & 1) return false;\n'
+        + '    if (Atomics.load(this.c, 3) & 4) {\n'
+        + '      Atomics.store(this.c, 1, Atomics.load(this.c, 0));\n'
+        + '      this.pos = 0; this.tail.fill(0); this.g = 0;\n'
+        + '      Atomics.and(this.c, 3, ~4);\n'
+        + '      return true;\n'
+        + '    }\n'
+        + '    if (Atomics.load(this.c, 3) & 2) return true;\n'
         + '    var out = outputs[0];\n'
         + '    var n = out[0].length;\n'
         + '    var rd = Atomics.load(this.c, 1) >>> 0;\n'
@@ -223,8 +230,30 @@ EM_JS(double, ek_webaudio_queue, (int id, const short *ptr, int frames, int chan
 
     var st = A.streams[id];
     if (!st) {
-        st = A.streams[id] = { next: 0 };
+        st = A.streams[id] = { next: 0, entries: [], played: 0, paused: false };
+        st.update = function() {
+            if (st.paused) return;
+            var now = A.ctx.currentTime;
+            st.entries.forEach(function(e) {
+                var elapsed = Math.max(0, Math.min(now - e.start, e.buffer.duration - e.offset));
+                st.played += elapsed;
+                e.offset += elapsed;
+                e.start = Math.max(now, e.start);
+            });
+            st.entries = st.entries.filter(function(e) { return e.offset < e.buffer.duration; });
+        };
+        st.schedule = function(e) {
+            var src = A.ctx.createBufferSource();
+            src.buffer = e.buffer;
+            src.connect(A.ctx.destination);
+            src.onended = function() { src.disconnect(); };
+            e.source = src;
+            e.start = Math.max(A.ctx.currentTime + 0.03, st.next);
+            src.start(e.start, e.offset);
+            st.next = e.start + e.buffer.duration - e.offset;
+        };
     }
+    st.update();
 
     var buf = A.ctx.createBuffer(channels, frames, rate);
     var base = ptr >> 1;
@@ -236,14 +265,9 @@ EM_JS(double, ek_webaudio_queue, (int id, const short *ptr, int frames, int chan
         }
     }
 
-    var src = A.ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(A.ctx.destination);
-
-    // Small lead-in guards against scheduling in the past after a stall.
-    var t = Math.max(A.ctx.currentTime + 0.03, st.next);
-    src.start(t);
-    st.next = t + frames / rate;
+    var entry = { buffer: buf, offset: 0, start: 0, source: null };
+    st.entries.push(entry);
+    st.schedule(entry);
 
     return st.next - A.ctx.currentTime;
 });
@@ -257,9 +281,31 @@ EM_JS(double, ek_webaudio_ahead, (int id), {
     return (ahead > 0) ? ahead : 0;
 });
 
+EM_JS(double, ek_webaudio_position, (int id), {
+    var A = window.__ekAudio, st = A && A.streams[id];
+    if (!st) return 0;
+    st.update();
+    return st.played;
+});
+
+EM_JS(void, ek_webaudio_pause, (int id, int paused), {
+    var A = window.__ekAudio, st = A && A.streams[id];
+    if (!st || st.paused === !!paused) return;
+    st.update();
+    st.paused = !!paused;
+    st.next = 0;
+    st.entries.forEach(function(e) {
+        if (paused) { try { e.source.stop(); e.source.disconnect(); } catch (_) {} }
+        else st.schedule(e);
+    });
+});
+
 EM_JS(void, ek_webaudio_drop, (int id), {
     var A = window.__ekAudio;
-    if (A) delete A.streams[id];
+    if (A && A.streams[id]) {
+        A.streams[id].entries.forEach(function(e) { try { e.source.stop(); e.source.disconnect(); } catch (_) {} });
+        delete A.streams[id];
+    }
 });
 // clang-format on
 
@@ -280,7 +326,7 @@ namespace eka2l1::drivers {
             std::atomic<std::uint32_t> write_frames;
             std::atomic<std::uint32_t> read_frames;
             std::atomic<std::uint32_t> volume_q16;
-            std::atomic<std::uint32_t> flags; // bit0 = dead
+            std::atomic<std::uint32_t> flags; // bit0 = dead, bit1 = paused
         };
 
         static_assert(sizeof(ring_control) == 16, "worklet expects 4 i32 control words");
@@ -335,16 +381,24 @@ namespace eka2l1::drivers {
         }
 
         bool start() override {
+            ctrl_->flags.fetch_and(~2U, std::memory_order_release);
+            ek_webaudio_pause(id_, 0);
             playing_ = true;
             return true;
         }
 
         bool stop() override {
+            // The worklet owns the read cursor. Ask it to discard queued PCM,
+            // then wait for acknowledgement before pumping a restarted stream.
+            ctrl_->flags.fetch_or(node_made_ ? 6U : 2U, std::memory_order_release);
+            ek_webaudio_drop(id_);
             playing_ = false;
             return true;
         }
 
         void pause() override {
+            ctrl_->flags.fetch_or(2U, std::memory_order_release);
+            ek_webaudio_pause(id_, 1);
             playing_ = false;
         }
 
@@ -366,20 +420,25 @@ namespace eka2l1::drivers {
         }
 
         bool current_frame_position(std::uint64_t *pos) override {
-            *pos = frames_pulled_;
+            *pos = node_made_ ? ctrl_->read_frames.load(std::memory_order_acquire)
+                : static_cast<std::uint64_t>(ek_webaudio_position(id_) * sample_rate);
             return true;
         }
 
         // Top up the ring (worklet path) or the schedule (fallback path) from
         // the emulated side. Runs on the browser main thread once per frame.
         void pump(const float master_volume_factor) {
-            if (!playing_) {
+            if (!playing_ || (ctrl_->flags.load(std::memory_order_acquire) & 4U)) {
                 return;
             }
 
             const std::size_t chunk_frames = chunk_buf_.size() / channels;
 
-            if (!node_made_ && (ek_webaudio_worklet_state() == 1)) {
+            const int worklet_state = ek_webaudio_worklet_state();
+            // Do not pull fallback PCM while module loading is pending: switching
+            // queues afterward would lose or duplicate already scheduled samples.
+            if (!node_made_ && worklet_state == 0) return;
+            if (!node_made_ && worklet_state == 1) {
                 node_made_ = (ek_webaudio_make_node(id_, ctrl_.get(), ring_buf_.data(),
                                   static_cast<int>(ring_buf_.size()), channels,
                                   static_cast<int>(sample_rate))

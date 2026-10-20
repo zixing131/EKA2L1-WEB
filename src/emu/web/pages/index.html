@@ -165,6 +165,20 @@
         </div>
 
         <div class="section-card">
+            <div class="section-title">Java ME</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <label class="pref-label" for="prefJ2mePermissions" data-i18n="settings.j2me.permissions.label">自动允许 J2ME 权限</label>
+                    <div class="pref-sub" data-i18n="settings.j2me.permissions.sub">默认开启，自动允许联网、文件等权限；关闭后逐次手动确认</div>
+                </div>
+                <select id="prefJ2mePermissions">
+                    <option value="1" data-i18n="settings.j2me.permissions.on">开启（全部允许）</option>
+                    <option value="0" data-i18n="settings.j2me.permissions.off">关闭（手动确认）</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="section-card">
             <div class="section-title" data-i18n="settings.perf.title">性能</div>
             <div class="pref-item">
                 <div style="flex:1">

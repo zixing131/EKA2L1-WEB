@@ -33,6 +33,13 @@
 #include <loader/rsc.h>
 #include <utils/bafl.h>
 #include <vfs/vfs.h>
+#if EKA2L1_PLATFORM(WASM)
+#include <emscripten.h>
+EM_JS(int, web_allow_j2me_permissions, (), {
+    try { return localStorage.getItem('eka2l1_j2me_auto_allow') !== '0'; }
+    catch (_) { return 1; }
+});
+#endif
 
 namespace eka2l1::epoc::notifier {
     namespace {
@@ -185,6 +192,15 @@ namespace eka2l1::epoc::notifier {
             info.complete(epoc::error_not_supported);
             return;
         }
+#if EKA2L1_PLATFORM(WASM)
+        // Runtime security queries belong to J9, not to arbitrary native apps.
+        // Return the ROM's affirmative softkey command, never generic success.
+        if (web_allow_j2me_permissions() && info.requester->owning_process()->get_uid() == 0x102033E6
+            && buttons.size() == 2 && buttons[0].command == 3005 && buttons[1].command == 3006) {
+            info.complete(buttons[0].command);
+            return;
+        }
+#endif
         if (buttons.size() == 1) buttons.push_back({ -1, u"Cancel" });
         state_->thread = info.requester->unique_id();
         state_->status = info.sts;

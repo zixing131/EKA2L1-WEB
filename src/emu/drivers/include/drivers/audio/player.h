@@ -48,7 +48,8 @@ namespace eka2l1::drivers {
         player_type_wmf = 0,
         player_type_ffmpeg = 1,
         player_type_minibae = 2,
-        player_type_tsf = 3
+        player_type_tsf = 3,
+        player_type_minimp3 = 4
     };
 
     enum midi_bank_type : std::uint32_t {

@@ -946,6 +946,11 @@
     var prefPerf = document.getElementById('prefPerf');
     var prefFilter = document.getElementById('prefFilter');
     var prefLang = document.getElementById('prefLang');
+    var prefJ2mePermissions = document.getElementById('prefJ2mePermissions');
+    prefJ2mePermissions.value = localStorage.getItem('eka2l1_j2me_auto_allow') === '0' ? '0' : '1';
+    prefJ2mePermissions.addEventListener('change', function () {
+        localStorage.setItem('eka2l1_j2me_auto_allow', this.value);
+    });
     prefScale.value = localStorage.getItem('eka2l1_scale') || 'fit';
     if (prefKeyLayout) prefKeyLayout.value = localStorage.getItem('eka2l1_keylayout') || 't9';
     prefKeypad.value = localStorage.getItem('eka2l1_keypad') || 'auto';

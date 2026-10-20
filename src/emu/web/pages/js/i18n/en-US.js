@@ -3,6 +3,11 @@
     'use strict';
     window.EKA2L1_LOCALES = window.EKA2L1_LOCALES || {};
     window.EKA2L1_LOCALES['en-US'] = {
+        'settings.j2me.permissions.label': 'Automatically allow J2ME permissions',
+        'settings.j2me.permissions.sub': 'On by default. Allow network, file and other permissions automatically; turn off to confirm each request.',
+        'settings.j2me.permissions.on': 'On (allow all)',
+        'settings.j2me.permissions.off': 'Off (ask each time)',
+
         // ---- Nav ----------------------------------------------------------------
         'nav.games': 'Apps',
         'nav.settings': 'Settings',

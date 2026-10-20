@@ -34,10 +34,35 @@ async def run(args):
                     if await dialog.count():
                         count += 1
                         print('System query:', await dialog.inner_text(), flush=True)
-                        await page.screenshot(path=str(args.output / f'query-{count}.png'))
+                        if count <= 5:
+                            await page.screenshot(path=str(args.output / f'query-{count}.png'))
                         await dialog.locator('[data-choice="' + str(args.query_choice) + '"]').click()
                     await asyncio.sleep(0.2)
             permission_task = asyncio.create_task(answer_system_queries())
+        if args.manual_permissions:
+            await page.add_init_script("localStorage.setItem('eka2l1_j2me_auto_allow', '0')")
+        await page.add_init_script("""(() => {
+            const probe = window.__audioProbe = {peak: 0, samples: 0, state: null};
+            const attached = new WeakSet();
+            setInterval(() => {
+                const a = window.__ekAudio;
+                if (!a || !a.ctx) return;
+                probe.state = a.ctx.state;
+                for (const node of Object.values(a.nodes)) {
+                    if (attached.has(node)) continue;
+                    attached.add(node);
+                    const analyser = a.ctx.createAnalyser();
+                    analyser.fftSize = 256;
+                    node.connect(analyser);
+                    const data = new Float32Array(256);
+                    setInterval(() => {
+                        analyser.getFloatTimeDomainData(data);
+                        for (const value of data) probe.peak = Math.max(probe.peak, Math.abs(value));
+                        probe.samples += data.length;
+                    }, 100);
+                }
+            }, 100);
+        })()""")
         profiler = None
         if args.profile:
             profiler = await page.context.new_cdp_session(page)
@@ -139,13 +164,20 @@ async def run(args):
                 assert await page.locator('#bootOverlay').evaluate("e => e.classList.contains('hidden')")
                 await page.screenshot(path=str(args.output / 'game.png'), timeout=15000)
                 await page.click('[onclick="toggleKeypad()"]')
-                for index, key in enumerate(args.keys.split(','), 1):
-                    await page.locator('[data-key="' + key + '"]').first.click(delay=300, timeout=5000)
+                for index, key in enumerate(filter(None, args.keys.split(',')), 1):
+                    await page.locator('[data-key="' + key + '"]').first.click(delay=300, timeout=30000)
                     await asyncio.sleep(args.key_interval)
                     await page.screenshot(path=str(args.output / f'key-{index}-{key}.png'), timeout=15000)
                 after_keys = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
                 assert any(line.startswith('j9midps60[') and 'exit=3/0' in line
                            for line in after_keys.splitlines()), after_keys
+                audio = await page.evaluate('window.__audioProbe');
+                (args.output / 'audio.json').write_text(json.dumps(audio))
+                if args.require_audio:
+                    assert audio['state'] == 'running' and audio['peak'] > 0.001, audio
+                if args.require_network:
+                    network = await page.evaluate('EKA2L1.module.ekaNetwork.stats')
+                    assert network['connects'] > 0 and network['received'] > 1000, network
                 assert not page_errors, page_errors
                 print('PASS: JAR entry, guest installation, persisted reload and live cold-started J9.')
                 print('Inspect game.png and key-*.png for menu and gameplay progress.')
@@ -154,6 +186,24 @@ async def run(args):
                     await asyncio.wait_for(page.evaluate("EKA2L1.module.ccall('wasm_debug_dump', null, [], [])"), 15)
                     runtime = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
                     (args.output / 'runtime-final.txt').write_text(runtime)
+                    network = await page.evaluate('EKA2L1.module.ekaNetwork && EKA2L1.module.ekaNetwork.stats')
+                    (args.output / 'network.json').write_text(json.dumps(network))
+                    cache = await page.evaluate("""() => {
+                        const fs = EKA2L1.module.FS, result = [];
+                        function walk(path) {
+                            if (!fs.analyzePath(path).exists) return;
+                            for (const name of fs.readdir(path)) {
+                                if (name === '.' || name === '..') continue;
+                                const child = path + '/' + name, stat = fs.stat(child);
+                                const dir = fs.isDir(stat.mode);
+                                result.push({path: child, size: stat.size, directory: dir});
+                                if (dir && result.length < 200) walk(child);
+                            }
+                        }
+                        walk('/eka2l1/drives/e/netmusic');
+                        return result;
+                    }""")
+                    (args.output / 'cache.json').write_text(json.dumps(cache))
                     state = await asyncio.wait_for(page.evaluate('({install:EKA2L1.midletInstallStatus(),apps:EKA2L1.appList()})'), 15)
                     (args.output / 'state.json').write_text(json.dumps(state, indent=2, ensure_ascii=False))
                     await page.screenshot(path=str(args.output / 'final.png'), timeout=15000)
@@ -187,6 +237,9 @@ if __name__ == '__main__':
     parser.add_argument('--expect-install-error', action='store_true', help='Assert guest rejection and no new MIDlet card')
     parser.add_argument('--key-interval', type=float, default=8, help='Seconds to wait after each game key')
     parser.add_argument('--keys', default='OK,LSK', help='Comma-separated keypad sequence after launch')
+    parser.add_argument('--manual-permissions', action='store_true', help='Disable J2ME auto-allow to exercise permission dialogs')
     parser.add_argument('--query-choice', type=int, choices=(0, 1), help='Click this system-dialog button in the isolated test browser')
+    parser.add_argument('--require-audio', action='store_true', help='Require nonzero PCM at a running browser AudioWorklet output')
+    parser.add_argument('--require-network', action='store_true', help='Require completed TCP connections and received payload')
     parser.add_argument('--profile', action='store_true', help='Capture a renderer CPU profile through cold launch')
     asyncio.run(run(parser.parse_args()))

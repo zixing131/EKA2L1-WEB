@@ -23,6 +23,7 @@
 #include <drivers/audio/backend/ffmpeg/dsp_ffmpeg.h>
 #else
 #include <drivers/audio/backend/dsp_shared.h>
+#include <drivers/audio/backend/minimp3/dsp_minimp3.h>
 
 #include <atomic>
 #include <chrono>
@@ -95,7 +96,7 @@ namespace eka2l1::drivers {
 
 
 #if !EKA2L1_HAS_NATIVE_AV()
-    // WASM has no audio backend (ffmpeg is compiled out), so the factories used
+    // Without an audio driver the factories used
     // to return nullptr. The MMF device server dereferences the returned stream
     // unconditionally, which traps. These no-op streams accept all data and
     // report success without producing sound, keeping audio-using apps alive.
@@ -216,61 +217,6 @@ namespace eka2l1::drivers {
             }
         };
 
-        // Audible DSP stream for WASM: PCM goes straight through the shared
-        // ring buffer into the audio driver's output stream (the Web Audio
-        // backend). Compressed formats need ffmpeg, which is compiled out, so
-        // they are rejected — MMF then reports KErrNotSupported instead of
-        // playing silence.
-        struct dsp_output_stream_pcm : public dsp_output_stream_shared {
-            std::vector<std::uint8_t> pcm8_pending_;
-
-            explicit dsp_output_stream_pcm(drivers::audio_driver *aud)
-                : dsp_output_stream_shared(aud) {
-                format_ = PCM16_FOUR_CC_CODE;
-            }
-
-            bool format(const four_cc fmt) override {
-                if ((fmt == PCM16_FOUR_CC_CODE) || (fmt == PCM8_FOUR_CC_CODE)) {
-                    format_ = fmt;
-                    return true;
-                }
-
-                LOG_ERROR(DRIVER_AUD, "Compressed audio format 0x{:X} unsupported on the web build", fmt);
-                return false;
-            }
-
-            void get_supported_formats(std::vector<four_cc> &cc_list) override {
-                cc_list.clear();
-                cc_list.push_back(PCM16_FOUR_CC_CODE);
-                cc_list.push_back(PCM8_FOUR_CC_CODE);
-            }
-
-            // Only PCM8 reaches these (the base class short-circuits PCM16):
-            // widen signed 8-bit to 16-bit and hand it back on the next pull.
-            void queue_data_decode(const std::uint8_t *original, const std::size_t original_size) override {
-                const std::size_t at = pcm8_pending_.size();
-                pcm8_pending_.resize(at + original_size * 2);
-
-                std::int16_t *dest = reinterpret_cast<std::int16_t *>(pcm8_pending_.data() + at);
-                const std::int8_t *src = reinterpret_cast<const std::int8_t *>(original);
-
-                for (std::size_t i = 0; i < original_size; i++) {
-                    dest[i] = static_cast<std::int16_t>(src[i]) << 8;
-                }
-            }
-
-            bool decode_data(std::vector<std::uint8_t> &dest) override {
-                if (pcm8_pending_.empty()) {
-                    dest.clear();
-                    return false;
-                }
-
-                dest = std::move(pcm8_pending_);
-                pcm8_pending_.clear();
-                return true;
-            }
-        };
-
         struct dsp_input_stream_null : public dsp_input_stream {
             bool recording_ = false;
 
@@ -310,10 +256,10 @@ namespace eka2l1::drivers {
         switch (dsp_backend) {
         case dsp_stream_backend_ffmpeg:
 #if !EKA2L1_HAS_NATIVE_AV()
-            // With a real audio driver (Web Audio) PCM can actually play; the
+            // With a real audio driver (Web Audio), PCM and MP3 can play; the
             // paced no-op stream remains the fallback so MMF never stalls.
             if (aud) {
-                return std::make_unique<dsp_output_stream_pcm>(aud);
+                return new_minimp3_dsp_output(aud);
             }
             return std::make_unique<dsp_output_stream_null>();
 #else

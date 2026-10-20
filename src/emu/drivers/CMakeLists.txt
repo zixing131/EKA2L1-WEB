@@ -44,6 +44,8 @@ add_library(drivers
         include/drivers/sensor/sensor.h
         include/drivers/video/backend/ffmpeg/video_player_ffmpeg.h
         include/drivers/video/video.h
+        src/audio/backend/minimp3/player_minimp3.cpp
+        src/audio/backend/minimp3/dsp_minimp3.cpp
         src/driver.cpp
         src/itc.cpp
         src/audio/audio.cpp
@@ -229,3 +231,5 @@ endif ()
 if (NOT MSVC)
     target_compile_options(miniBAE_EMU PRIVATE -Wno-int-conversion -Wno-implicit-function-declaration)
 endif()
+
+target_include_directories(drivers PRIVATE "${PROJECT_SOURCE_DIR}/src/external/minimp3")

@@ -1043,7 +1043,11 @@ namespace eka2l1 {
         }
 
         drivers::dsp_output_stream *out_stream = reinterpret_cast<drivers::dsp_output_stream *>(stream_.get());
-        out_stream->write(reinterpret_cast<std::uint8_t *>(buffer_chunk_->host_base()), supplied_size);
+        if (!out_stream->write(reinterpret_cast<std::uint8_t *>(buffer_chunk_->host_base()), supplied_size)) {
+            complete_play(epoc::error_not_supported);
+            ctx->complete(epoc::error_not_supported);
+            return;
+        }
 
         // Work around for Space Impact N-Gage 2.0
         // TODO: Why it is submitting 16 times smaller bytes

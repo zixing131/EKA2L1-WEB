@@ -103,8 +103,10 @@ if (EMSCRIPTEN)
         COMMENT "Staging resources for Emscripten file packaging"
     )
 
+    set_property(TARGET eka2l1_wasm APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/web_network.js")
     # Emscripten linker flags for WASM output
     target_link_options(eka2l1_wasm PRIVATE
+        "SHELL:--pre-js ${CMAKE_CURRENT_SOURCE_DIR}/src/web_network.js"
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         # 160MB start, grow on demand (in-place for shared memory, no copy).
         # iOS Safari kills the tab well under ~1.2GB commit, and a ROM install

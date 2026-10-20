@@ -72,6 +72,9 @@ namespace eka2l1::drivers {
         }
 #endif
 
+#if EKA2L1_PLATFORM(WASM)
+        res.push_back(player_type_minimp3);
+#endif
         return res;
     }
 

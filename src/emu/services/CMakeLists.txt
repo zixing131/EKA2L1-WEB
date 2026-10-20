@@ -318,8 +318,8 @@ add_library(epocservs
         src/window/util.cpp
         src/window/window.cpp)
 
-# OHOS, like WASM, has no libuv/uvw here, so it takes the null bluetooth/internet
-# protocol path (no host-backed networking for now).
+# Native targets use libuv/uvw. WASM uses the browser TCP relay below;
+# OHOS retains the null internet backend. Both use null Bluetooth protocols.
 if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
     target_sources(epocservs PRIVATE
         src/bluetooth/btmidman.cpp
@@ -341,8 +341,12 @@ else()
     target_sources(epocservs PRIVATE
         src/bluetooth/btmidman_null.cpp
         src/bluetooth/protocols/overall_null.cpp
-        src/internet/protocols/overall_null.cpp
     )
+    if (EMSCRIPTEN)
+        target_sources(epocservs PRIVATE src/internet/protocols/web.cpp)
+    else()
+        target_sources(epocservs PRIVATE src/internet/protocols/overall_null.cpp)
+    endif()
 endif()
 
 target_include_directories(epocservs PUBLIC include)

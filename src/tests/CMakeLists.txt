@@ -10,6 +10,7 @@ add_executable(ekatests
     game_patches.cpp
     j2me_manifest.cpp
     notifier_queries.cpp
+    mp3_player.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 
