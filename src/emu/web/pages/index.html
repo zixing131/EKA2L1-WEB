@@ -165,6 +165,20 @@
         </div>
 
         <div class="section-card">
+            <div class="section-title" data-i18n="settings.sensors.title">浏览器权限</div>
+            <div class="pref-item">
+                <div style="flex:1">
+                    <label class="pref-label" for="prefHostSensors" data-i18n="settings.sensors.label">请求相机和位置权限</label>
+                    <div class="pref-sub" data-i18n="settings.sensors.sub">默认关闭，不访问相机和位置，也不弹出授权提示；适用于塞班和 Java ME 应用</div>
+                </div>
+                <select id="prefHostSensors">
+                    <option value="0" data-i18n="settings.sensors.off">关闭（不请求）</option>
+                    <option value="1" data-i18n="settings.sensors.on">开启（允许请求）</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="section-card">
             <div class="section-title">Java ME</div>
             <div class="pref-item">
                 <div style="flex:1">

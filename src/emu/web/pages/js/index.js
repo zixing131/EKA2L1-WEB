@@ -959,6 +959,11 @@
     var prefPerf = document.getElementById('prefPerf');
     var prefFilter = document.getElementById('prefFilter');
     var prefLang = document.getElementById('prefLang');
+    var prefHostSensors = document.getElementById('prefHostSensors');
+    prefHostSensors.value = EKA2L1.hostSensorsAllowed() ? '1' : '0';
+    prefHostSensors.addEventListener('change', function () {
+        EKA2L1.setHostSensorsAllowed(this.value === '1');
+    });
     var prefJ2mePermissions = document.getElementById('prefJ2mePermissions');
     var prefJ2meKeypad = document.getElementById('prefJ2meKeypad');
     prefJ2meKeypad.value = localStorage.getItem('eka2l1_j2me_keypad') || '';

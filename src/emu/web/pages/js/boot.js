@@ -743,12 +743,40 @@
         ccall('wasm_set_volume', null, ['number'], [vol | 0]);
     };
 
+    // Host hardware access is independent of guest Java ME permission prompts.
+    // Only an explicit opt-in may reach browser APIs that request permission.
+    EKA2L1.hostSensorsAllowed = function () {
+        try { return localStorage.getItem('eka2l1_host_sensors') === '1'; }
+        catch (e) { return false; }
+    };
+
+    EKA2L1.stopHostSensors = function () {
+        EKA2L1._geoGeneration = (EKA2L1._geoGeneration || 0) + 1;
+        if (EKA2L1._geoWatch != null) {
+            navigator.geolocation.clearWatch(EKA2L1._geoWatch);
+            EKA2L1._geoWatch = null;
+        }
+        if (window.__ekCam && window.__ekCam.disable) window.__ekCam.disable();
+    };
+
+    EKA2L1.setHostSensorsAllowed = function (allowed) {
+        localStorage.setItem('eka2l1_host_sensors', allowed ? '1' : '0');
+        if (!allowed) EKA2L1.stopHostSensors();
+    };
+
+    // The library and player may be open in separate tabs.
+    if (window.addEventListener) window.addEventListener('storage', function (event) {
+        if ((event.key === 'eka2l1_host_sensors' || event.key === null) &&
+                !EKA2L1.hostSensorsAllowed()) EKA2L1.stopHostSensors();
+    });
+
     /**
      * Ask the browser for camera permission (getUserMedia). Best called from a
      * user-gesture handler before launching the Camera app. Returns 1 if a
-     * request was started / already granted, 0 if MediaDevices is missing.
+     * request was started / already granted, 0 if disabled or unavailable.
      */
     EKA2L1.requestCamera = function () {
+        if (!EKA2L1.hostSensorsAllowed()) return 0;
         try {
             return ccall('wasm_request_camera', 'number', [], []) | 0;
         } catch (e) {
@@ -777,13 +805,16 @@
 
     /** Watch the browser location and keep the guest fix updated. */
     EKA2L1.syncLocation = function () {
-        if (!navigator.geolocation) return 0;
+        if (!EKA2L1.hostSensorsAllowed() || !navigator.geolocation) return 0;
         if (EKA2L1._geoWatch != null) return 1;
+        var generation = EKA2L1._geoGeneration = (EKA2L1._geoGeneration || 0) + 1;
         EKA2L1._geoWatch = navigator.geolocation.watchPosition(function (pos) {
+            if (!EKA2L1.hostSensorsAllowed() || generation !== EKA2L1._geoGeneration) return;
             var c = pos.coords;
             EKA2L1.setGps(c.latitude, c.longitude, c.accuracy, c.altitude, c.speed, c.heading);
             console.log('[Kernel] host gps ' + c.latitude.toFixed(6) + ',' + c.longitude.toFixed(6));
         }, function (err) {
+            if (generation !== EKA2L1._geoGeneration) return;
             console.log('[Kernel] host gps denied ' + (err && err.code));
             if (EKA2L1._geoWatch != null && navigator.geolocation.clearWatch) {
                 navigator.geolocation.clearWatch(EKA2L1._geoWatch);

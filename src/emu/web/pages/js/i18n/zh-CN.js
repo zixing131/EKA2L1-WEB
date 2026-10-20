@@ -3,6 +3,11 @@
     'use strict';
     window.EKA2L1_LOCALES = window.EKA2L1_LOCALES || {};
     window.EKA2L1_LOCALES['zh-CN'] = {
+        'settings.sensors.title': '浏览器权限',
+        'settings.sensors.label': '请求相机和位置权限',
+        'settings.sensors.sub': '默认关闭，不访问相机和位置，也不弹出授权提示；适用于塞班和 Java ME 应用',
+        'settings.sensors.off': '关闭（不请求）',
+        'settings.sensors.on': '开启（允许请求）',
         'settings.j2me.permissions.label': '自动允许 J2ME 权限',
         'settings.j2me.permissions.sub': '默认开启，自动允许联网、文件等权限；关闭后逐次手动确认',
         'settings.j2me.permissions.on': '开启（全部允许）',

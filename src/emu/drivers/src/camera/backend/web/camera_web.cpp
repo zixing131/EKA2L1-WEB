@@ -87,8 +87,33 @@ namespace eka2l1::drivers::camera {
         // clang-format off
         EM_JS(void, ek_cam_js_init, (), {
             if (window.__ekCam) return;
-            var C = { cams: {}, perm: 0, warmStream: null };
+            var C = { cams: {}, perm: 0, warmStream: null, generation: 0, pendingPermission: false };
             window.__ekCam = C;
+
+            C.allowed = function () {
+                try { return localStorage.getItem('eka2l1_host_sensors') === '1'; }
+                catch (e) { return false; }
+            };
+
+            C.fail = function (cam) {
+                C.stopRaf(cam.id);
+                cam.failed = 1;
+                cam.ready = 0;
+                // Zero dimensions signal failure without copying a frame.
+                Module['_ek_cam_js_frame_ready'](cam.id, 0, 0);
+            };
+
+            C.disable = function () {
+                C.generation++;
+                C.pendingPermission = false;
+                C.perm = 0;
+                C.stopTracks(C.warmStream);
+                C.warmStream = null;
+                Object.keys(C.cams).forEach(function (id) {
+                    C.fail(C.cams[id]);
+                    C.close(id);
+                });
+            };
 
             C.ensureVideo = function (id) {
                 var cam = C.cams[id];
@@ -112,10 +137,6 @@ namespace eka2l1::drivers::camera {
             };
 
             C.open = function (id, facing, wantW, wantH) {
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    console.warn('[ekCam] getUserMedia unavailable');
-                    return;
-                }
                 var cam = C.cams[id];
                 if (!cam) {
                     cam = { id: id, facing: facing, wantW: wantW|0, wantH: wantH|0,
@@ -127,6 +148,12 @@ namespace eka2l1::drivers::camera {
                     cam.wantW = wantW|0;
                     cam.wantH = wantH|0;
                 }
+                if (!C.allowed() || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    C.fail(cam);
+                    return;
+                }
+                cam.failed = 0;
+                if (cam.pending) return;
                 if (cam.stream) {
                     cam.ready = 1;
                     if (cam.feeding) C.startRaf(id);
@@ -145,7 +172,14 @@ namespace eka2l1::drivers::camera {
                     }
                 };
 
+                cam.pending = true;
+                var generation = C.generation;
                 navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+                    cam.pending = false;
+                    if (!C.allowed() || generation !== C.generation || C.cams[id] !== cam) {
+                        C.stopTracks(stream);
+                        return;
+                    }
                     C.perm = 1;
                     cam.stream = stream;
                     cam.failed = 0;
@@ -156,10 +190,11 @@ namespace eka2l1::drivers::camera {
                     cam.ready = 1;
                     if (cam.feeding) C.startRaf(id);
                 }).catch(function (err) {
+                    cam.pending = false;
+                    if (generation !== C.generation || C.cams[id] !== cam) return;
                     console.warn('[ekCam] getUserMedia failed:', err && err.name, err && err.message);
                     C.perm = -1;
-                    cam.failed = 1;
-                    cam.ready = 0;
+                    C.fail(cam);
                 });
             };
 
@@ -176,6 +211,7 @@ namespace eka2l1::drivers::camera {
 
             C.sampleOnce = function (id) {
                 var cam = C.cams[id];
+                if (!C.allowed()) { C.disable(); return 0; }
                 if (!cam || !cam.ready || !cam.video || cam.bufPtr <= 0) return 0;
                 var v = cam.video;
                 var vw = v.videoWidth|0;
@@ -216,7 +252,7 @@ namespace eka2l1::drivers::camera {
 
             C.startRaf = function (id) {
                 var cam = C.cams[id];
-                if (!cam || cam.raf) return;
+                if (!cam || cam.raf || cam.failed) return;
                 cam.feeding = 1;
                 var tick = function () {
                     cam.raf = 0;
@@ -224,7 +260,7 @@ namespace eka2l1::drivers::camera {
                     if (C.sampleOnce(id)) {
                         try { Module['_ek_cam_js_frame_ready'](id, cam.frameW, cam.frameH); } catch (e) {}
                     }
-                    cam.raf = requestAnimationFrame(tick);
+                    if (cam.feeding) cam.raf = requestAnimationFrame(tick);
                 };
                 cam.raf = requestAnimationFrame(tick);
             };
@@ -253,13 +289,22 @@ namespace eka2l1::drivers::camera {
             };
 
             C.requestPermission = function () {
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 0;
-                if (C.perm === 1) return 1;
+                if (!C.allowed() || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 0;
+                if (C.perm === 1 || C.pendingPermission) return 1;
+                var generation = C.generation;
+                C.pendingPermission = true;
                 navigator.mediaDevices.getUserMedia({ audio: false, video: true }).then(function (stream) {
+                    if (generation !== C.generation || !C.allowed()) {
+                        C.stopTracks(stream);
+                        return;
+                    }
+                    C.pendingPermission = false;
                     C.perm = 1;
                     C.stopTracks(C.warmStream);
                     C.warmStream = stream;
                 }).catch(function (err) {
+                    if (generation !== C.generation) return;
+                    C.pendingPermission = false;
                     console.warn('[ekCam] permission request failed:', err && err.name);
                     C.perm = -1;
                 });
@@ -360,6 +405,7 @@ namespace eka2l1::drivers::camera {
             int latest_w_ = 0;
             int latest_h_ = 0;
             bool latest_valid_ = false;
+            std::atomic<bool> camera_failed_{ false };
 
             std::atomic<bool> feed_running_{ false };
             std::thread feed_thread_;
@@ -391,6 +437,11 @@ namespace eka2l1::drivers::camera {
                     }
 
                     if (frame_callback && wants_frame_callback && wants_frame_callback()) {
+                        if (camera_failed_.load(std::memory_order_acquire)) {
+                            frame_callback(nullptr, 0, -1);
+                            std::this_thread::sleep_for(interval);
+                            continue;
+                        }
                         std::vector<std::uint8_t> rgba;
                         int w = 0;
                         int h = 0;
@@ -466,6 +517,12 @@ namespace eka2l1::drivers::camera {
                 if (rgba_scratch_.size() < bytes) {
                     return;
                 }
+                if (width <= 0 || height <= 0) {
+                    latest_valid_ = false;
+                    camera_failed_.store(true, std::memory_order_release);
+                    return;
+                }
+                camera_failed_.store(false, std::memory_order_release);
                 latest_rgba_.resize(bytes);
                 std::memcpy(latest_rgba_.data(), rgba_scratch_.data(), bytes);
                 latest_w_ = width;
@@ -574,6 +631,7 @@ namespace eka2l1::drivers::camera {
                         latest_valid_ = false;
                     }
 
+                    camera_failed_.store(false, std::memory_order_release);
                     bind_scratch_buffer(size.x, size.y);
                     run_on_main(main_open, handle, front ? 1 : 0, size.x, size.y);
                     // Ensure sampling runs even without an active viewfinder feed.
@@ -582,6 +640,7 @@ namespace eka2l1::drivers::camera {
                     bool got = false;
                     for (int i = 0; i < 90; i++) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                        if (camera_failed_.load(std::memory_order_acquire)) break;
                         const std::lock_guard<std::mutex> guard(frame_lock_);
                         if (latest_valid_ && latest_w_ > 0 && latest_h_ > 0) {
                             got = true;
@@ -645,6 +704,7 @@ namespace eka2l1::drivers::camera {
                     wants_frame_callback_ = new_frame_needed_callback;
                 }
 
+                camera_failed_.store(false, std::memory_order_release);
                 bind_scratch_buffer(size.x, size.y);
                 run_on_main(main_open, handle_, front_facing_ ? 1 : 0, size.x, size.y);
                 run_on_main(main_start_feed, handle_, 0, 0, 0);

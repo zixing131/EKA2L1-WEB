@@ -3,6 +3,11 @@
     'use strict';
     window.EKA2L1_LOCALES = window.EKA2L1_LOCALES || {};
     window.EKA2L1_LOCALES['en-US'] = {
+        'settings.sensors.title': 'Browser permissions',
+        'settings.sensors.label': 'Request camera and location permissions',
+        'settings.sensors.sub': 'Off by default: no camera or location access and no permission prompts. Applies to Symbian and Java ME apps.',
+        'settings.sensors.off': 'Off (do not request)',
+        'settings.sensors.on': 'On (allow requests)',
         'settings.j2me.permissions.label': 'Automatically allow J2ME permissions',
         'settings.j2me.permissions.sub': 'On by default. Allow network, file and other permissions automatically; turn off to confirm each request.',
         'settings.j2me.permissions.on': 'On (allow all)',
