@@ -1883,6 +1883,13 @@ int wasm_install_package(const char *pkg_path) {
  * guest process; raw mode reports success once its AppArc registration is committed.
  */
 EMSCRIPTEN_KEEPALIVE
+int wasm_prepare_midlet_install() {
+    if (!g_state.symsys) return -1;
+    g_state.paused = false;
+    return eka2l1::j2me::prepare_runtime_for_install(g_state.symsys.get());
+}
+
+EMSCRIPTEN_KEEPALIVE
 int wasm_install_midlet(const char *jar_path) {
     if (!jar_path) return -1;
     if (!g_state.symsys) return -2;

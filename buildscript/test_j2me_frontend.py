@@ -2,7 +2,7 @@
 """Install a JAR through the library, reload persisted storage and cold-launch J9.
 
 Requires Playwright, Chromium and serve_regression.py. Each run uses a fresh
-browser context. PASS verifies persistence and a live VM after --observe;
+browser context. PASS verifies persistence and a live VM/Main after --observe;
 inspect the screenshots to verify game initialization and key handling.
 """
 import argparse
@@ -13,6 +13,16 @@ import tempfile
 from pathlib import Path
 
 from playwright.async_api import async_playwright
+
+
+def assert_live_j9(runtime):
+    assert any(line.startswith('j9midps60[') and 'exit=3/0' in line
+               for line in runtime.splitlines()), runtime
+    # A guest memory fault stops Main without terminating its process. Checking
+    # exit status alone used to report PASS for the resulting black screen.
+    threads = runtime.split('=== j9 threads ===', 1)[-1].split('=== servers ===', 1)[0]
+    main = next((line for line in threads.splitlines() if line.startswith('  Main ')), '')
+    assert main and ' st=4' not in main, runtime
 
 
 async def run(args):
@@ -159,8 +169,7 @@ async def run(args):
                     (args.output / 'cpu-profile.json').write_text(json.dumps(profile))
                 runtime = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
                 (args.output / 'runtime.txt').write_text(runtime)
-                assert any(line.startswith('j9midps60[') and 'exit=3/0' in line
-                           for line in runtime.splitlines()), runtime
+                assert_live_j9(runtime)
                 assert await page.locator('#bootOverlay').evaluate("e => e.classList.contains('hidden')")
                 await page.screenshot(path=str(args.output / 'game.png'), timeout=15000)
                 await page.click('[onclick="toggleKeypad()"]')
@@ -169,8 +178,7 @@ async def run(args):
                     await asyncio.sleep(args.key_interval)
                     await page.screenshot(path=str(args.output / f'key-{index}-{key}.png'), timeout=15000)
                 after_keys = await asyncio.wait_for(page.evaluate('EKA2L1.probeJavaRuntime()'), 15)
-                assert any(line.startswith('j9midps60[') and 'exit=3/0' in line
-                           for line in after_keys.splitlines()), after_keys
+                assert_live_j9(after_keys)
                 audio = await page.evaluate('window.__audioProbe');
                 (args.output / 'audio.json').write_text(json.dumps(audio))
                 if args.require_audio:

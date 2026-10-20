@@ -620,6 +620,9 @@
                 // The ROM MIDP installer is itself a guest process, so it must
                 // be allowed to run until its logon callback completes.
                 EKA2L1.setPaused(false);
+                return EKA2L1.prepareMidletInstall();
+            })
+            .then(function () {
                 var result = EKA2L1.installMidlet(target);
                 try { EKA2L1.module.FS.unlink(target); } catch (e) {}
                 if (result !== 0) throw new Error(EKA2L1.t('error.installFailedCode', { code: result }));

@@ -192,6 +192,7 @@
                 const path = javaPackage ? '/eka2l1/regression.jar' : '/eka2l1/regression.sis';
                 mod.FS.writeFile(path, new Uint8Array(await pkg.arrayBuffer()));
                 try {
+                    if (javaPackage) await EKA2L1.prepareMidletInstall();
                     const installed = javaPackage ? EKA2L1.installMidlet(path) : EKA2L1.installPackage(path);
                     note('安装测试程序包 = ' + installed);
                     if (installed !== 0) throw new Error('安装测试程序包失败：' + installed);

@@ -7,6 +7,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/vfs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/ipc_arg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/handle_close.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernel/codeseg_reuse.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/message.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/property.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kernel/timer.cpp
@@ -42,6 +43,7 @@ set(CORE_TEST_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/services/centralrepo/set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/sms/common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/socket/opcodes.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/services/socket/completion.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/ui/iconops.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/services/ui/skin/skn.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/utils/obj.cpp

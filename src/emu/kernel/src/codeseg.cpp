@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 namespace eka2l1::kernel {
     // No firmware we run exports more than 221 drtaeabi ordinals. Ordinal 222 is
@@ -166,22 +167,25 @@ namespace eka2l1::kernel {
     }
 
     bool codeseg::eligible_for_codeseg_reuse() {
-        mark = true;
-
-        memory_system *mem = kern->get_memory_system();
-        const auto data_size_align = common::align(data_size + bss_size, mem->get_page_size());
-
-        if ((data_size_align != 0) && !is_rom()) {
-            return false;
-        }
-
-        for (auto &dep : dependencies) {
-            if (!dep.dep_->mark && !dep.dep_->eligible_for_codeseg_reuse()) {
-                dep.dep_->mark = true;
+        // Attachment traversal also uses mark. A marked dependency may still
+        // have process-local data: skipping it would share an import veneer
+        // patched to another process's copy of that DLL (e.g. javalogger).
+        // Inspect the entire dependency closure with independent cycle tracking.
+        std::unordered_set<const codeseg *> visited;
+        std::vector<const codeseg *> pending{this};
+        while (!pending.empty()) {
+            const codeseg *seg = pending.back();
+            pending.pop_back();
+            if (!visited.insert(seg).second) {
+                continue;
+            }
+            if ((seg->data_size || seg->bss_size) && !seg->is_rom()) {
                 return false;
             }
+            for (const auto &dep : seg->dependencies) {
+                pending.push_back(dep.dep_);
+            }
         }
-
         return true;
     }
 

@@ -30,6 +30,7 @@
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
 #include <kernel/server.h>
+#include <services/fs/fs.h>
 #include <system/epoc.h>
 #include <utils/apacmd.h>
 #include <utils/err.h>
@@ -802,6 +803,24 @@ namespace eka2l1::j2me {
 
     static bool java_midp2_server_ready(kernel_system *kern) {
         return guest_server_exists(kern, "!MIDP.SystemAMS.MIDP2");
+    }
+
+    int prepare_runtime_for_install(system *sys) {
+        if (!sys) {
+            return -1;
+        }
+        if (!eka2l1_j9_raw || sys->get_symbian_version_use() <= epocver::epoc6
+            || !sys->get_io_system()->exist(u"Z:\\sys\\bin\\midp2silentmidletinstall.exe")) {
+            return 0;
+        }
+        auto *kern = sys->get_kernel_system();
+        if (java_midp2_server_ready(kern)) {
+            return 0;
+        }
+        if (!boot_java_runtime(sys)) {
+            return -1;
+        }
+        return java_midp2_server_ready(kern) ? 0 : 1;
     }
 
     static bool java_ams_trader_ready(kernel_system *kern) {
@@ -2517,11 +2536,43 @@ namespace eka2l1::j2me {
             return INSTALL_ERROR_JAVA_INSTALLER_CANT_START;
         }
 
+        // AMS initializes its databases before starting its preinstall monitor.
+        // Starting another installer as soon as the AMS process appears races
+        // those Create/Open transactions on a clean S60v5 drive (KErrAlreadyExists
+        // in SystemAMSMain). Let the ROM start its own monitor first.
+        kernel::process *installer = find_running_process(kern, "midp2silent");
+        if (eka2l1_j9_raw) {
+            if (installer) {
+                // Host VFS writes do not pass through RFs. Wake the existing
+                // monitor after both files are complete, including warm installs.
+                auto *files = static_cast<fs_server *>(kern->get_by_name<service::server>(
+                    epoc::fs::get_server_name_through_epocver(kern->get_epoc_version())));
+                if (!files) {
+                    return INSTALL_ERROR_JAVA_INSTALLER_CANT_START;
+                }
+                if (install_exit_cb) {
+                    installer->logon(std::move(install_exit_cb));
+                }
+                files->notify_change(guest_jad_path, fs_server_client::notify_type::all);
+                LOG_INFO(J2ME, "Staged JAR for existing guest MIDP installer {}", installer->name());
+                return INSTALL_ERROR_JAR_SUCCESS;
+            }
+            if (!java_midp2_server_ready(kern)) {
+                LOG_ERROR(J2ME, "AMS did not finish initialization before MIDlet install");
+                return INSTALL_ERROR_JAVA_INSTALLER_CANT_START;
+            }
+            // A boot core may have exited while the serving core was starting.
+            creator = find_running_process(kern, "systemamscore");
+            if (!creator) {
+                return INSTALL_ERROR_JAVA_INSTALLER_CANT_START;
+            }
+        }
+
         // Pass the staged JAD path as the command-line argument. The silent
         // installer reads this to know which MIDlet to install; without it the
         // process boots but has nothing to act on and stalls in its async
         // scheduler waiting for a download/trigger that never arrives.
-        kernel::process *installer = kern->spawn_new_process(SILENT_INSTALLER, guest_jad_path);
+        installer = kern->spawn_new_process(SILENT_INSTALLER, guest_jad_path);
         if (!installer) {
             io->delete_entry(guest_jar_path);
             io->delete_entry(guest_jad_path);

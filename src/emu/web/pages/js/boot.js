@@ -535,6 +535,19 @@
         return ccall('wasm_install_package', 'number', ['string'], [vfsPath]);
     };
 
+    EKA2L1.prepareMidletInstall = async function () {
+        var deadline = Date.now() + 180000;
+        for (;;) {
+            var state = ccall('wasm_prepare_midlet_install', 'number', [], []);
+            if (state === 0) return;
+            if (state < 0) throw new Error('MIDP runtime initialization failed (' + state + ')');
+            if (Date.now() >= deadline) throw new Error('MIDP runtime initialization timed out');
+            // Yield to animation frames and the guest scheduler, including its
+            // timers. A synchronous loop cannot finish AMS cold initialization.
+            await new Promise(function (resolve) { setTimeout(resolve, 100); });
+        }
+    };
+
     EKA2L1.installMidlet = function (vfsPath) {
         return ccall('wasm_install_midlet', 'number', ['string'], [vfsPath]);
     };

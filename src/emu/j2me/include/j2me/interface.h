@@ -72,6 +72,10 @@ namespace eka2l1::j2me {
      */
     void stop_silent_installer(system *sys);
 
+    // Start AMS without racing its initial database creation. Call again after
+    // allowing the guest scheduler to run: 0 ready, 1 pending, negative failure.
+    int prepare_runtime_for_install(system *sys);
+
     bool reregister_midlet(system *sys, const std::uint32_t app_id,
         std::function<void(kernel::process*)> exit_cb);
 

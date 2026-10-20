@@ -54,6 +54,7 @@ namespace eka2l1::epoc::socket {
 
     void socket::bind_callback(const saddress &addr, std::function<void(int)> callback) {
         LOG_ERROR(SERVICE_ESOCK, "Binding socket with callback unimplemented!");
+        callback(epoc::error_not_supported);
     }
 
     void socket::connect(const saddress &addr, epoc::notify_info &info) {
@@ -64,16 +65,19 @@ namespace eka2l1::epoc::socket {
     void socket::ioctl(const std::uint32_t command, epoc::notify_info &complete_info, std::uint8_t *buffer,
         const std::size_t available_size, const std::size_t max_buffer_size, const std::uint32_t level) {
         LOG_ERROR(SERVICE_ESOCK, "Unhandled base IOCTL (command={})", command);
+        complete_info.complete(epoc::error_not_supported);
     }
 
     void socket::send(const std::uint8_t *data, const std::uint32_t data_size, std::uint32_t *sent_size, const saddress *addr,
         std::uint32_t flags, epoc::notify_info &complete_info) {
         LOG_ERROR(SERVICE_ESOCK, "Sending data to socket unimplemented!");
+        complete_info.complete(epoc::error_not_supported);
     }
 
     void socket::receive(std::uint8_t *data, const std::uint32_t data_size, std::uint32_t *sent_size, saddress *addr,
         std::uint32_t flags, epoc::notify_info &complete_info, receive_done_callback cb) {
         LOG_ERROR(SERVICE_ESOCK, "Receiving data from socket unimplemented!");
+        complete_info.complete(epoc::error_not_supported);
     }
 
     std::int32_t socket::local_name(saddress &result, std::uint32_t &result_len) {
@@ -114,6 +118,7 @@ namespace eka2l1::epoc::socket {
 
     void socket::shutdown(epoc::notify_info &complete_info, int reason) {
         LOG_ERROR(SERVICE_ESOCK, "Shutdown not implemented!");
+        complete_info.complete(epoc::error_not_supported);
     }
 
     socket_socket::socket_socket(socket_client_session *parent, std::unique_ptr<socket> &sock)
