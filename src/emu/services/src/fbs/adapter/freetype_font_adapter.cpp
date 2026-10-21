@@ -454,7 +454,7 @@ namespace eka2l1::epoc::adapter {
             return ((code & ~0x80000000) < face->num_glyphs);
         }
 
-        return FT_Get_Char_Index(face, code) != 0;
+        return has_character(idx, static_cast<std::int32_t>(code), metric_identifier);
     }
 
     std::size_t freetype_font_adapter::count() {
@@ -469,7 +469,42 @@ namespace eka2l1::epoc::adapter {
         auto face = faces_[face_index];
         auto glyph_index = FT_Get_Char_Index(face, codepoint);
 
-        return glyph_index != 0;
+        if (!glyph_index) {
+            return false;
+        }
+
+        // S60's CJK fonts may have cmap entries for empty Latin glyphs (and
+        // nonsensical advances). Route those through the linked font fallback.
+        // Whitespace/control characters legitimately have no ink; only test
+        // printable ASCII and the ellipsis used to truncate UI labels.
+        if (!((codepoint >= 0x21 && codepoint <= 0x7E) || codepoint == 0x2026)) {
+            return true;
+        }
+        // Coverage queries need not supply a size. Bitmap-only fonts must be
+        // probed at one of their strikes rather than an arbitrary 16 pixels.
+        const std::uint32_t default_size = (!FT_IS_SCALABLE(face) && face->num_fixed_sizes)
+            ? static_cast<std::uint32_t>(face->available_sizes[0].y_ppem >> 6) : 16;
+        const std::uint32_t size = metric_identifier ? metric_identifier : default_size;
+        const auto key = std::make_tuple(face_index, codepoint, size);
+        const auto cached = visible_latin_cache_.find(key);
+        if (cached != visible_latin_cache_.end()) {
+            return cached->second;
+        }
+        bool visible = false;
+        if (set_font_size(face_index, size) && !FT_Load_Glyph(face, glyph_index, FT_LOAD_RENDER)) {
+            const auto &bitmap = face->glyph->bitmap;
+            for (unsigned int y = 0; y < bitmap.rows && !visible; y++) {
+                const auto *row = bitmap.buffer + static_cast<std::ptrdiff_t>(y) * bitmap.pitch;
+                for (unsigned int x = 0; x < bitmap.width; x++) {
+                    if ((bitmap.pixel_mode == FT_PIXEL_MODE_MONO) ? (row[x >> 3] & (0x80 >> (x & 7))) : row[x]) {
+                        visible = true;
+                        break;
+                    }
+                }
+            }
+        }
+        visible_latin_cache_.emplace(key, visible);
+        return visible;
     }
 
     bool freetype_font_adapter::get_table_content(const std::size_t face_index, const std::uint32_t tag4, std::uint8_t *dest, uint32_t &dest_size) {

@@ -21,6 +21,7 @@
 
 #include <map>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 #include <common/container.h>
@@ -37,6 +38,7 @@ namespace eka2l1::epoc::adapter {
        bool is_valid_;
 
        std::vector<std::uint32_t> current_font_sizes_;
+       std::map<std::tuple<std::size_t, std::int32_t, std::uint32_t>, bool> visible_latin_cache_;
 
        // Scratch buffer for converting FreeType's 1bpp embedded-bitmap glyphs
        // (FT_PIXEL_MODE_MONO, used by fonts with EBDT strikes like S60SC) into the

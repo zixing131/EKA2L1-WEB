@@ -19,6 +19,10 @@
 
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 #include <services/fbs/font_store.h>
 
 using namespace eka2l1;
@@ -104,4 +108,84 @@ TEST_CASE("font_match_ignores_name_when_none_was_asked_for", "fbs") {
     const epoc::open_font_face_attrib named = make_face(u"Nokia Sans S60", 0);
 
     REQUIRE(epoc::match_font_spec(unnamed, u"", spec, 20) == epoc::match_font_spec(named, u"Nokia Sans S60", spec, 20));
+}
+
+namespace {
+    // Synthetic fixtures model the ROM's CJK font: valid Chinese, cmap entries
+    // for blank Latin glyphs, and a bogus Latin advance. No ROM data is needed.
+    std::vector<std::uint8_t> make_ui_font(const std::string &family, const bool latin, const bool cjk) {
+        std::string bdf = "STARTFONT 2.1\nFONT -test-" + family
+            + "-medium-r-normal--14-140-72-72-c-80-iso10646-1\n"
+              "SIZE 14 72 72\nFONTBOUNDINGBOX 8 14 0 0\nSTARTPROPERTIES 4\n"
+              "FONT_ASCENT 14\nFONT_DESCENT 0\nFAMILY_NAME \"" + family
+            + "\"\nWEIGHT_NAME \"Medium\"\nENDPROPERTIES\nCHARS 6\n";
+        for (const int code : { 0x20, 0x30, 0x41, 0x61, 0x2026, 0x4E2D }) {
+            const bool ink = code != 0x20 && ((code == 0x4E2D) ? cjk : latin);
+            const int advance = (code == 0x4E2D) ? 14 : (latin ? 8 : 87);
+            bdf += "STARTCHAR glyph" + std::to_string(code) + "\nENCODING " + std::to_string(code)
+                + "\nSWIDTH 1000 0\nDWIDTH " + std::to_string(advance) + " 0\nBBX 8 14 0 0\nBITMAP\n";
+            for (int row = 0; row < 14; row++) {
+                bdf += ink ? "7E\n" : "00\n";
+            }
+            bdf += "ENDCHAR\n";
+        }
+        bdf += "ENDFONT\n";
+        return { bdf.begin(), bdf.end() };
+    }
+}
+
+TEST_CASE("ROM fonts with blank Latin glyphs use a drawable ROM fallback", "[fbs][web]") {
+    for (const bool cjk_first : { false, true }) {
+        epoc::font_store store(nullptr);
+        auto chinese = make_ui_font("ChineseUI", false, true);
+        auto latin = make_ui_font("LatinUI", true, false);
+        const auto kind = epoc::adapter::font_file_adapter_kind::freetype;
+        REQUIRE(store.add_fonts(cjk_first ? chinese : latin, kind));
+        REQUIRE(store.add_fonts(cjk_first ? latin : chinese, kind));
+        auto *chinese_face = store.get_open_font_info(cjk_first ? 0 : 1);
+        REQUIRE(chinese_face);
+        auto *original = chinese_face->adapter;
+        REQUIRE(store.get_open_font_info(cjk_first ? 1 : 0)->adapter->has_character(0, 'A', 0));
+        // cmap existence is insufficient; visible ASCII/ellipsis need ink.
+        REQUIRE_FALSE(original->has_character(0, 'A', 14));
+        REQUIRE_FALSE(original->does_glyph_exist(0, 'A', 14));
+        REQUIRE_FALSE(original->has_character(0, 0x2026, 14));
+        REQUIRE(original->has_character(0, ' ', 14));
+        REQUIRE(original->has_character(0, 0x4E2D, 14));
+        // Shaped glyph indices are face-specific and are not reinterpreted.
+        REQUIRE(original->does_glyph_exist(0, 0x80000001, 14));
+
+        const auto name = chinese_face->face_attrib.name.to_std_string(nullptr);
+        // No host fonts are installed: fallback must use the ROM Latin face.
+        store.attach_user_font_fallbacks();
+        auto spec = make_spec(name, 16, 0);
+        auto *selected = store.seek_the_open_font(spec);
+        REQUIRE(selected == chinese_face);
+        REQUIRE(selected->adapter != original);
+        auto *linked = selected->adapter;
+        REQUIRE(linked->has_character(0, 'A', 14));
+        REQUIRE(linked->get_glyph_advance(0, 'A', 14) == 8);
+        REQUIRE(linked->get_glyph_advance(0, 0x2026, 14) == 8);
+        REQUIRE(linked->get_glyph_advance(0, 0x4E2D, 14) == 14);
+        REQUIRE(linked->get_glyph_advance(0, ' ', 14) == 87);
+
+        const int code = 'A';
+        eka2l1::vec2 size;
+        REQUIRE(linked->measure_atlas_glyphs(0, &code, 1, 14, &size));
+        REQUIRE(size.x > 0);
+        REQUIRE(size.y > 0);
+        std::vector<std::uint8_t> pixels(size.x * size.y * 4, 0);
+        const eka2l1::vec2 position(0, 0);
+        epoc::adapter::character_info glyph{};
+        REQUIRE(linked->render_atlas_glyphs(0, &code, 1, 14, pixels.data(), size, &position, &glyph));
+        REQUIRE(std::any_of(pixels.begin(), pixels.end(), [](std::uint8_t pixel) { return pixel != 0; }));
+        REQUIRE(glyph.xadv == 8);
+        epoc::glyph_bitmap_type type = epoc::antialised_glyph_bitmap;
+        epoc::open_font_character_metric metric{};
+        std::uint32_t bytes = 0;
+        auto *bitmap = linked->get_glyph_bitmap(0, 'A', 14, nullptr, nullptr, bytes, &type, metric);
+        REQUIRE(bitmap);
+        REQUIRE(metric.horizontal_advance == 8);
+        linked->free_glyph_bitmap(bitmap);
+    }
 }

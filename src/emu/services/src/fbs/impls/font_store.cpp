@@ -18,6 +18,7 @@
  */
 
 #include <common/log.h>
+#include <algorithm>
 #include <services/fbs/adapter/linked_font_adapter.h>
 #include <services/fbs/font_store.h>
 
@@ -395,10 +396,9 @@ namespace eka2l1::epoc {
             }
         }
 
-        if (fallbacks.empty()) {
-            return;
-        }
-
+        // Snapshot unwrapped adapters so a fallback cannot point back into a
+        // wrapper assembled earlier in this loop.
+        const auto original_fonts = open_font_store;
         for (auto &info : open_font_store) {
             if (info.user_font) {
                 continue;
@@ -408,6 +408,44 @@ namespace eka2l1::epoc {
             components.push_back({ info.adapter, info.idx, is_cjk_placeholder_font(info.adapter, info.idx) });
 
             open_font_face_attrib attrib = info.face_attrib;
+
+            // CJK ROM faces can advertise ASCII whose glyphs are empty. Keep
+            // their requested name/metrics and Chinese glyphs, but supply real
+            // Latin glyphs from a compatible ROM face before host fallbacks.
+            if (!has_basic_latin_glyphs(info)) {
+                epoc::font_spec_v1 spec{};
+                spec.height = 16;
+                spec.tf.flags = (attrib.style & open_font_face_attrib::mono_width) ? 0 : typeface_info::tf_propotional;
+                if (attrib.style & open_font_face_attrib::serif) {
+                    spec.tf.flags |= typeface_info::tf_serif;
+                }
+                if (attrib.style & open_font_face_attrib::bold) {
+                    spec.style.flags |= font_style_base::bold;
+                }
+                if (attrib.style & open_font_face_attrib::italic) {
+                    spec.style.flags |= font_style_base::italic;
+                }
+                const open_font_info *latin = nullptr;
+                int best_score = 0;
+                for (const auto &candidate : original_fonts) {
+                    if (candidate.user_font || (candidate.face_attrib.style & open_font_face_attrib::symbol)
+                        || !epoc::adapter::can_present_glyph_as(candidate.adapter->get_output_bitmap_type(),
+                            info.adapter->get_output_bitmap_type()) || !has_basic_latin_glyphs(candidate)) {
+                        continue;
+                    }
+                    const int score = match_font_spec(candidate.face_attrib, candidate.family, spec, 16);
+                    if (!latin || score > best_score) {
+                        latin = &candidate;
+                        best_score = score;
+                    }
+                }
+                if (latin) {
+                    components.push_back({ latin->adapter, latin->idx, is_cjk_placeholder_font(latin->adapter, latin->idx) });
+                    for (std::size_t word = 0; word < 4; word++) {
+                        attrib.coverage[word] |= latin->face_attrib.coverage[word];
+                    }
+                }
+            }
 
             for (const auto &fallback : fallbacks) {
                 // A glyph bitmap reaches the guest in the format the font as a
@@ -449,6 +487,42 @@ namespace eka2l1::epoc {
         }
 
         return nullptr;
+    }
+
+    bool font_store::has_basic_latin_glyphs(const open_font_info &info) {
+        const auto key = std::make_pair(info.adapter, info.idx);
+        auto cached = basic_latin_cache.find(key);
+        if (cached != basic_latin_cache.end()) {
+            return cached->second;
+        }
+
+        // Some ROM CJK fonts (e.g. S60SC) map Latin letters to empty glyphs,
+        // with enormous advances. Their cmap and UnicodeRange bits still
+        // claim Latin coverage. Check actual ink before picking a ROM Latin
+        // fallback; spaces are deliberately not probes.
+        std::uint32_t metric = 0;
+        bool usable = info.adapter->get_nearest_supported_metric(info.idx, 16, &metric, true).has_value();
+        for (const int code : { 'A', 'a', '0' }) {
+            if (!usable || !info.adapter->has_character(info.idx, code, metric)) {
+                usable = false;
+                break;
+            }
+            eka2l1::vec2 size;
+            if (!info.adapter->measure_atlas_glyphs(info.idx, &code, 1, metric, &size)
+                || size.x <= 0 || size.y <= 0 || size.x > 256 || size.y > 256) {
+                usable = false;
+                break;
+            }
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size.x) * size.y
+                * info.adapter->get_atlas_bitmap_bits_per_pixel() / 8, 0);
+            const eka2l1::vec2 position(0, 0);
+            epoc::adapter::character_info glyph{};
+            usable = info.adapter->render_atlas_glyphs(info.idx, &code, 1, metric,
+                pixels.data(), size, &position, &glyph)
+                && std::any_of(pixels.begin(), pixels.end(), [](const std::uint8_t value) { return value != 0; });
+        }
+        basic_latin_cache.emplace(key, usable);
+        return usable;
     }
 
     static std::uint32_t coverage_extent(const open_font_face_attrib &attrib) {

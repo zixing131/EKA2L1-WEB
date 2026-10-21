@@ -75,6 +75,10 @@ namespace eka2l1::epoc {
         // placeholder box for every han character" (see is_cjk_placeholder_font)
         std::map<std::pair<epoc::adapter::font_file_adapter_base *, std::size_t>, bool> cjk_placeholder_cache;
 
+        // Cache actual Latin ink, rather than trusting a font's Unicode ranges.
+        std::map<std::pair<epoc::adapter::font_file_adapter_base *, std::size_t>, bool> basic_latin_cache;
+        bool has_basic_latin_glyphs(const open_font_info &info);
+
         eka2l1::io_system *io;
 
         // Linked typefaces occupy the front of open_font_store; see
@@ -119,7 +123,9 @@ namespace eka2l1::epoc {
          * draw. Every device face is therefore given the imported fonts as
          * trailing components of a linked typeface, which is the same
          * arrangement link.ini describes, with the device's own face canonical
-         * so nothing about its appearance or metrics changes.
+         * so nothing about its appearance or metrics changes. Faces with blank
+         * Latin glyphs also receive a compatible ROM Latin component, even
+         * when no imported fonts are installed.
          */
         void attach_user_font_fallbacks();
 
