@@ -5,6 +5,7 @@ iOS port: symptom, how it was narrowed down, and the conclusion/fix. Newest firs
 
 | Date | Doc |
 |---|---|
+| 2026-11-17 | [Guest and host filesystem paths](./PATH_TYPES.md) |
 | 2026-11-13 | [UIQ 3 bring-up contract review](./uiq3-bringup-review.md) |
 | 2026-10-30 | [Snakes Subsonic: RGB444 data on the N97 PostingSurface path](./ngage-snakes-rgb444-posting.md) |
 | 2026-10-27 | [Ashen movement timing and the Worms EKA1 tick mask](./ashen-movement-and-eka1-tick-mask.md) |
