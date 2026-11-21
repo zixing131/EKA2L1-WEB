@@ -54,14 +54,14 @@ namespace eka2l1 {
         priority_ = 0;
 
         // Try to read resource file contains priority
-        std::u16string priority_filename = u"resource\\apps\\PrioritySet.rsc";
+        const guest_path priority_filename(u"resource\\apps\\PrioritySet.rsc");
         symfile f = nullptr;
 
         // Stepping one below drive_a would leave the enum's value range.
         for (int drive_index = drive_z; drive_index >= drive_a; drive_index--) {
             const drive_number drive = static_cast<drive_number>(drive_index);
             if (io->get_drive_entry(drive)) {
-                f = io->open_file(std::u16string(drive_to_char16(drive), 1) + priority_filename, READ_MODE | BIN_MODE);
+                f = io->open_file(eka2l1::guest_path{guest_path(std::u16string{drive_to_char16(drive), u':', u'\\'}) / priority_filename}, READ_MODE | BIN_MODE);
 
                 if (f) {
                     break;
@@ -196,6 +196,7 @@ namespace eka2l1 {
     void view_session::on_view_activation(const ui::view::view_id &id) {
         if (outstanding_activation_notify_) {
             if ((next_activation_id_ == ui::view::EMPTY_VIEW_ID) || (next_activation_id_ == id)) {
+                outstanding_activation_notify_ = false;
                 queue_.queue_event({ ui::view::view_event::event_active_notification, id, ui::view::EMPTY_VIEW_ID, 0, 0 });
             }
         }
@@ -204,6 +205,7 @@ namespace eka2l1 {
     void view_session::on_view_deactivation(const ui::view::view_id &id) {
         if (outstanding_deactivation_notify_) {
             if ((next_deactivation_id_ == ui::view::EMPTY_VIEW_ID) || (next_deactivation_id_ == id)) {
+                outstanding_deactivation_notify_ = false;
                 queue_.queue_event({ ui::view::view_event::event_deactive_notification, id, ui::view::EMPTY_VIEW_ID, 0, 0 });
             }
         }
