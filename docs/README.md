@@ -5,6 +5,8 @@ iOS port: symptom, how it was narrowed down, and the conclusion/fix. Newest firs
 
 | Date | Doc |
 |---|---|
+| 2026-11-22 | [ekalynx ARMv5/v6 interpreter on iOS](./ekalynx-interpreter.md) |
+| 2026-11-21 | [Thumb block interpretation on iOS](./thumb-block-interpreter.md) |
 | 2026-11-17 | [Guest and host filesystem paths](./PATH_TYPES.md) |
 | 2026-11-13 | [UIQ 3 bring-up contract review](./uiq3-bringup-review.md) |
 | 2026-10-30 | [Snakes Subsonic: RGB444 data on the N97 PostingSurface path](./ngage-snakes-rgb444-posting.md) |
