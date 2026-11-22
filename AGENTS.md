@@ -76,7 +76,7 @@ settling on a cause. Keep crash reports and downloaded symbols out of commits.
 ### Physical device
 
 For behavior the simulator cannot validate, use iPhone Air, UDID
-`77611A2B-2A02-51FA-BAFC-2104F1D8011A`, team `L6JP27B8YR`, with
+`00008150-00093CAC1A44401C`, team `L6JP27B8YR`, with
 `EKA2L1_IOS_DEVELOPMENT_TEAM` and `EKA2L1_IOS_DEVICE` for
 `scripts/build_ios.sh install`. The device must be unlocked. Retry empty or
 connection-reset `devicectl device copy from` results. If screen or sound cannot
