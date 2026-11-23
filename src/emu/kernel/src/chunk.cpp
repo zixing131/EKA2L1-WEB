@@ -143,8 +143,18 @@ namespace eka2l1 {
 
             if (err != mem::MEM_MODEL_CHUNK_ERR_OK) {
                 LOG_ERROR(KERNEL, "Failed to allocate mem model chunk: {}, error: {}", obj_name, err);
+                mmc_impl_unq_.reset();
+                mmc_impl_ = nullptr;
             } else {
-                mmc_impl_->adjust(bottom, top);
+                if (!mmc_impl_->adjust(bottom, top)) {
+                    if (mmc_impl_unq_) {
+                        mmc_impl_unq_.reset();
+                    } else {
+                        mmp->delete_chunk(mmc_impl_);
+                    }
+                    mmc_impl_ = nullptr;
+                    return;
+                }
 
                 // Clear the adjusted memory with clear byte.
                 // Note that the doc does not specify if this is used in future. I don't think it will.

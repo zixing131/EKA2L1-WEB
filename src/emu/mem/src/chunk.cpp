@@ -37,6 +37,10 @@ namespace eka2l1::mem {
     }
 
     bool mem_model_chunk::adjust(const vm_address bottom, const vm_address top) {
+        if (top > max() || (bottom != 0xFFFFFFFF && bottom > top)) {
+            return false;
+        }
+
         const std::size_t top_page_off = ((top + control_->page_size() - 1) >> control_->page_size_bits_);
         const std::size_t bottom_page_off = (bottom >> control_->page_size_bits_);
 

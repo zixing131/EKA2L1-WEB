@@ -108,6 +108,9 @@ if (EMSCRIPTEN)
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:--pre-js ${CMAKE_CURRENT_SOURCE_DIR}/src/web_network.js"
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        # Fixed increments bound unused headroom even after the guest has
+        # launched. The default 20% growth can add tens of unused MiB at once.
+        "SHELL:-s MEMORY_GROWTH_LINEAR_STEP=16777216"
         # Start at 160 MiB and grow shared memory as guests need it.
         "SHELL:-s INITIAL_MEMORY=167772160"
         # S60 5th Edition reserves large maximum sizes for many process heaps.

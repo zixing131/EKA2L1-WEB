@@ -8,6 +8,7 @@ inspect the screenshots to verify game initialization and key handling.
 import argparse
 import asyncio
 import json
+import math
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -35,6 +36,20 @@ async def run(args):
         # This test exercises installation/storage, not PWA updates. A worker
         # activating on first load can otherwise reload midway through setup.
         page = await browser.new_page(service_workers='allow' if args.service_worker else 'block')
+        if args.perf_mode:
+            await page.add_init_script(
+                f"localStorage.setItem('eka2l1_perf', {json.dumps(args.perf_mode)})")
+        if args.measure_fps:
+            await page.add_init_script("""(() => {
+                const peak = window.__ekaMemoryPeak = {heap: 0, malloc: 0};
+                setInterval(() => {
+                    const mod = window.EKA2L1?.module;
+                    if (!mod?._wasm_mem_stats) return;
+                    const stats = JSON.parse(mod.ccall('wasm_mem_stats', 'string'));
+                    peak.heap = Math.max(peak.heap, stats.heap);
+                    peak.malloc = Math.max(peak.malloc, stats.malloc);
+                }, 250);
+            })()""")
         permission_task = None
         if args.query_choice is not None:
             async def answer_system_queries():
@@ -249,6 +264,24 @@ async def run(args):
                     await page.locator('[data-key="' + key + '"]').first.click(delay=80, timeout=30000)
                     await asyncio.sleep(args.key_interval)
                     await page.screenshot(path=str(args.output / f'key-{index}-{key}.png'), timeout=15000)
+                if args.measure_fps:
+                    await page.screenshot(path=str(args.output / 'fps-start.png'))
+                    start = await page.evaluate(
+                        "({ time: performance.now(), redraws: EKA2L1.redrawCount() })")
+                    await asyncio.sleep(args.measure_fps)
+                    end = await page.evaluate("""({
+                        time: performance.now(), redraws: EKA2L1.redrawCount(),
+                        memory: window.__ekaMemoryPeak
+                    })""")
+                    elapsed = (end['time'] - start['time']) / 1000
+                    redraws = end['redraws'] - start['redraws']
+                    perf = {'seconds': elapsed, 'guest_redraws': redraws,
+                            'guest_fps': redraws / elapsed,
+                            'launch_peak_wasm_bytes': end['memory']['heap'],
+                            'launch_peak_malloc_bytes': end['memory']['malloc']}
+                    (args.output / 'fps.json').write_text(json.dumps(perf, indent=2))
+                    print('Performance', perf, flush=True)
+                    await page.screenshot(path=str(args.output / 'fps-end.png'))
                 if args.touch_keypad:
                     box = await page.locator('#canvas').bounding_box()
                     await page.mouse.move(box['x'] + box['width'] * .5, box['y'] + box['height'] * .8)
@@ -331,10 +364,16 @@ if __name__ == '__main__':
     parser.add_argument('--service-worker', action='store_true', help='Include PWA activation and update handling')
     parser.add_argument('--expect-install-error', action='store_true', help='Assert guest rejection and no new MIDlet card')
     parser.add_argument('--key-interval', type=float, default=8, help='Seconds to wait after each game key')
+    parser.add_argument('--perf-mode', choices=('auto', 'low', 'high'), help='Set the Web performance preset')
+    parser.add_argument('--measure-fps', type=float, default=0, metavar='SECONDS',
+                        help='Measure guest redraw FPS after the key sequence and record launch memory peaks')
     parser.add_argument('--keys', default='OK,LSK', help='Comma-separated keypad sequence after launch')
     parser.add_argument('--manual-permissions', action='store_true', help='Disable J2ME auto-allow to exercise permission dialogs')
     parser.add_argument('--query-choice', type=int, choices=(0, 1), help='Click this system-dialog button in the isolated test browser')
     parser.add_argument('--require-audio', action='store_true', help='Require nonzero PCM at a running browser AudioWorklet output')
     parser.add_argument('--require-network', action='store_true', help='Require completed TCP connections and received payload')
     parser.add_argument('--profile', action='store_true', help='Capture a renderer CPU profile through cold launch')
-    asyncio.run(run(parser.parse_args()))
+    options = parser.parse_args()
+    if not math.isfinite(options.measure_fps) or options.measure_fps < 0:
+        parser.error('--measure-fps must be a finite, nonnegative duration')
+    asyncio.run(run(options))

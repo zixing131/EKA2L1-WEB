@@ -75,6 +75,33 @@ TEST_CASE("chunk_creation_failure_leaves_the_out_pointer_alone", "mem") {
     }
 }
 
+TEST_CASE("small chunks can grow to their limit and release their guest reservation", "mem") {
+    mem_model_fixture fixture(mem::mem_model_type::multiple);
+    mem::mem_model_chunk_creation_info info{};
+    info.size = 0x3000;
+    info.flags = mem::MEM_MODEL_CHUNK_TYPE_NORMAL | mem::MEM_MODEL_CHUNK_REGION_USER_LOCAL;
+    info.perm = prot_read_write;
+
+    mem::mem_model_chunk *chunk = nullptr;
+    REQUIRE(fixture.process->create_chunk(chunk, info) == mem::MEM_MODEL_CHUNK_ERR_OK);
+    const auto base = chunk->base(fixture.process.get());
+#ifdef __EMSCRIPTEN__
+    CHECK(chunk->max() == info.size);
+#endif
+    REQUIRE(chunk->adjust(0, 0x1000));
+    auto *first = static_cast<std::uint8_t *>(chunk->host_base());
+    first[0] = 42;
+    REQUIRE(chunk->adjust(0, static_cast<address>(info.size)));
+    CHECK(fixture.process->get_pointer(base + 0x2000) == first + 0x2000);
+    CHECK(first[0] == 42);
+    CHECK_FALSE(chunk->adjust(0, static_cast<address>(chunk->max() + 1)));
+    CHECK(chunk->top() == info.size);
+    fixture.process->delete_chunk(chunk);
+
+    REQUIRE(fixture.process->create_chunk(chunk, info) == mem::MEM_MODEL_CHUNK_ERR_OK);
+    CHECK(chunk->base(fixture.process.get()) == base);
+}
+
 TEST_CASE("chunk_creation_failure_does_not_leak_a_slot", "mem") {
     // The multiple model reserves a chunk slot before do_create() runs, and a
     // process only gets MAX_CHUNK_ALLOW_PER_PROCESS of them. Keeping the slot on

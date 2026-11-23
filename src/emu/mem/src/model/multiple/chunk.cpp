@@ -399,6 +399,17 @@ namespace eka2l1::mem {
 
         base_ = addr;
         committed_ = 0;
+        guest_reservation_size_ = max_size_;
+
+#if EKA2L1_PLATFORM(WASM)
+        // Guest addresses still reserve entire page-table ranges. The host
+        // backing only needs to cover the page-rounded maximum requested by
+        // the caller, including any future commits up to that maximum.
+        if (create_info.addr == 0 && !create_info.host_map) {
+            const std::size_t page_mask = control_->page_size() - 1;
+            max_size_ = (create_info.size + page_mask) & ~page_mask;
+        }
+#endif
 
         page_tabs_.resize(((base_ & control_->chunk_mask_) + max_size_ + control_->chunk_mask_) >> control_->chunk_shift_);
         std::fill(page_tabs_.begin(), page_tabs_.end(), 0xFFFFFFFF);
@@ -448,11 +459,12 @@ namespace eka2l1::mem {
         }
 
         // Free the region that previously allocated from the allocator
-        if (!(create_flags_ & MEM_MODEL_CHUNK_INTERNAL_FORCE_FILL)) {
+        if (guest_reservation_size_ && !(create_flags_ & MEM_MODEL_CHUNK_INTERNAL_FORCE_FILL)) {
             linear_section *sec = get_section(create_flags_);
 
             if (sec)
-                sec->alloc_.deallocate((base_ - sec->beg_) >> control_->page_size_bits_, max_size_ >> control_->page_size_bits_);
+                sec->alloc_.deallocate((base_ - sec->beg_) >> control_->page_size_bits_,
+                    guest_reservation_size_ >> control_->page_size_bits_);
         }
 
         if (is_code) {

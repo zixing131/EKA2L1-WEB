@@ -43,6 +43,7 @@ namespace eka2l1::mem {
 
         std::size_t committed_{ 0 };
         std::size_t max_size_{ 0 };
+        std::size_t guest_reservation_size_{ 0 };
 
         std::vector<std::uint32_t> page_tabs_;
         std::vector<asid> attached_asids_;
