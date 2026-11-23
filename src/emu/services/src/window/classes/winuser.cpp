@@ -200,7 +200,7 @@ namespace eka2l1::epoc {
         }
         attachment.last_revision = source.prepared_revision();
 
-        const int native_rotation = (flags & flag_fix_native_orientation) ? (scr->current_mode().rotation + 180) % 360 : 0;
+        const int native_rotation = (flags & flag_fix_native_orientation) ? (360 - scr->current_mode().rotation) % 360 : 0;
         const auto placement = place_surface(attachment.config, abs_rect, source.size(), scr->display_scale_factor, native_rotation);
         common::region clip;
         clip.add_rect(placement.clip);
@@ -243,6 +243,20 @@ namespace eka2l1::epoc {
 
         if (!pending_segment_) {
             pending_segment_ = std::make_unique<gdi_store_command_segment>();
+            if (last_clip_command_.opcode_ != gdi_store_command_invalid) {
+                pending_segment_->add_command(last_clip_command_);
+            }
+        }
+
+        switch (command.opcode_) {
+        case gdi_store_command_set_clip_rect_single:
+        case gdi_store_command_set_clip_rect_multiple:
+        case gdi_store_command_disable_clip:
+            last_clip_command_ = command;
+            break;
+
+        default:
+            break;
         }
 
         if (command.opcode_ == gdi_store_command_draw_bitmap) {
@@ -271,12 +285,25 @@ namespace eka2l1::epoc {
                 data.mask_drv_ = bcache->add_or_get(drv, mask_bitmap_bw, nullptr, &new_update_command_mask);
             }
 
+            // Upload now: the cache already records these textures as current, and this window's
+            // pending segment may be discarded or never built (hidden or destroyed window).
+            gdi_store_command_segment uploads;
             if (new_update_command_main.opcode_ != gdi_store_command_invalid) {
-                pending_segment_->add_command(new_update_command_main);
+                uploads.add_command(new_update_command_main);
             }
 
             if (new_update_command_mask.opcode_ != gdi_store_command_invalid) {
-                pending_segment_->add_command(new_update_command_mask);
+                uploads.add_command(new_update_command_mask);
+            }
+
+            if (!uploads.commands_.empty()) {
+                drivers::graphics_command_builder upload_builder;
+                gdi_command_builder upload_gdi(drv, upload_builder, *bcache, drivers::filter_option::linear, eka2l1::vec2(0, 0),
+                    1.0f, common::region{});
+                upload_gdi.build_texture_updates(uploads);
+
+                drivers::command_list upload_list = upload_builder.retrieve_command_list();
+                drv->submit_command_list(upload_list);
             }
         }
 
@@ -454,6 +481,7 @@ namespace eka2l1::epoc {
 
         if (vis) {
             flags |= flags_visible;
+            on_shown();
         } else {
             // Purge all queued events now that the window is not visible anymore
             client->walk_event(should_purge_canvas_base, this);
@@ -698,12 +726,44 @@ namespace eka2l1::epoc {
         invalidate(bounding_rect());
     }
 
+    struct pending_redraw_walker : public window_tree_walker {
+        bool do_it(epoc::window *win) override {
+            if (win->type == window_kind::client) {
+                reinterpret_cast<canvas_base *>(win)->requeue_pending_redraw();
+            }
+
+            return false;
+        }
+    };
+
+    void canvas_base::on_shown() {
+        // Invalidations made while this window or a parent was hidden never reached the client.
+        // WSERV queues them when the hidden state clears (CWsRedrawMsgWindow::VisibleRegionChange).
+        requeue_pending_redraw();
+
+        pending_redraw_walker walker;
+        walk_tree(&walker, epoc::window_tree_walk_style::bonjour_children);
+    }
+
+    void redraw_msg_canvas::requeue_pending_redraw() {
+        if (!is_visible() || redraw_region.rects_.empty()) {
+            return;
+        }
+
+        for (const auto &rect : redraw_region.rects_) {
+            client->queue_redraw(this, rect);
+        }
+
+        client->trigger_redraw();
+    }
+
     void canvas_base::activate(service::ipc_context &context, ws_cmd &cmd) {
         flags |= flags_active;
         on_activate();
 
         if (is_visible()) {
             scr->need_update_visible_regions(true);
+            on_shown();
         }
 
         context.complete(epoc::error_none);
@@ -1496,7 +1556,9 @@ namespace eka2l1::epoc {
                 draw_surface(builder, background_surface_);
             }
             drivers::command_list cmd_list = driver_builder_.retrieve_command_list();
-            if (pending_segment_) {
+            // An earlier scheduled refresh can run before EndRedraw; keep the
+            // unfinished commands queued just like the pending redraw-store segment.
+            if (pending_segment_ && !(flags & flags_in_redraw)) {
                 builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
 
                 gdi_command_builder gdi_builder(client->get_ws().get_graphics_driver(), builder,
@@ -1694,9 +1756,11 @@ namespace eka2l1::epoc {
         }
 
         if (pending_segment_) {
+            common::region bitmap_region;
+            bitmap_region.add_rect(bounding_rect());
             gdi_command_builder gdi_builder(client->get_ws().get_graphics_driver(), driver_builder_,
                 *client->get_ws().get_bitmap_cache(), drivers::filter_option::linear, eka2l1::vec2(0, 0),
-                1.0f, common::region{});
+                1.0f, bitmap_region);
 
             gdi_builder.build_segment(*pending_segment_);
             pending_segment_.reset();
@@ -1745,6 +1809,11 @@ namespace eka2l1::epoc {
 
             if (driver_win_id == 0) {
                 driver_win_id = drivers::create_bitmap(drv, abs_rect.size, 32);
+                // Symbian initializes backup bitmaps with the default white background.
+                cmd_builder.bind_bitmap(driver_win_id);
+                cmd_builder.set_feature(drivers::graphics_feature::clipping, false);
+                cmd_builder.set_feature(drivers::graphics_feature::stencil_test, false);
+                cmd_builder.clear(eka2l1::vecx<float, 6>({ 1, 1, 1, 1, 1, 0 }), drivers::draw_buffer_bit_color_buffer);
             } else {
                 cmd_builder.resize_bitmap(driver_win_id, abs_rect.size);
             }

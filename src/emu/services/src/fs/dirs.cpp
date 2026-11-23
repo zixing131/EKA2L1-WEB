@@ -320,8 +320,8 @@ namespace eka2l1 {
 
         size_t queried_entries = 0;
 
-        // 4 is for info (length + descriptor type)
-        size_t entry_no_name_size = epoc::fs::entry_standard_size + 4 + 8;
+        // Four bytes for the descriptor type and length.
+        constexpr std::size_t entry_header_size = epoc::fs::entry_standard_size + 4;
 
         kernel_system *kern = ctx->sys->get_kernel_system();
         io_system *io = ctx->sys->get_io_system();
@@ -340,27 +340,23 @@ namespace eka2l1 {
                 return;
             }
 
-            // The name length in the packed stream is the UCS-2 character
-            // count: info->name is UTF-8, where multibyte characters (CJK
-            // file names) made the write stride larger than the descriptor
-            // length the client advances by, desyncing every following entry.
-            const std::size_t name_bytes = common::utf8_to_ucs2(info->name).length() * 2;
+            epoc::fs::build_symbian_entry_from_emulator_entry(io, info.value(), entry);
+            const std::size_t name_bytes = entry.name.get_length() * sizeof(char16_t);
+            const auto name_stride = common::align(name_bytes, 4);
+            const auto packed_size = entry_header_size + name_stride + (should_support_64bit_size ? 8 : 0);
 
-            if (entry_buf + entry_no_name_size + common::align(name_bytes, 4) + 4 > entry_buf_end) {
+            if (packed_size > static_cast<std::size_t>(entry_buf_end - entry_buf)) {
                 break;
             }
 
-            epoc::fs::build_symbian_entry_from_emulator_entry(io, info.value(), entry);
             if (eka2l1_shell_leave_probe && ctx->msg->own_thr->name() == "xnthemeserver") {
                 LOG_WARN(SERVICE_EFSRV, "[shell-fs] DirRead name='{}' attrib=0x{:X}", info->name, entry.attrib);
             }
-            const std::uint32_t entry_write_size = epoc::fs::entry_standard_size + 4;
-
-            memcpy(entry_buf, &entry, entry_write_size);
-            entry_buf += entry_write_size;
+            memcpy(entry_buf, &entry, entry_header_size);
+            entry_buf += entry_header_size;
 
             memcpy(entry_buf, &entry.name.data[0], name_bytes);
-            entry_buf += common::align(name_bytes, 4);
+            entry_buf += name_stride;
 
             if (should_support_64bit_size) {
                 // Epoc10 uses two reserved bytes
