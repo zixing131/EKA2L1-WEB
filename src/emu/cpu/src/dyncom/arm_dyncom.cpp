@@ -40,6 +40,9 @@ namespace eka2l1::arm {
     }
 
     dyncom_core::~dyncom_core() {
+#ifdef __EMSCRIPTEN__
+        state_->clear_jit_blocks();
+#endif
     }
 
     void dyncom_core::run(const std::uint32_t instruction_count) {

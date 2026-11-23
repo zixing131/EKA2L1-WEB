@@ -15,7 +15,16 @@
 bool AddOverflow(std::uint32_t, std::uint32_t, std::uint32_t);
 bool SubOverflow(std::uint32_t, std::uint32_t, std::uint32_t);
 
-std::uint32_t AddWithCarry(std::uint32_t, std::uint32_t, std::uint32_t, bool *, bool *);
+inline std::uint32_t AddWithCarry(std::uint32_t left, std::uint32_t right,
+    std::uint32_t carry_in, bool *carry_out, bool *overflow) {
+    const std::uint64_t sum = static_cast<std::uint64_t>(left) + right + carry_in;
+    const auto result = static_cast<std::uint32_t>(sum);
+    if (carry_out)
+        *carry_out = (sum >> 32) != 0;
+    if (overflow)
+        *overflow = ((~(left ^ right) & (left ^ result)) >> 31) != 0;
+    return result;
+}
 bool ARMul_AddOverflowQ(std::uint32_t, std::uint32_t);
 
 std::uint8_t ARMul_SignedSaturatedAdd8(std::uint8_t, std::uint8_t);

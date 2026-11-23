@@ -140,6 +140,9 @@ bool check_memory_bailouts() {
         const auto before = dyncom_jit::stat_jit_instrs;
         for (unsigned i = 0; i < 40; ++i) run(0x3000);
         if (dyncom_jit::stat_jit_instrs == before) return false;
+        core->set_pc(code_base);
+        core->step();
+        if (core->get_pc() != code_base + 4 || core->get_num_instruction_executed() != 1) return false;
 
         // Page-zero permission sentinel collides with a resident read-only
         // page in the same TLB slot. Neither loads nor stores may use it.
@@ -157,7 +160,7 @@ bool check_memory_bailouts() {
         run(0x3FFE);
         if (core->get_reg(0) != expected || env.mem[0x8FFE] != 0xCC) return false;
     }
-    std::printf("PASS: compiled loads/stores bail on page-zero aliases and split pages\n");
+    std::puts("PASS: compiled memory blocks respect single steps and bail on invalid TLB spans");
     return true;
 }
 
@@ -168,6 +171,21 @@ int main() {
     }
     diff_env interp_env, jit_env;
     auto interp = make_core(interp_env), jit = make_core(jit_env);
+    dyncom_jit::enabled_default = 0;
+    if (!check_thumb_pairs(interp_env, *interp)) {
+        std::puts("FAIL: Thumb pair flags, PC or instruction budget");
+        return 1;
+    }
+    if (!check_thumb_counted_loop(interp_env, *interp)) {
+        std::puts("FAIL: Thumb counted loop across pages or instruction budgets");
+        return 1;
+    }
+    std::puts("PASS: Thumb instruction pairs and counted loops respect instruction budgets and memory boundaries");
+    if (!check_arm_counted_loops(interp_env, *interp, jit_env, *jit)) {
+        std::puts("FAIL: ARM counted-loop batch differs from exact single steps");
+        return 1;
+    }
+    std::puts("PASS: ARM counted-loop batches match single steps across 240 generated programs");
     std::mt19937 rng(0xA32);
     std::uint64_t checked = 0;
     for (unsigned opcode : {2, 3, 4, 5, 6, 7, 10, 11}) {

@@ -75,6 +75,8 @@ set(SOURCE_DYNCOM
         src/dyncom/arm_dyncom_thumb.cpp
         src/dyncom/arm_dyncom_trans.cpp
         src/dyncom/arm_dyncom_wasmjit.cpp
+        src/dyncom/arm_counted_loop.inl
+        src/dyncom/thumb_counted_loop.inl
         include/cpu/dyncom/arm_dyncom_jit.h
         src/dyncom/armstate.cpp
         src/dyncom/armsupp.cpp)

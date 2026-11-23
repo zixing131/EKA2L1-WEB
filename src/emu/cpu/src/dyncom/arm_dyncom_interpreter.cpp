@@ -5,12 +5,14 @@
 #define CITRA_IGNORE_EXIT(x)
 
 #include <algorithm>
+#include <bit>
 #include <cinttypes>
 #include <common/log.h>
 #include <common/time.h>
 #include <common/types.h>
 #include <cpu/dyncom/arm_dyncom_dec.h>
 #include <cpu/dyncom/arm_dyncom_interpreter.h>
+#include <cpu/dyncom/arm_dyncom_jit.h>
 #include <cpu/dyncom/arm_dyncom_run.h>
 #include <cpu/dyncom/arm_dyncom_thumb.h>
 #include <cpu/dyncom/arm_dyncom_trans.h>
@@ -18,6 +20,7 @@
 #include <cpu/dyncom/armsupp.h>
 #include <cpu/dyncom/vfp/vfp.h>
 #include <cstdio>
+#include <cstring>
 
 #include <cpu/arm_interface.h>
 
@@ -26,10 +29,7 @@
 
 #define glue(x, y) x##y
 #define DPO(s) glue(DataProcessingOperands, s)
-#define ROTATE_RIGHT(n, i, l) ((n << (l - i)) | (n >> i))
-#define ROTATE_LEFT(n, i, l) ((n >> (l - i)) | (n << i))
-#define ROTATE_RIGHT_32(n, i) ROTATE_RIGHT(n, i, 32)
-#define ROTATE_LEFT_32(n, i) ROTATE_LEFT(n, i, 32)
+#define ROTATE_RIGHT_32(n, i) std::rotr(static_cast<std::uint32_t>(n), (i))
 
 static bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
     const bool n_flag = cpu->NFlag != 0;
@@ -85,17 +85,6 @@ static inline int CountSetBits16(unsigned int v) {
     v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
     return static_cast<int>((((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24);
 #endif
-}
-
-static unsigned int DPO(Immediate)(ARMul_State *cpu, unsigned int sht_oper) {
-    unsigned int immed_8 = BITS(sht_oper, 0, 7);
-    unsigned int rotate_imm = BITS(sht_oper, 8, 11);
-    unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
-    if (rotate_imm == 0)
-        cpu->shifter_carry_out = cpu->CFlag;
-    else
-        cpu->shifter_carry_out = BIT(shifter_operand, 31);
-    return shifter_operand;
 }
 
 static unsigned int DPO(Register)(ARMul_State *cpu, unsigned int sht_oper) {
@@ -683,8 +672,6 @@ unsigned int GetShifterOp(unsigned int inst) {
 // frequency.
 static unsigned int EvalShifterOperand(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
     switch (idx) {
-    case SHTOP_IMMEDIATE:
-        return DPO(Immediate)(cpu, sht_oper);
     case SHTOP_REGISTER:
         return DPO(Register)(cpu, sht_oper);
     case SHTOP_LSL_IMM:
@@ -856,27 +843,22 @@ static void EvalGetAddr(ARMul_State *cpu, unsigned int idx, unsigned int inst, u
 #endif
 
 DYNCOM_FORCE_INLINE static unsigned int ShtOpEval(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
-    if (idx == SHTOP_IMMEDIATE) {
-        unsigned int immed_8 = BITS(sht_oper, 0, 7);
-        unsigned int rotate_imm = BITS(sht_oper, 8, 11);
-        unsigned int shifter_operand = ROTATE_RIGHT_32(immed_8, rotate_imm * 2);
-        if (rotate_imm == 0)
-            cpu->shifter_carry_out = cpu->CFlag;
-        else
-            cpu->shifter_carry_out = BIT(shifter_operand, 31);
-        return shifter_operand;
+    if (idx <= SHTOP_ROTATED_IMMEDIATE) {
+        cpu->shifter_carry_out = (idx == SHTOP_IMMEDIATE) ? cpu->CFlag : (sht_oper >> 31);
+        return sht_oper;
+    }
+    if (idx == SHTOP_REGISTER) {
+        return DPO(Register)(cpu, sht_oper);
     }
     return EvalShifterOperand(cpu, idx, sht_oper);
 }
 
-DYNCOM_FORCE_INLINE static void GetAddrEval(ARMul_State *cpu, unsigned int idx, unsigned int inst, unsigned int &virt_addr) {
-    if (idx == ADDRMODE_LNSW_IMM_OFFSET) {
-        unsigned int Rn = BITS(inst, 16, 19);
-        unsigned int rn = CHECK_READ_REG15_WA(cpu, Rn);
-        virt_addr = U_BIT ? (rn + OFFSET_12) : (rn - OFFSET_12);
+DYNCOM_FORCE_INLINE static void GetAddrEval(ARMul_State *cpu, const ldst_inst *decoded, unsigned int &virt_addr) {
+    if (decoded->addr_mode == ADDRMODE_LNSW_IMM_OFFSET) {
+        virt_addr = CHECK_READ_REG15_WA(cpu, decoded->base_register) + decoded->immediate_offset;
         return;
     }
-    EvalGetAddr(cpu, idx, inst, virt_addr);
+    EvalGetAddr(cpu, decoded->addr_mode, decoded->inst, virt_addr);
 }
 
 enum { FETCH_SUCCESS,
@@ -993,6 +975,36 @@ static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
     }
 }
 
+static void FuseInstructionPair(arm_inst *left, const arm_inst *right, bool thumb) {
+    const auto &indices = eka2l1::arm::dyncom_jit::indices;
+    if (left->idx == indices.cmp) {
+        const bool conditional_branch = thumb ? right->idx == indices.b_cond_thumb
+                                              : right->idx == indices.bbl && right->cond < ConditionCode::AL;
+        if (conditional_branch) left->fusion = TransFusion::COMPARE_BRANCH;
+    } else if (thumb && left->idx == indices.mov && right->idx == indices.mov) {
+        const auto &first = *reinterpret_cast<const mov_inst *>(left->component);
+        const auto &second = *reinterpret_cast<const mov_inst *>(right->component);
+        if (left->cond == ConditionCode::AL && right->cond == ConditionCode::AL
+            && first.shtop_idx == SHTOP_LSL_IMM && second.shtop_idx == SHTOP_LSR_IMM
+            && first.S && second.S && first.Rd < 8 && second.Rd < 8
+            && (first.shifter_operand & 15) < 8 && (second.shifter_operand & 15) == first.Rd) {
+            left->fusion = TransFusion::THUMB_SHIFT_PAIR;
+        }
+    }
+}
+
+#include "arm_counted_loop.inl"
+#include "thumb_counted_loop.inl"
+
+template <typename Loop>
+static void AttachCountedLoop(ARMul_State *cpu, std::size_t bb_start, const Loop &loop) {
+    const auto offset = cpu->trans_cache_buf_top - bb_start;
+    auto *first = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[bb_start]);
+    first->loop_offset = static_cast<std::uint16_t>(offset);
+    std::memcpy(&cpu->trans_cache_buf[cpu->trans_cache_buf_top], &loop, sizeof(loop));
+    cpu->trans_cache_buf_top += (sizeof(loop) + 7) & ~std::size_t{7};
+}
+
 static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     // Decode instruction, get index
     // Allocate memory and init InsCream
@@ -1000,7 +1012,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     // Save start addr of basicblock in CreamCache
     ARM_INST_PTR inst_base = nullptr;
     TransExtData ret = TransExtData::NON_BRANCH;
-    int size = 0; // instruction size of basic block
+    arm_inst *prev = nullptr;
     maybe_flush_instruction_cache(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
@@ -1014,8 +1026,8 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
             return FETCH_EXCEPTION;
         }
 
-        size++;
-
+        if (prev) FuseInstructionPair(prev, inst_base, cpu->TFlag != 0);
+        prev = inst_base;
         phys_addr += inst_size;
 
         if ((phys_addr & 0xfff) == 0) {
@@ -1023,6 +1035,26 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
         }
         ret = inst_base->br;
     };
+
+    // Attach fast-loop data after the ordinary stream. The WASM compiler
+    // still sees the same instruction indices and terminates at the branch.
+    if (cpu->TFlag && inst_base->idx == eka2l1::arm::dyncom_jit::indices.b_cond_thumb) {
+        const auto &branch = *reinterpret_cast<const b_cond_thumb *>(inst_base->component);
+        if (branch.cond == ConditionCode::LT && phys_addr + 2 + branch.imm == pc_start) {
+            thumb_counted_loop loop;
+            if (analyze_thumb_counted_loop(cpu, pc_start, loop)) {
+                AttachCountedLoop(cpu, bb_start, loop);
+            }
+        }
+    } else if (!cpu->TFlag && inst_base->idx == eka2l1::arm::dyncom_jit::indices.bbl
+        && inst_base->cond == ConditionCode::NE) {
+        const auto &branch = *reinterpret_cast<const bbl_inst *>(inst_base->component);
+        if (!branch.L && phys_addr + 4 + branch.signed_immed_24 == pc_start) {
+            arm_counted_loop loop;
+            if (analyze_arm_counted_loop(cpu, pc_start, phys_addr - 4, loop))
+                AttachCountedLoop(cpu, bb_start, loop);
+        }
+    }
 
     cpu->instruction_cache[cpu->make_instruction_cache_key(pc_start)] = bb_start;
     cpu->mark_code_page(pc_start);
@@ -1140,19 +1172,19 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define WASM_DYNCOM_YIELD_CHECK
 #endif
 
+#define ENTER_NEXT_INSTRUCTION                  \
+    if (num_instrs >= cpu->NumInstrsToExecute)  \
+        goto END;                               \
+    WASM_DYNCOM_YIELD_CHECK;                    \
+    ++num_instrs
+
 #if defined __GNUC__ || defined __clang__
 #define GOTO_NEXT_INST                         \
-    if (num_instrs >= cpu->NumInstrsToExecute) \
-        goto END;                              \
-    num_instrs++;                              \
-    WASM_DYNCOM_YIELD_CHECK;                   \
+    ENTER_NEXT_INSTRUCTION;                    \
     goto *InstLabel[inst_base->idx]
 #else
 #define GOTO_NEXT_INST                         \
-    if (num_instrs >= cpu->NumInstrsToExecute) \
-        goto END;                              \
-    num_instrs++;                              \
-    WASM_DYNCOM_YIELD_CHECK;                   \
+    ENTER_NEXT_INSTRUCTION;                    \
     switch (inst_base->idx) {                  \
     case 0:                                    \
         goto VMLA_INST;                        \
@@ -1824,10 +1856,11 @@ DISPATCH : {
     // Find the cached instruction cream, otherwise translate it...
     {
         const std::uint32_t dispatch_pc = cpu->Reg[15];
+        const std::uint32_t dispatch_tag = dispatch_pc | (cpu->TFlag != 0);
         const std::uint32_t dispatch_asid = cpu->instruction_cache_asid;
         ARMul_State::block_lookup_entry &bl_entry = cpu->block_lookup_ref(dispatch_pc);
 
-        if ((bl_entry.pc == dispatch_pc) && (bl_entry.asid == dispatch_asid)
+        if ((bl_entry.pc == dispatch_tag) && (bl_entry.asid == dispatch_asid)
             && (bl_entry.generation == cpu->block_lookup_generation)) {
             ptr = bl_entry.ptr;
         } else {
@@ -1843,7 +1876,7 @@ DISPATCH : {
                     goto END;
             }
 
-            bl_entry.pc = dispatch_pc;
+            bl_entry.pc = dispatch_tag;
             bl_entry.asid = dispatch_asid;
             bl_entry.generation = cpu->block_lookup_generation;
             bl_entry.ptr = ptr;
@@ -1860,7 +1893,9 @@ DISPATCH : {
         }
 
 #ifdef __EMSCRIPTEN__
-        if ((eka2l1::arm::dyncom_jit::enabled_default != 0)) {
+        // A debugger step can land on a warmed block. It must execute just
+        // one guest instruction even when a compiled block is available.
+        if ((eka2l1::arm::dyncom_jit::enabled_default != 0) && cpu->NumInstrsToExecute != 1) {
             if (bl_entry.jit_idx > 0) {
                 cpu->jit_chain_depth = 0; // defensive: chain calls keep it balanced
                 const int executed = eka2l1::arm::dyncom_jit::call(bl_entry.jit_idx, cpu);
@@ -1894,7 +1929,28 @@ DISPATCH : {
 #endif
     }
 
-    inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr];
+    inst_base = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[ptr]);
+    if (inst_base->loop_offset && cpu->NumInstrsToExecute > num_instrs) {
+        const auto *loop_data = &cpu->trans_cache_buf[ptr + inst_base->loop_offset];
+        // Bound work between browser yields and off-thread invalidation checks.
+        const auto remaining = cpu->NumInstrsToExecute - num_instrs;
+        const auto executed = cpu->TFlag
+            ? run_thumb_counted_loop(cpu, *reinterpret_cast<const thumb_counted_loop *>(loop_data),
+                  std::min<std::uint64_t>(remaining, 1024))
+            : run_arm_counted_loop(cpu, *reinterpret_cast<const arm_counted_loop *>(loop_data),
+                  static_cast<std::uint32_t>(std::min<std::uint64_t>(remaining, 8192)));
+        if (executed) {
+            num_instrs += executed;
+            if (num_instrs >= cpu->NumInstrsToExecute) goto END;
+#ifdef __EMSCRIPTEN__
+            if (eka2l1::common::get_current_utc_time_in_microseconds_since_epoch() >= wasm_dyncom_deadline_us) {
+                wasm_dyncom_deadline_hit = true;
+                goto END;
+            }
+#endif
+            goto DISPATCH;
+        }
+    }
     GOTO_NEXT_INST;
 }
 ADC_INST : {
@@ -1934,22 +1990,11 @@ ADC_INST : {
 ADD_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         add_inst *const inst_cream = (add_inst *)inst_base->component;
-        std::uint32_t rn_val = 0;
-
-        // The ADR thumb instruction got disguised, under ADD. However unlike the other,
-        // it uses aligned PC. So have to check
-        if (cpu->TFlag) {
-            std::uint32_t inst = cpu->ReadCode(cpu->Reg[15] & 0xFFFFFFFC);
-            inst = GetThumbInstruction(inst, cpu->Reg[15]);
-
-            if (((inst & 0xF800) >> 11) == 20) {
-                rn_val = CHECK_READ_REG15_WA(cpu, inst_cream->Rn);
-            } else {
-                rn_val = CHECK_READ_REG15(cpu, inst_cream->Rn);
-            }
-        } else {
-            rn_val = CHECK_READ_REG15_WA(cpu, inst_cream->Rn);
-        }
+        // Thumb ADR decodes to ADD (immediate) with Rn == PC. High-register
+        // Thumb ADD uses the ordinary PC rule, including at halfword offsets.
+        const std::uint32_t rn_val = (!cpu->TFlag || inst_cream->I)
+            ? CHECK_READ_REG15_WA(cpu, inst_cream->Rn)
+            : CHECK_READ_REG15(cpu, inst_cream->Rn);
 
         bool carry;
         bool overflow;
@@ -2211,7 +2256,13 @@ CMP_INST : {
     }
     cpu->Reg[15] += cpu->GetInstructionSize();
     INC_PC(sizeof(cmp_inst));
+    const bool fused_branch = inst_base->fusion == TransFusion::COMPARE_BRANCH;
     FETCH_INST;
+    if (fused_branch) {
+        ENTER_NEXT_INSTRUCTION;
+        if (cpu->TFlag) goto B_COND_THUMB;
+        goto BBL_INST;
+    }
     GOTO_NEXT_INST;
 }
 CPS_INST : {
@@ -2302,7 +2353,7 @@ LDC_INST : {
 LDM_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         // Per-instruction block cursor: the register list walks one contiguous
         // run, so resolve the host page once instead of per word.
@@ -2393,7 +2444,7 @@ SXTH_INST : {
 }
 LDR_INST : {
     ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+    GetAddrEval(cpu, inst_cream, addr);
 
     unsigned int value = cpu->ReadMemory32(addr);
     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2414,7 +2465,7 @@ LDR_INST : {
 LDRCOND_INST : {
     if (CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         unsigned int value = cpu->ReadMemory32(addr);
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
@@ -2457,7 +2508,7 @@ UXTAH_INST : {
 LDRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
     }
@@ -2469,7 +2520,7 @@ LDRB_INST : {
 LDRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2490,7 +2541,7 @@ LDRD_INST : {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
         // addr[2] == 0)
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
         // wouldn't do this as a single read.
@@ -2561,7 +2612,7 @@ LDREXD_INST : {
 LDRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
     }
@@ -2573,7 +2624,7 @@ LDRH_INST : {
 LDRSB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
         unsigned int value = cpu->ReadMemory8(addr);
         if (BIT(value, 7)) {
             value |= 0xffffff00;
@@ -2588,7 +2639,7 @@ LDRSB_INST : {
 LDRSH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         unsigned int value = cpu->ReadMemory16(addr);
         if (BIT(value, 15)) {
@@ -2604,7 +2655,7 @@ LDRSH_INST : {
 LDRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         const std::uint32_t dest_index = BITS(inst_cream->inst, 12, 15);
         const std::uint32_t previous_mode = cpu->Mode;
@@ -2675,6 +2726,29 @@ MLA_INST : {
     GOTO_NEXT_INST;
 }
 MOV_INST : {
+    if (inst_base->fusion == TransFusion::THUMB_SHIFT_PAIR) {
+        const auto &first = *reinterpret_cast<const mov_inst *>(inst_base->component);
+        const auto shifted = DPO(LogicalShiftLeftByImmediate)(cpu, first.shifter_operand);
+        cpu->Reg[first.Rd] = shifted;
+        UPDATE_NFLAG(shifted);
+        UPDATE_ZFLAG(shifted);
+        UPDATE_CFLAG_WITH_SC;
+        cpu->Reg[15] += 2;
+        INC_PC(sizeof(mov_inst));
+        FETCH_INST;
+
+        ENTER_NEXT_INSTRUCTION;
+        const auto &second = *reinterpret_cast<const mov_inst *>(inst_base->component);
+        const auto result = DPO(LogicalShiftRightByImmediate)(cpu, second.shifter_operand);
+        cpu->Reg[second.Rd] = result;
+        UPDATE_NFLAG(result);
+        UPDATE_ZFLAG(result);
+        UPDATE_CFLAG_WITH_SC;
+        cpu->Reg[15] += 2;
+        INC_PC(sizeof(mov_inst));
+        FETCH_INST;
+        GOTO_NEXT_INST;
+    }
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         mov_inst *inst_cream = (mov_inst *)inst_base->component;
 
@@ -3078,7 +3152,7 @@ RFE_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream, address);
 
     cpu->Cpsr = cpu->ReadMemory32(address);
     cpu->Reg[15] = cpu->ReadMemory32(address + 4);
@@ -3739,7 +3813,7 @@ SRS_INST : {
     ldst_inst *const inst_cream = (ldst_inst *)inst_base->component;
 
     std::uint32_t address = 0;
-    GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, address);
+    GetAddrEval(cpu, inst_cream, address);
 
     cpu->WriteMemory32(address + 0, cpu->Reg[14]);
     cpu->WriteMemory32(address + 4, cpu->Spsr_copy);
@@ -3818,7 +3892,7 @@ STM_INST : {
         unsigned int Rn = BITS(inst, 16, 19);
         unsigned int old_RN = cpu->Reg[Rn];
 
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         // Per-instruction block cursor: the register list walks one contiguous
         // run, so resolve the host page once instead of per word.
@@ -3893,7 +3967,7 @@ SXTB_INST : {
 STR_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         unsigned int reg = BITS(inst_cream->inst, 12, 15);
         unsigned int value = cpu->Reg[reg];
@@ -3933,7 +4007,7 @@ UXTAB_INST : {
 STRB_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
         cpu->WriteMemory8(addr, value);
     }
@@ -3945,7 +4019,7 @@ STRB_INST : {
 STRBT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
@@ -3962,7 +4036,7 @@ STRBT_INST : {
 STRD_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
         // so STRD wouldn't store these as a single write.
@@ -4034,7 +4108,7 @@ STREXH_INST : {
 STRH_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
         cpu->WriteMemory16(addr, value);
@@ -4047,7 +4121,7 @@ STRH_INST : {
 STRT_INST : {
     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
         ldst_inst *inst_cream = (ldst_inst *)inst_base->component;
-        GetAddrEval(cpu, inst_cream->addr_mode, inst_cream->inst, addr);
+        GetAddrEval(cpu, inst_cream, addr);
 
         const std::uint32_t previous_mode = cpu->Mode;
         const std::uint32_t rt_index = BITS(inst_cream->inst, 12, 15);
@@ -4178,7 +4252,7 @@ SXTB16_INST : {
         std::uint32_t rn_val = RN;
 
         if (rotation)
-            rm_val = ((rm_val << (32 - rotation)) | (rm_val >> rotation));
+            rm_val = std::rotr(rm_val, rotation);
 
         // SXTB16
         if (inst_cream->Rn == 15) {
@@ -4752,7 +4826,7 @@ UXTB16_INST : {
         const std::uint8_t rn_idx = inst_cream->Rn;
         const std::uint32_t rm_val = RM;
         const std::uint32_t rotation = inst_cream->rotate * 8;
-        const std::uint32_t rotated_rm = ((rm_val << (32 - rotation)) | (rm_val >> rotation));
+        const std::uint32_t rotated_rm = std::rotr(rm_val, rotation);
 
         // UXTB16, otherwise UXTAB16
         if (rn_idx == 15) {

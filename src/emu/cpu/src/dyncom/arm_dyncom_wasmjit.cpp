@@ -80,8 +80,8 @@ EM_JS(int, dyncom_wasmjit_install, (const unsigned char *bytes, int len, int reu
                 cache.entries.delete(hash);
                 cache.bytes -= entry.bytes.length;
             }
-            const maxBytes = 16 * 1024 * 1024;
-            const maxEntries = 8192;
+            const maxBytes = 4 * 1024 * 1024;
+            const maxEntries = 2048;
             if (source.length <= maxBytes) {
                 while (cache.entries.size >= maxEntries || cache.bytes + source.length > maxBytes) {
                     var oldest = cache.entries.keys().next().value;
@@ -114,6 +114,10 @@ EM_JS(int, dyncom_wasmjit_install, (const unsigned char *bytes, int len, int reu
     }
 });
 
+EM_JS(void, dyncom_wasmjit_remove, (int index), {
+    wasmTable.set(index, null);
+});
+
 namespace eka2l1::arm::dyncom_jit {
 
     int enabled_default = 1;
@@ -131,10 +135,14 @@ namespace eka2l1::arm::dyncom_jit {
     std::uint32_t stat_blocker_hist[224] = {};
 
     static std::vector<std::int32_t> g_free_indices;
+    static std::size_t live_blocks = 0;
+    static constexpr std::size_t MAX_LIVE_BLOCKS = 8192;
 
     void release_index(std::int32_t table_idx) {
         if (table_idx > 0) {
+            dyncom_wasmjit_remove(table_idx);
             g_free_indices.push_back(table_idx);
+            --live_blocks;
         }
     }
 
@@ -531,20 +539,15 @@ namespace eka2l1::arm::dyncom_jit {
             // unsupported shift kinds (register-amount shifts, ROR/RRX).
             bool emit_operand2(unsigned shtop_idx, std::uint32_t sht, bool update_carry) {
                 switch (shtop_idx) {
-                case SHTOP_IMMEDIATE: {
-                    const std::uint32_t imm8 = sht & 0xFF;
-                    const std::uint32_t rot = (sht >> 8) & 0xF;
-                    const std::uint32_t val = (rot == 0)
-                        ? imm8
-                        : ((imm8 >> (rot * 2)) | (imm8 << (32 - rot * 2)));
-                    w_.const_i32(val);
+                case SHTOP_IMMEDIATE:
+                case SHTOP_ROTATED_IMMEDIATE:
+                    w_.const_i32(sht);
                     w_.local_set(L_T1);
-                    if (update_carry && rot != 0) {
-                        w_.const_i32((val >> 31) & 1);
+                    if (update_carry && shtop_idx == SHTOP_ROTATED_IMMEDIATE) {
+                        w_.const_i32(sht >> 31);
                         w_.local_set(L_C);
                     }
                     return true;
-                }
                 case SHTOP_REGISTER:
                     emit_reg_read_dp(sht & 0xF);
                     w_.local_set(L_T1);
@@ -813,13 +816,7 @@ namespace eka2l1::arm::dyncom_jit {
                 // Using DP for ADR when PC is halfword-aligned skews the
                 // literal base by 2 and breaks CDL/layout table lookups.
                 if (cls.alu == alu_kind::ADD && Rn == 15) {
-                    bool use_wa = (inst_size_ != 2);
-                    if (inst_size_ == 2) {
-                        const std::uint32_t word = cpu_->ReadCode(pc_ & ~3u);
-                        const std::uint32_t tinst = GetThumbInstruction(word, pc_);
-                        use_wa = (((tinst & 0xF800) >> 11) == 20);
-                    }
-                    if (use_wa) {
+                    if (inst_size_ != 2 || shtop <= SHTOP_ROTATED_IMMEDIATE) {
                         emit_reg_read_wa(15);
                     } else {
                         emit_reg_read_dp(15);
@@ -1597,6 +1594,7 @@ namespace eka2l1::arm::dyncom_jit {
                 return -2;
             }
 
+            ++live_blocks;
             stat_compiled++;
             // Stay quiet by default: per-block printf through the JS console
             // saturates DevTools and stalls the page during boot. Enable with
@@ -1616,7 +1614,7 @@ namespace eka2l1::arm::dyncom_jit {
         if (indices.cmp < 0 || indices.mov < 0 || indices.ldr < 0 || indices.bbl < 0) {
             return -2;
         }
-        if (static_cast<int>(stat_compiled) >= compile_limit) {
+        if (live_blocks >= MAX_LIVE_BLOCKS || static_cast<int>(stat_compiled) >= compile_limit) {
             return -2;
         }
         block_compiler c(cpu, pc);

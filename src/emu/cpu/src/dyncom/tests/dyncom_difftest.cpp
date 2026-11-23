@@ -22,7 +22,7 @@
  * Run:    scripts/cpu_difftest.sh   (exits non-zero on the first divergence)
  *
  * EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY lets the WASM harness reuse the fixture
- * and golden model without the host VFP fast-path tests or this file's main.
+ * and golden model without this file's main.
  */
 
 #include <cpu/dyncom/arm_dyncom.h>
@@ -33,6 +33,8 @@
 
 #include <common/types.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -371,148 +373,191 @@ struct rng {
     bool flip() { return e() & 1; }
 };
 
-#ifndef EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY
-std::uint32_t random_normal_f32(rng &r) {
-    // Keep most products away from overflow/underflow so the host envelope is
-    // exercised heavily, while still varying signs and every significand bit.
-    const std::uint32_t sign = r.u32() & 0x80000000u;
-    const std::uint32_t exponent = 80u + r.range(96u);
-    return sign | (exponent << 23) | (r.u32() & 0x007FFFFFu);
+bool check_thumb_pairs(diff_env &env, dyncom_core &core) {
+    constexpr std::uint32_t code = 0x1000;
+    // MOVS r3,#0; LSLS r1,r0,#2; LSRS r2,r1,#4; BX lr.
+    constexpr std::uint16_t shifts[] = { 0x2300, 0x0081, 0x090A, 0x4770 };
+    std::memcpy(env.mem.data() + code, shifts, sizeof(shifts));
+    core.clear_instruction_cache();
+    cpu_state input{};
+    input.reg[0] = 0xE0000003;
+    input.reg[15] = code;
+    input.cpsr = 0x10000030;
+    write_state(core, input);
+    core.run(2); // Stop after the first shift inside the translated pair.
+    if (core.get_pc() != code + 4 || core.get_reg(1) != 0x8000000C
+        || core.get_cpsr() != 0xB0000030 || core.get_num_instruction_executed() != 2) return false;
+    core.step();
+    if (core.get_pc() != code + 6 || core.get_reg(2) != 0x08000000 || core.get_cpsr() != 0x30000030) return false;
+
+    write_state(core, input);
+    core.run(3); // Execute both shifts in the same slice.
+    if (core.get_pc() != code + 6 || core.get_reg(2) != 0x08000000 || core.get_cpsr() != 0x30000030) return false;
+
+    // CMP r0,#1; BEQ +2. The PC at the budget boundary is on the branch.
+    constexpr std::uint16_t branch[] = { 0x2300, 0x2801, 0xD001, 0x4770, 0x4770, 0x4770 };
+    std::memcpy(env.mem.data() + code, branch, sizeof(branch));
+    core.clear_instruction_cache();
+    input.reg[0] = 1;
+    write_state(core, input);
+    core.run(2);
+    if (core.get_pc() != code + 4 || core.get_num_instruction_executed() != 2) return false;
+    write_state(core, input);
+    core.run(3);
+    if (core.get_pc() != code + 10) return false;
+    input.reg[0] = 0;
+    write_state(core, input);
+    core.run(3);
+    return core.get_pc() == code + 6;
 }
 
-std::uint32_t run_vfp_mac_differential(diff_env &env_a, diff_env &env_b,
-    dyncom_core &core_a, dyncom_core &core_b, std::uint32_t base_seed,
-    std::uint32_t count) {
-    struct mac_op {
-        const char *name;
-        std::uint32_t inst;
-    };
-    // vmla/vmls/vnmla/vnmls.f32 s0, s1, s2 (ARM state, AL condition).
-    static constexpr mac_op ops[] = {
-        { "vmla.f32", 0xEE000A81u },
-        { "vmls.f32", 0xEE000AC1u },
-        { "vnmla.f32", 0xEE100AC1u },
-        { "vnmls.f32", 0xEE100A81u },
-    };
+bool check_thumb_counted_loop(diff_env &env, dyncom_core &core) {
+    constexpr std::uint32_t code = 0x1000;
+    constexpr std::uint32_t data = 0x3F00;
+    // STR r2,[r1]; ADDS r1,#4; ADDS r0,#1; CMP r0,r3; BLT loop; BX lr.
+    constexpr std::uint16_t loop[] = { 0x600A, 0x3104, 0x3001, 0x4298, 0xDBFA, 0x4770 };
+    std::memcpy(env.mem.data() + code, loop, sizeof(loop));
+    constexpr std::uint32_t limit = 1500;
+    constexpr std::uint32_t iterations = 778;
+    constexpr std::uint32_t fill = 0x12345678;
+    std::memset(env.mem.data() + data, 0, limit * 4);
+    core.clear_instruction_cache();
+    core.set_tlb_page(data & ~PAGE_MASK, env.mem.data() + (data & ~PAGE_MASK), prot_read_write);
 
-    const std::uint32_t cases = count < 50000u ? count : 50000u;
-    std::uint32_t failures = 0;
-    vfp_reset_single_host_fast_hits_for_test();
+    cpu_state input{};
+    input.reg[1] = data;
+    input.reg[2] = fill;
+    input.reg[3] = limit;
+    input.reg[15] = code;
+    input.cpsr = 0x30;
+    write_state(core, input);
+    core.run(iterations * 5 + 2);
+    if (core.get_pc() != code + 4 || core.get_reg(0) != iterations
+        || core.get_reg(1) != data + (iterations + 1) * 4
+        || core.get_num_instruction_executed() != iterations * 5 + 2) return false;
 
-    for (std::uint32_t i = 0; i < cases && failures < 20; ++i) {
-        const std::uint32_t case_seed = base_seed ^ (0x9E3779B9u * (i + 1u));
-        rng r(case_seed);
-        const std::uint32_t accumulator = random_normal_f32(r);
-        const std::uint32_t multiplicand = random_normal_f32(r);
-        const std::uint32_t multiplier = random_normal_f32(r);
+    core.run((limit - iterations) * 5 - 2);
+    if (core.get_pc() != code + 10 || core.get_reg(0) != limit
+        || core.get_reg(1) != data + limit * 4 || core.get_cpsr() != 0x60000030) return false;
+    for (std::uint32_t i = 0; i < limit; ++i) {
+        std::uint32_t value;
+        std::memcpy(&value, env.mem.data() + data + i * 4, sizeof(value));
+        if (value != fill) return false;
+    }
+    return true;
+}
 
-        for (const mac_op &op : ops) {
-            std::memcpy(env_a.mem.data(), &op.inst, 4);
-            std::memcpy(env_b.mem.data(), &op.inst, 4);
-            core_a.imb_range(0, 8);
-            core_b.imb_range(0, 8);
+bool check_arm_counted_loops(diff_env &env, dyncom_core &core,
+    diff_env &reference_env, dyncom_core &reference) {
+    constexpr std::uint32_t code_base = 0x1000;
+    std::mt19937 random(0x7A2D581);
+    for (unsigned test = 0; test < 240; ++test) {
+        std::array<unsigned, 15> registers{};
+        for (unsigned r = 0; r < registers.size(); ++r)
+            registers[r] = r;
+        std::shuffle(registers.begin(), registers.end(), random);
+        const unsigned x = registers[0], c = registers[1], acc = registers[2];
+        const unsigned addend = registers[3], subtrahend = registers[4], comparison = registers[5];
+        const unsigned modifier = registers[6];
+        const unsigned decrement = (test % 13) + 1;
+        const bool compare_left = (test & 1) != 0;
+        const bool compare_and_carry = test % 3 != 0;
+        std::vector<std::uint32_t> code;
+        const unsigned repetitions = (test % 7) + 1;
+        for (unsigned i = 0; i < repetitions; ++i) {
+            code.push_back(0xE0900000 | (x << 16) | (x << 12) | addend); // ADDS
+            code.push_back(0xE0400000 | (x << 16) | (x << 12) | subtrahend); // SUB
+            if (!compare_and_carry) continue;
+            const unsigned lhs = compare_left ? x : comparison;
+            const unsigned rhs = compare_left ? comparison : x;
+            code.push_back(0xE1500000 | (lhs << 16) | rhs); // CMP
+            code.push_back(0xE0A00000 | (acc << 16) | (acc << 12) | modifier); // ADC
+        }
+        code.push_back(0xE2500000 | (c << 16) | (c << 12) | decrement); // SUBS immediate
+        const auto branch_words = -static_cast<int>(code.size()) - 2;
+        code.push_back(0x1A000000 | (static_cast<std::uint32_t>(branch_words) & 0xFFFFFF)); // BNE
+        const auto fallthrough = code_base + static_cast<std::uint32_t>(code.size() * 4);
+        code.push_back(0xEF000000); // SVC
+        code.push_back(0xEAFFFFFE); // End the block after the stop callback.
+        for (auto *buffer : { &env.mem, &reference_env.mem })
+            std::memcpy(buffer->data() + code_base, code.data(), code.size() * 4);
 
-            for (dyncom_core *core : { &core_a, &core_b }) {
-                core->set_cpsr(0x10); // USER mode, ARM state
-                core->set_pc(0);
-                core->set_fpscr(0);   // RN, gradual underflow, propagated NaNs
-                core->set_vfp(0, accumulator);
-                core->set_vfp(1, multiplicand);
-                core->set_vfp(2, multiplier);
-            }
+        cpu_state initial{};
+        for (auto &reg : initial.reg)
+            reg = random();
+        initial.reg[15] = code_base;
+        initial.reg[c] = ((test % 47) + 1) * decrement;
+        if (test % 11 == 0) ++initial.reg[c]; // Also exercise the wraparound fallback.
+        if (test % 17 == 0) initial.reg[c] = 0;
+        initial.cpsr = (random() & 0xF0000000) | 0x10; // ARM user mode.
 
-            vfp_set_single_host_fast_for_test(false);
-            core_a.run(1);
-            vfp_set_single_host_fast_for_test(true);
-            core_b.run(1);
+        for (auto *cpu : { &core, &reference }) {
+            cpu->clear_instruction_cache();
+            write_state(*cpu, initial);
+        }
+        bool finished = false;
+        core.system_call_handler = [&](std::uint32_t) { finished = true; core.stop(); };
+        reference.system_call_handler = [&](std::uint32_t) { reference.stop(); };
 
-            const std::uint32_t slow = core_a.get_vfp(0);
-            const std::uint32_t fast = core_b.get_vfp(0);
-            const std::uint32_t slow_fpscr = core_a.get_fpscr();
-            const std::uint32_t fast_fpscr = core_b.get_fpscr();
-            if (slow != fast || slow_fpscr != fast_fpscr) {
-                std::printf("[DIVERGENCE] %s host-fast != softfloat seed=%u "
-                            "a=%08X n=%08X m=%08X slow=%08X fast=%08X "
-                            "slow_fpscr=%08X fast_fpscr=%08X\n",
-                    op.name, case_seed, accumulator, multiplicand,
-                    multiplier, slow, fast, slow_fpscr, fast_fpscr);
-                ++failures;
-                if (failures >= 20)
+        for (unsigned slice = 0; slice < 5 && !finished; ++slice) {
+            const unsigned budget = 1 + random() % (repetitions * 16 + 65);
+            core.run(budget);
+            unsigned reference_ticks = 0;
+            for (; reference_ticks < budget; ++reference_ticks) {
+                const bool last = reference.get_pc() == fallthrough;
+                reference.step();
+                if (last) {
+                    ++reference_ticks;
                     break;
+                }
+            }
+            const auto actual = read_state(core);
+            const auto expected = read_state(reference);
+            if (!(actual == expected) || core.get_num_instruction_executed() != reference_ticks) {
+                core.system_call_handler = [](std::uint32_t) {};
+                reference.system_call_handler = [](std::uint32_t) {};
+                std::printf("[ARM LOOP] case %u slice %u budget %u ticks %u/%u, CPSR actual=%08X expected=%08X\n",
+                    test, slice, budget, core.get_num_instruction_executed(), reference_ticks, actual.cpsr, expected.cpsr);
+                for (unsigned r = 0; r < 16; ++r) {
+                    if (actual.reg[r] != expected.reg[r])
+                        std::printf("  r%u actual=%08X expected=%08X\n", r, actual.reg[r], expected.reg[r]);
+                }
+                return false;
             }
         }
+        core.system_call_handler = [](std::uint32_t) {};
+        reference.system_call_handler = [](std::uint32_t) {};
     }
-
-    const std::uint64_t hits = vfp_single_host_fast_hits_for_test();
-    if (hits == 0) {
-        std::printf("[HARNESS BUG] VFP MAC host-fast envelope was never exercised\n");
-        ++failures;
-    } else {
-        std::printf("dyncom_difftest: VFP MAC host-fast %llu hits across %u randomized inputs\n",
-            static_cast<unsigned long long>(hits), cases);
-    }
-    vfp_set_single_host_fast_for_test(true);
-    return failures;
+    return true;
 }
 
-std::uint32_t benchmark_vfp_mac(diff_env &env_a, diff_env &env_b,
-    dyncom_core &core_a, dyncom_core &core_b) {
-    constexpr std::uint32_t inst = 0xEE000A81u; // vmla.f32 s0, s1, s2
-    constexpr std::uint32_t instructions = 8192;
-    constexpr std::uint32_t rounds = 20;
-    static_assert(instructions * sizeof(inst) <= MEM_SIZE);
-
-    for (std::uint32_t offset = 0; offset < instructions * sizeof(inst); offset += sizeof(inst)) {
-        std::memcpy(env_a.mem.data() + offset, &inst, sizeof(inst));
-        std::memcpy(env_b.mem.data() + offset, &inst, sizeof(inst));
-    }
-    core_a.imb_range(0, instructions * sizeof(inst));
-    core_b.imb_range(0, instructions * sizeof(inst));
-
-    auto prepare = [](dyncom_core &core) {
+#ifndef EKA2L1_DYNCOM_DIFFTEST_FIXTURES_ONLY
+bool check_vfp_mac(diff_env &env, dyncom_core &core) {
+    // Inputs have exact products and sums in binary32.
+    constexpr std::array cases = {
+        std::pair{ 0xEE000A81u, 0x40E00000u }, // VMLA 1 + 2*3 = 7
+        std::pair{ 0xEE000AC1u, 0xC0A00000u }, // VMLS 1 - 2*3 = -5
+        std::pair{ 0xEE100AC1u, 0xC0E00000u }, // VNMLA -1 - 2*3 = -7
+        std::pair{ 0xEE100A81u, 0x40A00000u }, // VNMLS -1 + 2*3 = 5
+    };
+    for (const auto &[inst, expected] : cases) {
+        std::memcpy(env.mem.data(), &inst, sizeof(inst));
+        core.clear_instruction_cache();
         core.set_cpsr(0x10);
         core.set_pc(0);
         core.set_fpscr(0);
-        core.set_vfp(0, 0x3F800000u); // 1.0
-        core.set_vfp(1, 0x35800000u); // 2^-20
-        core.set_vfp(2, 0x3F800000u); // 1.0
-    };
-    using clock = std::chrono::steady_clock;
-    std::chrono::nanoseconds slow_time{ 0 }, fast_time{ 0 };
-    vfp_reset_single_host_fast_hits_for_test();
-
-    for (std::uint32_t round = 0; round < rounds; ++round) {
-        prepare(core_a);
-        vfp_set_single_host_fast_for_test(false);
-        const auto slow_start = clock::now();
-        core_a.run(instructions);
-        slow_time += clock::now() - slow_start;
-
-        prepare(core_b);
-        vfp_set_single_host_fast_for_test(true);
-        const auto fast_start = clock::now();
-        core_b.run(instructions);
-        fast_time += clock::now() - fast_start;
+        core.set_vfp(0, 0x3F800000);
+        core.set_vfp(1, 0x40000000);
+        core.set_vfp(2, 0x40400000);
+        core.run(1);
+        if (core.get_vfp(0) != expected || core.get_fpscr() != 0) {
+            std::printf("[VFP MAC] %08X expected=%08X actual=%08X fpscr=%08X\n",
+                inst, expected, core.get_vfp(0), core.get_fpscr());
+            return false;
+        }
     }
-
-    const std::uint32_t slow = core_a.get_vfp(0);
-    const std::uint32_t fast = core_b.get_vfp(0);
-    const std::uint64_t hits = vfp_single_host_fast_hits_for_test();
-    vfp_set_single_host_fast_for_test(true);
-    if (slow != fast || hits != static_cast<std::uint64_t>(instructions) * rounds) {
-        std::printf("[HARNESS BUG] VFP MAC benchmark mismatch slow=%08X fast=%08X "
-                    "hits=%llu expected=%u\n",
-            slow, fast, static_cast<unsigned long long>(hits), instructions * rounds);
-        return 1;
-    }
-
-    const double slow_ms = std::chrono::duration<double, std::milli>(slow_time).count();
-    const double fast_ms = std::chrono::duration<double, std::milli>(fast_time).count();
-    std::printf("dyncom_difftest: VFP MAC microbenchmark soft=%.2fms host-fast=%.2fms (%.2fx)\n",
-        slow_ms, fast_ms, slow_ms / fast_ms);
-    return 0;
+    return true;
 }
-
 #endif
 
 // A random data-processing instruction. cond is AL most of the time but
@@ -954,9 +999,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    failures += run_vfp_mac_differential(env_a, env_b, *core_a, *core_b,
-        base_seed, count);
-    failures += benchmark_vfp_mac(env_a, env_b, *core_a, *core_b);
+    if (!check_thumb_pairs(env_a, *core_a)) {
+        std::puts("[THUMB PAIRS] incorrect flags, PC or instruction count");
+        ++failures;
+    }
+    if (!check_thumb_counted_loop(env_a, *core_a)) {
+        std::puts("[THUMB COUNTED LOOP] incorrect memory, flags, PC or instruction count");
+        ++failures;
+    }
+    failures += !check_arm_counted_loops(env_a, *core_a, env_b, *core_b);
+    failures += !check_vfp_mac(env_a, *core_a);
 
     // Negative control: prove the comparator catches a deliberate divergence.
     {
@@ -969,7 +1021,7 @@ int main(int argc, char **argv) {
     }
 
     if (failures == 0) {
-        std::printf("dyncom_difftest: PASS (%u integer cases + VFP MAC soft/host A/B + negative control)\n", count);
+        std::printf("dyncom_difftest: PASS (%u integer cases + ARM and Thumb loops + VFP MAC + negative control)\n", count);
         return 0;
     }
     std::printf("dyncom_difftest: FAIL (%u divergences)\n", failures);

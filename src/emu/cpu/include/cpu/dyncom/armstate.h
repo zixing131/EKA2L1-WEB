@@ -365,11 +365,11 @@ public:
     unsigned bigendSig;
     unsigned syscallSig;
 
-    char trans_cache_buf[TRANS_CACHE_SIZE];
+    alignas(8) char trans_cache_buf[TRANS_CACHE_SIZE];
     size_t trans_cache_buf_top = 0;
 
     // ASID-tagged translation cache. Translations from different address spaces
-    // coexist (key = (asid << 32) | virtual_pc) so the cache survives process
+    // coexist (key = (asid << 32) | aligned_pc | thumb_bit) across process
     // switches instead of being wiped on every IPC round-trip. The scheduler
     // pushes the running process's asid via dyncom_core::set_asid -> set_asid()
     // below. asid 0 is used by the embedded-fallback interpreter (no asid ever
@@ -378,7 +378,7 @@ public:
     std::uint32_t instruction_cache_asid = 0;
 
     std::uint64_t make_instruction_cache_key(const std::uint32_t vaddr) const {
-        return (static_cast<std::uint64_t>(instruction_cache_asid) << 32) | vaddr;
+        return (static_cast<std::uint64_t>(instruction_cache_asid) << 32) | vaddr | (TFlag != 0);
     }
 
     // Direct-mapped lookaside in front of instruction_cache: DISPATCH runs on

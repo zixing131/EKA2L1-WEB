@@ -16,6 +16,7 @@ struct ARMul_State;
 // interpreter dispatches through a local switch with inlined bodies.
 enum shtop_index : unsigned int {
     SHTOP_IMMEDIATE = 0,
+    SHTOP_ROTATED_IMMEDIATE,
     SHTOP_REGISTER,
     SHTOP_LSL_IMM,
     SHTOP_LSL_REG,
@@ -51,7 +52,7 @@ enum addr_mode_index : unsigned int {
     ADDRMODE_INVALID,
 };
 
-enum class TransExtData {
+enum class TransExtData : std::uint16_t {
     COND = (1 << 0),
     NON_BRANCH = (1 << 1),
     DIRECT_BRANCH = (1 << 2),
@@ -63,11 +64,19 @@ enum class TransExtData {
     SINGLE_STEP = (1 << 8)
 };
 
-struct arm_inst {
-    unsigned int idx;
-    unsigned int cond;
+enum class TransFusion : std::uint8_t {
+    NONE,
+    COMPARE_BRANCH,
+    THUMB_SHIFT_PAIR,
+};
+
+struct alignas(8) arm_inst {
+    std::uint16_t idx;
+    std::uint8_t cond;
+    TransFusion fusion;
     TransExtData br;
-    char component[0];
+    std::uint16_t loop_offset;
+    alignas(8) char component[0];
 };
 
 struct generic_arm_inst {
@@ -522,8 +531,10 @@ struct pkh_inst {
 #undef VFP_INTERPRETER_STRUCT
 
 struct ldst_inst {
-    unsigned int inst;
-    unsigned int addr_mode; // addr_mode_index
+    std::uint32_t inst;
+    std::int16_t immediate_offset;
+    std::uint8_t base_register;
+    std::uint8_t addr_mode; // addr_mode_index
 };
 
 typedef arm_inst *ARM_INST_PTR;
