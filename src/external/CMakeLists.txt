@@ -369,6 +369,16 @@ option(CAPSTONE_SYSZ_SUPPORT "SystemZ support" OFF)
 option(CAPSTONE_XCORE_SUPPORT "XCore support" OFF)
 option(CAPSTONE_X86_SUPPORT "x86 support" OFF)
 
+if (EMSCRIPTEN)
+    # Both the analyser and debugger disassemble ARM/Thumb guest code. The
+    # other architectures add decoder tables to the browser's linear memory.
+    set(CAPSTONE_ARCHITECTURE_DEFAULT OFF)
+    foreach (architecture ARM64 M68K MIPS PPC SPARC SYSZ XCORE X86 TMS320C64X
+            M680X EVM MOS65XX WASM BPF RISCV SH TRICORE)
+        set(CAPSTONE_${architecture}_SUPPORT OFF)
+    endforeach()
+endif()
+
 add_subdirectory(capstone EXCLUDE_FROM_ALL)
 
 # libfat
