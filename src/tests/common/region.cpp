@@ -83,6 +83,7 @@ TEST_CASE("region subtraction visits consecutive rectangles", "[region]") {
     region.eliminate(rect({0, 0}, {24, 8}));
     CHECK_FALSE(region.contains({15, 5}));
     CHECK(region.contains({15, 9}));
+}
 
 namespace {
     bool covers(const rect &area, int x, int y) {

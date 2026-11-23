@@ -31,6 +31,7 @@ TEST_CASE("ETel enumerates phones independently of line entry order", "[etel]") 
         CHECK(entry->entity_->type() == epoc::etel_entry_line);
     }
     CHECK_FALSE(manager.get_entry_real_index(4, epoc::etel_entry_line).has_value());
+}
 
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-3.0-or-later
