@@ -42,7 +42,7 @@ namespace eka2l1::common {
     }
 
     bool region::add_rect(const eka2l1::rect &rect) {
-        if (rect.empty()) {
+        if (rect.size.x <= 0 || rect.size.y <= 0) {
             return false;
         }
 
@@ -74,6 +74,10 @@ namespace eka2l1::common {
     }
 
     bool region::add_region(const region &rg) {
+        if (this == &rg) {
+            return false;
+        }
+
         bool modded = false;
         for (std::size_t i = 0; i < rg.rects_.size(); i++) {
             if (add_rect(rg.rects_[i])) {
@@ -85,7 +89,7 @@ namespace eka2l1::common {
     }
 
     void region::eliminate(const eka2l1::rect &rect) {
-        if (rect.empty()) {
+        if (rect.size.x <= 0 || rect.size.y <= 0) {
             return;
         }
 
@@ -116,6 +120,11 @@ namespace eka2l1::common {
     }
 
     void region::eliminate(const region &reg) {
+        if (this == &reg) {
+            make_empty();
+            return;
+        }
+
         for (std::size_t i = 0; i < reg.rects_.size(); i++) {
             eliminate(reg.rects_[i]);
         }
@@ -128,7 +137,7 @@ namespace eka2l1::common {
             for (std::size_t j = 0; j < target.rects_.size(); j++) {
                 eka2l1::rect the_intersect = target.rects_[j].intersect(rects_[i]);
 
-                if (!the_intersect.empty()) {
+                if (the_intersect.size.x > 0 && the_intersect.size.y > 0) {
                     intersection.rects_.push_back(the_intersect);
                 }
             }
