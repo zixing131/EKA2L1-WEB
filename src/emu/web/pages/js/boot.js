@@ -59,15 +59,15 @@
 
     // SDL's Emscripten port creates the WebGL context with default attributes
     // (default GPU, alpha-composited canvas). Wrap getContext on our canvas so
-    // every WebGL request runs on the discrete/high-performance GPU and skips
-    // features the emulator never uses (alpha compositing, antialiasing of a
-    // plain textured quad) — cheaper compositing, smoother presentation.
+    // use the selected power profile and skip alpha compositing and
+    // antialiasing on the emulator's textured quad.
     function boostWebGLContext(canvas) {
         var original = canvas.getContext.bind(canvas);
+        var powerPreference = lowPowerRequested() ? 'low-power' : 'high-performance';
         canvas.getContext = function (type, attrs) {
             if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
                 attrs = attrs || {};
-                attrs.powerPreference = attrs.powerPreference || 'high-performance';
+                attrs.powerPreference = attrs.powerPreference || powerPreference;
                 attrs.alpha = false;
                 attrs.antialias = false;
                 // Keep the last completed guest frame while its windows are
@@ -87,7 +87,7 @@
                 attrs.powerPreference = 'default';
                 ctx = original(type, attrs);
                 if (ctx) {
-                    console.warn('[EKA2L1] WebGL context created without desynchronized/high-performance');
+                    console.warn('[EKA2L1] WebGL context created with default power preference');
                 }
                 return ctx;
             }
@@ -204,12 +204,7 @@
                 mod.FS.mount(mod.FS.filesystems.IDBFS, {}, '/eka2l1');
 
                 onProgress(62, EKA2L1.t('progress.restoringData'));
-                mod.FS.syncfs(true, function (err) {
-                    if (err) {
-                        reject(err);
-                        return;
-                    }
-
+                restoreStorage(mod.FS).then(function () {
                     onProgress(82, EKA2L1.t('progress.startingCore'));
                     // Re-apply after sync in case anything reset defaults.
                     applyJitQueryParams(mod);
@@ -229,7 +224,7 @@
                     EKA2L1.ready = true;
                     onProgress(92, EKA2L1.t('progress.coreStarted'));
                     resolve(mod);
-                });
+                }).catch(reject);
             }).catch(reject);
         });
     };
@@ -237,225 +232,167 @@
     // ---- persistence -------------------------------------------------------
 
     var saveTail = Promise.resolve();
+    var STORAGE_MOUNT = '/eka2l1';
+    var IO_CHUNK_BYTES = 2 * 1024 * 1024;
+    var STORAGE_BATCH_BYTES = 4 * 1024 * 1024;
+    var STORAGE_BATCH_ENTRIES = 256;
+
+    function queueSave(save) {
+        var operation = saveTail.catch(function () {}).then(async function () {
+            var mod = EKA2L1.module;
+            if (!mod || !mod.FS) return;
+            var hold = mod._wasm_set_storage_syncing;
+            if (hold) hold(1);
+            try {
+                return await save(mod.FS);
+            } finally {
+                if (hold) hold(0);
+            }
+        });
+        saveTail = operation;
+        return operation;
+    }
+
+    function openStorage(IDBFS) {
+        return new Promise(function (resolve, reject) {
+            IDBFS.getDB(STORAGE_MOUNT, function (err, db) {
+                if (err) reject(err);
+                else resolve(db);
+            });
+        });
+    }
+
+    // Primary keys are paths ordered with each directory before its children.
+    // A cursor keeps only one deserialized file in flight and IDBFS adopts
+    // its typed array as MEMFS backing storage.
+    async function restoreStorage(FS) {
+        var IDBFS = FS.filesystems.IDBFS;
+        var db = await openStorage(IDBFS);
+        try {
+            await new Promise(function (resolve, reject) {
+                var tx = db.transaction(IDBFS.DB_STORE_NAME, 'readonly');
+                tx.oncomplete = resolve;
+                tx.onabort = function () { reject(tx.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
+                tx.objectStore(IDBFS.DB_STORE_NAME).openCursor().onsuccess = function (event) {
+                    var cursor = event.target.result;
+                    if (!cursor) return;
+                    IDBFS.storeLocalEntry(cursor.key, cursor.value, function (err) {
+                        if (err) {
+                            reject(err);
+                            tx.abort();
+                        } else {
+                            cursor.continue();
+                        }
+                    });
+                };
+            });
+        } finally {
+            db.close();
+        }
+    }
 
     /** Flush /eka2l1 (MEMFS) to IndexedDB. Returns a Promise. */
     EKA2L1.save = function () {
         // Every caller waits for its own sync, including changes made while a
         // previous snapshot was being written. A busy save is not a success.
-        var operation = saveTail.catch(function () {}).then(function () {
+        return queueSave(function (FS) {
             return new Promise(function (resolve, reject) {
-                var mod = EKA2L1.module;
-                if (!mod || !mod.FS) { resolve(); return; }
-                var t0 = performance.now();
-                var hold = mod._wasm_set_storage_syncing;
-                if (hold) hold(1);
-                function complete(err) {
-                    if (hold) hold(0);
-                    if (err) {
-                        console.warn('[EKA2L1] syncfs failed:', err);
-                        reject(err);
-                    } else {
-                        console.log('[EKA2L1] saved to IndexedDB in ' +
-                            (performance.now() - t0).toFixed(0) + 'ms');
-                        resolve();
-                    }
-                }
-                try { mod.FS.syncfs(false, complete); }
-                catch (err) { complete(err); }
+                FS.syncfs(false, function (err) {
+                    if (err) reject(err);
+                    else resolve();
+                });
             });
         });
-        saveTail = operation;
-        return operation;
     };
 
-    /**
-     * Post-install bulk save, iOS-friendly.
-     *
-     * FS.syncfs persists the whole mount in ONE IndexedDB transaction; right
-     * after a device install that means structured-cloning ~100-300MB of
-     * extracted files at once — a transient spike that gets the tab killed on
-     * iOS. This walks MEMFS and writes the same records IDBFS would (store
-     * FILE_DATA, value {timestamp, mode[, contents]}, key = path, exact
-     * mtimes) in small per-transaction batches with macrotask yields, so a
-     * later FS.syncfs reconcile sees everything as already clean.
-     * Falls back must be handled by the caller (catch -> EKA2L1.save()).
-     */
+    async function saveStoragePaths(FS, paths, onBatch) {
+        var IDBFS = FS.filesystems.IDBFS;
+        var db = await openStorage(IDBFS);
+        var done = 0;
+        var bytesDone = 0;
+        try {
+            while (done < paths.length) {
+                await new Promise(function (resolve, reject) {
+                    var tx = db.transaction(IDBFS.DB_STORE_NAME, 'readwrite');
+                    tx.oncomplete = resolve;
+                    tx.onabort = function () { reject(tx.error || new Error(EKA2L1.t('error.idbWriteFailed'))); };
+                    var store = tx.objectStore(IDBFS.DB_STORE_NAME);
+                    var bytes = 0;
+                    var entries = 0;
+                    try {
+                        while (done < paths.length && entries < STORAGE_BATCH_ENTRIES) {
+                            var path = paths[done];
+                            var st = FS.lstat(path);
+                            var size = FS.isFile(st.mode) ? st.size : 0;
+                            if (entries && bytes + size > STORAGE_BATCH_BYTES) break;
+                            IDBFS.loadLocalEntry(path, function (err, entry) {
+                                if (err) throw err;
+                                store.put(entry, path);
+                            });
+                            bytes += size;
+                            entries++;
+                            done++;
+                        }
+                    } catch (err) {
+                        reject(err);
+                        tx.abort();
+                    }
+                    bytesDone += bytes;
+                });
+                if (onBatch) onBatch(done, paths.length, bytesDone);
+                if (done < paths.length) await new Promise(function (resolve) { setTimeout(resolve, 0); });
+            }
+            return { entries: done, bytes: bytesDone };
+        } finally {
+            db.close();
+        }
+    }
+
+    // Use the IDBFS record format and write file backing views directly. A
+    // large file gets its own transaction without a second full MEMFS copy.
     EKA2L1.saveInitialStaged = function (onProgress, onStage) {
-        var FS = EKA2L1.module.FS;
-        var MOUNT = '/eka2l1';
-        var STORE = 'FILE_DATA';
-        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
-        var BATCH_BYTES = 4 * 1024 * 1024;
-
-        function stage(s) { if (onStage) { try { onStage(s); } catch (e) {} } }
-
-        stage(EKA2L1.t('stage.openDb'));
-        return new Promise(function (resolve, reject) {
-            var req;
-            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
-            req.onupgradeneeded = function (e) {
-                // Mirror IDBFS.getDB's upgrade path so a fresh DB is identical.
-                var db = e.target.result;
-                var st = db.objectStoreNames.contains(STORE)
-                    ? e.target.transaction.objectStore(STORE)
-                    : db.createObjectStore(STORE);
-                if (!st.indexNames.contains('timestamp')) {
-                    st.createIndex('timestamp', 'timestamp', { unique: false });
-                }
-            };
-            req.onblocked = function () { stage(EKA2L1.t('stage.dbBusy')); };
-            req.onerror = function () { reject(req.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
-            req.onsuccess = function () { resolve(req.result); };
-        }).then(function (db) {
-            stage(EKA2L1.t('stage.scanFiles'));
+        return queueSave(async function (FS) {
             var paths = [];
             var bytesTotal = 0;
+            if (onStage) onStage(EKA2L1.t('stage.scanFiles'));
             (function walk(dir) {
                 FS.readdir(dir).forEach(function (name) {
                     if (name === '.' || name === '..') return;
-                    var p = dir + '/' + name;
-                    paths.push(p);
-                    var st = FS.lstat(p);
-                    if (FS.isDir(st.mode)) walk(p);
-                    else if (FS.isFile(st.mode)) bytesTotal += (st.size || 0);
+                    var path = dir + '/' + name;
+                    var st = FS.lstat(path);
+                    paths.push(path);
+                    if (FS.isDir(st.mode)) walk(path);
+                    else if (FS.isFile(st.mode)) bytesTotal += st.size;
                 });
-            })(MOUNT);
-            stage(EKA2L1.t('stage.fileCount', { count: paths.length, mb: Math.floor(bytesTotal / 1048576) }));
-
-            var i = 0;
-            var written = 0;
-            var bytesDone = 0;
-
-            function nextBatch() {
-                if (i >= paths.length) {
-                    db.close();
-                    return Promise.resolve({ entries: written, bytes: bytesDone, bytesTotal: bytesTotal });
-                }
-                return new Promise(function (res, rej) {
-                    var tx = db.transaction([STORE], 'readwrite');
-                    tx.onerror = tx.onabort = function (e) {
-                        rej((e.target && e.target.error) || new Error(EKA2L1.t('error.idbWriteFailed')));
-                        if (e.preventDefault) e.preventDefault();
-                    };
-                    tx.oncomplete = function () { res(); };
-
-                    var store = tx.objectStore(STORE);
-                    var bytes = 0;
-                    while (i < paths.length && bytes < BATCH_BYTES) {
-                        var p = paths[i++];
-                        var st = FS.lstat(p);
-                        var entry = { timestamp: st.mtime, mode: st.mode };
-                        if (FS.isFile(st.mode)) {
-                            entry.contents = FS.readFile(p); // bounded copy (<= batch size + one file)
-                            bytes += entry.contents.length;
-                        } else if (FS.isLink(st.mode)) {
-                            entry.link = FS.readlink(p);
-                        }
-                        store.put(entry, p);
-                        written++;
-                    }
-                    bytesDone += bytes;
-                }).then(function () {
-                    if (onProgress) onProgress(written, paths.length, bytesDone, bytesTotal);
-                    // Macrotask yield: lets Safari GC the batch copies before
-                    // the next one instead of accumulating them.
-                    return new Promise(function (r) { setTimeout(r, 0); });
-                }).then(nextBatch);
-            }
-
-            return nextBatch().catch(function (err) {
-                try { db.close(); } catch (e) {}
+            })(STORAGE_MOUNT);
+            if (onStage) onStage(EKA2L1.t('stage.fileCount', {
+                count: paths.length, mb: Math.floor(bytesTotal / 1048576)
+            }));
+            try {
+                var stats = await saveStoragePaths(FS, paths, function (done, total, bytes) {
+                    if (onProgress) onProgress(done, total, bytes, bytesTotal);
+                });
+                stats.bytesTotal = bytesTotal;
+                return stats;
+            } catch (err) {
                 err.bytesTotal = bytesTotal;
                 throw err;
-            });
+            }
         });
     };
 
-    /**
-     * Persist only the given VFS file paths (ancestor directories are added
-     * automatically) using the same IndexedDB record format as FS.syncfs.
-     * Unlike EKA2L1.save() this doesn't reconcile the whole ~300MB mount, so
-     * uploading a single 30MB game stays fast and memory-bounded — full-mount
-     * syncfs spikes are what get the tab killed on iOS Safari.
-     */
+    /** Persist selected files and their ancestor directories. */
     EKA2L1.savePaths = function (filePaths, onProgress) {
-        var FS = EKA2L1.module.FS;
-        var MOUNT = '/eka2l1';
-        var STORE = 'FILE_DATA';
-        var DB_VERSION = 21; // Emscripten IDBFS.DB_VERSION (must match the glue)
-        var BATCH_BYTES = 4 * 1024 * 1024;
-
-        // Expand to ancestors so a restore can rebuild the directory tree.
-        var wanted = {};
-        (filePaths || []).forEach(function (p) {
-            var parts = p.split('/');
-            for (var i = 3; i <= parts.length; i++) { // '' / 'eka2l1' / ...
-                var sub = parts.slice(0, i).join('/');
-                if (sub.indexOf(MOUNT) === 0) wanted[sub] = 1;
-            }
-        });
-        var paths = Object.keys(wanted).sort();
-        if (!paths.length) return Promise.resolve({ entries: 0, bytes: 0 });
-
-        return new Promise(function (resolve, reject) {
-            var req;
-            try { req = indexedDB.open(MOUNT, DB_VERSION); } catch (e) { reject(e); return; }
-            req.onupgradeneeded = function (e) {
-                var db = e.target.result;
-                var st = db.objectStoreNames.contains(STORE)
-                    ? e.target.transaction.objectStore(STORE)
-                    : db.createObjectStore(STORE);
-                if (!st.indexNames.contains('timestamp')) {
-                    st.createIndex('timestamp', 'timestamp', { unique: false });
+        return queueSave(function (FS) {
+            var wanted = new Set();
+            (filePaths || []).forEach(function (path) {
+                if (!path.startsWith(STORAGE_MOUNT + '/')) return;
+                while (path !== STORAGE_MOUNT) {
+                    wanted.add(path);
+                    path = path.substring(0, path.lastIndexOf('/'));
                 }
-            };
-            req.onerror = function () { reject(req.error || new Error(EKA2L1.t('error.idbOpenFailed'))); };
-            req.onsuccess = function () { resolve(req.result); };
-        }).then(function (db) {
-            var i = 0;
-            var written = 0;
-            var bytesDone = 0;
-
-            function nextBatch() {
-                if (i >= paths.length) {
-                    db.close();
-                    return Promise.resolve({ entries: written, bytes: bytesDone });
-                }
-                return new Promise(function (res, rej) {
-                    var tx = db.transaction([STORE], 'readwrite');
-                    tx.onerror = tx.onabort = function (e) {
-                        rej((e.target && e.target.error) || new Error(EKA2L1.t('error.idbWriteFailed')));
-                        if (e.preventDefault) e.preventDefault();
-                    };
-                    tx.oncomplete = function () { res(); };
-
-                    var store = tx.objectStore(STORE);
-                    var bytes = 0;
-                    while (i < paths.length && bytes < BATCH_BYTES) {
-                        var p = paths[i++];
-                        var st = FS.lstat(p);
-                        var entry = { timestamp: st.mtime, mode: st.mode };
-                        if (FS.isFile(st.mode)) {
-                            entry.contents = FS.readFile(p);
-                            bytes += entry.contents.length;
-                        } else if (FS.isLink(st.mode)) {
-                            entry.link = FS.readlink(p);
-                        }
-                        store.put(entry, p);
-                        written++;
-                    }
-                    bytesDone += bytes;
-                }).then(function () {
-                    if (onProgress) onProgress(written, paths.length, bytesDone);
-                    // Macrotask yield between batches (Safari GC headroom).
-                    return new Promise(function (r) { setTimeout(r, 0); });
-                }).then(nextBatch);
-            }
-
-            return nextBatch().catch(function (err) {
-                try { db.close(); } catch (e) {}
-                throw err;
             });
+            return saveStoragePaths(FS, Array.from(wanted).sort(), onProgress);
         });
     };
 
@@ -869,15 +806,19 @@
         return false;
     };
 
+    function lowPowerRequested() {
+        var mode = 'auto';
+        try { mode = localStorage.getItem('eka2l1_perf') || mode; } catch (e) {}
+        return (mode === 'low') || (mode === 'auto' && EKA2L1.isLowEndDevice());
+    }
+
     /**
      * Apply the persisted performance preferences to the booted core.
      * perfMode: 'auto' (low-end heuristic) | 'high' (60fps) | 'low' (30fps).
      * filter:   'smooth' | 'sharp'.
      */
     EKA2L1.applyPerfPrefs = function () {
-        var mode = localStorage.getItem('eka2l1_perf') || 'auto';
-        var lowPower = (mode === 'low') || (mode === 'auto' && EKA2L1.isLowEndDevice());
-
+        var lowPower = lowPowerRequested();
         if (lowPower) {
             EKA2L1.setMaxFps(30);
             // With 33ms frames the guest can take the full budget and still
@@ -967,41 +908,40 @@
         return /OOM|out of memory|cannot enlarge|memory\.grow|could not allocat/i.test(s);
     };
 
-    /**
-     * Write a File/Blob into the wasm VFS in 8MB slices. Streaming matters on
-     * iOS Safari: loading a 100MB+ ROM as one ArrayBuffer (on top of the MEMFS
-     * copy) pushed the tab over the memory limit and got it killed mid-install.
-     * Resolves with the target path.
-     */
-    EKA2L1.writeFileToVFS = function (file, targetPath, onProgress) {
-        var FS = EKA2L1.module.FS;
-        var CHUNK = 8 * 1024 * 1024;
+    var uploadSerial = 0;
 
+    /** Copy a picked file into MEMFS with one backing allocation. */
+    EKA2L1.writeFileToVFS = async function (file, targetPath, onProgress) {
+        var FS = EKA2L1.module.FS;
         var dir = targetPath.substring(0, targetPath.lastIndexOf('/'));
         FS.mkdirTree(dir);
 
-        var stream = FS.open(targetPath, 'w');
-        var offset = 0;
-
-        function writeNext() {
-            if (offset >= file.size) {
-                FS.close(stream);
-                return Promise.resolve(targetPath);
-            }
-            var slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
-            return slice.arrayBuffer().then(function (buf) {
-                var data = new Uint8Array(buf);
-                FS.write(stream, data, 0, data.length, offset);
-                offset += data.length;
+        var temporaryPath;
+        do {
+            temporaryPath = dir + '/.eka2l1-upload-' + (++uploadSerial);
+        } while (FS.analyzePath(temporaryPath).exists);
+        var stream = FS.open(temporaryPath, 'w');
+        try {
+            FS.ftruncate(stream.fd, file.size);
+            for (var offset = 0; offset < file.size;) {
+                var slice = file.slice(offset, Math.min(offset + IO_CHUNK_BYTES, file.size));
+                var data = new Uint8Array(await slice.arrayBuffer());
+                var written = FS.write(stream, data, 0, data.length, offset);
+                if (written !== data.length || written === 0) {
+                    throw new Error('Incomplete VFS write');
+                }
+                offset += written;
                 if (onProgress) onProgress(offset, file.size);
-                return writeNext();
-            });
-        }
-
-        return writeNext().catch(function (err) {
-            try { FS.close(stream); } catch (e) {}
+            }
+            FS.close(stream);
+            stream = null;
+            FS.rename(temporaryPath, targetPath);
+            return targetPath;
+        } catch (err) {
+            try { if (stream) FS.close(stream); } catch (e) {}
+            try { FS.unlink(temporaryPath); } catch (e) {}
             throw err;
-        });
+        }
     };
 
     /** True when the wasm core exports the streaming RPKG installer. */
@@ -1011,7 +951,7 @@
     };
 
     /**
-     * Stream a picked RPKG File straight into the C++ installer in 8MB
+     * Stream a picked RPKG File straight into the C++ installer in small
      * slices. Unlike writeFileToVFS + initDevice, the package itself never
      * lands in MEMFS — on iOS the extra 100-400MB resident copy was what
      * pushed the tab over the jetsam limit mid-install.
@@ -1020,7 +960,6 @@
      */
     EKA2L1.streamInstallRpkg = function (file, onProgress) {
         var mod = EKA2L1.module;
-        var CHUNK = 8 * 1024 * 1024;
 
         var rc = mod.ccall('wasm_rpkg_stream_begin', 'number', [], []);
         if (rc !== 0) {
@@ -1031,7 +970,7 @@
 
         function pump() {
             if (offset >= file.size) return Promise.resolve();
-            var slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
+            var slice = file.slice(offset, Math.min(offset + IO_CHUNK_BYTES, file.size));
             return slice.arrayBuffer().then(function (ab) {
                 var u8 = new Uint8Array(ab);
                 var ptr = mod.ccall('wasm_rpkg_stream_buffer', 'number', ['number'], [u8.length]);

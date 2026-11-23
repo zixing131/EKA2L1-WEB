@@ -387,11 +387,10 @@
             }));
         }).catch(function (err) {
             console.warn('[EKA2L1] staged save failed:', err);
-            // The one-shot syncfs clones EVERYTHING into a single IndexedDB
-            // transaction — exactly the spike that kills iOS tabs. Only fall
-            // back when the image is small enough to plausibly survive it.
+            // Keep the one-shot retry inside the staged transaction budget.
             var bt = err ? err.bytesTotal : undefined;
-            if (typeof bt === 'number' && bt > 200 * 1048576) {
+            if (typeof bt !== 'number') throw err;
+            if (bt > 4 * 1048576) {
                 throw new Error(EKA2L1.t('error.stagedSaveFailed', {
                     msg: err.message || err, mb: Math.floor(bt / 1048576)
                 }));
@@ -436,7 +435,7 @@
                 if (rpkgFile && EKA2L1.canStreamRpkg()) {
                     // EKA2 streaming path: the RPKG is parsed/extracted as the
                     // chunks arrive and never lands in MEMFS, and the ROM goes
-                    // straight to its final location — no temp copies at all.
+                    // uses a single backing allocation that is moved into place.
                     //
                     // Order matters for iOS: PERSIST BEFORE ACTIVATING. The
                     // activation (initDevice) is a full emulator boot — it

@@ -108,15 +108,8 @@ if (EMSCRIPTEN)
     target_link_options(eka2l1_wasm PRIVATE
         "SHELL:--pre-js ${CMAKE_CURRENT_SOURCE_DIR}/src/web_network.js"
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
-        # 160MB start, grow on demand (in-place for shared memory, no copy).
-        # iOS Safari kills the tab well under ~1.2GB commit, and a ROM install
-        # peaks at baseline + RPKG in MEMFS + extracted Z drive + IndexedDB
-        # sync copies. 256MB was sized for the old 131MB dyncom translation
-        # arena; with that trimmed to 32MB on WASM the same headroom fits in
-        # 160MB, leaving ~100MB more for the install spike.
-        "SHELL:-s INITIAL_MEMORY=268435456"
-        # 1GB cap: heavy runs peak well under 400MB, and a smaller reservation
-        # is friendlier to iOS Safari's shared-memory accounting.
+        # Start at 160 MiB and grow shared memory as guests need it.
+        "SHELL:-s INITIAL_MEMORY=167772160"
         # S60 5th Edition reserves large maximum sizes for many process heaps.
         # The multiple memory model represents those reservations in the WASM
         # address space, so a complete 5800 shell can exceed the old 1 GiB cap

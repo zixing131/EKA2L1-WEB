@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <queue>
 #include <thread>
 
@@ -1398,6 +1399,9 @@ namespace eka2l1 {
 
     bool kernel_system::map_rom(const mem::vm_address addr, const std::string &path) {
         const std::size_t rom_size = common::file_size(path);
+        if (rom_size == 0 || rom_size > std::numeric_limits<address>::max() - addr) {
+            return false;
+        }
 
         // The multiple model needs padding before an unaligned ROM base.
         mem::vm_address chunk_base = addr;
@@ -1408,7 +1412,9 @@ namespace eka2l1 {
             rebase_offset = addr - chunk_base;
         }
 
-        if (rebase_offset == 0) {
+        // Emscripten emulates private mmap with a full copy and cannot release
+        // it through unmap_file(). Own the guest ROM allocation explicitly.
+        if (rebase_offset == 0 && !EKA2L1_PLATFORM(WASM)) {
             rom_map_ = common::map_file(path, prot_read_write, 0, true);
             rom_map_size_ = 0;
 
@@ -1416,8 +1422,10 @@ namespace eka2l1 {
                 return false;
             }
         } else {
-            LOG_INFO(KERNEL, "ROM base 0x{:X} is not chunk-aligned, mapping the ROM at offset 0x{:X} of a chunk at 0x{:X}",
-                addr, rebase_offset, chunk_base);
+            if (rebase_offset != 0) {
+                LOG_INFO(KERNEL, "ROM base 0x{:X} is not chunk-aligned, mapping the ROM at offset 0x{:X} of a chunk at 0x{:X}",
+                    addr, rebase_offset, chunk_base);
+            }
 
             rom_map_size_ = rebase_offset + rom_size;
             rom_map_ = common::map_memory(rom_map_size_);
@@ -1432,15 +1440,13 @@ namespace eka2l1 {
                 return false;
             }
 
-            void *rom_file_map = common::map_file(path, prot_read, 0, true);
-
-            if (!rom_file_map) {
+            auto *rom_bytes = static_cast<std::uint8_t *>(rom_map_);
+            std::memset(rom_bytes, 0, rebase_offset);
+            common::ro_std_file_stream rom_file(path, true);
+            if (!rom_file.valid() || rom_file.read(rom_bytes + rebase_offset, rom_size) != rom_size) {
                 unmap_rom();
                 return false;
             }
-
-            std::memcpy(reinterpret_cast<std::uint8_t *>(rom_map_) + rebase_offset, rom_file_map, rom_size);
-            common::unmap_file(rom_file_map);
         }
 
         LOG_TRACE(KERNEL, "Rom mapped to address: 0x{:x}", reinterpret_cast<std::uint64_t>(rom_map_));
