@@ -10,9 +10,13 @@
 
 static arm_inst *AllocBuffer(ARMul_State *state, std::size_t size) {
     std::size_t start = state->trans_cache_buf_top;
-    state->trans_cache_buf_top += ((size + 7) >> 3) << 3;
+    const auto record_size = (size + 7) & ~std::size_t{7};
+    state->trans_cache_buf_top += record_size;
     assert(state->trans_cache_buf_top <= TRANS_CACHE_SIZE && "Translation cache is full!");
-    auto *instruction = reinterpret_cast<arm_inst *>(&state->trans_cache_buf[start]);
+#ifdef __EMSCRIPTEN__
+    assert((start % TRANS_CACHE_SLAB_SIZE) + record_size < TRANS_CACHE_SLAB_SIZE);
+#endif
+    auto *instruction = reinterpret_cast<arm_inst *>(state->translation_at(start));
     instruction->fusion = TransFusion::NONE;
     instruction->loop_offset = 0;
     return instruction;

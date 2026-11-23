@@ -17,6 +17,7 @@ ARMul_State::ARMul_State(eka2l1::arm::dyncom_core *core, PrivilegeMode initial_m
     // dyncom CPU time as the cache grows from 0 to thousands of entries.
     instruction_cache.reserve(64 * 1024);
 #ifdef __EMSCRIPTEN__
+    trans_cache_slabs.front() = std::make_unique_for_overwrite<char[]>(TRANS_CACHE_SLAB_SIZE);
     jit_enabled = (eka2l1::arm::dyncom_jit::enabled_default != 0);
 #endif
     Reset();

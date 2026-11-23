@@ -19,6 +19,7 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <common/types.h>
 #include <unordered_map>
 
@@ -35,14 +36,11 @@ namespace eka2l1::arm {
     class exclusive_monitor;
 }
 
-// Translation-cache arena, an inline member of ARMul_State — the whole size is
-// malloc'd up front when the core is created. Overflow is safe: the
-// interpreter flushes and restarts the cache when the high-water mark nears
-// the end (see TRANS_CACHE_FLUSH_MARGIN), so this only sets how often that
-// happens. iOS Safari kills the tab well under ~1.2GB, so the web build trades
-// rare flushes for ~100MB less baseline footprint.
+// Keep a bounded cache. The web build allocates its backing in slabs so
+// the core and small workloads do not have to reserve the whole arena.
 #ifdef __EMSCRIPTEN__
-#define TRANS_CACHE_SIZE (32 * 1024 * 1024)
+inline constexpr std::size_t TRANS_CACHE_SLAB_SIZE = 4 * 1024 * 1024;
+inline constexpr std::size_t TRANS_CACHE_SIZE = 32 * 1024 * 1024;
 #else
 #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
 #endif
@@ -365,8 +363,20 @@ public:
     unsigned bigendSig;
     unsigned syscallSig;
 
+#ifdef __EMSCRIPTEN__
+    std::array<std::unique_ptr<char[]>, TRANS_CACHE_SIZE / TRANS_CACHE_SLAB_SIZE> trans_cache_slabs;
+#else
     alignas(8) char trans_cache_buf[TRANS_CACHE_SIZE];
+#endif
     size_t trans_cache_buf_top = 0;
+
+    char *translation_at(const std::size_t offset) {
+#ifdef __EMSCRIPTEN__
+        return trans_cache_slabs[offset / TRANS_CACHE_SLAB_SIZE].get() + (offset % TRANS_CACHE_SLAB_SIZE);
+#else
+        return trans_cache_buf + offset;
+#endif
+    }
 
     // ASID-tagged translation cache. Translations from different address spaces
     // coexist (key = (asid << 32) | aligned_pc | thumb_bit) across process

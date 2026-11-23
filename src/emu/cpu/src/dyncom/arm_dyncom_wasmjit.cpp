@@ -1414,7 +1414,7 @@ namespace eka2l1::arm::dyncom_jit {
             std::size_t ptr = trans_ptr;
 
             for (unsigned n = 0; n < JIT_MAX_INSTS; n++) {
-                arm_inst *base = reinterpret_cast<arm_inst *>(&cpu_->trans_cache_buf[ptr]);
+                arm_inst *base = reinterpret_cast<arm_inst *>(cpu_->translation_at(ptr));
                 const inst_class cls = classify(base->idx);
 
                 if (cls.comp_size < 0) {

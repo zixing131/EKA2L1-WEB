@@ -21,6 +21,7 @@
 #include <cpu/dyncom/vfp/vfp.h>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include <cpu/arm_interface.h>
 
@@ -962,17 +963,40 @@ static constexpr std::size_t INSTRUCTION_CACHE_FLUSH_THRESHOLD = 256 * 1024;
 std::atomic<std::uint64_t> eka2l1_wasm_guest_blocks_translated{ 0 };
 #endif
 
-// Translations now survive context switches, so trans_cache_buf can fill up
-// from accumulation alone. One block is at most a page of Thumb instructions
-// (~96KB of cream); flush well before the hard end of the buffer since the
-// capacity assert in AllocBuffer is compiled out in release builds.
-static constexpr std::size_t TRANS_CACHE_FLUSH_MARGIN = 1024 * 1024;
-
-static inline void maybe_flush_instruction_cache(ARMul_State *cpu) {
-    if ((cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD)
-        || (cpu->trans_cache_buf_top >= TRANS_CACHE_SIZE - TRANS_CACHE_FLUSH_MARGIN)) {
+// A translation ends at the next guest page boundary. Leave room for the
+// whole decoded block and its optional loop record before starting it.
+static inline void prepare_translation(ARMul_State *cpu) {
+    if (cpu->instruction_cache.size() >= INSTRUCTION_CACHE_FLUSH_THRESHOLD) {
         cpu->invalidate_translation_cache();
     }
+#ifdef __EMSCRIPTEN__
+    constexpr std::size_t block_margin = 256 * 1024;
+    if (cpu->trans_cache_buf_top % TRANS_CACHE_SLAB_SIZE < TRANS_CACHE_SLAB_SIZE - block_margin) {
+        return;
+    }
+
+    const auto next = cpu->trans_cache_buf_top / TRANS_CACHE_SLAB_SIZE + 1;
+    if (next == cpu->trans_cache_slabs.size()) {
+        cpu->invalidate_translation_cache();
+        return;
+    }
+
+    auto &slab = cpu->trans_cache_slabs[next];
+    if (!slab) {
+        slab.reset(new (std::nothrow) char[TRANS_CACHE_SLAB_SIZE]);
+        if (!slab) {
+            // Under memory pressure, keep translating in the slabs we own.
+            cpu->invalidate_translation_cache();
+            return;
+        }
+    }
+    cpu->trans_cache_buf_top = next * TRANS_CACHE_SLAB_SIZE;
+#else
+    constexpr std::size_t block_margin = 1024 * 1024;
+    if (cpu->trans_cache_buf_top >= TRANS_CACHE_SIZE - block_margin) {
+        cpu->invalidate_translation_cache();
+    }
+#endif
 }
 
 static void FuseInstructionPair(arm_inst *left, const arm_inst *right, bool thumb) {
@@ -999,9 +1023,9 @@ static void FuseInstructionPair(arm_inst *left, const arm_inst *right, bool thum
 template <typename Loop>
 static void AttachCountedLoop(ARMul_State *cpu, std::size_t bb_start, const Loop &loop) {
     const auto offset = cpu->trans_cache_buf_top - bb_start;
-    auto *first = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[bb_start]);
+    auto *first = reinterpret_cast<arm_inst *>(cpu->translation_at(bb_start));
     first->loop_offset = static_cast<std::uint16_t>(offset);
-    std::memcpy(&cpu->trans_cache_buf[cpu->trans_cache_buf_top], &loop, sizeof(loop));
+    std::memcpy(cpu->translation_at(cpu->trans_cache_buf_top), &loop, sizeof(loop));
     cpu->trans_cache_buf_top += (sizeof(loop) + 7) & ~std::size_t{7};
 }
 
@@ -1013,7 +1037,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
     ARM_INST_PTR inst_base = nullptr;
     TransExtData ret = TransExtData::NON_BRANCH;
     arm_inst *prev = nullptr;
-    maybe_flush_instruction_cache(cpu);
+    prepare_translation(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
@@ -1067,7 +1091,7 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
 
 static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, std::uint32_t addr) {
     ARM_INST_PTR inst_base = nullptr;
-    maybe_flush_instruction_cache(cpu);
+    prepare_translation(cpu);
     bb_start = cpu->trans_cache_buf_top;
 
     std::uint32_t phys_addr = addr;
@@ -1150,10 +1174,10 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
 #define FETCH_INST                                 \
     if (inst_base->br != TransExtData::NON_BRANCH) \
         goto DISPATCH;                             \
-    inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr]
+    inst_base = reinterpret_cast<arm_inst *>(instruction_bytes)
 
-#define INC_PC(l) ptr += (((sizeof(arm_inst) + l + 7) >> 3) << 3)
-#define INC_PC_STUB ptr += (((sizeof(arm_inst) + 7) >> 3) << 3)
+#define INC_PC(l) instruction_bytes += (((sizeof(arm_inst) + l + 7) >> 3) << 3)
+#define INC_PC_STUB instruction_bytes += (((sizeof(arm_inst) + 7) >> 3) << 3)
 
 // GCC and Clang have a C++ extension to support a lookup table of labels. Otherwise, fallback to a
 // clunky switch statement.
@@ -1825,6 +1849,7 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
         &&END };
 #endif
     arm_inst *inst_base;
+    char *instruction_bytes;
     unsigned int addr;
 
     std::size_t ptr;
@@ -1929,9 +1954,10 @@ DISPATCH : {
 #endif
     }
 
-    inst_base = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[ptr]);
+    instruction_bytes = cpu->translation_at(ptr);
+    inst_base = reinterpret_cast<arm_inst *>(instruction_bytes);
     if (inst_base->loop_offset && cpu->NumInstrsToExecute > num_instrs) {
-        const auto *loop_data = &cpu->trans_cache_buf[ptr + inst_base->loop_offset];
+        const auto *loop_data = instruction_bytes + inst_base->loop_offset;
         // Bound work between browser yields and off-thread invalidation checks.
         const auto remaining = cpu->NumInstrsToExecute - num_instrs;
         const auto executed = cpu->TFlag

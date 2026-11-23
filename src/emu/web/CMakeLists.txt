@@ -110,9 +110,9 @@ if (EMSCRIPTEN)
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         # Fixed increments bound unused headroom even after the guest has
         # launched. The default 20% growth can add tens of unused MiB at once.
-        "SHELL:-s MEMORY_GROWTH_LINEAR_STEP=16777216"
-        # Start at 160 MiB and grow shared memory as guests need it.
-        "SHELL:-s INITIAL_MEMORY=167772160"
+        "SHELL:-s MEMORY_GROWTH_LINEAR_STEP=8388608"
+        # Start at 128 MiB and grow shared memory as guests need it.
+        "SHELL:-s INITIAL_MEMORY=134217728"
         # S60 5th Edition reserves large maximum sizes for many process heaps.
         # The multiple memory model represents those reservations in the WASM
         # address space, so a complete 5800 shell can exceed the old 1 GiB cap

@@ -164,7 +164,44 @@ bool check_memory_bailouts() {
     return true;
 }
 
+static bool check_translation_cache_wrap() {
+    diff_env env;
+    auto core = make_core(env);
+    dyncom_jit::enabled_default = 0;
+    constexpr std::uint32_t add = 0xE2800001; // ADD r0,r0,#1
+    constexpr std::uint32_t page_size = 1 << PAGE_BITS;
+    for (std::uint32_t pc = code_base; pc < MEM_SIZE; pc += sizeof(add)) {
+        std::memcpy(env.mem.data() + pc, &add, sizeof(add));
+    }
+
+    // Each address space adds another set of translations for the same PCs.
+    // Enough of them fill the arena, while repeating ASID 1 also revisits
+    // blocks translated before the active slab was allocated.
+    for (std::uint32_t asid = 1; asid <= 160; ++asid) {
+        cpu_state input{};
+        input.reg[15] = code_base;
+        input.cpsr = 0x10;
+        for (const auto selected : {asid, 1u}) {
+            core->set_asid(selected);
+            write_state(*core, input);
+            for (std::uint32_t pc = code_base; pc < MEM_SIZE; pc += page_size) {
+                core->run(page_size / sizeof(add));
+                if (core->get_pc() != pc + page_size
+                    || core->get_reg(0) != (pc + page_size - code_base) / sizeof(add)) {
+                    return false;
+                }
+            }
+        }
+    }
+    std::puts("PASS: decoded blocks survive cache slab changes and cache wrap");
+    return true;
+}
+
 int main() {
+    if (!check_translation_cache_wrap()) {
+        std::puts("FAIL: translation cache slab changes or wrap");
+        return 1;
+    }
     if (!check_memory_bailouts()) {
         std::printf("FAIL: compiled memory access boundary checks\n");
         return 1;
