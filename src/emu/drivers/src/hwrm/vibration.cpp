@@ -19,16 +19,20 @@
 
 #include <common/platform.h>
 #include <drivers/hwrm/backend/vibration_null.h>
-#ifdef EKA2L1_PLATFORM_ANDROID
+#if EKA2L1_PLATFORM(ANDROID)
 #include <drivers/hwrm/backend/vibration_jdk.h>
+#elif EKA2L1_PLATFORM(IOS)
+#include <drivers/hwrm/backend/vibration_ios.h>
 #elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_PLATFORM(OHOS)
 #include <drivers/hwrm/backend/vibration_sdl2.h>
 #endif
 
 namespace eka2l1::drivers::hwrm {
     std::unique_ptr<vibrator> make_suitable_vibrator() {
-#ifdef EKA2L1_PLATFORM_ANDROID
+#if EKA2L1_PLATFORM(ANDROID)
         return std::make_unique<vibrator_jdk>();
+#elif EKA2L1_PLATFORM(IOS)
+        return std::make_unique<vibrator_ios>();
 #elif EKA2L1_PLATFORM(WASM) || EKA2L1_PLATFORM(OHOS)
         // No SDL2 on OHOS; vibration via Vibrator Kit can be wired in the
         // frontend later. Use the null vibrator for now.

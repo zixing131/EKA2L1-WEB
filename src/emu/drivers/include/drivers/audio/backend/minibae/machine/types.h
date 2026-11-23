@@ -35,7 +35,9 @@
 #define X_PLATFORM X_WIN95
 #else
 #include <pthread.h>
-#if EKA2L1_PLATFORM(MACOS)
+#if EKA2L1_PLATFORM(IOS)
+#define X_PLATFORM X_IOS
+#elif EKA2L1_PLATFORM(MACOS)
 #define X_PLATFORM X_MACINTOSH
 #elif EKA2L1_PLATFORM(ANDROID)
 // ANDROID is intentionally not EKA2L1_PLATFORM(UNIX) (see platform.h), so

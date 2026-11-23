@@ -19,10 +19,10 @@
 
 #include <common/platform.h>
 #include <drivers/audio/dsp.h>
-#if EKA2L1_HAS_NATIVE_AV()
+#include <drivers/audio/backend/dsp_shared.h>
+#if EKA2L1_HAS_FFMPEG
 #include <drivers/audio/backend/ffmpeg/dsp_ffmpeg.h>
 #else
-#include <drivers/audio/backend/dsp_shared.h>
 #include <drivers/audio/backend/minimp3/dsp_minimp3.h>
 
 #include <atomic>
@@ -262,8 +262,10 @@ namespace eka2l1::drivers {
                 return new_minimp3_dsp_output(aud);
             }
             return std::make_unique<dsp_output_stream_null>();
-#else
+#elif EKA2L1_HAS_FFMPEG
             return std::make_unique<dsp_output_stream_ffmpeg>(aud);
+#else
+            return new_minimp3_dsp_output(aud);
 #endif
         default:
             break;

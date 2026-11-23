@@ -1483,9 +1483,14 @@ namespace eka2l1 {
             rebase_offset = addr - chunk_base;
         }
 
+#if EKA2L1_PLATFORM(WASM)
         // Emscripten emulates private mmap with a full copy and cannot release
         // it through unmap_file(). Own the guest ROM allocation explicitly.
-        if (rebase_offset == 0 && !EKA2L1_PLATFORM(WASM)) {
+        constexpr bool can_map_file = false;
+#else
+        constexpr bool can_map_file = true;
+#endif
+        if (rebase_offset == 0 && can_map_file) {
             rom_map_ = common::map_file(path, prot_read_write, 0, true);
             rom_map_size_ = 0;
 

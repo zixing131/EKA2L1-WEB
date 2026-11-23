@@ -22,11 +22,11 @@
 #include <drivers/audio/backend/tinysoundfont/player_tsf.h>
 #include <drivers/audio/player.h>
 #include <drivers/audio/backend/minimp3/player_minimp3.h>
-#if EKA2L1_HAS_NATIVE_AV()
+#if EKA2L1_HAS_FFMPEG
 #include <drivers/audio/backend/ffmpeg/player_ffmpeg.h>
+#endif
 #if EKA2L1_PLATFORM(WIN32)
 #include <drivers/audio/backend/wmf/player_wmf.h>
-#endif
 #endif
 
 namespace eka2l1::drivers {
@@ -70,7 +70,7 @@ namespace eka2l1::drivers {
         case player_type_tsf:
             return std::make_unique<player_tsf>(aud);
 
-#if EKA2L1_HAS_NATIVE_AV()
+#if EKA2L1_HAS_FFMPEG
         case player_type_ffmpeg:
             return std::make_unique<player_ffmpeg>(aud);
 #endif

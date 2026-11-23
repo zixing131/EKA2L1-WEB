@@ -21,6 +21,7 @@
 #pragma once
 
 #include <drivers/graphics/backend/graphics_driver_shared.h>
+#include <drivers/graphics/backend/ogl/common_ogl.h>
 #include <drivers/graphics/backend/ogl/shader_ogl.h>
 #include <drivers/graphics/backend/ogl/texture_ogl.h>
 #include <drivers/graphics/backend/ogl/input_desc_ogl.h>
@@ -28,7 +29,6 @@
 
 #include <common/queue.h>
 #include <common/region.h>
-#include <glad/glad.h>
 
 #include <memory>
 #include <queue>
