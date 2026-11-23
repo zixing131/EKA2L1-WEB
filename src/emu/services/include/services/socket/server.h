@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <deque>
+
 #include <services/socket/common.h>
 #include <services/socket/connection.h>
 #include <services/socket/host.h>
@@ -34,6 +36,8 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace eka2l1 {
     namespace epoc::socket {
@@ -41,9 +45,37 @@ namespace eka2l1 {
         private:
             connection *conn_;
             bool progress_reported_;
+            std::shared_ptr<connection_state> state_;
+            std::weak_ptr<connection_state> observed_state_;
+            std::shared_ptr<connection_reference> reference_;
+            std::vector<connection_info> snapshot_;
+            conn_progress progress_{};
+            std::optional<std::string> start_preferences_;
+            std::unique_ptr<service::ipc_context> progress_request_;
+
+            std::unique_ptr<service::ipc_context> interface_request_;
+            std::shared_ptr<interface_observer> interface_observer_;
+            std::deque<interface_notification> interface_events_;
+
+            void request_interface_notification(service::ipc_context *ctx);
+            void complete_interface_notification();
+
+            void cancel_progress();
+            void cancel_interface_notification();
+            void set_progress(std::int32_t stage);
+            void bind_state(const std::shared_ptr<connection_state> &state, bool monitor = false);
+            void attach(service::ipc_context *ctx);
+            void start(service::ipc_context *ctx, bool with_preferences);
+            void enumerate(service::ipc_context *ctx);
+            void get_info(service::ipc_context *ctx);
+            void get_int_setting(service::ipc_context *ctx);
+            void get_des_setting(service::ipc_context *ctx);
+            void name(service::ipc_context *ctx);
+            void control(service::ipc_context *ctx);
 
         public:
             explicit socket_connection_proxy(socket_client_session *parent, connection *conn);
+            ~socket_connection_proxy() override;
 
             connection *get_connection() const {
                 return conn_;
@@ -51,6 +83,7 @@ namespace eka2l1 {
 
             void dispatch(service::ipc_context *ctx) override;
             void progress_notify(service::ipc_context *ctx);
+            std::int32_t clone_from(const std::u16string &name, const security_info &caller);
 
             socket_subsession_type type() const override {
                 return socket_subsession_type_connection;
@@ -138,6 +171,7 @@ namespace eka2l1 {
 
     enum socket_opcode {
         socket_pr_find = 0x02,
+        socket_pr_start = 0x03,
         socket_so_create = 0x06,
         socket_so_create_null = 0x07,
         socket_so_send = 0x08,
@@ -147,6 +181,10 @@ namespace eka2l1 {
         socket_so_recv_one_or_more = 0x0C,
         socket_so_read = 0x0D,
         socket_so_write = 0xE,
+        socket_so_send_to = 0x0F,
+        socket_so_send_to_no_len = 0x10,
+        socket_so_recv_from = 0x11,
+        socket_so_recv_from_no_len = 0x12,
         socket_so_connect = 0x13,
         socket_so_bind = 0x14,
         socket_so_accept = 0x15,
@@ -157,10 +195,12 @@ namespace eka2l1 {
         socket_so_local_name = 0x1B,
         socket_so_remote_name = 0x1C,
         socket_so_close = 0x1D,
+        socket_so_shutdown = 0x1E,
         socket_so_cancel_recv = 0x20,
         socket_so_cancel_send = 0x21,
         socket_so_cancel_connect = 0x22,
         socket_so_cancel_accept = 0x23,
+        socket_so_cancel_all = 0x24,
         socket_hr_open = 0x28,
         socket_hr_get_by_name = 0x29,
         socket_hr_next = 0x2A,
@@ -179,12 +219,25 @@ namespace eka2l1 {
         socket_so_open_with_connection = 0x3D,
         socket_hr_open_with_connection = 0x3E,
         socket_cn_open_with_cn_type = 0x3F,
+        socket_cn_open_with_name = 0x40,
+        socket_cn_close = 0x41,
+        socket_cn_name = 0x42,
+        socket_cn_start_default = 0x43,
         socket_cn_start = 0x44,
         socket_cn_stop = 0x45,
+        socket_cn_progress = 0x46,
         socket_cn_progress_notification = 0x47,
+        socket_cn_cancel_progress_notification = 0x48,
+        socket_cn_last_progress_error = 0x49,
         socket_cn_get_int_setting = 0x4C,
         socket_cn_get_des_setting = 0x4F,
-        socket_cn_get_long_des_setting = 0x51,
+        socket_cn_get_long_des_setting = 0x50,
+        socket_cn_enumerate_connections = 0x51,
+        socket_cn_get_connection_info = 0x52,
+        socket_cn_control = 0x53,
+        socket_cn_attach = 0x54,
+        socket_cn_all_interface_notification = 0x55,
+        socket_cn_cancel_all_interface_notification = 0x56,
         socket_so_open_with_subconnection = 0x71,
         socket_ss_request_optimal_dealer = 0x3EE,
         socket_cm_api_ext_interface_send_receive = 0x3F0
@@ -210,6 +263,7 @@ namespace eka2l1 {
         socket_reform_so_set_opt = 0x31,
         socket_reform_so_get_opt = 0x32,
         socket_reform_so_ioctl = 0x33,
+        socket_reform_so_shutdown = 0x35,
         socket_reform_hr_open = 0x37,
         socket_reform_hr_get_by_name = 0x38,
         socket_reform_hr_next = 0x39,
@@ -224,8 +278,17 @@ namespace eka2l1 {
         socket_reform_so_open_with_conn = 0x46,
         socket_reform_hr_open_with_connection = 0x47,
         socket_reform_cn_open_with_cn_type = 0x48,
+        socket_reform_cn_open_with_name = 0x49,
+        socket_reform_cn_start = 0x4A,
+        socket_reform_cn_set_start_preferences = 0x4B,
+        socket_reform_cn_get_int_setting = 0x4D,
+        socket_reform_cn_get_des_setting = 0x50,
+        socket_reform_cn_close = 0x97,
+        socket_reform_cn_name = 0x98,
+        socket_reform_cn_control = 0x10,
         socket_reform_cn_get_long_des_setting = 0x51,
         socket_reform_pr_find = 0x82,
+        socket_reform_pr_start = 0x83,
         socket_reform_so_create_null = 0x85,
         socket_reform_so_local_name = 0x86,
         socket_reform_so_remote_name = 0x87,
@@ -234,6 +297,7 @@ namespace eka2l1 {
         socket_reform_so_cancel_connect = 0x8C,
         socket_reform_so_cancel_accept = 0x8D,
         socket_reform_so_cancel_all = 0x8E,
+        socket_reform_so_info = 0x8F,
         socket_reform_so_close = 0x88,
         socket_reform_so_cancel_ioctl = 0x89,
         socket_reform_hr_cancel = 0x91,
@@ -248,6 +312,7 @@ namespace eka2l1 {
         socket_old_num_pr = 0x00,
         socket_old_pr_info = 0x01,
         socket_old_pr_find = 0x02,
+        socket_old_pr_start = 0x03,
         socket_old_so_create = 0x06,
         socket_old_so_create_null = 0x07,
         socket_old_so_send = 0x08,
@@ -322,6 +387,7 @@ namespace eka2l1 {
     class socket_server : public service::typical_server {
         std::vector<std::unique_ptr<epoc::socket::protocol>> protocols_;
         std::vector<std::unique_ptr<epoc::socket::connect_agent>> agents_;
+        epoc::socket::connection_registry connections_;
 
     public:
         explicit socket_server(eka2l1::system *sys);
@@ -333,6 +399,8 @@ namespace eka2l1 {
 
         bool add_protocol(std::unique_ptr<epoc::socket::protocol> &pr);
         bool add_agent(std::unique_ptr<epoc::socket::connect_agent> &ag);
+
+        epoc::socket::connection_registry &connections() { return connections_; }
     };
 
     using socket_subsession_instance = std::unique_ptr<epoc::socket::socket_subsession>;
@@ -342,6 +410,7 @@ namespace eka2l1 {
         friend class epoc::socket::socket_host_resolver;
         friend class epoc::socket::socket_socket;
         friend class epoc::socket::socket_net_database;
+        friend class epoc::socket::socket_connection_proxy;
 
         common::identity_container<socket_subsession_instance> subsessions_;
 
@@ -356,8 +425,9 @@ namespace eka2l1 {
         void so_create_with_conn_or_subconn(service::ipc_context *ctx);
         void so_create_null(service::ipc_context *ctx);
         void pr_find(service::ipc_context *ctx);
+        void pr_start(service::ipc_context *ctx);
         void sr_get_by_number(eka2l1::service::ipc_context *ctx);
-        void cn_open(eka2l1::service::ipc_context *ctx);
+        void cn_open(eka2l1::service::ipc_context *ctx, bool with_name = false);
         void cn_get_long_des_setting(eka2l1::service::ipc_context *ctx);
         void ndb_create(service::ipc_context *ctx);
         void ss_request_optimal_dealer(eka2l1::service::ipc_context *ctx);

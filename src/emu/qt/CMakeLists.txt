@@ -21,6 +21,17 @@ endif()
 
 find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets LinguistTools Svg Network ${EXCLUSIVE_QT_COMPONENTS} REQUIRED)
 
+# displaywidget.cpp includes <qpa/qplatformnativeinterface.h> on X11/Wayland.
+# Some distributions expose those private headers only through Qt6::GuiPrivate,
+# others through Qt6::Gui and ship no such package -- so ask, but do not require.
+# Qt warns that private headers tie the binary to the exact Qt build it was
+# compiled against. That comes with including qpa headers at all, so the warning adds nothing.
+if (NOT WIN32 AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Haiku"
+        AND ${QT_VERSION_MAJOR} GREATER_EQUAL 6)
+    set(QT_NO_PRIVATE_MODULE_WARNING ON)
+    find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS GuiPrivate)
+endif()
+
 # Make list of TS files, and add them to resources. Credits from Yuzu CMakeLists
 set(TS_FOLDER translations)
 
@@ -70,6 +81,7 @@ set(PROJECT_SOURCES
         include/qt/package_manager_dialog.h
         include/qt/seh_handler.h
         include/qt/settings_dialog.h
+        include/qt/host_overrides.h
         include/qt/state.h
         include/qt/symbian_input_dialog.h
         include/qt/thread.h
@@ -107,6 +119,7 @@ set(PROJECT_SOURCES
         src/package_manager_dialog.ui
         src/seh_handler.cpp
         src/settings_dialog.cpp
+        src/host_overrides.cpp
         src/settings_dialog.ui
         src/state.cpp
         src/symbian_input_dialog.cpp
@@ -181,6 +194,10 @@ else()
         Qt${QT_VERSION_MAJOR}::OpenGL)
 endif()
 
+if (TARGET Qt${QT_VERSION_MAJOR}::GuiPrivate)
+    list(APPEND EXCLUSIVE_QT_LIBRARIES Qt${QT_VERSION_MAJOR}::GuiPrivate)
+endif()
+
 target_link_libraries(eka2l1_qt PRIVATE
     Qt${QT_VERSION_MAJOR}::Svg
     Qt${QT_VERSION_MAJOR}::Widgets
@@ -234,7 +251,15 @@ add_dependencies(eka2l1_qt
     vibractrl
     backlightctrl
     postingsurfacefactory
-    goommonitor)
+    goommonitor
+    ssl
+    commdb)
+
+set_property(TARGET eka2l1_qt APPEND PROPERTY LINK_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/patch/ssl/group/ssl_general.dll"
+    "${PROJECT_SOURCE_DIR}/src/patch/ssl/group/ssl.dll.map"
+    "${PROJECT_SOURCE_DIR}/src/patch/commdb/group/commdb_v6.dll"
+    "${PROJECT_SOURCE_DIR}/src/patch/commdb/group/commdb.dll.map")
 
 add_custom_command(
         TARGET eka2l1_qt
@@ -256,6 +281,19 @@ add_custom_command(
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/emu/qt/resources/" "$<TARGET_FILE_DIR:eka2l1_qt>/resources/"
     )
 
+if (EKA2L1_ENABLE_SCRIPTING_ABILITY AND EKA2L1_SCRIPTING_LUA)
+    # Stage the Lua runtime with the frontend as well as with the scripting
+    # library. Packaging may remove bin/ after a successful build; an
+    # incremental rebuild does not relink the unchanged static library and
+    # therefore would not rerun that target's asset-copy command.
+    add_custom_command(
+            TARGET eka2l1_qt
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:eka2l1_qt>/scripts/eka2l1"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/emu/scripting/lua/eka2l1/" "$<TARGET_FILE_DIR:eka2l1_qt>/scripts/eka2l1/"
+        )
+endif ()
+
 if (EKA2L1_ENABLE_SCRIPTING_ABILITY)
     if (LUA_DLL_PATH)
         add_custom_command(
@@ -267,21 +305,15 @@ if (EKA2L1_ENABLE_SCRIPTING_ABILITY)
 
     set_target_properties(eka2l1_qt PROPERTIES ENABLE_EXPORTS 1)
 
-    if (UNIX AND (NOT APPLE) AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU"))
+    if (APPLE)
+        target_link_libraries(eka2l1_qt PRIVATE -Wl,-force_load,$<TARGET_FILE:scripting>)
+    elseif(UNIX AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU"))
         target_link_libraries(eka2l1_qt PRIVATE -Wl,--whole-archive $<TARGET_FILE:scripting> -Wl,--no-whole-archive)
     elseif(MSVC)
         set_target_properties(eka2l1_qt PROPERTIES LINK_FLAGS /WHOLEARCHIVE:scripting.lib)
     else()
         target_link_libraries(eka2l1_qt PRIVATE scripting)
     endif()
-endif()
-
-if (ENABLE_DISCORD_RICH_PRESENCE AND WIN32)
-    add_custom_command(
-            TARGET eka2l1_qt
-            POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/external/discord_game_sdk/lib/x86_64/discord_game_sdk.dll" "$<TARGET_FILE_DIR:eka2l1_qt>"
-    )
 endif()
 
 get_target_property(QMAKE_EXE Qt${QT_VERSION_MAJOR}::qmake IMPORTED_LOCATION)
@@ -294,21 +326,48 @@ if(APPLE)
        MACOSX_BUNDLE_BUNDLE_VERSION 0.0.4.2
        MACOSX_BUNDLE_SHORT_VERSION_STRING 0.0.4.2
        MACOSX_BUNDLE_ICON_FILE duck.icns
+       MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/EKA2L1.entitlements"
        XCODE_ATTRIBUTE_OTHER_CODE_SIGN_FLAGS "--deep --options=runtime"
        OUTPUT_NAME EKA2L1
     )
 
-    # Copy Qt plugins into the bundle
-    if (${QT_VERSION_MAJOR} EQUAL 5)
-        get_target_property(qtcocoa_location Qt${QT_VERSION_MAJOR}::QCocoaIntegrationPlugin LOCATION)
-        target_sources(eka2l1_qt PRIVATE "${qtcocoa_location}")
-        set_source_files_properties("${qtcocoa_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/platforms)
+    # Copy Qt plugins into the bundle. Without the platform plugin the app exits
+    # at startup with "no Qt platform plugin could be initialized"; qt6's
+    # qt_finalize_executable only deploys on install, not into the build tree.
+    get_target_property(qtcocoa_location Qt${QT_VERSION_MAJOR}::QCocoaIntegrationPlugin LOCATION)
+    target_sources(eka2l1_qt PRIVATE "${qtcocoa_location}")
+    set_source_files_properties("${qtcocoa_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/platforms)
 
-        get_target_property(qtmacstyle_location Qt${QT_VERSION_MAJOR}::QMacStylePlugin LOCATION)
-        target_sources(eka2l1_qt PRIVATE "${qtmacstyle_location}")
-        set_source_files_properties("${qtmacstyle_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/styles)
-    endif()
+    get_target_property(qtmacstyle_location Qt${QT_VERSION_MAJOR}::QMacStylePlugin LOCATION)
+    target_sources(eka2l1_qt PRIVATE "${qtmacstyle_location}")
+    set_source_files_properties("${qtmacstyle_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/styles)
+
+    # Two more plugins the camera backend does not work without.
+    if (Qt6Multimedia_FOUND)
+        # Without a media backend plugin QtMultimedia enumerates no camera at
+        # all. Prefer the native one: Qt's FFmpeg backend links Qt's own FFmpeg
+        # dylibs, which do not belong in this bundle.
+        set(media_plugins ${QT_ALL_PLUGINS_FOUND_BY_FIND_PACKAGE_multimedia})
+        if ("QDarwinMediaPlugin" IN_LIST media_plugins)
+            set(media_plugins QDarwinMediaPlugin)
+        endif ()
+
+        foreach (media_plugin IN LISTS media_plugins)
+            set(media_plugin_target "Qt${QT_VERSION_MAJOR}::${media_plugin}")
+            if (TARGET ${media_plugin_target})
+                get_target_property(media_plugin_location ${media_plugin_target} LOCATION)
+                target_sources(eka2l1_qt PRIVATE "${media_plugin_location}")
+                set_source_files_properties("${media_plugin_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/multimedia)
+            endif ()
+        endforeach ()
+
+        # A still reaches the guest as JPEG, a plugin rather than one of
+        # QtGui's built-in formats: without it QImage::save fails.
+        get_target_property(qtjpeg_location Qt${QT_VERSION_MAJOR}::QJpegPlugin LOCATION)
+        target_sources(eka2l1_qt PRIVATE "${qtjpeg_location}")
+        set_source_files_properties("${qtjpeg_location}" PROPERTIES MACOSX_PACKAGE_LOCATION MacOS/imageformats)
+    endif ()
 
     # Copy icon into the bundle
     target_sources(eka2l1_qt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/duck.icns")
@@ -318,8 +377,7 @@ if(APPLE)
         TARGET eka2l1_qt
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:eka2l1_qt>/patch"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_BINARY_DIR}/bin/patch/" "$<TARGET_FILE_DIR:eka2l1_qt>/patch/"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/external/sdl2/macos/SDL2.framework" "$<TARGET_FILE_DIR:eka2l1_qt>/Frameworks/SDL2.framework")
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_BINARY_DIR}/bin/patch/" "$<TARGET_FILE_DIR:eka2l1_qt>/patch/")
 
     # Update library references to make the bundle portable
     include(DolphinPostprocessBundle)
@@ -330,6 +388,14 @@ if(APPLE)
        ${CMAKE_INSTALL_NAME_TOOL} -add_rpath "@executable_path/../Frameworks/"
        $<TARGET_FILE:eka2l1_qt>)
 
+    # Everything above rewrites Mach-O headers, which invalidates the signature
+    # the linker produced. Apple Silicon refuses to run an unsigned binary at
+    # all -- the app is killed on launch with a code signature error -- so sign
+    # the bundle again once it is in its final shape.
+    add_custom_command(TARGET eka2l1_qt
+       POST_BUILD COMMAND
+       codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:eka2l1_qt>")
+
     if (EKA2L1_DEPLOY_DMG)
         find_program(MACDEPLOYQT_EXECUTABLE macdeployqt HINTS "${QT_BIN_DIR}")
 
@@ -337,10 +403,8 @@ if(APPLE)
             COMMAND "${MACDEPLOYQT_EXECUTABLE}"
                 "$<TARGET_FILE_DIR:eka2l1_qt>/../.."
                 -dmg
-                -always-overwrite)
-
-        add_custom_command(TARGET eka2l1_qt POST_BUILD
-            COMMAND rm -rf "${CMAKE_BINARY_DIR}/bin/EKA2L1.app")
+                -always-overwrite
+                -codesign=-)
     endif()
 endif()
 
@@ -413,3 +477,5 @@ if (UNIX AND NOT APPLE)
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/assets/duck_tank_fedora.png" "$<TARGET_FILE_DIR:eka2l1_qt>/duck_tank_fedora.png")
 endif()
+
+target_link_libraries(eka2l1_qt PRIVATE control_native)

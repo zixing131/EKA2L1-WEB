@@ -73,7 +73,8 @@ namespace eka2l1::epoc {
         saved_setting = *the_setting;
 
         if (this == scr->focus) {
-            scr->restore_from_config(client->get_ws().get_graphics_driver(), saved_setting, &client->get_ws());
+            scr->restore_from_config(client->get_ws().get_graphics_driver(), saved_setting,
+                &client->get_ws());
         }
     }
 
@@ -88,8 +89,11 @@ namespace eka2l1::epoc {
     window_group::window_group(window_server_client_ptr client, screen *scr, epoc::window *parent, const std::uint32_t client_handle)
         : window(client, scr, parent, window_kind::group)
         , uid_owner_change_callback_handle(0)
-        , uid_owner_change_process(nullptr)
+        , uid_owner_change_process(0)
         , screen_change_event_handle(0) {
+        if (!client) {
+            return;
+        }
         set_initial_state();
 
         // Create window group as child
@@ -105,20 +109,31 @@ namespace eka2l1::epoc {
         uid_owner_change_callback_handle = mama->register_uid_type_change_callback(this,
             window_group_process_uid_type_change_callback);
 
-        uid_owner_change_process = mama;
+        uid_owner_change_process = mama->unique_id();
     }
 
     window_group::~window_group() {
         client->get_ws().remove_key_captures(this);
-        if (uid_owner_change_process) {
-            uid_owner_change_process->unregister_uid_type_change_callback(uid_owner_change_callback_handle);
+        if (client && uid_owner_change_process) {
+            kernel_system *kern = client->get_ws().get_kernel_system();
+            if (kernel::process *owner = kern->get_by_id<kernel::process>(uid_owner_change_process)) {
+                owner->unregister_uid_type_change_callback(uid_owner_change_callback_handle);
+            }
         }
         
         remove_from_sibling_list();
 
+        if (!client) {
+            return;
+        }
+
         if (this == scr->focus) {
             set_receive_focus(false);
             scr->update_focus(&client->get_ws(), this);
+        }
+
+        if (scr && (this == scr->default_owning_group)) {
+            scr->default_owning_group = nullptr;
         }
 
         if (scr) {
@@ -286,7 +301,6 @@ namespace eka2l1::epoc {
 
         case EWsWinOpEnableGroupListChangeEvents:
         case EWsWinOpDisableScreenChangeEvents:
-        case EWsWinOpDisableModifierChangedEvents:
         case EWsWinOpDisableErrorMessages:
         case EWsWinOpDisableOnEvents:
         case EWsWinOpDisableGroupChangeEvents:
@@ -322,6 +336,11 @@ namespace eka2l1::epoc {
 
         case EWsWinOpAddPriorityKey:
             add_priority_key(ctx, cmd);
+            break;
+
+        case EWsWinOpDefaultOwningWindow:
+            scr->default_owning_group = this;
+            ctx.complete(epoc::error_none);
             break;
 
         default: {

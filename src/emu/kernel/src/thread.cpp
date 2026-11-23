@@ -351,9 +351,8 @@ namespace eka2l1 {
                 std::memcpy(thread_free_modify_local_storage_ptr, ldata, NATIVE_THREAD_LOCAL_DATA_COPY_SIZE);
 
                 if (kern->get_epoc_version() < epocver::epoc10) {
-                    // Anna and above add thread ID to the local storage at offset 12
-                    // While the TLS heap is expected on at least OS version S60v3 to be at offset 12 instead
-                    // So nullify the thread ID
+                    // Only Belle euser has iThreadId at offset 12; earlier releases, Anna included,
+                    // keep iTlsHeap there and lazily initialise the TLS array only while it is null.
                     reinterpret_cast<thread_local_data*>(thread_free_modify_local_storage_ptr)->thread_id = 0;
                 }
 
@@ -400,10 +399,10 @@ namespace eka2l1 {
 
         void thread::do_cleanup() {
             // Close all thread handles
-            if (!kern->wipeout_in_progress())
+            if (!kern->wipeout_in_progress()) {
                 thread_handles.reset();
-
-            kern->free_msg(sync_msg);
+                kern->free_msg(sync_msg);
+            }
             cleanup_detachs(true);
         }
 
@@ -507,6 +506,12 @@ namespace eka2l1 {
         }
 
         bool thread::stop() {
+            // A dead thread left in a wait queue would later be handed the mutex or a semaphore count
+            if (wait_obj && !kern->is_eka1() && !kern->wipeout_in_progress()) {
+                end_timeout_early();
+                cancel_wait_object();
+            }
+
             return scheduler->stop(this);
         }
 
@@ -1139,6 +1144,25 @@ namespace eka2l1 {
             }
         }
 
+        void thread::cancel_wait_object() {
+            switch (wait_obj->get_object_type()) {
+            case object_type::mutex:
+                reinterpret_cast<mutex *>(wait_obj)->cancel_wait(this);
+                break;
+
+            case object_type::sema:
+                reinterpret_cast<semaphore *>(wait_obj)->cancel_wait(this);
+                break;
+
+            case object_type::condvar:
+                reinterpret_cast<condvar *>(wait_obj)->cancel_wait(this);
+                break;
+
+            default:
+                break;
+            }
+        }
+
         void thread::handle_wait_object_timeout() {
             // The wait object's native signal may got the upper hands
             if (!is_in_timeout) {
@@ -1151,13 +1175,14 @@ namespace eka2l1 {
             }
 
             if (!kern->is_eka1()) {
-                switch (wait_obj->get_object_type()) {
-                case kernel::object_type::sema:
-                    reinterpret_cast<kernel::semaphore*>(wait_obj)->timeouted(this);
-                    break;
+                const bool suspended = is_suspended();
+                cancel_wait_object();
 
-                default:
-                    break;
+                // A suspended thread stays blocked until it is resumed
+                if (suspended) {
+                    state = thread_state::wait;
+                } else {
+                    scheduler->dewait(this);
                 }
 
                 // Set the return value of the previous wait function to timed out

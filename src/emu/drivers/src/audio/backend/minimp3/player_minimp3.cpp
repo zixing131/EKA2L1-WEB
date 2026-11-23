@@ -113,7 +113,7 @@ namespace eka2l1::drivers {
             explicit minimp3_player(audio_driver *driver) : driver_(driver) {}
             ~minimp3_player() override { playing_ = false; output_.reset(); }
             bool open_url(const std::string &url) override {
-                common::ro_std_file_stream stream(url, true);
+                common::ro_std_file_stream stream(host_path(url), true);
                 return stream.valid() && open(stream);
             }
             bool open_custom(common::rw_stream *stream) override { return stream && open(*stream); }

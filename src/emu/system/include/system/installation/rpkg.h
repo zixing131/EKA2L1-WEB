@@ -1,5 +1,6 @@
 #pragma once
 
+#include <common/path_types.h>
 #include <common/types.h>
 #include <system/installation/common.h>
 
@@ -39,10 +40,10 @@ namespace eka2l1 {
             std::uint64_t data_size;
         };
 
-        bool should_install_requires_additional_rpkg(const std::string &path);
+        bool should_install_requires_additional_rpkg(const host_path &path);
 
-        device_installation_error install_rom(device_manager *dvc, const std::string &path, const std::string &rom_resident_path, const std::string &drives_z_resident_path, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
-        device_installation_error install_rpkg(device_manager *dvc, const std::string &path, const std::string &devices_rom_path, std::string &firmware_code, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
+        device_installation_error install_rom(device_manager *dvc, const host_path &path, const host_path &rom_resident_path, const host_path &drives_z_resident_path, const bool isolate_drives, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
+        device_installation_error install_rpkg(device_manager *dvc, const host_path &path, const host_path &devices_rom_path, std::string &firmware_code, const bool isolate_drives, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
 
         /**
          * Incremental (push-mode) RPKG installer.
@@ -63,7 +64,7 @@ namespace eka2l1 {
          */
         class rpkg_stream_installer {
         public:
-            explicit rpkg_stream_installer(device_manager *dvcmngr, const std::string &devices_rom_path);
+            explicit rpkg_stream_installer(device_manager *dvcmngr, const host_path &devices_rom_path);
             ~rpkg_stream_installer();
 
             rpkg_stream_installer(const rpkg_stream_installer &) = delete;
@@ -93,7 +94,7 @@ namespace eka2l1 {
             void open_entry_output();
 
             device_manager *dvcmngr_;
-            std::string devices_rom_path_;
+            host_path devices_rom_path_;
 
             parse_state state_;
             std::vector<std::uint8_t> pending_; ///< buffer for fixed-size pieces
@@ -105,7 +106,7 @@ namespace eka2l1 {
             bool discard_rest_; ///< output failure: mirror install_rpkg's "break"
             bool finished_;
 
-            std::unordered_set<std::string> created_directories_;
+            std::unordered_set<host_path> created_directories_;
             std::unique_ptr<common::wo_std_file_stream> out_;
         };
 
@@ -120,8 +121,8 @@ namespace eka2l1 {
          * @param rpkg_path Path to the RPKG, or an empty string when the caller has none. A ROM that turns
          *                  out to need one then fails with device_installation_rpkg_missing.
          */
-        device_installation_error install_rom_with_optional_rpkg(device_manager *dvc, const std::string &rom_path,
-            const std::string &rpkg_path, const std::string &rom_resident_path, const std::string &drives_z_resident_path,
-            progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
+        device_installation_error install_rom_with_optional_rpkg(device_manager *dvc, const host_path &rom_path,
+            const host_path &rpkg_path, const host_path &rom_resident_path, const host_path &drives_z_resident_path,
+            const bool isolate_drives, progress_changed_callback progress_cb, cancel_requested_callback cancel_cb);
     }
 }

@@ -19,20 +19,26 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <drivers/audio/stream.h>
 #include <drivers/audio/player.h>
 #include <drivers/driver.h>
 
 #include <common/container.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
 
+namespace eka2l1::common {
+    class ro_stream;
+}
+
 namespace eka2l1::drivers {
     using master_audio_volume_change_callback = std::function<void(const std::uint32_t old, const std::uint32_t newv)>;
-    using bank_change_callback = std::function<void(const midi_bank_type type, const std::string &new_path)>;
+    using bank_change_callback = std::function<void(const midi_bank_type type, const host_path &new_path)>;
 
     class audio_driver : public driver {
         friend struct audio_output_stream;
@@ -43,10 +49,10 @@ namespace eka2l1::drivers {
 
         // MIDIs...
         player_type preferred_midi_backend_;
-        std::array<std::string, MIDI_BANK_TYPE_MAX> midi_banks_;
+        std::array<host_path, MIDI_BANK_TYPE_MAX> midi_banks_;
 
         std::uint32_t master_volume_ = 100;
-        bool suspend_ = false;
+        std::atomic<bool> suspend_{false};
 
         std::mutex lock_;
 
@@ -85,24 +91,25 @@ namespace eka2l1::drivers {
         }
 
         bool suspending() const {
-            return suspend_;
+            return suspend_.load();
         }
 
         virtual void suspend() {
-            suspend_ = true;
+            suspend_.store(true);
         }
 
         virtual void resume() {
-            suspend_ = false;
+            suspend_.store(false);
         }
 
         void master_volume(const std::uint32_t value);
 
         std::vector<player_type> get_suitable_player_types(const std::string &url);
+        std::vector<player_type> get_suitable_player_types(common::ro_stream &stream);
         void set_preferred_midi_backend(const player_type type);
 
-        std::optional<std::string> get_bank_path(const midi_bank_type type) const;
-        void set_bank_path(const midi_bank_type type, const std::string &path);
+        std::optional<host_path> get_bank_path(const midi_bank_type type) const;
+        void set_bank_path(const midi_bank_type type, const host_path &path);
 
         std::size_t add_bank_change_callback(bank_change_callback callback);
         bool remove_bank_change_callback(const std::size_t handle);

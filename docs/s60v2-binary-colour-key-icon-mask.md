@@ -1,5 +1,9 @@
 # A binary 8bpp AIF mask rendered the icon inside out, so the app list showed nothing
 
+> **Superseded.** The depth rule and the content override described here were both removed once
+> the full mask survey showed the display mode decides every known case on its own; see
+> [mask polarity is the display mode](./icon-mask-polarity-is-the-display-mode.md).
+
 ## Symptom
 
 Nokia 6680 (rm-36) app list. *Karapuzzz Tetris 3D* has no icon at all — an empty cell where every

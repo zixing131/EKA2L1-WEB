@@ -26,6 +26,9 @@ namespace eka2l1::common {
     class arg_parser;
 }
 
+void register_command_line_options(eka2l1::common::arg_parser &parser);
+bool handle_command_line_help(const int argc, const char **argv);
+
 bool app_install_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 bool package_remove_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 bool app_specifier_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
@@ -39,7 +42,10 @@ bool device_set_option_handler(eka2l1::common::arg_parser *parser, void *userdat
 bool keybind_profile_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 bool set_mmcid_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 bool run_ngage_game_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
+bool run_jar_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 
 #if ENABLE_SCRIPTING
 bool python_docgen_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);
 #endif
+
+bool debug_control_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err);

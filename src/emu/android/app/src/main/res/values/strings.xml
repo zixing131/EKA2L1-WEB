@@ -1,4 +1,11 @@
 <resources>
+    <string name="virtual_key_edit">Edit Key</string>
+    <string name="virtual_key_space">Space</string>
+    <string name="virtual_key_soft_left">Left soft key</string>
+    <string name="virtual_key_soft_right">Right soft key</string>
+    <string name="virtual_key_clear">Clear</string>
+    <string name="virtual_key_ok">OK</string>
+    <string name="letter_keys">Show letter keys</string>
     <string name="app_name" translatable="false">EKA2L1</string>
     <string name="error">Error</string>
     <string name="no_data">No data</string>
@@ -17,6 +24,8 @@
     <string name="no_devices_found">No devices found</string>
     <string name="exit">Exit</string>
     <string name="rename">Rename</string>
+    <string name="delete_device_title">Delete device?</string>
+    <string name="delete_device_message">This device\'s data will be deleted along with it. The app will restart to finish.</string>
     <string name="save_log">Save log</string>
     <string name="take_screenshot">Take screenshot</string>
     <string name="screenshot">Screenshot</string>
@@ -25,6 +34,7 @@
     <string name="opengl_required">The app requires OpenGL ES 3.0+.</string>
     <string name="warning">Warning</string>
     <string name="scoped_storage_warning">Your user data is stored in a location which <b>will be deleted</b> when you uninstall the app:\n</string>
+    <string name="scoped_storage_move_hint">\n\nTo keep it somewhere reachable, long press \"Working directory\" in the settings and choose a folder.</string>
     <string name="install_ng_game">Install N-Gage game</string>
     <string name="notify_dialog_title">Notification</string>
     <string name="grid_app_list_mode">Grid mode</string>
@@ -73,6 +83,7 @@
     <string name="install_device_vpl_invalid_msg">The firmware description file (VPL) file is invalid!</string>
     <string name="install_device_rofs_corrupt_msg">ROFS file is corrupted!</string>
     <string name="install_device_rom_corrupt_msg">ROM file is corrupted!</string>
+    <string name="isolate_drives">Separate storage for this device (drives C, D and E are not shared with other devices)</string>
     <string name="install_device_fpsx_corrupt_msg">FPSX file is corrupted!</string>
 
     <string name="pref_general_title">General</string>
@@ -90,6 +101,13 @@
     <string name="pref_emulator_dir">Working directory</string>
     <string name="pref_launch_file_dir">Launch file directory</string>
     <string name="pref_emulator_dir_cant_change">The working directory can\'t be changed!</string>
+    <string name="pref_emulator_dir_hint">Tap to browse, long press to move it elsewhere</string>
+    <string name="pref_emulator_dir_needs_all_files_access">Moving the working directory outside of the app storage needs the \"All files access\" permission. Grant it in the system settings, then long press again.</string>
+    <string name="pref_emulator_dir_not_writable">This folder can\'t be written to.</string>
+    <string name="pref_emulator_dir_inside_current">Choose a folder outside of the current working directory.</string>
+    <string name="pref_emulator_dir_move_confirm">Move the content of the working directory to:\n\n%1$s\n\nThe app will restart afterwards.</string>
+    <string name="pref_emulator_dir_move_replaces">The chosen folder is not empty. Items with the same name will be replaced.</string>
+    <string name="pref_emulator_dir_move_failed">Failed to move the content of the working directory.</string>
     <string name="pref_general_utilities_nearest_neighbor_filtering_msg">Enable nearest neighbor filtering</string>
     <string name="pref_general_show_fps">Show FPS counter</string>
     <string name="pref_system_language_option_name">Language</string>
@@ -159,6 +177,10 @@
     <string name="pref_orientation_auto">Auto</string>
     <string name="pref_orientation_port">Portrait</string>
     <string name="pref_orientation_land">Landscape</string>
+    <string name="pref_guest_screen_mode">Guest screen mode</string>
+    <string name="pref_guest_screen_mode_app">Decided by app</string>
+    <string name="pref_guest_screen_mode_entry">Mode %1$d</string>
+    <string name="pref_guest_screen_mode_entry_size">Mode %1$d (%2$d×%3$d)</string>
     <string name="pref_vk_type">Keyboard type</string>
     <string name="pref_vk_type_custom">Custom</string>
     <string name="pref_vk_type_phone">Phone</string>
@@ -256,4 +278,13 @@
     <string name="install_ng_game_more_than_one_game">There is more than one game in the given card game folder!</string>
     <string name="install_ng_game_no_game_info_file">The game information file does not exist in the card game folder!</string>
     <string name="install_ng_game_corrupted_game_info">The game information file has been corrupted. Please check your data\'s validity!</string>
+    <string name="hosts_title">Hosts</string>
+    <string name="hosts_hint">Redirect guest hostnames or wildcard suffixes to an IP address or another hostname, optionally with a port. Changes affect new connections; restart the game if it has cached an address.</string>
+    <string name="hosts_add">Add host mapping</string>
+    <string name="hosts_mapping">Host mapping</string>
+    <string name="hosts_hostname">Hostname or *.suffix</string>
+    <string name="hosts_target">Target and optional port</string>
+    <string name="hosts_invalid">Enter a valid hostname or *.suffix and an IP address or hostname with an optional port.</string>
+    <string name="hosts_duplicate">This hostname already has a mapping. Edit the existing entry.</string>
+    <string name="hosts_save_error">Could not save host mappings.</string>
 </resources>

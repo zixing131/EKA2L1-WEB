@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <services/allocator.h>
 #include <services/fbs/adapter/font_adapter.h>
 #include <services/fbs/bitmap.h>
@@ -39,6 +40,7 @@
 #include <drivers/graphics/common.h>
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -295,12 +297,12 @@ namespace eka2l1 {
         fbsbitmap *final_clean();
 
         std::uint8_t *original_pointer(fbs_server *serv) {
-            return bitmap_->data_pointer(serv) - bitmap_->byte_width_ * reserved_height_each_side_;
+            return bitmap_->data_block_pointer(serv) - bitmap_->byte_width_ * reserved_height_each_side_;
         }
     };
 
     struct fbsbitmap_cache_info {
-        std::u16string path;
+        guest_path path;
         int bitmap_idx;
     };
 
@@ -365,9 +367,13 @@ namespace eka2l1 {
         eka2l1::ptr<void> bmp_font_vtab;
         codeseg_ptr fntstr_seg;
 
+        // Bytes the client library expects between a large bitmap's data offset and its pixels.
+        std::uint32_t bitmap_data_header_size_ = 0;
+
         std::u16string default_system_font;
 
         std::unordered_map<fbsbitmap_cache_info, fbsbitmap *> shared_bitmaps;
+        std::unordered_map<address, fbsbitmap *> rom_bitmaps_;
 
         std::unique_ptr<epoc::chunk_allocator> shared_chunk_allocator;
         std::unique_ptr<epoc::chunk_allocator> large_chunk_allocator;
@@ -392,9 +398,10 @@ namespace eka2l1 {
         // UI code doesn't locally replace "unsupported" chars with boxes before
         // the glyph-level fallback in rasterize_glyph ever gets a chance.
         std::uint32_t fallback_coverage_[4] = { 0, 0, 0, 0 };
+        std::array<std::uint32_t, 256> palette_256_{};
 
         void load_fonts(eka2l1::io_system *io);
-        void load_custom_fonts(const std::string &storage);
+        void load_custom_fonts(const host_path &storage);
         void load_linked_fonts(eka2l1::io_system *io);
 
         std::atomic<service::uid> connection_id_counter{ 0x1234 }; // Easier to debug
@@ -407,17 +414,28 @@ namespace eka2l1 {
     protected:
         void load_fonts_from_directory(eka2l1::io_system *io, eka2l1::directory *dir);
         void load_fallback_host_fonts();
-        void load_linked_fonts_from_directory(eka2l1::io_system *io, const std::u16string &fonts_folder_path);
+        void load_linked_fonts_from_directory(eka2l1::io_system *io, const guest_path &fonts_folder_path);
         void initialize_server();
 
         bool add_font(common::ro_stream &stream, const std::string &name, const bool user_font = false);
-        bool add_single_font(eka2l1::io_system *io, const std::u16string &path);
+        bool add_single_font(eka2l1::io_system *io, const guest_path &path);
 
     public:
         explicit fbs_server(eka2l1::system *sys);
         ~fbs_server() override;
 
         service::uid init();
+
+        /**
+         * \brief   Resolve the Color256 table from the ROM's palette or GDI library.
+         *
+         * Call once drive Z is mounted; until then the version-based table is used.
+         */
+        void initialize_palette();
+
+        const std::array<std::uint32_t, 256> &palette_256() const {
+            return palette_256_;
+        }
 
         void connect(service::ipc_context &context) override;
 
@@ -450,6 +468,16 @@ namespace eka2l1 {
          */
         fbsbitmap *create_bitmap(fbs_bitmap_data_info &info, const bool alloc_data = true, const bool support_current_display_mod_flag = true,
             const bool support_dirty = true);
+
+        /**
+         * \brief   Get the bitmap a client uses in place from ROM.
+         *
+         * CFbsBitmap::Handle() of such a bitmap is the address of its CBitwiseBitmap,
+         * which the server and the window server must accept like a normal handle.
+         *
+         * \returns The bitmap, or nullptr if the address is not a ROM bitmap.
+         */
+        fbsbitmap *get_rom_bitmap(const address addr);
 
         /**
          * \brief   Turn an NVG extended bitmap into a plain raster one, in place.
@@ -579,6 +607,17 @@ namespace eka2l1 {
          * \returns  True on success.
          */
         bool free_large_data(const void *ptr);
+
+        /**
+         * \brief    Allocate pixel storage for a bitmap in the large chunk.
+         *
+         * Reserves bitmap_data_header_size() bytes in front of the returned pointer.
+         */
+        void *allocate_bitmap_pixels(const std::size_t s);
+
+        std::uint32_t bitmap_data_header_size() const {
+            return bitmap_data_header_size_;
+        }
 
         /*! \brief Use to Allocate structure from server side.
          *

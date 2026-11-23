@@ -109,6 +109,7 @@ public class EmulatorActivity extends AppCompatActivity {
     private boolean statusBarEnabled;
     private boolean actionBarEnabled;
     private VirtualKeyboard keyboard;
+    private ViewCallbacks inputCallbacks;
     private float displayWidth;
     private float displayHeight;
     private SparseIntArray androidToSymbian;
@@ -137,6 +138,7 @@ public class EmulatorActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         Intent intent = getIntent();
+        Emulator.configureDebugControl(this, intent);
         boolean externalIntent = intent.getBooleanExtra(KEY_APP_IS_SHORTCUT, false) || ACTION_LAUNCH_GAME.equals(intent.getAction())
                 || intent.getData() != null;
 
@@ -207,6 +209,7 @@ public class EmulatorActivity extends AppCompatActivity {
 
         SurfaceView surfaceView = findViewById(R.id.surface_view);
         ViewCallbacks callbacks = new ViewCallbacks(surfaceView);
+        inputCallbacks = callbacks;
         surfaceView.setFocusableInTouchMode(true);
         surfaceView.setWillNotDraw(true);
         surfaceView.setOnTouchListener(callbacks);
@@ -229,6 +232,7 @@ public class EmulatorActivity extends AppCompatActivity {
 
         Emulator.setContext(this);
         EmulatorCamera.setActivity(this);
+        EmulatorLocation.setActivity(this);
 
         if (deviceCode != null) {
             String []availableDevices = Emulator.getDeviceFirmwareCodes();
@@ -249,10 +253,10 @@ public class EmulatorActivity extends AppCompatActivity {
 
         androidToSymbian = (params.keyMappings != null) ? params.keyMappings : KeyMapper.getDefaultKeyMap();
 
-        if (params.showKeyboard) {
+        if (params.showKeyboard && !ProfilesManager.hidesKeyboardByDefault(configDir, deviceCode)) {
             setVirtualKeyboard(uidStr);
         }
-        if (params.showKeyboard && keyboard instanceof FixedKeyboard) {
+        if (keyboard instanceof FixedKeyboard) {
             setOrientation(ORIENTATION_PORTRAIT);
         } else {
             setOrientation(params.orientation);
@@ -279,6 +283,8 @@ public class EmulatorActivity extends AppCompatActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             hideSystemUI();
+        } else if (inputCallbacks != null) {
+            inputCallbacks.releaseKeys();
         }
     }
 
@@ -358,6 +364,9 @@ public class EmulatorActivity extends AppCompatActivity {
         inflater.inflate(R.menu.emulator, menu);
         if (keyboard != null && !(keyboard instanceof FixedKeyboard)) {
             inflater.inflate(R.menu.emulator_keys, menu);
+        } else if (keyboard instanceof FixedKeyboard) {
+            inflater.inflate(R.menu.emulator_fixed_keys, menu);
+            menu.findItem(R.id.action_show_edit).setChecked(params.vkShowEditKey);
         }
         actionScreenshot = menu.findItem(R.id.action_screenshot);
         if (!getSupportActionBar().isShowing()) {
@@ -375,6 +384,12 @@ public class EmulatorActivity extends AppCompatActivity {
             saveLog();
         } else if (id == R.id.action_screenshot) {
             saveScreenshot();
+        } else if (id == R.id.action_show_edit && keyboard instanceof FixedKeyboard) {
+            params.vkShowEditKey = !item.isChecked();
+            item.setChecked(params.vkShowEditKey);
+            ((FixedKeyboard) keyboard).setEditKeyVisible(params.vkShowEditKey);
+            ProfilesManager.saveConfig(params);
+            return true;
         } else if (keyboard != null) {
             handleVkOptions(id);
         }
@@ -432,6 +447,8 @@ public class EmulatorActivity extends AppCompatActivity {
             showSetLayoutDialog();
         } else if (id == R.id.action_hide_buttons) {
             showHideButtonDialog();
+        } else if (id == R.id.action_letter_keys) {
+            showLetterKeysDialog();
         }
     }
 
@@ -448,7 +465,16 @@ public class EmulatorActivity extends AppCompatActivity {
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle(R.string.hide_buttons)
                 .setMultiChoiceItems(keyboard.getKeyNames(), keyboard.getKeyVisibility(),
-                        (dialogInterface, i, b) -> keyboard.setKeyVisibility(i, b))
+                        (dialogInterface, i, b) -> keyboard.setPhoneKeyHidden(i, b))
+                .setPositiveButton(android.R.string.ok, null);
+        builder.show();
+    }
+
+    private void showLetterKeysDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(R.string.letter_keys)
+                .setMultiChoiceItems(keyboard.getLetterKeyNames(), keyboard.getLetterKeysShown(),
+                        (dialogInterface, i, b) -> keyboard.setLetterKeyShown(i, b))
                 .setPositiveButton(android.R.string.ok, null);
         builder.show();
     }
@@ -478,6 +504,9 @@ public class EmulatorActivity extends AppCompatActivity {
             keyboard = new FixedKeyboard(this);
         }
         keyboard.setHideDelay(params.vkHideDelay);
+        if (keyboard instanceof FixedKeyboard) {
+            ((FixedKeyboard) keyboard).setEditKeyVisible(params.vkShowEditKey);
+        }
         keyboard.setHasHapticFeedback(params.vkFeedback);
         keyboard.setButtonShape(params.vkButtonShape);
 
@@ -555,6 +584,17 @@ public class EmulatorActivity extends AppCompatActivity {
     private class ViewCallbacks implements View.OnTouchListener, SurfaceHolder.Callback, SurfaceHolder.Callback2, View.OnKeyListener {
         private final View view;
         private final FrameLayout rootView;
+        private final SparseIntArray heldKeys = new SparseIntArray();
+
+        private void releaseKeys() {
+            for (int i = 0; i < heldKeys.size(); i++) {
+                Emulator.pressKey(heldKeys.valueAt(i), 1);
+            }
+            heldKeys.clear();
+            if (keyboard != null) {
+                keyboard.releaseKeys();
+            }
+        }
 
         public ViewCallbacks(View view) {
             this.view = view;
@@ -584,6 +624,7 @@ public class EmulatorActivity extends AppCompatActivity {
 
         @Override
         public void surfaceDestroyed(SurfaceHolder holder) {
+            releaseKeys();
             Emulator.surfaceDestroyed();
         }
 
@@ -599,25 +640,28 @@ public class EmulatorActivity extends AppCompatActivity {
         }
 
         public boolean onKeyDown(int keyCode, KeyEvent event) {
-            keyCode = convertAndroidKeyCode(keyCode);
-            if (keyCode == Integer.MAX_VALUE) {
+            int scan = convertAndroidKeyCode(keyCode);
+            if (scan == Integer.MAX_VALUE) {
                 return false;
             }
-            if (event.getRepeatCount() == 0) {
-                if (keyboard == null || !keyboard.keyPressed(keyCode)) {
-                    Emulator.pressKey(keyCode, 0);
+            if (event.getRepeatCount() == 0 && heldKeys.indexOfKey(keyCode) < 0) {
+                boolean alreadyHeld = heldKeys.indexOfValue(scan) >= 0;
+                heldKeys.put(keyCode, scan);
+                if (!alreadyHeld && (keyboard == null || !keyboard.keyPressed(scan))) {
+                    Emulator.pressKey(scan, 0);
                 }
             }
             return true;
         }
 
         public boolean onKeyUp(int keyCode, KeyEvent event) {
-            keyCode = convertAndroidKeyCode(keyCode);
-            if (keyCode == Integer.MAX_VALUE) {
+            int scan = heldKeys.get(keyCode, Integer.MAX_VALUE);
+            if (scan == Integer.MAX_VALUE) {
                 return false;
             }
-            if (keyboard == null || !keyboard.keyReleased(keyCode)) {
-                Emulator.pressKey(keyCode, 1);
+            heldKeys.delete(keyCode);
+            if (heldKeys.indexOfValue(scan) < 0 && (keyboard == null || !keyboard.keyReleased(scan))) {
+                Emulator.pressKey(scan, 1);
             }
             return true;
         }
@@ -626,6 +670,12 @@ public class EmulatorActivity extends AppCompatActivity {
         @SuppressLint("ClickableViewAccessibility")
         public boolean onTouch(View v, MotionEvent event) {
             switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_CANCEL:
+                    if (keyboard != null) {
+                        keyboard.releaseKeys();
+                    }
+                    return true;
+
                 case MotionEvent.ACTION_DOWN:
                     if (keyboard != null) {
                         keyboard.show();

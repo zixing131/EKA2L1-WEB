@@ -39,6 +39,11 @@ namespace eka2l1::epoc {
             std::string style;
             /// From S60_SCR_SOFTKEY_LOCATION*; empty = Avkon default (bottom).
             std::string softkey_loc;
+            epoc::display_mode disp_mode;
+            epoc::display_mode dsa_disp_mode;
+
+            // False for an index a sparse NUMSCREENMODES table leaves out; it then mirrors the first defined mode.
+            bool defined = true;
         };
 
         struct hardware_state {
@@ -50,13 +55,6 @@ namespace eka2l1::epoc {
 
         struct screen {
             int screen_number;
-            epoc::display_mode disp_mode;
-
-            // Depth of the physical framebuffer that direct screen access clients write
-            // into. WINDOWMODE only describes what WSERV composes in; on EKA1 panels the
-            // two differ, so keep them apart.
-            epoc::display_mode dsa_disp_mode;
-
             bool auto_clear;
             bool flicker_free;
             bool blt_offscreen;

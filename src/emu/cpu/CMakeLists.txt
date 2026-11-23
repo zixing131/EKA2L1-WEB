@@ -52,6 +52,10 @@ set(SOURCE_12L1R
         src/12l1r/thumb_visitor.cpp
         src/12l1r/visit_session.cpp)
 
+option(EKA2L1_CPU_DYNCOM_ONLY "Build the portable dyncom backend without native JITs" OFF)
+option(EKA2L1_DYNCOM_PROFILE "Profile guest instruction frequencies in native dyncom" OFF)
+option(EKA2L1_DYNCOM_VFP_TRACE "Keep native dyncom VFP trace logging" OFF)
+
 set(SOURCE_DYNCOM
         include/cpu/dyncom/vfp/asm_vfp.h
         include/cpu/dyncom/vfp/vfp_helper.h
@@ -81,6 +85,24 @@ set(SOURCE_DYNCOM
         src/dyncom/armstate.cpp
         src/dyncom/armsupp.cpp)
 
+# The native and Web decoders use different translated instruction layouts.
+# Build a single implementation per target so headers and translators agree.
+if (NOT EMSCRIPTEN AND NOT EKA2L1_CPU_DYNCOM_ONLY)
+    set(EKA2L1_NATIVE_DYNCOM ON)
+    set(SOURCE_NATIVE_DYNCOM src/ekalynx/interpreter.cpp)
+    foreach(source IN LISTS SOURCE_DYNCOM)
+        if (source MATCHES "wasmjit|arm_dyncom_jit|/arm_counted_loop")
+            continue()
+        endif()
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/native/${source}")
+            list(APPEND SOURCE_NATIVE_DYNCOM "native/${source}")
+        else()
+            list(APPEND SOURCE_NATIVE_DYNCOM "${source}")
+        endif()
+    endforeach()
+    set(SOURCE_DYNCOM ${SOURCE_NATIVE_DYNCOM})
+endif()
+
 add_library(cpu
         include/cpu/arm_analyser.h
         include/cpu/arm_analyser_capstone.h
@@ -94,28 +116,26 @@ add_library(cpu
         ${SOURCE_12L1R_PUBLIC}
         ${SOURCE_DYNCOM})
 
-# Build the CPU module with the dyncom interpreter only (no dynarmic). Lets the
-# differential test harness link host-side without dragging in dynarmic. OFF by
-# default -> normal builds are unchanged.
-option(EKA2L1_CPU_DYNCOM_ONLY "Build the CPU module with the dyncom interpreter only (no dynarmic)" OFF)
-
-if (EMSCRIPTEN OR EKA2L1_CPU_DYNCOM_ONLY)
-    # WASM sandbox cannot execute JIT-generated machine code; the dyncom-only
-    # build skips dynarmic on purpose. dyncom sources are already in the base
-    # add_library() call above.
-    if (EKA2L1_CPU_DYNCOM_ONLY)
-        target_compile_definitions(cpu PRIVATE EKA2L1_CPU_DYNCOM_ONLY_BUILD=1)
-    endif()
+if (EKA2L1_CPU_DYNCOM_ONLY)
+    target_compile_definitions(cpu PRIVATE EKA2L1_CPU_DYNCOM_ONLY_BUILD=1)
+elseif (EMSCRIPTEN)
+    # The Web backend uses portable interpreter dispatch and the Web JIT.
 elseif (ARCHITECTURE_ARM32)
     target_sources(cpu PRIVATE ${SOURCE_12L1R})
     target_link_libraries(cpu PRIVATE Catch2)
-else()
-    target_sources(cpu PRIVATE
-            include/cpu/arm_dynarmic.h
-            src/arm_dynarmic.cpp)
-    target_link_libraries(cpu
-            PRIVATE
-            dynarmic)
+elseif (NOT EKA2L1_IOS OR EKA2L1_IOS_DYNARMIC)
+    target_sources(cpu PRIVATE include/cpu/arm_dynarmic.h src/arm_dynarmic.cpp)
+    target_link_libraries(cpu PRIVATE dynarmic)
+endif()
+
+if (EKA2L1_NATIVE_DYNCOM)
+    target_include_directories(cpu BEFORE PUBLIC native/include)
+    if (EKA2L1_DYNCOM_PROFILE)
+        target_compile_definitions(cpu PUBLIC EKA2L1_DYNCOM_PROFILE=1)
+    endif()
+    if (NOT EKA2L1_DYNCOM_VFP_TRACE)
+        target_compile_definitions(cpu PRIVATE EKA2L1_DYNCOM_DISABLE_VFP_TRACE=1)
+    endif()
 endif()
 
 target_include_directories(cpu PUBLIC include)
@@ -124,7 +144,7 @@ target_include_directories(cpu PRIVATE ${capstone_INCLUDE_DIRS})
 target_link_libraries(cpu PUBLIC common)
 target_link_libraries(cpu
         PRIVATE
-        capstone-static)
+        capstone)
 
 # Differential test harness for the dyncom interpreter (self-A/B + golden ALU
 # oracle over randomized instruction streams). Standalone host tool, default OFF.
@@ -132,8 +152,16 @@ target_link_libraries(cpu
 # other shared-CPU optimizations.
 option(EKA2L1_BUILD_DYNCOM_DIFFTEST "Build the dyncom interpreter differential test harness" OFF)
 if (EKA2L1_BUILD_DYNCOM_DIFFTEST)
-    add_executable(dyncom_difftest src/dyncom/tests/dyncom_difftest.cpp)
-    target_link_libraries(dyncom_difftest PRIVATE cpu common)
+    if (EKA2L1_NATIVE_DYNCOM AND TARGET dynarmic)
+        target_compile_definitions(cpu PUBLIC EKA2L1_DYNCOM_DIFFTEST=1)
+        add_executable(dyncom_difftest native/src/dyncom/tests/dyncom_difftest.cpp)
+        target_link_libraries(dyncom_difftest PRIVATE cpu common dynarmic)
+        add_executable(arm_replay src/dyncom/tests/arm_replay.cpp)
+        target_link_libraries(arm_replay PRIVATE cpu)
+    elseif (NOT EKA2L1_NATIVE_DYNCOM)
+        add_executable(dyncom_difftest src/dyncom/tests/dyncom_difftest.cpp)
+        target_link_libraries(dyncom_difftest PRIVATE cpu common)
+    endif()
 endif()
 
 # Runs actual runtime-generated WASM against the interpreter and golden model.

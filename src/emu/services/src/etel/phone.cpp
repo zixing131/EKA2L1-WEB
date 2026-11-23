@@ -81,7 +81,7 @@ namespace eka2l1 {
         }
 
         if ((info_to_fill->index_ < 0) || (info_to_fill->index_ >= phone_->lines_.size())) {
-            ctx->complete(epoc::error_argument);
+            ctx->complete(epoc::error_not_found);
             return;
         }
 
@@ -150,6 +150,24 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void etel_phone_subsession::notify_mode_change(service::ipc_context *ctx) {
+        if (!mode_change_nof_.empty()) {
+            ctx->complete(epoc::error_in_use);
+            return;
+        }
+        if (!ctx->get_descriptor_argument_ptr(0)
+            || ctx->get_argument_max_data_size(0) < sizeof(std::uint32_t)) {
+            ctx->complete(epoc::error_bad_descriptor);
+            return;
+        }
+        mode_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
+    }
+
+    void etel_phone_subsession::notify_mode_change_cancel(service::ipc_context *ctx) {
+        mode_change_nof_.complete(epoc::error_cancel);
+        ctx->complete(epoc::error_none);
+    }
+
     void etel_phone_subsession::get_network_registration_status(eka2l1::service::ipc_context *ctx) {
         LOG_TRACE(SERVICE_ETEL, "Get network registration status hardcoded");
         const std::uint32_t network_registration_status = epoc::etel_mobile_phone_registered_on_home_network;
@@ -170,14 +188,6 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
-    void etel_phone_subsession::get_nitz_info(eka2l1::service::ipc_context *ctx) {
-        // No modem/network clock is attached to the emulator.  KErrNotFound
-        // is one of the documented GetNITZInfo results and lets the clock
-        // model fall back to the system time instead of blocking forever.
-        LOG_TRACE(SERVICE_ETEL, "Get NITZ info: no network time available");
-        ctx->complete(epoc::error_not_found);
-    }
-
     static const std::u16string EXAMPLE_VALID_IMI_CODE = u"540806859904945";
     static const std::u16string EXAMPLE_VALID_REVISION = u"1.0.0";
 
@@ -195,7 +205,8 @@ namespace eka2l1 {
         phoneid.revision_id_.assign(nullptr, EXAMPLE_VALID_REVISION);
         phoneid.serial_num_.assign(nullptr, common::utf8_to_ucs2(conf_state->imei));
 
-        if (legacy_level_ == ETEL_LEGACY_LEVEL_LEGACY) {
+        // RBasicGsmPhone takes the bare TGsmPhoneId; RMobilePhone's V1 adds the extension header.
+        if (ctx->msg->function == epoc::etel_old_gsm_phone_get_phone_id) {
             ctx->write_data_to_descriptor_argument<epoc::etel_phone_id_v0>(0, phoneid);
         } else {
             epoc::etel_phone_id_v1 phoneid_new;
@@ -210,17 +221,11 @@ namespace eka2l1 {
     void etel_phone_subsession::get_subscriber_id(eka2l1::service::ipc_context *ctx) {
         config::state *conf_state = ctx->sys->get_config();
 
-        if (legacy_level_ <= ETEL_LEGACY_LEVEL_TRANSITION) {
-            epoc::buf_static<char16_t, 15> imei_buf;
-            imei_buf.assign(nullptr, common::utf8_to_ucs2(conf_state->imei));
+        // The client passes a bare TBuf<KIMSISize> (TMobilePhoneSubscriberId), not a versioned package.
+        epoc::buf_static<char16_t, 15> imsi_buf;
+        imsi_buf.assign(nullptr, common::utf8_to_ucs2(conf_state->imei));
 
-            ctx->write_data_to_descriptor_argument(0, imei_buf);
-        } else {
-            subscriber_id_info_v1 id_info;
-            id_info.the_id_.assign(nullptr, common::utf8_to_ucs2(conf_state->imei));
-
-            ctx->write_data_to_descriptor_argument<subscriber_id_info_v1>(0, id_info);
-        }
+        ctx->write_data_to_descriptor_argument(0, imsi_buf);
         ctx->complete(epoc::error_none);
     }
 
@@ -237,6 +242,32 @@ namespace eka2l1 {
         network_info->band_info_ = phone_->network_info_.band_info_;
 
         ctx->write_data_to_descriptor_argument<epoc::etel_phone_network_info>(0, network_info.value(), nullptr, true);
+        ctx->complete(epoc::error_none);
+    }
+
+    void etel_phone_subsession::get_current_network_transition(eka2l1::service::ipc_context *ctx) {
+        if (ctx->get_argument_data_size(0) != sizeof(epoc::etel_phone_network_info_v1)
+            || ctx->get_argument_data_size(2) != sizeof(epoc::etel_phone_location_area)) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        auto network = ctx->get_argument_data_from_descriptor<epoc::etel_phone_network_info_v1>(0);
+        auto location = ctx->get_argument_data_from_descriptor<epoc::etel_phone_location_area>(2);
+        if (!network || !location) {
+            ctx->complete(epoc::error_bad_descriptor);
+            return;
+        }
+        network->mode_ = phone_->network_info_.mode_;
+        network->status_ = phone_->network_info_.status_;
+        network->band_info_ = phone_->network_info_.band_info_;
+        location->area_known_ = false;
+        location->location_area_code_ = 0;
+        location->cell_id_ = 0;
+        if (!ctx->write_data_to_descriptor_argument(0, *network)
+            || !ctx->write_data_to_descriptor_argument(2, *location)) {
+            ctx->complete(epoc::error_bad_descriptor);
+            return;
+        }
         ctx->complete(epoc::error_none);
     }
 
@@ -286,6 +317,11 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void etel_phone_subsession::get_nitz_info(eka2l1::service::ipc_context *ctx) {
+        // Nothing here broadcasts a network time frame. A TSY reports that by failing
+        // the fetch, not by handing back an empty snapshot.
+        ctx->complete(epoc::error_not_found);
+    }
 
     void etel_phone_subsession::notify_nitz_info_change(eka2l1::service::ipc_context *ctx) {
         nitz_info_change_nof_ = epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr);
@@ -378,8 +414,7 @@ namespace eka2l1 {
                 break;
 
             default:
-                LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
-                ctx->complete(epoc::error_not_supported);
+                dispatch_unhandled(ctx);
                 break;
             }
         } else if (legacy_level_ == ETEL_LEGACY_LEVEL_TRANSITION) {
@@ -408,13 +443,25 @@ namespace eka2l1 {
                 get_subscriber_id(ctx);
                 break;
 
+            case epoc::etel_mobile_phone_transition_get_current_network:
+                get_current_network_transition(ctx);
+                break;
+
             case epoc::etel_mobile_phone_transition_get_identity_caps:
                 get_identity_caps(ctx);
                 break;
 
+            // Symbian 7.0 still ships the etelbgsm/etelagsm clients (Gsmbas.dll, Gsmadv.dll).
+            case epoc::etel_old_gsm_phone_get_phone_id:
+                get_phone_id(ctx);
+                break;
+
+            case epoc::etel_old_gsm_adv_phone_get_subscriber_id:
+                get_subscriber_id(ctx);
+                break;
+
             default:
-                LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
-                ctx->complete(epoc::error_not_supported);
+                dispatch_unhandled(ctx);
                 break;
             }
         } else {
@@ -604,15 +651,15 @@ namespace eka2l1 {
                 break;
 
             default:
-                LOG_ERROR(SERVICE_ETEL, "Unimplemented etel phone opcode {}", ctx->msg->function);
-                ctx->complete(epoc::error_not_supported);
+                dispatch_unhandled(ctx);
                 break;
             }
         }
     }
 
     etel_phone::etel_phone(const epoc::etel_phone_info &info)
-        : info_(info) {
+        : info_(info)
+        , network_info_{} {
         // Initialize default mode
         status_.detect_ = epoc::etel_modem_detect_not_present;
         status_.mode_ = epoc::etel_phone_mode_idle;

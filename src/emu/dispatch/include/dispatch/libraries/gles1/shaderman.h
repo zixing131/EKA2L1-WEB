@@ -30,12 +30,23 @@
 namespace eka2l1::dispatch {
     struct gles_texture_env_info;
 
+    std::uint64_t gles1_vertex_shader_key(std::uint64_t vertex_statuses, std::uint32_t active_texs);
+
     struct gles1_shader_variables_info {
+        std::int32_t logic_op_destination_loc_;
+        std::int32_t logic_op_mask_loc_;
         std::int32_t view_model_mat_loc_;
         std::int32_t proj_mat_loc_;
+        std::int32_t position_scale_loc_;
         std::int32_t color_loc_;
         std::int32_t normal_loc_;
+        std::int32_t point_size_loc_;
+        std::int32_t point_scale_loc_;
+        std::int32_t point_size_factor_loc_;
+        std::int32_t point_attenuation_loc_;
+        std::int32_t point_range_loc_;
         std::int32_t palette_mat_loc_;
+        std::int32_t weight_scale_loc_;
         std::int32_t texcoord_loc_[GLES1_EMU_MAX_TEXTURE_COUNT];
         std::int32_t texview_loc_[GLES1_EMU_MAX_TEXTURE_COUNT];
         std::int32_t texenv_color_loc_[GLES1_EMU_MAX_TEXTURE_COUNT];

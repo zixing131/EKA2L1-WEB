@@ -84,7 +84,7 @@ namespace eka2l1::epoc::notifier {
             // command IDs for an unknown application's private resource.
             if ((resource_id & 0xFFFFF000) != 0x08CC0000) return {};
             auto *io = kern->get_io_system();
-            const auto path = utils::get_nearest_lang_file(io, u"z:\\resource\\avkon.rsc",
+            const auto path = utils::get_nearest_lang_file(io, guest_path(u"z:\\resource\\avkon.rsc"),
                 kern->get_current_language(), drive_z);
             auto file = io->open_file(path, READ_MODE | BIN_MODE);
             if (!file || file->size() > 16 * 1024 * 1024) return {};

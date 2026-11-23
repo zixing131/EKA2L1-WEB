@@ -114,8 +114,11 @@ namespace eka2l1::dispatch {
         float env_colors_[4];
 
         bool texturing_enabled_;
+        bool point_coord_replace_;
 
         explicit gles1_texture_unit();
+        std::uint32_t set_point_coord_replace(double param);
+        std::uint32_t get_env(std::uint32_t target, std::uint32_t pname, void *params, gles_get_data_type type) const;
     };
 
     struct gles1_light_info {
@@ -136,8 +139,8 @@ namespace eka2l1::dispatch {
 
     struct egl_context_es1 : public egl_context_es_shared {
     private:
-        void prepare_vertex_buffer_and_descriptors(drivers::graphics_driver *drv, kernel::process *crr_process, const std::int32_t first_index, const std::uint32_t vcount, const std::uint32_t active_texs);
-        bool prepare_shader_program_for_draw(dispatch::egl_controller &controller, const std::uint32_t active_texs);
+        bool prepare_vertex_buffer_and_descriptors(drivers::graphics_driver *drv, kernel::process *crr_process, const std::int32_t first_index, const std::uint32_t vcount, const std::uint32_t active_texs);
+        bool prepare_shader_program_for_draw(drivers::graphics_driver *drv, dispatch::egl_controller &controller, const std::uint32_t active_texs);
 
     public:
         std::stack<glm::mat4> model_view_mat_stack_;
@@ -149,7 +152,7 @@ namespace eka2l1::dispatch {
         std::uint32_t active_mat_stack_;
         std::uint32_t current_palette_mat_index_;
 
-        enum {
+        enum : std::uint64_t {
             FRAGMENT_STATE_ALPHA_TEST = 1 << 0,
             FRAGMENT_STATE_ALPHA_TEST_FUNC_POS = 1,
             FRAGMENT_STATE_ALPHA_FUNC_MASK = 0b1110,
@@ -167,6 +170,10 @@ namespace eka2l1::dispatch {
             FRAGMENT_STATE_CLIP_PLANE3_ENABLE = 1 << 11,
             FRAGMENT_STATE_CLIP_PLANE4_ENABLE = 1 << 12,
             FRAGMENT_STATE_CLIP_PLANE5_ENABLE = 1 << 13,
+            FRAGMENT_STATE_POINT_COORD_REPLACE_POS = 14,
+            FRAGMENT_STATE_POINT_SPRITE = 1ULL << 17,
+            FRAGMENT_STATE_LOGIC_OP = 1ULL << 18,
+            FRAGMENT_STATE_LOGIC_OP_POS = 19,
             FRAGMENT_STATE_REVERSED_BITS_POS = 54,
 
             VERTEX_STATE_CLIENT_VERTEX_ARRAY = 1 << 0,
@@ -187,6 +194,7 @@ namespace eka2l1::dispatch {
             VERTEX_STATE_CLIENT_MATRIX_INDEX_ARRAY = 1 << 14,
             VERTEX_STATE_CLIENT_WEIGHT_ARRAY = 1 << 15,
             VERTEX_STATE_SKINNING_ENABLE = 1 << 16,
+            // Store the matrix-index array size minus one to cover all four vertex units.
             VERTEX_STATE_SKIN_WEIGHTS_PER_VERTEX_BITS_POS = 17,
             VERTEX_STATE_SKIN_WEIGHTS_PER_VERTEX_MASK = 0b11 << 17,
             VERTEX_STATE_LIGHTING_ENABLE = 1 << 19,
@@ -202,6 +210,8 @@ namespace eka2l1::dispatch {
             VERTEX_STATE_COLOR_MATERIAL_ENABLE = 1 << 29,
             VERTEX_STATE_LIGHT_AROUND_MASK = 0b11111111 << 20,
             VERTEX_STATE_LIGHT_RELATED_MASK = 0b111111111 << 20,
+            VERTEX_STATE_CLIENT_POINT_SIZE_ARRAY = 1ULL << 30,
+            VERTEX_STATE_DRAW_POINTS = 1ULL << 31,
             VERTEX_STATE_REVERSED_BITS_POS = 54
         };
 
@@ -210,6 +220,13 @@ namespace eka2l1::dispatch {
         gles_vertex_attrib normal_attrib_;
         gles_vertex_attrib matrix_index_attrib_;
         gles_vertex_attrib weight_attrib_;
+        gles_vertex_attrib point_size_attrib_;
+        float point_size_;
+        float point_size_min_ = 0.0f;
+        std::optional<float> point_size_max_;
+        float point_fade_threshold_size_ = 1.0f;
+        float point_distance_attenuation_[3] = { 1.0f, 0.0f, 0.0f };
+        bool point_sprite_enabled_;
         drivers::handle input_desc_;
 
         std::int32_t previous_first_index_;
@@ -243,8 +260,17 @@ namespace eka2l1::dispatch {
         std::uint64_t fragment_statuses_;
         float alpha_test_ref_;
 
-        explicit egl_context_es1();
+        explicit egl_context_es1(std::shared_ptr<gles_object_namespace> shared_namespace = nullptr);
+        std::uint32_t logic_op_ = GL_COPY_EMU;
+        drivers::handle logic_op_destination_ = 0;
+        eka2l1::vec2 logic_op_destination_size_ = { 0, 0 };
+        bool needs_logic_op_emulation() const;
+        bool set_logic_op(std::uint32_t op);
+        void draw_logic_op(drivers::graphics_driver *driver, egl_controller &controller, drivers::graphics_primitive_mode mode,
+            std::int32_t count, const std::uint8_t *indices = nullptr, std::uint32_t index_size = 0);
         glm::mat4 &active_matrix();
+        std::uint32_t set_point_parameter(std::uint32_t pname, const float *params);
+        float point_size_max(drivers::graphics_driver *driver) const;
 
         gles_driver_texture *binded_texture() override;
         egl_context_type context_type() const override {
@@ -252,9 +278,10 @@ namespace eka2l1::dispatch {
         }
 
         bool prepare_for_draw(drivers::graphics_driver *driver, egl_controller &controller, kernel::process *crr_process,
-            const std::int32_t first_index, const std::uint32_t vcount) override;
+            const std::int32_t first_index, const std::uint32_t vcount, const drivers::graphics_primitive_mode primitive_mode) override;
         void flush_to_driver(egl_controller &controller, drivers::graphics_driver *driver, const bool is_frame_swap_flush = false) override;
         void destroy(drivers::graphics_driver *driver, drivers::graphics_command_builder &builder) override;
+        void on_buffer_deleted(std::uint32_t name) override;
         bool enable(const std::uint32_t feature) override;
         bool disable(const std::uint32_t feature) override;
         bool is_enabled(const std::uint32_t feature, bool &enabled) override;
@@ -262,6 +289,8 @@ namespace eka2l1::dispatch {
         std::uint32_t bind_texture(const std::uint32_t target, const std::uint32_t tex) override;
     };
 
+    std::vector<std::uint32_t> gles1_logic_op_indices(drivers::graphics_primitive_mode mode,
+        std::int32_t count, const std::uint8_t *indices = nullptr, std::uint32_t index_size = 0);
     egl_context_es1 *get_es1_active_context(system *sys);
 
     /**

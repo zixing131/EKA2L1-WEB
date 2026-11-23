@@ -36,7 +36,9 @@ namespace eka2l1::drivers {
         callback_ = callback;
 
         userdata_.resize(data_size);
-        std::memcpy(userdata_.data(), data, data_size);
+        if (data_size != 0) {
+            std::memcpy(userdata_.data(), data, data_size);
+        }
 
         return true;
     }

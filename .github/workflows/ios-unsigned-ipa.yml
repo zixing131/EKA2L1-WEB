@@ -1,0 +1,73 @@
+name: iOS Unsigned IPA
+
+on:
+  push:
+    branches:
+      - ios
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned iOS IPA
+    runs-on: macos-26
+    env:
+      EKA2L1_IOS_CONFIGURATION: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build unsigned device app
+        run: scripts/build_ios.sh device
+
+      - name: Package unsigned IPA
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="build/ios-device/src/emu/ios/${EKA2L1_IOS_CONFIGURATION}-iphoneos/EKA2L1.app"
+          if [ ! -d "${APP}" ]; then
+            echo "Built app not found: ${APP}" >&2
+            exit 1
+          fi
+
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IPA="${RUNNER_TEMP}/EKA2L1-ios-unsigned-${SHORT_SHA}.ipa"
+          STAGE="${RUNNER_TEMP}/unsigned-ipa"
+          rm -rf "${STAGE}"
+          mkdir -p "${STAGE}/Payload"
+          cp -R "${APP}" "${STAGE}/Payload/"
+          (cd "${STAGE}" && zip -qry "${IPA}" Payload)
+
+          echo "ipa=${IPA}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=EKA2L1-ios-unsigned-${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.ipa }}
+          if-no-files-found: error
+
+      - name: Upload dSYM
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}-dSYM
+          path: build/ios-device/src/emu/ios/${{ env.EKA2L1_IOS_CONFIGURATION }}-iphoneos/EKA2L1.app.dSYM
+          if-no-files-found: warn

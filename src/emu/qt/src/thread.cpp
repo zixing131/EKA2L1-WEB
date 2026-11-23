@@ -56,6 +56,7 @@
 
 #include <qt/mainwindow.h>
 #include <iostream>
+#include <filesystem>
 
 static eka2l1::drivers::input_event make_mouse_event_driver(const float x, const float y, const float z, const int button, const int action,
     const int mouse_id) {
@@ -186,10 +187,18 @@ namespace eka2l1::desktop {
 
         switch (state.graphics_driver->get_current_api()) {
         case drivers::graphic_api::opengl: {
-            state.graphics_driver->set_display_hook([window]() {
-                window->swap_buffer();
-                window->poll_events();
-            });
+            if (state.debug_control_port) {
+                state.graphics_driver->set_display_hook([window, &state]() {
+                    state.debug_frames.fetch_add(1, std::memory_order_relaxed);
+                    window->swap_buffer();
+                    window->poll_events();
+                });
+            } else {
+                state.graphics_driver->set_display_hook([window]() {
+                    window->swap_buffer();
+                    window->poll_events();
+                });
+            }
 
             break;
         }
@@ -245,8 +254,13 @@ namespace eka2l1::desktop {
 
         state.joystick_controller->start_polling();
 
+        // Do not reset graphics_event here. The initialization above set it to release the OS
+        // thread, which consumes the signal itself now that common::event is auto-reset. Clearing
+        // it before that waiter has re-acquired the event lock erases the wake, and the OS thread
+        // never leaves its startup wait -- no guest instruction ever runs, and the later shutdown
+        // handshake over the same event deadlocks with it.
+
         // Keep running. User which want to change the graphics backend will have to restart EKA2L1.
-        state.graphics_event.reset();
         state.graphics_driver->run();
 
         result = graphics_driver_thread_deinitialization(state);
@@ -279,7 +293,7 @@ namespace eka2l1::desktop {
             }
 
             const bool success = state.stage_two();
-            state.init_event.set();
+            state.init_done_event.set();
 
             if (first_time) {
                 state.graphics_event.wait();
@@ -290,8 +304,9 @@ namespace eka2l1::desktop {
                 break;
             }
 
-            // Try wait for initialization from other parties to make this success.
-            state.init_event.reset();
+            // Try wait for initialization from other parties to make this success. The wait
+            // consumes the signal by itself; resetting afterwards would drop a request raised
+            // between the wait returning and the reset.
             state.init_event.wait();
         }
 
@@ -351,38 +366,11 @@ namespace eka2l1::desktop {
 
         // Instantiate UI and High-level interface threads
         std::thread os_thread_obj(os_thread, std::ref(state));
-        state.init_event.wait();
+        state.init_done_event.wait();
 
         eka2l1::common::arg_parser parser(argc, argv);
 
-        parser.add("--help, -h", "Display helps menu", help_option_handler);
-        parser.add("--listapp", "List all installed applications", list_app_option_handler);
-        parser.add("--listdevices", "List all installed devices", list_devices_option_handler);
-        parser.add("--app, -a, --run", "Run an app with given name or UID, or the absolute virtual path to executable.\n"
-                                        "\t\t\t  See list of apps with --listapp.\n"
-                                        "\t\t\t  Extra command line arguments can be passed to the application.\n"
-                                        "\n"
-                                        "\t\t\t  Some example:\n"
-                                        "\t\t\t    eka2l1 --run C:\\sys\\bin\\BitmapTest.exe \"--hi --arg 5\"\n"
-                                        "\t\t\t    eka2l1 --run Bounce\n"
-                                        "\t\t\t    eka2l1 --run 0x200412ED\n",
-            app_specifier_option_handler);
-        parser.add("--device, -dvc", "Set a device to be ran, through the given firmware code. This device will also be saved in the configuration as the current device.\n"
-                               "\t\t\t Example: --device RH-29",
-            device_set_option_handler);
-        parser.add("--install, -i", "Install a SIS.", app_install_option_handler);
-        parser.add("--remove, -r", "Remove an package.", package_remove_option_handler);
-        parser.add("--fullscreen, -f", "Display the emulator in fullscreen.", fullscreen_option_handler);
-        parser.add("--mount, -m", "Load a folder/zip as a Game Card ROM.", mount_card_option_handler);
-        parser.add("--keybindprofile, -kbp", "Set a keybind profile to associate with the emulator launch. Don't include any file extension here.\n"
-                                              "\t Example: eka2l1 --kbp controller_for_octopus",
-            keybind_profile_option_handler);
-        parser.add("--mmcid, --cid, -cid", "Set the MMC-ID for the mounted card", set_mmcid_option_handler);
-        parser.add("--runng, --appng, -rng, -ang", "Run a single N-Gage game inside the E drive", run_ngage_game_option_handler);
-
-#if ENABLE_PYTHON_SCRIPTING
-        parser.add("--gendocs", "Generate Python documentation", python_docgen_option_handler);
-#endif
+        register_command_line_options(parser);
 
         if (argc > 1) {
             std::string err;
@@ -417,7 +405,52 @@ namespace eka2l1::desktop {
             state.ui_main->setup_and_switch_to_game_mode();
         }
 
+        if (state.debug_control_port) {
+            control::native_frontend frontend;
+            frontend.platform = "qt";
+            common::get_current_directory(frontend.documents);
+            frontend.log = frontend.documents / "EKA2L1.log";
+            frontend.get_system = [&state] { return state.symsys.get(); };
+            frontend.frames = [&state] { return state.debug_frames.load(); };
+            frontend.launch = [&state](auto uid) { return state.ui_main->control_launch(uid); };
+            frontend.close = [&state] { state.ui_main->control_close(); };
+            frontend.boot = [&state](int index) { return state.ui_main->control_boot(index); };
+            frontend.pause = [&state](bool paused) { state.ui_main->control_pause(paused); };
+            frontend.changed = [&state](auto change) { state.ui_main->control_changed(change); };
+            frontend.run_blocking = [&state](const std::function<void()> &work) { state.ui_main->control_run_blocking(work); };
+            if (state.sensor_driver) {
+                state.sensor_driver->set_acceleration_override(nullptr);
+                frontend.acceleration = [&state](const double *values) { state.sensor_driver->set_acceleration_override(values); };
+            }
+            state.debug_backend = std::make_shared<control::native_backend>(std::move(frontend));
+            state.debug_active = std::make_shared<std::atomic<bool>>(true);
+            auto active = state.debug_active;
+            std::weak_ptr<control::native_backend> backend = state.debug_backend;
+            auto *window = state.ui_main;
+            state.debug_service = std::make_unique<control::service>([active, backend, window](auto req, auto done) {
+                if (!active->load()) return done(control::response::error(503,"stopped","frontend stopped"));
+                QMetaObject::invokeMethod(window, [active, backend, req = std::move(req), done = std::move(done)] {
+                    if (!active->load()) return done(control::response::error(503,"stopped","frontend stopped"));
+                    if (auto control = backend.lock()) done(control->handle(req));
+                    else done(control::response::error(503,"stopped","frontend stopped"));
+                }, Qt::QueuedConnection);
+            });
+            state.debug_server = std::make_unique<control::server>();
+            std::string error;
+            if (!state.debug_server->start(state.debug_control_port, [&state](auto req, auto done) {
+                state.debug_service->handle(std::move(req),std::move(done));
+            }, error)) {
+                LOG_ERROR(FRONTEND_CMDLINE,"Unable to start debug control: {}",error);
+            } else {
+                LOG_INFO(FRONTEND_CMDLINE,"Debug control on 127.0.0.1:{}",state.debug_control_port);
+            }
+        }
+
         const int exec_code = application.exec();
+        if (state.debug_active) state.debug_active->store(false);
+        if (state.debug_server) state.debug_server->stop();
+        if (state.debug_service) state.debug_service->stop();
+        state.debug_backend.reset();
         kill_emulator(state);
 
         // Wait for OS thread to die

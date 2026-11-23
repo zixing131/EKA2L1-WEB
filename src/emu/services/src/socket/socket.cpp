@@ -117,6 +117,8 @@ namespace eka2l1::epoc::socket {
     }
 
     void socket::shutdown(epoc::notify_info &complete_info, int reason) {
+        // The client waits on this request status, so an unimplemented backend must
+        // still answer it or the guest's shutdown active object never runs again.
         LOG_ERROR(SERVICE_ESOCK, "Shutdown not implemented!");
         complete_info.complete(epoc::error_not_supported);
     }
@@ -278,14 +280,14 @@ namespace eka2l1::epoc::socket {
         std::uint8_t *packet_buffer = ctx->get_descriptor_argument_ptr(2);
         std::size_t packet_size = ctx->get_argument_max_data_size(2);
 
-        if (!packet_buffer || !packet_size) {
+        kernel::process *requester = ctx->msg->own_thr->owning_process();
+        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
+
+        if (!packet_des || (packet_size && !packet_buffer)) {
             ctx->complete(epoc::error_argument);
             return;
         }
-        
-        kernel::process *requester = ctx->msg->own_thr->owning_process();
-        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
-        
+
         epoc::notify_info info(ctx->msg->request_sts, ctx->msg->own_thr);
         sock_->receive(packet_buffer, static_cast<std::uint32_t>(packet_size), nullptr, nullptr, 0, info,
             [packet_des, requester](const std::int64_t length) {
@@ -343,14 +345,14 @@ namespace eka2l1::epoc::socket {
         std::uint8_t *packet_buffer = ctx->get_descriptor_argument_ptr(2);
         std::size_t packet_size = ctx->get_argument_max_data_size(2);
 
-        if (!packet_buffer || !packet_size) {
+        kernel::process *requester = ctx->msg->own_thr->owning_process();
+        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
+
+        if (!packet_des || (packet_size && !packet_buffer)) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        kernel::process *requester = ctx->msg->own_thr->owning_process();
-        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
-        
         // The reworked client passes the flags as a value and the transfer length package
         // second -- TIpcArgs(someFlags, &aLen, &aBuffer), esockserver/csock/CS_CLI.CPP. The
         // pre-S^3 client puts the package first and carries the flags inside it, which is
@@ -421,7 +423,16 @@ namespace eka2l1::epoc::socket {
 
         kernel::process *requester = ctx->msg->own_thr->owning_process();
         epoc::des8 *size_return_des = eka2l1::ptr<epoc::des8>(req_info->size_return_).get(requester);
-        saddress *optional_addr = (has_addr ? eka2l1::ptr<saddress>(req_info->sock_addr_).get(requester) : nullptr);
+        epoc::des8 *addr_des = has_addr ? eka2l1::ptr<epoc::des8>(req_info->sock_addr_).get(requester) : nullptr;
+        if (has_addr && (!addr_des || addr_des->get_max_length(requester) < sizeof(saddress))) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        saddress *optional_addr = addr_des ? reinterpret_cast<saddress *>(addr_des->get_pointer_raw(requester)) : nullptr;
+        if (has_addr && !optional_addr) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
 
         epoc::notify_info info(ctx->msg->request_sts, ctx->msg->own_thr);
         sock_->send(packet_buffer, static_cast<std::uint32_t>(packet_size),
@@ -433,7 +444,10 @@ namespace eka2l1::epoc::socket {
         std::uint8_t *packet_buffer = ctx->get_descriptor_argument_ptr(2);
         std::size_t packet_size = ctx->get_argument_max_data_size(2);
 
-        if (!packet_buffer || !packet_size) {
+        kernel::process *requester = ctx->msg->own_thr->owning_process();
+        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
+
+        if (!packet_des || (packet_size && !packet_buffer)) {
             ctx->complete(epoc::error_argument);
             return;
         }
@@ -444,15 +458,21 @@ namespace eka2l1::epoc::socket {
             return;
         }
 
-        kernel::process *requester = ctx->msg->own_thr->owning_process();
-        epoc::des8 *packet_des = eka2l1::ptr<epoc::des8>(ctx->msg->args.args[2]).get(requester);
-
         if (one_or_more) {
             req_info->flags_ |= SOCKET_FLAG_DONT_WAIT_FULL;
         }
 
         epoc::des8 *size_return_des = eka2l1::ptr<epoc::des8>(req_info->size_return_).get(requester);
-        saddress *optional_addr = (has_addr ? eka2l1::ptr<saddress>(req_info->sock_addr_).get(requester) : nullptr);
+        epoc::des8 *addr_des = has_addr ? eka2l1::ptr<epoc::des8>(req_info->sock_addr_).get(requester) : nullptr;
+        if (has_addr && (!addr_des || addr_des->get_max_length(requester) < sizeof(saddress))) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        saddress *optional_addr = addr_des ? reinterpret_cast<saddress *>(addr_des->get_pointer_raw(requester)) : nullptr;
+        if (has_addr && !optional_addr) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
 
         epoc::notify_info info(ctx->msg->request_sts, ctx->msg->own_thr);
         sock_->receive(packet_buffer, static_cast<std::uint32_t>(packet_size),
@@ -616,6 +636,11 @@ namespace eka2l1::epoc::socket {
                 cancel_accept(ctx);
                 return;
 
+            case socket_old_so_cancel_ioctl:
+                sock_->cancel_ioctl();
+                ctx->complete(epoc::error_none);
+                return;
+
             case socket_old_so_local_name:
                 local_name(ctx);
                 return;
@@ -684,6 +709,20 @@ namespace eka2l1::epoc::socket {
         } else {
             if (ctx->sys->get_symbian_version_use() >= epocver::epoc95) {
                 switch (ctx->msg->function) {
+                case socket_reform_so_cancel_ioctl:
+                    sock_->cancel_ioctl();
+                    ctx->complete(epoc::error_none);
+                    return;
+                case socket_reform_so_info: {
+                    protocol_description description{};
+                    if (!sock_->info(description)) {
+                        ctx->complete(epoc::error_not_supported);
+                        return;
+                    }
+                    ctx->write_data_to_descriptor_argument(0, description);
+                    ctx->complete(epoc::error_none);
+                    return;
+                }
                 case socket_reform_so_get_opt:
                     get_option(ctx);
                     return;
@@ -782,6 +821,10 @@ namespace eka2l1::epoc::socket {
                     listen(ctx);
                     return;
 
+                case socket_reform_so_shutdown:
+                    shutdown(ctx);
+                    return;
+
                 default:
                     break;
                 }
@@ -843,6 +886,22 @@ namespace eka2l1::epoc::socket {
                     recv(ctx, true, true, false);
                     return;
 
+                case socket_so_send_to:
+                    send(ctx, true, true);
+                    return;
+
+                case socket_so_send_to_no_len:
+                    send(ctx, false, true);
+                    return;
+
+                case socket_so_recv_from:
+                    recv(ctx, true, false, true);
+                    return;
+
+                case socket_so_recv_from_no_len:
+                    recv(ctx, false, false, true);
+                    return;
+
                 case socket_so_ioctl:
                     ioctl(ctx);
                     return;
@@ -865,12 +924,20 @@ namespace eka2l1::epoc::socket {
                     cancel_accept(ctx);
                     return;
 
+                case socket_so_cancel_all:
+                    cancel_all(ctx);
+                    return;
+
                 case socket_so_local_name:
                     local_name(ctx);
                     return;
 
                 case socket_so_remote_name:
                     remote_name(ctx);
+                    return;
+
+                case socket_so_shutdown:
+                    shutdown(ctx);
                     return;
 
                 default:

@@ -30,6 +30,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +48,17 @@ namespace eka2l1 {
 namespace eka2l1::epoc::internet {
     class midman;
     class inet_bridged_protocol;
+
+    struct host_port_mapping {
+        socket::saddress proxy;
+        socket::saddress target;
+    };
+
+    struct host_port_mapper {
+        std::vector<host_port_mapping> mappings;
+        std::mutex mutex;
+        std::uint32_t next_proxy_address = 1;
+    };
 
     struct sinet_address: public socket::saddress {
         static constexpr std::uint32_t DATA_SIZE = 12;
@@ -132,6 +144,7 @@ namespace eka2l1::epoc::internet {
 
         addrinfo *prev_info_;
         addrinfo *iterating_info_;
+        std::optional<std::uint16_t> mapped_port_;
 
     public:
         explicit inet_host_resolver(inet_bridged_protocol *papa, const std::uint32_t addr_family, const std::uint32_t protocol_id);
@@ -167,18 +180,25 @@ namespace eka2l1::epoc::internet {
 
     bool retrieve_local_ip_info(epoc::socket::saddress &broadcast, epoc::socket::saddress *myip = nullptr);
 
+    struct inet_connect_request;
+    struct inet_select_request;
+
     struct inet_socket : public socket::socket {
     private:
+        friend struct inet_connect_request;
+        friend struct inet_select_request;
         inet_bridged_protocol *papa_;
         inet_socket *accept_socket_ptr_;
         inet_socket *accept_server_;
 
         void *opaque_handle_;
-        void *opaque_connect_;
+        std::shared_ptr<inet_connect_request> connect_request_;
+        std::shared_ptr<inet_select_request> select_request_;
         void *opaque_send_info_;
         void *opaque_write_info_;
 
         std::uint32_t protocol_;
+        std::uint32_t family_ = INET_ADDRESS_FAMILY;
         epoc::notify_info connect_done_info_;
         epoc::notify_info send_done_info_;
         epoc::notify_info recv_done_info_;
@@ -194,6 +214,11 @@ namespace eka2l1::epoc::internet {
         bool take_available_only_;
         bool reuse_addr_ = false;
         bool reuse_addr_changed_ = false;
+        bool non_blocking_ = false;
+        bool listening_ = false;
+        bool connection_pending_ = false;
+        bool connected_ = false;
+        int connect_error_ = 0;
 
         std::vector<char> temp_buffer_;
         epoc::socket::saddress *recv_addr_;
@@ -202,6 +227,11 @@ namespace eka2l1::epoc::internet {
 
         sinet_address cached_broadcast_translate_;
         bool broadcast_translate_cached_;
+
+        // Endpoint pair of the last host port mapping applied on this socket, so addresses
+        // handed back to the guest stay in the synthetic address space it was given.
+        std::optional<epoc::socket::saddress> mapped_peer_guest_;
+        std::optional<epoc::socket::saddress> mapped_peer_host_;
 
         std::unique_ptr<common::ring_buffer<char, 0x80000>> stream_data_buffer_;
 
@@ -240,6 +270,8 @@ namespace eka2l1::epoc::internet {
         sockaddr_in6 send_dest_;
 
         void close_down();
+        std::uint32_t poll_status() const;
+        std::uint32_t bytes_available() const;
         void handle_connect_done_error_code(const int error_code);
         std::size_t retrieve_next_interface_info(std::uint8_t *buffer, const std::size_t avail_size);
         void create_frequent_tcp_tasks();
@@ -247,7 +279,6 @@ namespace eka2l1::epoc::internet {
         void create_frequent_common_tasks();
 
         // Asynchronous operations
-        void tcp_connect_impl_async();
         void tcp_send_impl_async();
         void tcp_recv_impl_async();
         void tcp_cancel_recv_impl_async();
@@ -262,10 +293,19 @@ namespace eka2l1::epoc::internet {
 
         void bind_impl_async();
         void bind_callback_impl_async();
+        int bind_host();
+
+        void remember_host_port_mapping(const epoc::socket::saddress &guest_addr, const epoc::socket::saddress &host_addr);
+        void restore_guest_peer(epoc::socket::saddress &address) const;
 
     public:
         explicit inet_socket(inet_bridged_protocol *papa);
         ~inet_socket() override;
+
+        bool info(protocol_description &description) const override;
+        void ioctl(std::uint32_t command, epoc::notify_info &complete_info, std::uint8_t *buffer,
+            std::size_t available_size, std::size_t max_buffer_size, std::uint32_t level) override;
+        void cancel_ioctl() override;
 
         bool open(const std::uint32_t family_id, const std::uint32_t protocol_id, const epoc::socket::socket_type sock_type);
         void connect(const epoc::socket::saddress &addr, epoc::notify_info &info) override;
@@ -316,13 +356,16 @@ namespace eka2l1::epoc::internet {
     private:
         std::shared_ptr<libuv::looper> looper_;
         kernel_system *kern_;
+        std::uint32_t protocol_id_;
+        std::shared_ptr<host_port_mapper> host_port_mapper_;
 
     public:
-        explicit inet_bridged_protocol(kernel_system *kern, const bool oldarch);
+        explicit inet_bridged_protocol(kernel_system *kern, const bool oldarch, std::uint32_t protocol_id,
+            std::shared_ptr<host_port_mapper> shared_mapper = nullptr);
         void initialize_looper();
 
         virtual std::u16string name() const override {
-            return u"INet";
+            return protocol_id_ == INET_TCP_PROTOCOL_ID ? u"tcp" : u"udp";
         }
 
         std::vector<std::uint32_t> family_ids() const override {
@@ -330,7 +373,15 @@ namespace eka2l1::epoc::internet {
         }
 
         virtual std::vector<std::uint32_t> supported_ids() const override {
-            return { INET_UDP_PROTOCOL_ID, INET_TCP_PROTOCOL_ID };
+            return { protocol_id_ };
+        }
+
+        std::uint32_t sock_type() const override {
+            return protocol_id_ == INET_TCP_PROTOCOL_ID ? socket::socket_type_stream : socket::socket_type_datagram;
+        }
+
+        std::int32_t message_size() const override {
+            return protocol_id_ == INET_TCP_PROTOCOL_ID ? socket::SOCKET_MESSAGE_SIZE_IS_STREAM : 65507;
         }
 
         virtual epoc::version ver() const override {
@@ -363,10 +414,21 @@ namespace eka2l1::epoc::internet {
         std::shared_ptr<libuv::looper> get_looper() {
             return looper_;
         }
+
+        void map_host_port(const sockaddr *target, std::uint16_t port, socket::saddress &guest_address);
+        bool apply_host_port(socket::saddress &address);
     };
+
+    // Turns a host endpoint back into the synthetic address the guest was handed by the resolver,
+    // so a mapped socket never reports the rewritten destination to the guest.
+    bool restore_mapped_endpoint(const socket::saddress &guest_endpoint, const socket::saddress &host_endpoint,
+        socket::saddress &address);
 
     void host_sockaddr_to_guest_saddress(const sockaddr *addr, epoc::socket::saddress &dest_addr, std::uint32_t *data_len = nullptr,
         bool for_descriptor = false);
+
+    int guest_bind_address_to_host(const epoc::socket::saddress &addr, std::uint32_t socket_family,
+        sockaddr_in6 &result);
         
     void addrinfo_to_name_entry(epoc::socket::name_entry &supply_and_result, addrinfo *result_info);
 }

@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,11 @@ namespace eka2l1::drivers {
 
         std::size_t data_pointer_;
         std::uint32_t flags_;
+        std::atomic<bool> playback_complete_{false};
+
+        // Where the current or next playback starts, and the stream frame count at that point.
+        std::atomic<std::uint64_t> start_position_us_{0};
+        std::atomic<std::uint64_t> start_position_frames_{0};
 
         std::int32_t repeat_left_;
         std::int64_t silence_micros_;
@@ -60,6 +66,7 @@ namespace eka2l1::drivers {
 
         std::vector<player_metadata> metadatas_;
         std::unique_ptr<audio_output_stream> output_stream_;
+        void on_stream_drained();
 
     public:
         explicit player_shared(audio_driver *driver);
@@ -94,7 +101,7 @@ namespace eka2l1::drivers {
         std::uint32_t get_dest_encoding() override;
 
         bool is_playing() const override {
-            return (output_stream_ && output_stream_->is_playing());
+            return !playback_complete_ && output_stream_ && output_stream_->is_playing();
         }
     };
 }

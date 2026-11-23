@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <drivers/video/backend/ffmpeg/video_player_ffmpeg.h>
 #include <drivers/audio/audio.h>
 
@@ -92,6 +93,7 @@ namespace eka2l1::drivers {
         audio_stream_index_ = -1;
         image_stream_index_ = -1;
         fps_ = 1.0f;
+        position_us_ = 0;
     }
 
     bool video_player_ffmpeg::prepare_codecs() {
@@ -165,7 +167,7 @@ namespace eka2l1::drivers {
 
                     // Create new audio stream. Don't play yet
                     stream_ = aud_driver_->new_output_stream(audio_stream->codecpar->sample_rate,
-                        audio_stream->codecpar->channels, [this](std::int16_t *output, std::size_t frames) {
+                        audio_stream->codecpar->ch_layout.nb_channels, [this](std::int16_t *output, std::size_t frames) {
                             return this->video_audio_callback(output, frames);
                         });
 
@@ -187,7 +189,7 @@ namespace eka2l1::drivers {
         return true;
     }
 
-    bool video_player_ffmpeg::open_file(const std::string &path) {
+    bool video_player_ffmpeg::open_file(const host_path &path) {
         if (format_ctx_) {
             LOG_ERROR(DRIVER_VID, "Another video is still in play queue, can't open another one!");
             return false;
@@ -218,11 +220,22 @@ namespace eka2l1::drivers {
     }
 
     void video_player_ffmpeg::play(const std::uint64_t *us_range) {
-        if (us_range) {
-            LOG_ERROR(DRIVER_VID, "Play with range is not yet supported. Playing the full video!");
-        }
-
         stop();
+        if (!format_ctx_) {
+            return;
+        }
+        playback_start_us_ = us_range ? us_range[0] : position_us_.load();
+        playback_end_us_ = us_range ? us_range[1] : UINT64_MAX;
+        av_seek_frame(format_ctx_, -1, static_cast<std::int64_t>(playback_start_us_), AVSEEK_FLAG_BACKWARD);
+        if (image_codec_ctx_) {
+            avcodec_flush_buffers(image_codec_ctx_);
+        }
+        if (audio_codec_ctx_) {
+            avcodec_flush_buffers(audio_codec_ctx_);
+        }
+        if (resample_context_) {
+            swr_free(&resample_context_);
+        }
 
         should_stop_ = false;
         done_event_.reset();
@@ -239,7 +252,7 @@ namespace eka2l1::drivers {
     }
 
     void video_player_ffmpeg::pause() {
-
+        stop();
     }
 
     void video_player_ffmpeg::stop() {
@@ -280,15 +293,16 @@ namespace eka2l1::drivers {
     }
 
     std::uint64_t video_player_ffmpeg::duration() const {
-        return 0;
+        return format_ctx_ && format_ctx_->duration > 0 ? static_cast<std::uint64_t>(format_ctx_->duration) : 0;
     }
 
     std::uint64_t video_player_ffmpeg::position() const {
-        return 0;
+        return position_us_;
     }
 
     void video_player_ffmpeg::set_position(const std::uint64_t pos) {
-
+        stop();
+        position_us_ = std::min(pos, duration());
     }
 
     void video_player_ffmpeg::set_fps(const float fps) {
@@ -356,14 +370,14 @@ namespace eka2l1::drivers {
 
             while (avcodec_receive_frame(audio_codec_ctx_, temp_audio_frame_) >= 0) {
                 if (!resample_context_) {
-                    const int dest_channel_type = (channel_count == 2) ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
-                    AVStream *audio_stream = format_ctx_->streams[audio_stream_index_];
-
-                    resample_context_ = swr_alloc_set_opts(nullptr, dest_channel_type, AV_SAMPLE_FMT_S16, stream_->get_sample_rate(),
-                        audio_stream->codecpar->channel_layout, static_cast<AVSampleFormat>(audio_stream->codecpar->format), audio_stream->codecpar->sample_rate,
+                    AVChannelLayout output_layout{};
+                    av_channel_layout_default(&output_layout, channel_count);
+                    result = swr_alloc_set_opts2(&resample_context_, &output_layout, AV_SAMPLE_FMT_S16, stream_->get_sample_rate(),
+                        &temp_audio_frame_->ch_layout, static_cast<AVSampleFormat>(temp_audio_frame_->format), temp_audio_frame_->sample_rate,
                         0, nullptr);
+                    av_channel_layout_uninit(&output_layout);
 
-                    if (swr_init(resample_context_) < 0) {
+                    if (result < 0 || swr_init(resample_context_) < 0) {
                         LOG_ERROR(DRIVER_AUD, "Error initializing audio resample context!");
                         swr_free(&resample_context_);
 
@@ -401,7 +415,7 @@ namespace eka2l1::drivers {
         std::size_t frame_buffer_size = 0;
 
         std::uint64_t amount_to_sleep = static_cast<std::uint64_t>(common::microsecs_per_sec / fps_);
-        bool complete_callback_called = false;
+        bool range_finished = false;
 
         // Video packets read ahead of their display time. Reading must not be
         // throttled by the video pacing sleep below, else the audio stream is fed
@@ -456,7 +470,13 @@ namespace eka2l1::drivers {
                 if ((temp_packet->stream_index == image_stream_index_) && has_image_decoder) {
                     pending_image_packets.push_back(av_packet_clone(temp_packet));
                 } else if ((temp_packet->stream_index == audio_stream_index_) && has_audio_output) {
-                    audio_packets_.push(av_packet_clone(temp_packet));
+                    const auto pts = temp_packet->pts;
+                    const auto time_us = pts == AV_NOPTS_VALUE ? static_cast<std::int64_t>(playback_start_us_)
+                        : av_rescale_q(pts, format_ctx_->streams[audio_stream_index_]->time_base, AV_TIME_BASE_Q);
+                    if (time_us >= static_cast<std::int64_t>(playback_start_us_)
+                        && (playback_end_us_ == UINT64_MAX || time_us < static_cast<std::int64_t>(playback_end_us_))) {
+                        audio_packets_.push(av_packet_clone(temp_packet));
+                    }
                 }
 
                 av_packet_unref(temp_packet);
@@ -468,7 +488,6 @@ namespace eka2l1::drivers {
 
                 if (play_complete_callback_) {
                     play_complete_callback_(play_complete_callback_userdata_, -1);
-                    complete_callback_called = true;
                 }
 
                 break;
@@ -490,7 +509,6 @@ namespace eka2l1::drivers {
 
                     if (play_complete_callback_) {
                         play_complete_callback_(play_complete_callback_userdata_, -1);
-                        complete_callback_called = true;
                     }
 
                     break;
@@ -502,6 +520,24 @@ namespace eka2l1::drivers {
                         break;
                     }
 
+                    if (result < 0) {
+                        break;
+                    }
+                    const std::int64_t pts = temp_frame->best_effort_timestamp;
+                    if (pts != AV_NOPTS_VALUE) {
+                        const auto frame_us = av_rescale_q(pts, format_ctx_->streams[image_stream_index_]->time_base, AV_TIME_BASE_Q);
+                        if (frame_us < static_cast<std::int64_t>(playback_start_us_)) {
+                            continue;
+                        }
+                        if (frame_us >= 0 && static_cast<std::uint64_t>(frame_us) >= playback_end_us_) {
+                            position_us_ = playback_end_us_;
+                            range_finished = true;
+                            should_stop_ = true;
+                            break;
+                        }
+                        position_us_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, frame_us));
+                    }
+
                     if (!scale_context) {
                         // Setup frame that will store scaled result
                         scale_context = sws_getContext(image_codec_ctx_->width, image_codec_ctx_->height,
@@ -509,13 +545,13 @@ namespace eka2l1::drivers {
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
 
                         int total_bytes_buffer = av_image_get_buffer_size(AV_PIX_FMT_RGBA, image_codec_ctx_->width,
-                           image_codec_ctx_->height, 32);
+                           image_codec_ctx_->height, 1);
 
                         // I put it extra, suspect sws_scale is heap corrupting the data a bit
                         frame_buffer = reinterpret_cast<std::uint8_t*>(av_malloc(total_bytes_buffer + (total_bytes_buffer / 2)));
 
                         av_image_fill_arrays(scaled_frame->data, scaled_frame->linesize, frame_buffer, AV_PIX_FMT_RGBA, image_codec_ctx_->width,
-                            image_codec_ctx_->height, 32);
+                            image_codec_ctx_->height, 1);
 
                         frame_buffer_size = static_cast<std::size_t>(total_bytes_buffer);
                     }
@@ -547,7 +583,6 @@ namespace eka2l1::drivers {
 
                     if (play_complete_callback_) {
                         play_complete_callback_(play_complete_callback_userdata_, 0);
-                        complete_callback_called = true;
                     }
 
                     break;
@@ -566,6 +601,10 @@ namespace eka2l1::drivers {
             pending_image_packets.pop_front();
 
             av_packet_free(&leftover);
+        }
+
+        if (range_finished && play_complete_callback_) {
+            play_complete_callback_(play_complete_callback_userdata_, 0);
         }
 
         // Wait until a confirmation that I can exit
@@ -588,11 +627,5 @@ namespace eka2l1::drivers {
         }
 
         av_free(frame_buffer);
-
-        if (!complete_callback_called) {            
-            if (play_complete_callback_) {
-                play_complete_callback_(play_complete_callback_userdata_, 0);
-            }
-        }
     }
 }

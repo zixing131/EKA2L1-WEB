@@ -94,10 +94,14 @@ namespace eka2l1::epoc {
     }
 
     window::~window() {
-        // A group's owned top_canvas is destroyed before the group's base
-        // destructor. Unlink every window here, including top_canvas, so the
-        // parent never walks an already freed child.
+        if (client) {
+            client->remove_modifier_changed_events(this);
+        }
+
+        // Members of derived windows (a group's top canvas) die before this runs,
+        // so each window must unlink itself or its parent keeps a dangling child.
         remove_from_sibling_list();
+
         while (child != nullptr) {
             child->parent = nullptr;
             child = child->sibling;
@@ -288,32 +292,16 @@ namespace eka2l1::epoc {
     }
 
     bool window::execute_command_for_general_node(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd) {
-        epoc::version cli_ver = client->client_version();
-        kernel_system *kern = client->get_ws().get_kernel_system();
-
-        // Patching out user opcode.
-        if ((cli_ver.major == WS_MAJOR_VER) && (cli_ver.minor == WS_MINOR_VER)) {
-            // The window-server client version determines this opcode table.
-            // Some EKA1/EPOC 8.0 releases report a newer build and already
-            // include EWsWinOpAbsPosition.
-            if (cli_ver.build <= WS_OLDARCH_VER) {
-                // Skip absolute position opcode
-                if (cmd.header.op >= EWsWinOpAbsPosition) {
-                    cmd.header.op += 1;
-                }
-            }
-
-            if (cli_ver.build <= WS_NEWARCH_VER) {
-                if ((cmd.header.op >= EWsWinOpSendAdvancedPointerEvent) && (kern->get_epoc_version() <= epocver::epoc94)) {
-                    // Send advanced pointer event opcode does not exist in the version.
-                    cmd.header.op += 1;
-                }
-            }
-        }
+        cmd.header.op = client->protocol().window_opcode(cmd.header.op);
 
         TWsWindowOpcodes op = static_cast<decltype(op)>(cmd.header.op);
 
         switch (op) {
+        case EWsWinOpDisableModifierChangedEvents:
+            client->remove_modifier_changed_events(this);
+            ctx.complete(epoc::error_none);
+            return true;
+
         case EWsWinOpEnableModifierChangedEvents: {
             epoc::event_mod_notifier_user nof;
             nof.notifier = *reinterpret_cast<event_mod_notifier *>(cmd.data_ptr);

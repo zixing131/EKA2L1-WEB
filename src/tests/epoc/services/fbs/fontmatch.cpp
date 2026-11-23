@@ -187,5 +187,173 @@ TEST_CASE("ROM fonts with blank Latin glyphs use a drawable ROM fallback", "[fbs
         REQUIRE(bitmap);
         REQUIRE(metric.horizontal_advance == 8);
         linked->free_glyph_bitmap(bitmap);
+
+#include <services/fbs/font_store.h>
+#include <algorithm>
+#include <fstream>
+#include <iterator>
+
+using namespace eka2l1;
+
+namespace {
+    epoc::font_spec_v1 make_spec(const std::u16string &name, const std::int32_t height, const std::uint32_t style_flags,
+        const std::uint32_t typeface_flags = epoc::typeface_info::tf_propotional) {
+        epoc::font_spec_v1 spec{};
+
+        spec.tf.name.assign(nullptr, name);
+        spec.tf.flags = typeface_flags;
+        spec.height = height;
+        spec.style.flags = style_flags;
+
+        return spec;
+    }
+
+    epoc::open_font_face_attrib make_face(const std::u16string &name, const std::int32_t style) {
+        epoc::open_font_face_attrib attrib{};
+
+        attrib.name.assign(nullptr, name);
+        attrib.fam_name.assign(nullptr, name);
+        attrib.style = style;
+
+        return attrib;
+    }
+}
+
+TEST_CASE("font_match_prefers_name_over_every_style_attribute", "fbs") {
+    // MatchFontSpecsInPixels pays 10 for the name and 2 for the weight, so a
+    // font asked for by name wins even when another one matches the weight.
+    epoc::font_spec_v1 spec = make_spec(u"MHeiM-C-GB18030-S60", 20, epoc::font_style_base::bold);
+
+    const epoc::open_font_face_attrib named = make_face(u"MHeiM-C-GB18030-S60", 0);
+    const epoc::open_font_face_attrib bold = make_face(u"Nokia Sans S60 SemiBold", epoc::open_font_face_attrib::bold);
+
+    REQUIRE(epoc::match_font_spec(named, u"MHeiM-C-GB18030-S60", spec, 20)
+        > epoc::match_font_spec(bold, u"Nokia Sans S60 SemiBold", spec, 20));
+}
+
+TEST_CASE("font_match_costs_more_for_height_than_for_weight", "fbs") {
+    // Height is worth 10 - |diff|, so being two pixels off already outweighs
+    // the 2 points a weight match is worth. The old scoring had bold override
+    // up to fifty pixels of difference.
+    epoc::font_spec_v1 spec = make_spec(u"", 20, epoc::font_style_base::bold);
+
+    const epoc::open_font_face_attrib bold = make_face(u"Bitmap Bold", epoc::open_font_face_attrib::bold);
+    const epoc::open_font_face_attrib regular = make_face(u"Bitmap Regular", 0);
+
+    REQUIRE(epoc::match_font_spec(regular, u"Bitmap Regular", spec, 20)
+        > epoc::match_font_spec(bold, u"Bitmap Bold", spec, 17));
+
+    // At the same height the weight decides after all.
+    REQUIRE(epoc::match_font_spec(bold, u"Bitmap Bold", spec, 20)
+        > epoc::match_font_spec(regular, u"Bitmap Regular", spec, 20));
+}
+
+TEST_CASE("font_match_scores_italic_mono_and_serif", "fbs") {
+    epoc::font_spec_v1 upright = make_spec(u"", 20, 0);
+    epoc::font_spec_v1 italic = make_spec(u"", 20, epoc::font_style_base::italic);
+
+    const epoc::open_font_face_attrib slanted = make_face(u"Face Italic", epoc::open_font_face_attrib::italic);
+    const epoc::open_font_face_attrib plain = make_face(u"Face", 0);
+
+    REQUIRE(epoc::match_font_spec(slanted, u"Face Italic", italic, 20) > epoc::match_font_spec(plain, u"Face", italic, 20));
+    REQUIRE(epoc::match_font_spec(plain, u"Face", upright, 20) > epoc::match_font_spec(slanted, u"Face Italic", upright, 20));
+
+    // Monospace is rated above serif, as it changes the layout rather than
+    // just the look.
+    epoc::font_spec_v1 mono_wanted = make_spec(u"", 20, 0, 0);
+    const epoc::open_font_face_attrib mono = make_face(u"Mono", epoc::open_font_face_attrib::mono_width);
+    const epoc::open_font_face_attrib serif = make_face(u"Serif", epoc::open_font_face_attrib::serif);
+
+    REQUIRE(epoc::match_font_spec(mono, u"Mono", mono_wanted, 20) > epoc::match_font_spec(serif, u"Serif", mono_wanted, 20));
+}
+
+TEST_CASE("font_match_ignores_name_when_none_was_asked_for", "fbs") {
+    // An empty typeface name means "whatever fits", and must not hand the 10
+    // points to a font whose own name happens to be empty too.
+    epoc::font_spec_v1 spec = make_spec(u"", 20, 0);
+
+    const epoc::open_font_face_attrib unnamed = make_face(u"", 0);
+    const epoc::open_font_face_attrib named = make_face(u"Nokia Sans S60", 0);
+
+    REQUIRE(epoc::match_font_spec(unnamed, u"", spec, 20) == epoc::match_font_spec(named, u"Nokia Sans S60", spec, 20));
+}
+
+namespace {
+    std::vector<std::uint8_t> bitmap_typeface_store() {
+        std::vector<std::uint8_t> data;
+        auto word = [&](std::uint32_t value) {
+            for (int i = 0; i < 4; ++i) data.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
+        };
+        for (std::uint32_t value : {0x10000037U, 0x10000039U, 0U, 0x47393853U,
+                 0U, 40U, 0U, 0U, 0U, 0U, 0U, 2U}) word(value);
+        auto face = [&](const std::string &name, std::uint8_t flags) {
+            data.push_back(static_cast<std::uint8_t>(name.size() << 2));
+            data.insert(data.end(), name.begin(), name.end());
+            data.push_back(flags);
+            word(0);
+        };
+        face("Calculator", epoc::typeface_info::tf_symbol);
+        face("Courier", epoc::typeface_info::tf_serif);
+        return data;
+    }
+}
+
+TEST_CASE("bitmap_font_fallback_preserves_symbol_and_monospace_flags", "fbs") {
+    auto data = bitmap_typeface_store();
+    epoc::font_store store(nullptr);
+    REQUIRE(store.add_fonts(data, epoc::adapter::font_file_adapter_kind::gdr));
+    auto spec = make_spec(u"Missing face", 13, 0, 0);
+    auto *normal = store.seek_the_open_font(spec);
+    REQUIRE(normal != nullptr);
+    REQUIRE(normal->family == u"Courier");
+    REQUIRE(normal->face_attrib.style & epoc::open_font_face_attrib::mono_width);
+    REQUIRE(normal->face_attrib.style & epoc::open_font_face_attrib::serif);
+
+    spec.tf.flags = epoc::typeface_info::tf_symbol;
+    auto *symbol = store.seek_the_open_font(spec);
+    REQUIRE(symbol != nullptr);
+    REQUIRE(symbol->family == u"Calculator");
+    REQUIRE(symbol->face_attrib.style & epoc::open_font_face_attrib::symbol);
+
+    spec.tf.name.assign(nullptr, u"Calculator");
+    spec.tf.flags = 0;
+    REQUIRE(store.seek_the_open_font(spec) == symbol);
+}
+
+TEST_CASE("freetype_rejects_compacted_truetype_glyph_tables", "fbs") {
+    std::ifstream file("fontassets/overlay_font.ttf", std::ios::binary);
+    REQUIRE(file.is_open());
+    const std::vector<std::uint8_t> original((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    for (const std::string table : {"loca", "hmtx"}) {
+        auto data = original;
+        {
+            epoc::font_store valid(nullptr);
+            REQUIRE(valid.add_fonts(data, epoc::adapter::font_file_adapter_kind::freetype));
+        }
+
+        const std::size_t count = (data[4] << 8) | data[5];
+        bool found = false;
+        for (std::size_t i = 0; i < count; i++) {
+            const std::size_t offset = 12 + i * 16;
+            if (std::equal(table.begin(), table.end(), data.begin() + offset)) {
+                // SFNT requires full-width entries; compressed ROM fonts keep
+                // the header fields but store fewer bytes in these tables.
+                std::uint32_t length = 0;
+                for (int byte = 12; byte < 16; byte++) {
+                    length = (length << 8) | data[offset + byte];
+                }
+                length = table == "loca" ? length * 5 / 8 : length * 9 / 16;
+                for (int byte = 15; byte >= 12; byte--) {
+                    data[offset + byte] = static_cast<std::uint8_t>(length);
+                    length >>= 8;
+                }
+                found = true;
+                break;
+            }
+        }
+        REQUIRE(found);
+        epoc::font_store compacted(nullptr);
+        REQUIRE_FALSE(compacted.add_fonts(data, epoc::adapter::font_file_adapter_kind::freetype));
     }
 }

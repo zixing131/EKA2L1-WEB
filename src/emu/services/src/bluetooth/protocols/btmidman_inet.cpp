@@ -22,9 +22,7 @@
 #include <services/internet/protocols/common.h>
 #include <services/internet/protocols/inet.h>
 
-#ifdef __APPLE__
-#include <services/bluetooth/protocols/bonjour.h>
-#endif
+#include <services/bluetooth/protocols/mdns.h>
 
 #include <common/random.h>
 #include <common/log.h>
@@ -44,7 +42,6 @@ namespace eka2l1::epoc::bt {
         , port_offset_(conf.btnet_port_offset)
         , enable_upnp_(conf.enable_upnp)
         , friend_info_cached_(false)
-        , lan_discovery_call_listener_socket_(nullptr)
         , bluetooth_queries_server_socket_(nullptr)
         , matching_server_socket_(nullptr)
         , hearing_timeout_timer_(nullptr)
@@ -53,7 +50,9 @@ namespace eka2l1::epoc::bt {
         , device_addr_asker_(this)
         , current_active_observer_(nullptr)
         , password_(conf.btnet_password)
+        , central_server_url_(conf.bt_central_server_url)
         , discovery_mode_(static_cast<discovery_mode>(conf.btnet_discovery_mode))
+        , suspended_(false)
         , asker_counter_(0) {
         // Local state the guest still reaches with discovery off.
         std::fill(port_refs_.begin(), port_refs_.end(), 0);
@@ -64,10 +63,6 @@ namespace eka2l1::epoc::bt {
 
         if (discovery_mode_ == DISCOVERY_MODE_OFF) {
             return;
-        }
-
-        if ((discovery_mode_ == DISCOVERY_MODE_LAN) && !uses_bonjour_discovery()) {
-            port_ = HARBOUR_PORT;
         }
 
         std::vector<std::uint64_t> errs;
@@ -82,55 +77,107 @@ namespace eka2l1::epoc::bt {
             }
         }
 
+        start_discovery(true);
+    }
+
+    void midman_inet::start_discovery(const bool first_start) {
         auto looper = libuv::default_looper;
-        std::string bt_server_url = conf.bt_central_server_url;
 
         if (!looper->started()) {
             looper->set_loop_thread_prepare_callback([]() { common::set_thread_priority(common::thread_priority_very_high); });
             looper->start();
         }
 
-        looper->one_shot([this, bt_server_url]() {
-            auto loop = uvw::loop::get_default();
+        looper->one_shot([this, first_start]() {
+            setup_discovery_sockets(first_start);
+        });
+    }
 
-            bluetooth_queries_server_socket_ = loop->resource<uvw::udp_handle>();
+    void midman_inet::setup_discovery_sockets(const bool first_start) {
+        auto loop = uvw::loop::get_default();
+
+        bluetooth_queries_server_socket_ = loop->resource<uvw::udp_handle>();
+
+        // Not a socket, so it survives a suspension and keeps a pending stranger
+        // search's timeout running across one.
+        if (!hearing_timeout_timer_) {
             hearing_timeout_timer_ = loop->resource<uvw::timer_handle>();
+        }
 
-            if (discovery_mode_ == DISCOVERY_MODE_LAN) {
-                setup_lan_discovery();
-            } else if (discovery_mode_ == DISCOVERY_MODE_PROXY_SERVER) {
-                setup_proxy_server_discovery(bt_server_url);
+        if (discovery_mode_ == DISCOVERY_MODE_LAN) {
+            setup_lan_discovery();
+        } else if (discovery_mode_ == DISCOVERY_MODE_PROXY_SERVER) {
+            setup_proxy_server_discovery(central_server_url_);
+        }
+
+        sockaddr_in6 addr_bind;
+        std::memset(&addr_bind, 0, sizeof(sockaddr_in6));
+        addr_bind.sin6_family = (discovery_mode_ == DISCOVERY_MODE_LAN) ? AF_INET : AF_INET6;
+        addr_bind.sin6_port = htons(static_cast<std::uint16_t>(port_));
+
+        // Nothing else reports on this socket, so an unchecked failure here
+        // leaves the whole discovery side dead with nothing in the log.
+        if (const int bind_err = bluetooth_queries_server_socket_->bind(*reinterpret_cast<sockaddr*>(&addr_bind)); bind_err < 0) {
+            LOG_ERROR(SERVICE_BLUETOOTH, "Can't bind the Bluetooth queries socket to port {}! Libuv error code={}", port_, bind_err);
+        }
+
+        // A resume rebuilds the socket behind the same port, which the router kept
+        // mapped while we were away.
+        if (first_start && should_upnp_apply_to_port()) {
+            UPnP::TryPortmapping(static_cast<std::uint16_t>(port_), true);
+        }
+
+        bluetooth_queries_server_socket_->on<uvw::udp_data_event>([this](const uvw::udp_data_event &event, uvw::udp_handle &handle) {
+            std::optional<sockaddr_in6> sender_ced = libuv::from_ip_string(event.sender.ip.data(), event.sender.port);
+            if (!sender_ced.has_value()) {
+                LOG_ERROR(SERVICE_BLUETOOTH, "Invalid sender address passed to callback!");
+                return;
             }
+            handle_queries_request(reinterpret_cast<sockaddr*>(&sender_ced.value()), event.data.get(), event.length);
+        });
 
-            sockaddr_in6 addr_bind;
-            std::memset(&addr_bind, 0, sizeof(sockaddr_in6));
-            addr_bind.sin6_family = (discovery_mode_ == DISCOVERY_MODE_LAN) ? AF_INET : AF_INET6;
-            addr_bind.sin6_port = htons(static_cast<std::uint16_t>(port_));
+        bluetooth_queries_server_socket_->on<uvw::error_event>([](const uvw::error_event &event, uvw::udp_handle &handle) {
+            LOG_ERROR(SERVICE_BLUETOOTH, "Error on the Bluetooth queries socket! Libuv error code={}", event.code());
 
-            // Nothing else reports on this socket, so an unchecked failure here
-            // leaves the whole discovery side dead with nothing in the log.
-            if (const int bind_err = bluetooth_queries_server_socket_->bind(*reinterpret_cast<sockaddr*>(&addr_bind)); bind_err < 0) {
-                LOG_ERROR(SERVICE_BLUETOOTH, "Can't bind the Bluetooth queries socket to port {}! Libuv error code={}", port_, bind_err);
+            if (is_socket_dead_error(event.code())) {
+                handle.stop();
             }
+        });
 
-            if (should_upnp_apply_to_port()) {
-                UPnP::TryPortmapping(static_cast<std::uint16_t>(port_), true);
-            }
+        bluetooth_queries_server_socket_->recv();
+    }
 
-            bluetooth_queries_server_socket_->on<uvw::udp_data_event>([this](const uvw::udp_data_event &event, uvw::udp_handle &handle) {
-                std::optional<sockaddr_in6> sender_ced = libuv::from_ip_string(event.sender.ip.data(), event.sender.port);
-                if (!sender_ced.has_value()) {
-                    LOG_ERROR(SERVICE_BLUETOOTH, "Invalid sender address passed to callback!");
-                    return;
-                }
-                handle_queries_request(reinterpret_cast<sockaddr*>(&sender_ced.value()), event.data.get(), event.length);
-            });
+    // The asker is left out on purpose: closing it would strand a synchronous
+    // requester waiting on a completion that can no longer arrive.
+    void midman_inet::shutdown_discovery_sockets() {
+        mdns_.reset();
+        shutdown_uv_handle(bluetooth_queries_server_socket_);
+        shutdown_uv_handle(matching_server_socket_);
+        matching_server_receive_buffer_.clear();
+    }
 
-            bluetooth_queries_server_socket_->on<uvw::error_event>([](const uvw::error_event &event, uvw::udp_handle &handle) {
-                LOG_ERROR(SERVICE_BLUETOOTH, "Error on the Bluetooth queries socket! Libuv error code={}", event.code());
-            });
+    // Keep the transition and all handle changes together on the loop thread.
+    void midman_inet::suspend() {
+        if ((discovery_mode_ == DISCOVERY_MODE_OFF) || !libuv::default_looper->started()) {
+            return;
+        }
 
-            bluetooth_queries_server_socket_->recv();
+        libuv::default_looper->one_shot([this]() {
+            if (suspended_) return;
+            suspended_ = true;
+            shutdown_discovery_sockets();
+        });
+    }
+
+    void midman_inet::resume() {
+        if ((discovery_mode_ == DISCOVERY_MODE_OFF) || !libuv::default_looper->started()) {
+            return;
+        }
+
+        libuv::default_looper->one_shot([this]() {
+            if (!suspended_) return;
+            suspended_ = false;
+            setup_discovery_sockets(false);
         });
     }
 
@@ -149,8 +196,6 @@ namespace eka2l1::epoc::bt {
             }
         }
 
-        send_logout(true);
-
         if (!libuv::default_looper->started()) {
             return;
         }
@@ -162,16 +207,12 @@ namespace eka2l1::epoc::bt {
         common::event teardown_done;
 
         libuv::default_looper->one_shot([this, &teardown_done]() {
+            send_logout();
             // The asker goes first: its retry timer completes requests through a callback
             // that reaches back into this object, which is already half torn down.
             device_addr_asker_.shutdown_handles();
 
-#ifdef __APPLE__
-            bonjour_.reset();
-#endif
-            shutdown_uv_handle(lan_discovery_call_listener_socket_);
-            shutdown_uv_handle(bluetooth_queries_server_socket_);
-            shutdown_uv_handle(matching_server_socket_);
+            shutdown_discovery_sockets();
             shutdown_uv_handle(hearing_timeout_timer_);
 
             teardown_done.set();
@@ -430,7 +471,7 @@ lookup:
             }
         }
 
-        if (!friend_info_cached_ && !uses_bonjour_discovery()) {
+        if (!friend_info_cached_ && !uses_mdns_discovery()) {
             // Try to refresh the local cache. It's not really ideal, but anyway resolver always redo
             // a full rescan...
             refresh_friend_infos();
@@ -464,7 +505,7 @@ lookup:
             return;
         }
 
-        if (!friend_info_cached_ && !uses_bonjour_discovery()) {
+        if (!friend_info_cached_ && !uses_mdns_discovery()) {
             // Try to refresh the local cache. It's not really ideal, but anyway resolver always redo
             // a full rescan...
             refresh_friend_infos_async([this, check_for_friend_and_run_cb]() {
@@ -504,7 +545,7 @@ lookup:
             return;
         }
 
-        if (uses_bonjour_discovery()) {
+        if (uses_mdns_discovery()) {
             friend_info_cached_ = true;
             return;
         }
@@ -711,7 +752,7 @@ lookup:
             return false;
         }
 
-        if (!friend_info_cached_ && !uses_bonjour_discovery()) {
+        if (!friend_info_cached_ && !uses_mdns_discovery()) {
             // Try to refresh the local cache. It's not really ideal, but anyway resolver always redo
             // a full rescan...
             refresh_friend_infos();
@@ -745,46 +786,18 @@ lookup:
     void midman_inet::send_call_for_strangers() {
         if (!send_strangers_call_task_) {
             send_strangers_call_task_ = libuv::create_task([this]() {
-                sockaddr *server_addr_sock_ptr = nullptr;
-                GUEST_TO_BSD_ADDR(server_addr_, server_addr_sock_ptr);
-
                 char request_friends = QUERY_OPCODE_GET_PLAYERS;
 
                 // Direct IP has no network-wide search: its peers come from the
-                // config list. Either socket can also be null when its setup
+                // config list. Discovery can also be null when its setup
                 // failed. Only the timeout below must happen unconditionally --
                 // an observer that never gets on_no_more_strangers() leaves its
                 // guest request outstanding forever.
-#ifdef __APPLE__
-                if (uses_bonjour_discovery() && bonjour_) {
-                    if (retried_lan_discovery_times_ == 0) bonjour_->retry();
-                    sync_bonjour_friends();
-                } else
-#endif
-                if ((discovery_mode_ == DISCOVERY_MODE_LAN) && lan_discovery_call_listener_socket_) {
-                    sockaddr_in6 server_addr_modded;
-
-                    // A bit of overflow would be ok, I guess))
-                    std::memcpy(&server_addr_modded, server_addr_sock_ptr, sizeof(sockaddr_in6));
-                    server_addr_modded.sin6_port = htons(LAN_DISCOVERY_PORT);
-
-                    std::vector<char> broadcast_buf;
-                    broadcast_buf.push_back(request_friends);
-                    broadcast_buf.push_back(static_cast<char>(password_.length()));
-                    broadcast_buf.insert(broadcast_buf.end(), password_.begin(), password_.end());
-
-                    lan_discovery_call_listener_socket_->on<uvw::error_event>([](const uvw::error_event &event, uvw::udp_handle &handle) {
-                        if (event.code() < 0) {
-                            LOG_ERROR(SERVICE_BLUETOOTH, "Fail to send broadcast message to find nearby playable devices! Libuv error code={}", event.code());
-                        }
-                    });
-
-                    lan_discovery_call_listener_socket_->on<uvw::send_event>([](const uvw::send_event &event, uvw::udp_handle &handle) {
-                        LOG_TRACE(SERVICE_BLUETOOTH, "Sent lan discovery call!");
-                    });
-
-                    lan_discovery_call_listener_socket_->broadcast(true);
-                    lan_discovery_call_listener_socket_->send(*reinterpret_cast<sockaddr*>(&server_addr_modded), copy_control_packet(broadcast_buf.data(), broadcast_buf.size()), static_cast<std::uint32_t>(broadcast_buf.size()));
+                if (uses_mdns_discovery()) {
+                    if (mdns_) {
+                        if (retried_lan_discovery_times_ == 0) mdns_->refresh();
+                        sync_lan_friends();
+                    }
                 } else if ((discovery_mode_ == DISCOVERY_MODE_PROXY_SERVER) && matching_server_socket_) {
                     matching_server_socket_->write(copy_control_packet(&request_friends, 1), 1);
                 }

@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <j2me/common.h>
 #include <cstdint>
 #include <functional>
@@ -91,7 +92,7 @@ namespace eka2l1::j2me {
      * @param jad_path_out Filled with the staged MIDP2 JAD path on success.
      */
     bool stage_midlet_for_launch(system *sys, const std::uint32_t app_id, std::u16string &jad_path_out);
-    install_error install(system *sys, const std::string &path, app_entry &entry_info,
+    install_error install(system *sys, const host_path &path, app_entry &entry_info,
         std::function<void(kernel::process*)> install_exit_cb = nullptr, std::string_view keypad = {});
     bool uninstall(system *sys, const std::uint32_t app_id);
     bool uninstall_guest(system *sys, const std::uint32_t app_id,

@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
 #include <common/log.h>
 #include <loader/rsc.h>
 #include <services/ui/view/view.h>
@@ -53,14 +54,14 @@ namespace eka2l1 {
         priority_ = 0;
 
         // Try to read resource file contains priority
-        std::u16string priority_filename = u"resource\\apps\\PrioritySet.rsc";
+        const guest_path priority_filename(u"resource\\apps\\PrioritySet.rsc");
         symfile f = nullptr;
 
         // Stepping one below drive_a would leave the enum's value range.
         for (int drive_index = drive_z; drive_index >= drive_a; drive_index--) {
             const drive_number drive = static_cast<drive_number>(drive_index);
             if (io->get_drive_entry(drive)) {
-                f = io->open_file(std::u16string(drive_to_char16(drive), 1) + priority_filename, READ_MODE | BIN_MODE);
+                f = io->open_file(eka2l1::guest_path{guest_path(std::u16string{drive_to_char16(drive), u':', u'\\'}) / priority_filename}, READ_MODE | BIN_MODE);
 
                 if (f) {
                     break;
@@ -127,7 +128,8 @@ namespace eka2l1 {
         }
     }
 
-    void view_server::make_view_active(view_session *activator, const ui::view::view_id &active_id, const ui::view::custom_message &msg) {
+    void view_server::make_view_active(view_session *activator, const ui::view::view_id &active_id, const ui::view::custom_message &msg,
+        const epoc::security_info &source, const epoc::notify_info &on_activated) {
         view_session *deactivate_ss = active_view_session();
         std::optional<ui::view::view_id> old_id = std::nullopt;
 
@@ -144,7 +146,7 @@ namespace eka2l1 {
 
         activator->set_active_view(active_id);
         activator->queue_event({ ui::view::view_event::event_active_view, active_id, old_id.value(),
-            msg.id_, static_cast<std::int32_t>(msg.data_.size()) }, msg);
+            msg.id_, static_cast<std::int32_t>(msg.data_.size()) }, msg, on_activated, source);
 
         call_activation_listener(active_id);
     }
@@ -194,6 +196,7 @@ namespace eka2l1 {
     void view_session::on_view_activation(const ui::view::view_id &id) {
         if (outstanding_activation_notify_) {
             if ((next_activation_id_ == ui::view::EMPTY_VIEW_ID) || (next_activation_id_ == id)) {
+                outstanding_activation_notify_ = false;
                 queue_.queue_event({ ui::view::view_event::event_active_notification, id, ui::view::EMPTY_VIEW_ID, 0, 0 });
             }
         }
@@ -202,9 +205,28 @@ namespace eka2l1 {
     void view_session::on_view_deactivation(const ui::view::view_id &id) {
         if (outstanding_deactivation_notify_) {
             if ((next_deactivation_id_ == ui::view::EMPTY_VIEW_ID) || (next_deactivation_id_ == id)) {
+                outstanding_deactivation_notify_ = false;
                 queue_.queue_event({ ui::view::view_event::event_deactive_notification, id, ui::view::EMPTY_VIEW_ID, 0, 0 });
             }
         }
+    }
+
+    void view_session::notify_next_transition(service::ipc_context *ctx, const bool activation) {
+        const auto id = ctx->get_argument_data_from_descriptor<ui::view::view_id>(0);
+        if (!id) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        if (activation) {
+            outstanding_activation_notify_ = true;
+            next_activation_id_ = *id;
+        } else {
+            outstanding_deactivation_notify_ = true;
+            next_deactivation_id_ = *id;
+        }
+
+        ctx->complete(epoc::error_none);
     }
 
     void view_session::add_view(service::ipc_context *ctx) {
@@ -335,8 +357,16 @@ namespace eka2l1 {
             return;
         }
 
-        server<view_server>()->make_view_active(this, id.value(), { custom_message_buf_cop, custom_message_id.value() });
-        ctx->complete(epoc::error_none);
+        // EVwsActivateView finishes once the view has taken the activation, which the client
+        // waits for; EVwsCreateActivateViewEvent only queues it.
+        const auto source = ctx->msg->own_thr->owning_process()->get_sec_info();
+        if (should_complete) {
+            server<view_server>()->make_view_active(this, id.value(), { custom_message_buf_cop, custom_message_id.value() }, source,
+                epoc::notify_info(ctx->msg->request_sts, ctx->msg->own_thr));
+        } else {
+            server<view_server>()->make_view_active(this, id.value(), { custom_message_buf_cop, custom_message_id.value() }, source);
+            ctx->complete(epoc::error_none);
+        }
     }
 
     void view_session::deactive_view(service::ipc_context *ctx, const bool should_complete) {
@@ -357,6 +387,48 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    void view_session::get_current_active_view_id(service::ipc_context *ctx) {
+        view_session *active_session = server<view_server>()->active_view_session();
+        ui::view::view_id id = ui::view::EMPTY_VIEW_ID;
+
+        if (active_session) {
+            id = active_session->active_view().value();
+        }
+
+        ctx->write_data_to_descriptor_argument<ui::view::view_id>(0, id);
+        ctx->complete(epoc::error_none);
+    }
+
+    void view_session::check_source_of_view_switch(service::ipc_context *ctx) {
+        const auto source = queue_.current_switch_source();
+        if (!source) {
+            ctx->complete(epoc::error_unknown);
+            return;
+        }
+
+        auto policy = ctx->get_argument_data_from_descriptor<epoc::security_policy>(0);
+        if (!policy || ctx->get_argument_data_size(0) != sizeof(epoc::security_policy)) {
+            ctx->complete(epoc::error_bad_descriptor);
+            return;
+        }
+        const auto valid_cap = [](const std::uint8_t cap) {
+            return cap == static_cast<std::uint8_t>(epoc::cap_none) || cap < epoc::cap_limit;
+        };
+        if (policy->type > epoc::security_policy::v3
+            || (policy->type >= epoc::security_policy::c3
+                && !std::all_of(policy->caps, policy->caps + 3, valid_cap))
+            || (policy->type == epoc::security_policy::c7
+                && !std::all_of(policy->extra_caps, policy->extra_caps + 4, valid_cap))) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        epoc::security_info missing;
+        const std::int32_t passed = policy->check(*source, missing);
+        const bool written = ctx->write_data_to_descriptor_argument<std::int32_t>(2, passed);
+        ctx->complete(written ? epoc::error_none : epoc::error_bad_descriptor);
+    }
+
     void view_session::get_custom_message(service::ipc_context *ctx) {
         const ui::view::custom_message custom = queue_.current_custom_message();
         ctx->write_data_to_descriptor_argument(0, custom.data_.data(), static_cast<std::uint32_t>(custom.data_.size()), nullptr, true);
@@ -371,7 +443,15 @@ namespace eka2l1 {
             ctx->msg->function += 1;
         }
 
-        if (!kern->is_eka1() && (kern->get_epoc_version() <= epocver::epoc95)) {
+        if (kern->get_epoc_version() == epocver::epoc93fp2) {
+            // FP2 places background color before Priority; FP1 uses privileged opcode 112.
+            if (ctx->msg->function == view_opcode_priority) {
+                ctx->msg->function = view_opcode_set_background_color;
+            } else if (ctx->msg->function == view_opcode_set_background_color) {
+                ctx->msg->function = view_opcode_priority;
+            }
+        } else if (!kern->is_eka1() && ((kern->get_epoc_version() < epocver::epoc93fp1)
+            || (kern->get_epoc_version() == epocver::epoc95))) {
             // These are swapped orders
             if (ctx->msg->function == view_opcode_deactivate_active_view_if_owner_match) {
                 ctx->msg->function = view_opcode_set_background_color;
@@ -436,8 +516,21 @@ namespace eka2l1 {
             deactive_view(ctx, false);
             break;
 
+        case view_opcode_notify_next_activation:
+            notify_next_transition(ctx, true);
+            break;
+
+        case view_opcode_notify_next_deactivation:
+            notify_next_transition(ctx, false);
+            break;
+
         case view_opcode_request_custom_message:
             get_custom_message(ctx);
+            break;
+
+        case view_opcode_set_protected:
+            // External view activation is unsupported; views are already isolated by session.
+            ctx->complete(epoc::error_none);
             break;
 
         case view_opcode_set_background_color: {
@@ -456,9 +549,17 @@ namespace eka2l1 {
             ctx->complete(epoc::error_none);
             break;
         }
+                break;
+        case view_opcode_current_active_view_id:
+            get_current_active_view_id(ctx);
+            break;
 
         case view_opcode_request_view_event_cancel:
             request_view_event_cancel(ctx);
+            break;
+
+        case view_opcode_check_source_of_view_switch:
+            check_source_of_view_switch(ctx);
             break;
 
         default:

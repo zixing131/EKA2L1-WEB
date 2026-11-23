@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace eka2l1::drivers {
@@ -40,6 +41,7 @@ namespace eka2l1::epoc {
     enum gdi_store_command_opcode : std::uint32_t {
         gdi_store_command_invalid,
         gdi_store_command_draw_rect,
+        gdi_store_command_xor_rect,
         gdi_store_command_draw_line,
         gdi_store_command_draw_polygon,
         gdi_store_command_draw_bitmap,
@@ -47,7 +49,9 @@ namespace eka2l1::epoc {
         gdi_store_command_set_clip_rect_single,
         gdi_store_command_set_clip_rect_multiple,
         gdi_store_command_disable_clip,
-        gdi_store_command_update_texture
+        gdi_store_command_update_texture,
+        gdi_store_command_draw_raw_texture,
+        gdi_store_command_blend_rect
     };
 
     // Whether replaying this opcode puts any pixel on the target. The clipping
@@ -56,11 +60,14 @@ namespace eka2l1::epoc {
     static inline bool gdi_store_command_draws_pixels(const gdi_store_command_opcode opcode) {
         switch (opcode) {
         case gdi_store_command_draw_rect:
+        case gdi_store_command_xor_rect:
+        case gdi_store_command_blend_rect:
         case gdi_store_command_draw_line:
         case gdi_store_command_draw_polygon:
         case gdi_store_command_draw_bitmap:
         case gdi_store_command_draw_text:
         case gdi_store_command_update_texture:
+        case gdi_store_command_draw_raw_texture:
             return true;
 
         default:
@@ -106,7 +113,8 @@ namespace eka2l1::epoc {
         GDI_STORE_COMMAND_INVERT_MASK = 1 << 0,
         GDI_STORE_COMMAND_MAIN_RAW = 1 << 1,
         GDI_STORE_COMMAND_MASK_RAW = 1 << 2,
-        GDI_STORE_COMMAND_BLIT = 1 << 3
+        GDI_STORE_COMMAND_BLIT = 1 << 3,
+        GDI_STORE_COMMAND_BRUSH_PATTERN = 1 << 4
     };
 
     struct gdi_store_command_draw_bitmap_data {
@@ -150,6 +158,8 @@ namespace eka2l1::epoc {
         gdi_store_command_opcode opcode_ = gdi_store_command_invalid;
         alignas(std::max_align_t) std::uint8_t data_[MAX_COMMAND_STORE_DATA_SIZE];
         std::shared_ptr<std::vector<std::uint8_t>> dynamic_data_;
+        // Own resources referenced by deferred drawing commands.
+        std::vector<std::shared_ptr<void>> resources_;
 
         std::uint8_t *allocate_dynamic_data(const std::size_t size) {
             if (!dynamic_data_) {
@@ -211,8 +221,13 @@ namespace eka2l1::epoc {
         gdi_store_command_segment *add_new_segment(const eka2l1::rect &draw_rect, const gdi_store_command_segment_type type_);
         void promote_last_segment();
         
-        // Returns true if this must cause an invalidation
-        bool clean_old_nonredraw_segments();
+        // Replaces the oldest segments with one that reproduces their pixels, or returns null.
+        using segment_flattener = std::function<std::unique_ptr<gdi_store_command_segment>(
+            const std::unique_ptr<gdi_store_command_segment> *segments, std::size_t count)>;
+
+        // Returns true if this must cause an invalidation. With a flattener, expired segments and
+        // everything older are merged instead of dropped.
+        bool clean_old_nonredraw_segments(const segment_flattener &flatten = nullptr);
         void redraw_done();
 
         gdi_store_command_segment *get_current_segment() const {
@@ -254,7 +269,7 @@ namespace eka2l1::epoc {
         void build_segment(const gdi_store_command_segment &segment);
         void build_texture_updates(const gdi_store_command_segment &segment);
         void build_single_command(const gdi_store_command &command);
-        void build_command_draw_rect(const gdi_store_command_draw_rect_data &cmd);
+        void build_command_draw_rect(const gdi_store_command_draw_rect_data &cmd, bool exclusive_or = false, bool blend = false);
         void build_command_draw_line(const gdi_store_command_draw_line_data &cmd);
         void build_command_draw_polygon(const gdi_store_command_draw_polygon_data &cmd);
         void build_command_draw_text(const gdi_store_command_draw_text_data &cmd);
@@ -262,6 +277,7 @@ namespace eka2l1::epoc {
         void build_command_draw_bitmap(const gdi_store_command_draw_bitmap_data &cmd);
         void build_command_set_clip_rect_single(const gdi_store_command_set_clip_rect_single_data &cmd);
         void build_command_set_clip_rect_multiple(const gdi_store_command_set_clip_rect_multiple_data &cmd);
+        void clip_to_region(const common::region &clipped);
         void build_command_disable_clip();
         void build_command_update_texture(const gdi_store_command_update_texture_data &cmd);
     };

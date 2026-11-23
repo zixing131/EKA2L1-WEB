@@ -18,6 +18,8 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
+#include <algorithm>
 #include <services/window/io.h>
 #include <services/window/op.h>
 #include <services/window/window.h>
@@ -303,7 +305,8 @@ namespace eka2l1::epoc {
             return;
         }
 
-        window_client_obj_ptr device = std::make_unique<epoc::screen_device>(this, target_screen);
+        const std::uint32_t client_pointer = (cmd.header.cmd_len >= sizeof(ws_cmd_screen_device_header)) ? header->screen_dvc_ptr : 0;
+        window_client_obj_ptr device = std::make_unique<epoc::screen_device>(this, target_screen, client_pointer);
 
         if (!primary_device) {
             primary_device = reinterpret_cast<epoc::screen_device *>(device.get());
@@ -362,12 +365,16 @@ namespace eka2l1::epoc {
         window_client_obj_ptr group = std::make_unique<epoc::window_group>(this, target_screen, parent_group, header->client_handle);
         epoc::window_group *group_casted = reinterpret_cast<epoc::window_group *>(group.get());
 
-        // If no window group is being focused on the screen, we force the screen to receive this window as focus
-        // Else rely on the focus flag.
-        if (!target_screen->focus || (header->focus)) {
-            group_casted->set_receive_focus(true);
-            target_screen->update_focus(&get_ws(), nullptr);
+        if (!device_ptr) {
+            device_ptr = primary_device;
         }
+
+        if (device_ptr) {
+            group_casted->client_device_pointer = device_ptr->client_pointer();
+        }
+
+        group_casted->set_receive_focus(header->focus != 0);
+        target_screen->update_focus(&get_ws(), nullptr);
 
         // Give it a nice name.
         // We can give it name with id, but too much hassle
@@ -570,7 +577,7 @@ namespace eka2l1::epoc {
 
     void window_server_client::send_event_to_all_window_groups(service::ipc_context &ctx, ws_cmd &cmd) {
         ws_cmd_send_event_to_window_group evt = *reinterpret_cast<ws_cmd_send_event_to_window_group *>(cmd.data_ptr);
-        get_ws().send_event_to_window_groups(evt.evt);
+        get_ws().send_event_to_window_groups(evt.evt, cmd.header.op == ws_cl_op_send_event_to_one_window_group_per_cli);
 
         ctx.complete(epoc::error_none);
     }
@@ -655,6 +662,9 @@ namespace eka2l1::epoc {
         const std::u16string win_group_name(win_group_name_ptr, find_info->length);
         std::wstring win_group_name_w = common::ucs2_to_wstr(win_group_name);
         for (; group; group = reinterpret_cast<epoc::window_group *>(group->sibling)) {
+            if (!group->client) {
+                continue;
+            }
             // Prevent null \0 character from being trimmed by substr
             std::wstring name_copy_raw_w;
   
@@ -713,7 +723,7 @@ namespace eka2l1::epoc {
         }
 
         for (; group; group = reinterpret_cast<epoc::window_group *>(group->sibling)) {
-            if (group->client->get_client()->unique_id() == thr_id) {
+            if (group->client && group->client->get_client()->unique_id() == thr_id) {
                 ctx.complete(group->id);
                 return;
             }
@@ -772,6 +782,19 @@ namespace eka2l1::epoc {
         ctx.complete(win->priority);
     }
 
+    void window_server_client::get_window_group_handle(service::ipc_context &ctx, ws_cmd &cmd) {
+        const std::uint32_t group_id = *reinterpret_cast<std::uint32_t *>(cmd.data_ptr);
+        epoc::window_group *win = get_ws().get_group_from_id(group_id);
+
+        if (!win || (win->type != window_kind::group)) {
+            LOG_TRACE(SERVICE_WINDOW, "Can't find group with id {}", group_id);
+            ctx.complete(epoc::error_not_found);
+            return;
+        }
+
+        ctx.complete(static_cast<int>(win->get_client_handle()));
+    }
+
     void window_server_client::get_redraw(service::ipc_context &ctx, ws_cmd &cmd) {
         auto evt = redraws.get_evt_opt();
 
@@ -800,7 +823,8 @@ namespace eka2l1::epoc {
     void window_server_client::get_focus_window_group(service::ipc_context &ctx, ws_cmd &cmd) {
         // TODO: Epoc < 9
         if (cmd.header.cmd_len == 0) {
-            ctx.complete(get_ws().get_current_focus_screen()->focus->id);
+            auto *focus = get_ws().get_current_focus_screen()->focus;
+            ctx.complete(focus ? focus->id : 0);
             return;
         }
 
@@ -813,7 +837,33 @@ namespace eka2l1::epoc {
             return;
         }
 
-        ctx.complete(scr->focus->id);
+        ctx.complete(scr->focus ? scr->focus->id : 0);
+    }
+
+    void window_server_client::get_default_owning_window(service::ipc_context &ctx, ws_cmd &cmd) {
+        epoc::screen *scr = primary_device ? primary_device->scr : get_ws().get_current_focus_screen();
+
+        if (cmd.header.cmd_len >= sizeof(int)) {
+            const int screen_num = *reinterpret_cast<int *>(cmd.data_ptr);
+
+            // A dummy screen number asks for the screen this client is bound to.
+            if (screen_num >= 0) {
+                scr = get_ws().get_screen(screen_num);
+
+                if (!scr) {
+                    LOG_ERROR(SERVICE_WINDOW, "Invalid screen number {}", screen_num);
+                    ctx.complete(epoc::error_argument);
+                    return;
+                }
+            }
+        }
+
+        if (!scr) {
+            ctx.complete(0);
+            return;
+        }
+
+        ctx.complete(scr->default_owning_group ? scr->default_owning_group->id : 0);
     }
 
     void window_server_client::get_window_group_name_from_id(service::ipc_context &ctx, ws_cmd &cmd) {
@@ -841,7 +891,7 @@ namespace eka2l1::epoc {
 
     struct window_clear_store_walker : public epoc::window_tree_walker {
         bool do_it(epoc::window *win) {
-            if (win->type == window_kind::group) {
+            if (win->type == window_kind::group && win->client) {
                 win->client->trigger_redraw();
             }
 
@@ -997,6 +1047,12 @@ namespace eka2l1::epoc {
     }
 
     void window_server_client::add_raw_event(service::ipc_context &ctx, ws_cmd &cmd) {
+        static epoc::security_policy policy({ epoc::cap_sw_event });
+        if (!ctx.satisfy(policy)) {
+            ctx.complete(epoc::error_permission_denied);
+            return;
+        }
+
         epoc::raw_event evt;
 
         if (cmd.header.cmd_len > sizeof(epoc::raw_event_eka1)) {
@@ -1008,7 +1064,22 @@ namespace eka2l1::epoc {
             evt.from_eka1_event(evt_eka1);
         }
 
-        LOG_TRACE(SERVICE_WINDOW, "Add raw event stubbed, event type {}", evt.type_);
+        switch (evt.type_) {
+        case epoc::raw_event_type_key_down:
+        case epoc::raw_event_type_key_up: {
+            epoc::event key_evt{};
+            key_evt.type = (evt.type_ == epoc::raw_event_type_key_down) ? epoc::event_code::key_down : epoc::event_code::key_up;
+            key_evt.time = get_ws().get_kernel_system()->universal_time();
+            key_evt.key_evt_.scancode = evt.data_.key_data_.scancode_;
+            get_ws().key_shipper.ship(key_evt);
+            break;
+        }
+
+        default:
+            LOG_TRACE(SERVICE_WINDOW, "Add raw event stubbed, event type {}", evt.type_);
+            break;
+        }
+
         ctx.complete(epoc::error_none);
     }
 
@@ -1101,20 +1172,12 @@ namespace eka2l1::epoc {
         ctx.complete(epoc::error_none);
     }
 
-    // This handle both sync and async
-    void window_server_client::execute_command(service::ipc_context &ctx, ws_cmd cmd) {
-        // LOG_TRACE(SERVICE_WINDOW, "Window client op: {}", (int)cmd.header.op);
-        epoc::version cli_ver = client_version();
+    window_server_protocol window_server_client::protocol() {
+        return { get_ws().get_kernel_system()->get_epoc_version(), client_version() };
+    }
 
-        // Patching out user opcode.
-        if (cli_ver.major == 1 && cli_ver.minor == 0) {
-            if (cli_ver.build <= WS_OLDARCH_VER) {
-                // Skip start and end custom text cursor, they does not exist
-                if (cmd.header.op >= ws_cl_op_start_custom_text_cursor) {
-                    cmd.header.op += 2;
-                }
-            }
-        }
+    void window_server_client::execute_command(service::ipc_context &ctx, ws_cmd cmd) {
+        cmd.header.op = protocol().session_opcode(cmd.header.op);
 
         switch (cmd.header.op) {
         case ws_cl_op_set_faded: {
@@ -1166,12 +1229,17 @@ namespace eka2l1::epoc {
             get_window_group_ordinal_priority(ctx, cmd);
             break;
 
+        case ws_cl_op_get_window_group_handle:
+            get_window_group_handle(ctx, cmd);
+            break;
+
         case ws_cl_op_send_event_to_window_group: {
             send_event_to_window_group(ctx, cmd);
             break;
         }
 
-        case ws_cl_op_send_event_to_all_window_groups: {
+        case ws_cl_op_send_event_to_all_window_groups:
+        case ws_cl_op_send_event_to_one_window_group_per_cli: {
             send_event_to_all_window_groups(ctx, cmd);
             break;
         }
@@ -1278,6 +1346,11 @@ namespace eka2l1::epoc {
             break;
         }
 
+        case ws_cl_op_get_default_owning_window: {
+            get_default_owning_window(ctx, cmd);
+            break;
+        }
+
         case ws_cl_op_find_window_group_identifier: {
             find_window_group_id(ctx, cmd);
             break;
@@ -1372,9 +1445,10 @@ namespace eka2l1::epoc {
             break;
 
         case ws_cl_op_get_modifier_state:
+            ctx.complete(get_ws().key_shipper.translator_.modifiers());
+            break;
+
         case ws_cl_op_set_modifier_state:
-            // No modifiers (Ctrl, Alt, ...) are considered yet.
-            // Apps known to use this: Frogger (Lonely Cat Games)
             ctx.complete(epoc::error_none);
             break;
 
@@ -1398,8 +1472,14 @@ namespace eka2l1::epoc {
             ctx.complete(epoc::error_not_supported);
             break;
 
+        case ws_cl_op_set_double_click:
+        case ws_cl_op_set_default_fading_params:
+            ctx.complete(epoc::error_none);
+            break;
+
         default:
             LOG_INFO(SERVICE_WINDOW, "Unimplemented ClOp: 0x{:x}", cmd.header.op);
+            ctx.complete(epoc::error_not_supported);
             break;
         }
     }
@@ -1435,6 +1515,54 @@ namespace eka2l1::epoc {
 
                 queue_event(evt);
             }
+        }
+    }
+
+    void window_server_client::remove_modifier_changed_events(epoc::window *win) {
+        const std::lock_guard guard(ws_client_lock);
+        epoc::event_mod_notifier_user notifier{};
+        notifier.user = win;
+        mod_notifies.erase(notifier);
+    }
+
+    void window_server_client::send_modifier_changed_events(std::uint32_t changed, std::uint32_t modifiers) {
+        for (const auto &request : mod_notifies) {
+            const std::uint32_t matching = changed & request.notifier.what;
+            if (!matching) {
+                continue;
+            }
+            epoc::window *group = request.user;
+            while (group && group->type != epoc::window_kind::group) {
+                group = group->parent;
+            }
+            if (request.notifier.when == epoc::event_control::only_with_keyboard_focus
+                && group != get_ws().get_focus()) {
+                continue;
+            }
+            if (request.notifier.when == epoc::event_control::only_when_visible) {
+                epoc::window *win = request.user;
+                if (win->type == epoc::window_kind::group) {
+                    win = win->child;
+                }
+                bool visible = false;
+                for (; win; win = win->sibling) {
+                    if ((win->type == epoc::window_kind::client || win->type == epoc::window_kind::top_client)
+                        && reinterpret_cast<epoc::canvas_base *>(win)->can_be_physically_seen()) {
+                        visible = true;
+                        break;
+                    }
+                    if (request.user->type != epoc::window_kind::group) {
+                        break;
+                    }
+                }
+                if (!visible) {
+                    continue;
+                }
+            }
+            epoc::event evt(request.user->client_handle, epoc::event_code::modifier_change);
+            evt.time = get_ws().get_kernel_system()->universal_time();
+            evt.modifier_evt_ = {matching, modifiers};
+            queue_event(evt);
         }
     }
 }
@@ -1479,7 +1607,7 @@ namespace eka2l1 {
             return;
         }
 
-        std::u16string wsini_path;
+        guest_path wsini_path;
         wsini_path += static_cast<char16_t>(static_cast<char>(rom_drive) + 'A');
         wsini_path += u":\\system\\data\\wsini.ini";
 
@@ -1491,7 +1619,7 @@ namespace eka2l1 {
         }
 
         std::string wsini_path_host_utf8 = common::ucs2_to_utf8(*wsini_path_host);
-        int err = ws_config.load(wsini_path_host_utf8.c_str());
+        int err = ws_config.load(host_path(wsini_path_host_utf8));
 
         if (err != 0) {
             LOG_ERROR(SERVICE_WINDOW, "Loading wsini file broke with code {}", err);
@@ -1506,54 +1634,35 @@ namespace eka2l1 {
 
         common::ini_node_ptr window_mode_node = ws_config.find("WINDOWMODE");
         epoc::display_mode scr_mode_global = epoc::display_mode::color16ma;
-        epoc::display_mode dsa_mode_global = epoc::display_mode::color16ma;
+        bool use_in_ini = true;
 
-        if (window_mode_node) {
+        // The ROM header has the real display depth on EKA1 phones. Read it even without a WINDOWMODE:
+        // their wsini.ini often lives inside the ROM image only, and is not found in an extracted Z drive
+        // (an N-Gage then ran its 4096-colour games as 32-bit, and direct screen access read them as 16-bit).
+        if (kern->get_epoc_version() <= epocver::epoc6) {
+            loader::rom *rom_info = kern->get_rom_info();
+            const epoc::display_mode conv_res = rom_info
+                ? epoc::get_display_mode_from_bpp(rom_info->header.eka1_diff1.bits_per_pixel, true)
+                : epoc::display_mode::color_last;
+
+            if (conv_res != epoc::display_mode::color_last) {
+                scr_mode_global = conv_res;
+                use_in_ini = false;
+            }
+        }
+
+        if (window_mode_node && use_in_ini) {
             common::ini_pair *window_mode_pair = window_mode_node->get_as<common::ini_pair>();
 
             std::vector<std::string> modes;
             modes.resize(1);
 
             window_mode_pair->get(modes);
-
-            device_manager *mngr = sys->get_device_manager();
-            device *current_dvc = mngr->get_current();
-
-            bool use_in_ini = true;
-
-            if (kern->get_epoc_version() <= epocver::epoc6) {
-                loader::rom *rom_info = kern->get_rom_info();
-                const epoc::display_mode conv_res = epoc::get_display_mode_from_bpp(rom_info->header.eka1_diff1.bits_per_pixel, true);
-
-                if (conv_res != epoc::display_mode::color_last) {
-                    scr_mode_global = conv_res;
-                    use_in_ini = false;
-                }
-            }
-
-            if (use_in_ini) {
-                scr_mode_global = epoc::string_to_display_mode(modes[0]);
-            }
-
-            // NGA render stages report every 32bpp target as DisplayMode16M (EColor16MA).
-            if ((kern->get_epoc_version() >= epocver::epoc10)
-                && (epoc::get_bpp_from_display_mode(scr_mode_global) == 32)) {
-                scr_mode_global = epoc::display_mode::color16ma;
-            }
-
-            dsa_mode_global = scr_mode_global;
-
-            // WINDOWMODE is the mode WSERV composes in; it is not proof of what a direct
-            // screen access client writes into the panel buffer. Most EKA1 guests follow
-            // the reported mode, but some hardcode 16-bit pixels, so start narrow and let
-            // screen::promote_dsa_depth_if_deep_pixels_written() widen once the guest
-            // shows it writes deeper ones.
-            if (kern->is_eka1() && (epoc::get_bpp_from_display_mode(dsa_mode_global) > 16)) {
-                dsa_mode_global = epoc::display_mode::color64k;
-            }
+            scr_mode_global = epoc::string_to_display_mode(modes[0]);
         }
 
-        bool is_auto_clear = false;
+        // WSERV's default when the ini leaves it out.
+        bool is_auto_clear = true;
         bool flicker_free = kern->is_eka1() ? false : true;
         bool blit_offscreen = kern->is_eka1() ? false : true;
 
@@ -1584,7 +1693,12 @@ namespace eka2l1 {
         static const eka2l1::vec2 ASSUMED_SCREEN_SIZE = { 176, 208 };
         static const eka2l1::vec2 ASSUMED_SCREEN_SIZE_S80 = { 640, 200 };
 
-        bool is_s80_device = sys->is_s80_device_active();
+        eka2l1::vec2 default_screen_size = sys->is_s80_device_active() ? ASSUMED_SCREEN_SIZE_S80 : ASSUMED_SCREEN_SIZE;
+        // HAL display attributes are driver-derived; its InitialValue table is not panel geometry.
+        const auto *device = sys->get_device_manager()->get_current();
+        if (device && device->machine_uid == 0x101FBE09) {
+            default_screen_size = { 640, 320 }; // Nokia 7710
+        }
 
         do {
             std::string screen_key = "SCREEN";
@@ -1606,14 +1720,23 @@ namespace eka2l1 {
             epoc::config::screen scr;
 
             scr.screen_number = total_screen - 1;
-            scr.disp_mode = scr_mode_global;
-            scr.dsa_disp_mode = dsa_mode_global;
             scr.auto_clear = is_auto_clear;
             scr.flicker_free = flicker_free;
             scr.blt_offscreen = blit_offscreen;
 
             int total_mode = 0;
             bool one_mode_only = false;
+
+            // NUMSCREENMODES lets the table skip indices; WSERV keeps those as empty slots.
+            std::uint32_t sparse_mode_count = 0;
+            common::ini_node_ptr num_modes_node = screen_node->get_as<common::ini_section>()->find("NUMSCREENMODES");
+            if (num_modes_node && common::ini_pair::is_my_type(num_modes_node)) {
+                num_modes_node->get_as<common::ini_pair>()->get(&sparse_mode_count, 1, 0);
+            }
+
+            if (sparse_mode_count > 256) {
+                sparse_mode_count = 0;
+            }
 
             do {
                 std::string current_mode_str = std::to_string(total_mode + 1);
@@ -1629,9 +1752,16 @@ namespace eka2l1 {
 
                 total_mode++;
 
-                epoc::config::screen_mode scr_mode;
+                epoc::config::screen_mode scr_mode{};
                 scr_mode.screen_number = total_screen - 1;
                 scr_mode.mode_number = total_mode;
+
+                if ((!mode_width || !mode_height) && (static_cast<std::uint32_t>(total_mode) <= sparse_mode_count)) {
+                    scr_mode.defined = false;
+                    scr.modes.push_back(scr_mode);
+
+                    continue;
+                }
 
                 if (mode_width) {
                     mode_width->get_as<common::ini_pair>()->get(reinterpret_cast<std::uint32_t *>(&scr_mode.size.x),
@@ -1640,10 +1770,10 @@ namespace eka2l1 {
                     if (total_mode > 1)
                         break;
 
-                    scr_mode.size.x = is_s80_device ? ASSUMED_SCREEN_SIZE_S80.x : ASSUMED_SCREEN_SIZE.x;
+                    scr_mode.size.x = default_screen_size.x;
                     one_mode_only = true;
                     LOG_WARN(SERVICE_WINDOW, "wsini has no SCR_WIDTH1 — falling back to assumed {}x{} (styles will be empty; Avkon AVKON 61 likely). Check Z:\\system\\data\\wsini.ini / Wsini.ini is readable.",
-                        scr_mode.size.x, is_s80_device ? ASSUMED_SCREEN_SIZE_S80.y : ASSUMED_SCREEN_SIZE.y);
+                        scr_mode.size.x, sys->is_s80_device_active() ? ASSUMED_SCREEN_SIZE_S80.y : ASSUMED_SCREEN_SIZE.y);
                 }
 
                 if (mode_height) {
@@ -1653,11 +1783,37 @@ namespace eka2l1 {
                     if (total_mode > 1)
                         break;
 
-                    scr_mode.size.y = is_s80_device ? ASSUMED_SCREEN_SIZE_S80.y : ASSUMED_SCREEN_SIZE.y;
+                    scr_mode.size.y = default_screen_size.y;
                     one_mode_only = true;
                 }
 
+                // WSERV takes "-1 -1" (dynamic) and "0 0" (HAL default) as the screen device size.
+                if (((scr_mode.size.x == -1) && (scr_mode.size.y == -1)) || ((scr_mode.size.x == 0) && (scr_mode.size.y == 0))) {
+                    scr_mode.size = default_screen_size;
+                }
+
                 current_mode_str = std::to_string(total_mode);
+
+                scr_mode.disp_mode = scr_mode_global;
+                const std::string display_mode_key = "SCR_WINDOWMODE" + current_mode_str;
+                auto display_mode_node = screen_node->get_as<common::ini_section>()->find(display_mode_key.c_str());
+                if (display_mode_node) {
+                    std::vector<std::string> mode_names(1);
+                    display_mode_node->get_as<common::ini_pair>()->get(mode_names);
+                    scr_mode.disp_mode = epoc::string_to_display_mode(mode_names[0]);
+                }
+
+                // NGA render stages expose 32-bit targets as EColor16MA.
+                if ((kern->get_epoc_version() >= epocver::epoc95)
+                    && (epoc::get_bpp_from_display_mode(scr_mode.disp_mode) == 32)) {
+                    scr_mode.disp_mode = epoc::display_mode::color16ma;
+                }
+
+                scr_mode.dsa_disp_mode = scr_mode.disp_mode;
+                // Start narrow for legacy DSA clients; actual writes can promote the format.
+                if (kern->is_eka1() && (epoc::get_bpp_from_display_mode(scr_mode.disp_mode) > 16)) {
+                    scr_mode.dsa_disp_mode = epoc::display_mode::color64k;
+                }
 
                 std::string screen_mode_rot_key = "SCR_ROTATION";
                 screen_mode_rot_key += current_mode_str;
@@ -1725,6 +1881,30 @@ namespace eka2l1 {
                 scr.modes.push_back(scr_mode);
             } while (!one_mode_only);
 
+            auto first_defined = std::find_if(scr.modes.begin(), scr.modes.end(),
+                [](const epoc::config::screen_mode &mode) { return mode.defined; });
+
+            if (first_defined == scr.modes.end()) {
+                first_defined = scr.modes.begin();
+
+                first_defined->defined = true;
+                first_defined->size = default_screen_size;
+                first_defined->rotation = 0;
+                first_defined->disp_mode = scr_mode_global;
+                first_defined->dsa_disp_mode = scr_mode_global;
+            }
+
+            const epoc::config::screen_mode mirrored = *first_defined;
+            for (epoc::config::screen_mode &mode : scr.modes) {
+                if (!mode.defined) {
+                    const int mode_number = mode.mode_number;
+
+                    mode = mirrored;
+                    mode.mode_number = mode_number;
+                    mode.defined = false;
+                }
+            }
+
             int total_hardware_state = 0;
 
             do {
@@ -1764,8 +1944,8 @@ namespace eka2l1 {
                 epoc::config::hardware_state only_state;
 
                 only_state.state_number = 0;
-                only_state.mode_normal = scr.modes[0].mode_number;
-                only_state.mode_alternative = scr.modes[0].mode_number;
+                only_state.mode_normal = mirrored.mode_number;
+                only_state.mode_alternative = mirrored.mode_number;
 
                 scr.hardware_states.push_back(only_state);
             }
@@ -1839,6 +2019,11 @@ namespace eka2l1 {
         if (g_j9_present_ws == this) {
             g_j9_present_ws = nullptr;
         }
+        if (direct_framebuffer_refresh_evt_ >= 0) {
+            get_ntimer()->unschedule_event(direct_framebuffer_refresh_evt_, 0);
+            get_ntimer()->remove_event(direct_framebuffer_refresh_evt_);
+        }
+
         if (!clients.empty()) {
             LOG_WARN(SERVICE_WINDOW, "Kernel is having a leakage with window server!");
             clients.clear();
@@ -1859,6 +2044,113 @@ namespace eka2l1 {
         timer->remove_event(deliver_report_visibility_evt_);
 
         bmp_cache.clean(drv);
+    }
+
+    // UIQ 2 has a five-way jog dial instead of a d-pad. Left and right become its pull and push,
+    // which Mophun titles read as right and left.
+    static std::int32_t uiq_2_scancode(const std::int32_t scancode) {
+        switch (scancode) {
+        case epoc::std_key_up_arrow:
+            return epoc::std_key_device_1;
+
+        case epoc::std_key_down_arrow:
+            return epoc::std_key_device_2;
+
+        case epoc::std_key_device_3:
+            return epoc::std_key_device_8;
+
+        case epoc::std_key_left_arrow:
+            return epoc::std_key_device_e;
+
+        case epoc::std_key_right_arrow:
+            return epoc::std_key_device_d;
+
+        default:
+            break;
+        }
+
+        return scancode;
+    }
+
+    // UIQ 3 navigates with a four-way controller and its action key (DeviceKeys.h); the S60 OK key becomes the action key.
+    static std::int32_t uiq_3_scancode(const std::int32_t scancode) {
+        switch (scancode) {
+        case epoc::std_key_up_arrow:
+            return epoc::std_key_device_4;
+
+        case epoc::std_key_down_arrow:
+            return epoc::std_key_device_5;
+
+        case epoc::std_key_left_arrow:
+            return epoc::std_key_device_6;
+
+        case epoc::std_key_right_arrow:
+            return epoc::std_key_device_7;
+
+        case epoc::std_key_device_3:
+            return epoc::std_key_device_8;
+
+        default:
+            break;
+        }
+
+        return scancode;
+    }
+
+    static bool is_sony_ericsson_p1i(system *sys) {
+        const auto *device = sys->get_device_manager()->get_current();
+        return sys->is_uiq_3_device_active() && device && (device->machine_uid == 0x20002E69);
+    }
+
+    std::int32_t window_server::uiq_scancode(const std::int32_t scancode) {
+        if (!uiq_version_) {
+            system *sys = get_system();
+            uiq_version_ = sys->is_uiq_2_device_active() ? 2 : (sys->is_uiq_3_device_active() ? 3 : 0);
+        }
+
+        switch (uiq_version_.value()) {
+        case 2:
+            return uiq_2_scancode(scancode);
+
+        case 3:
+            return uiq_3_scancode(scancode);
+
+        default:
+            break;
+        }
+
+        return scancode;
+    }
+
+    static constexpr std::uint64_t DIRECT_FRAMEBUFFER_REFRESH_INTERVAL_US = 1000000 / 60;
+
+    void window_server::map_direct_framebuffer(epoc::screen *scr) {
+        if (scr->is_screenplay_architecture() || !scr->screen_buffer_chunk) {
+            return;
+        }
+        scr->mark_direct_framebuffer_mapped();
+        // Panels up to OS 7.0s, and the P1i's (LCDSonyACX522/562Drv), scan out this memory;
+        // clients need not call Update().
+        if (((kern->get_epoc_version() > epocver::epoc7) && !is_sony_ericsson_p1i(get_system()))
+            || direct_framebuffer_refresh_evt_ >= 0) {
+            return;
+        }
+
+        direct_framebuffer_refresh_evt_ = get_ntimer()->register_event("directFramebufferRefresh",
+            [this](std::uint64_t, int) { refresh_direct_framebuffers(); });
+        get_ntimer()->schedule_event(DIRECT_FRAMEBUFFER_REFRESH_INTERVAL_US, direct_framebuffer_refresh_evt_, 0);
+    }
+
+    void window_server::refresh_direct_framebuffers() {
+        const std::lock_guard<kernel_system> guard(*kern);
+        if (auto *driver = get_graphics_driver()) {
+            for (epoc::screen *scr = screens; scr; scr = scr->next) {
+                if (scr->direct_framebuffer_mapped && scr->update_direct_framebuffer(epoc::framebuffer_update_source::raw)) {
+                    scr->present_framebuffer(driver, kern);
+                }
+            }
+        }
+        get_ntimer()->schedule_event(DIRECT_FRAMEBUFFER_REFRESH_INTERVAL_US, direct_framebuffer_refresh_evt_, 0);
     }
 
     drivers::graphics_driver *window_server::get_graphics_driver() {
@@ -1926,7 +2218,7 @@ namespace eka2l1 {
         guest_evt_.type = epoc::event_code::touch;
         guest_evt_.adv_pointer_evt_.pos_z = driver_evt_.mouse_.pos_z_;
         guest_evt_.adv_pointer_evt_.ptr_num = driver_evt_.mouse_.mouse_id;
-        guest_evt_.adv_pointer_evt_.modifier = epoc::event_modifier_adv_pointer;
+        guest_evt_.adv_pointer_evt_.modifier = epoc::event_modifier_adv_pointer | key_shipper.translator_.modifiers();
 
         switch (driver_evt_.mouse_.button_) {
         case drivers::mouse_button_left: {
@@ -2033,7 +2325,9 @@ namespace eka2l1 {
         epoc::window *root_current = get_current_focus_screen()->root->child;
         guest_event.time = kern->universal_time();
 
-        if (!root_current) {
+        if (!root_current && input_event.type_ != drivers::input_event_type::key
+            && input_event.type_ != drivers::input_event_type::key_raw
+            && input_event.type_ != drivers::input_event_type::button) {
             return;
         }
 
@@ -2053,6 +2347,8 @@ namespace eka2l1 {
                     } else if (scancode == '5') {
                         guest_event.key_evt_.scancode = epoc::std_key_space;
                     }
+                } else {
+                    guest_event.key_evt_.scancode = uiq_scancode(guest_event.key_evt_.scancode);
                 }
 
                 key_shipper.add_new_event(guest_event);
@@ -2065,6 +2361,7 @@ namespace eka2l1 {
 
         case drivers::input_event_type::button:
             if (make_button_event(input_mapping.button_input_map, input_event, guest_event)) {
+                guest_event.key_evt_.scancode = uiq_scancode(guest_event.key_evt_.scancode);
                 key_shipper.add_new_event(guest_event);
                 key_shipper.start_shipping();
 
@@ -2123,9 +2420,7 @@ namespace eka2l1 {
                     make_mouse_event(original_input_evt, guest_event, get_current_focus_screen());
 
                     if (update_pointer_position(guest_event)) {
-                        touch_shipper.add_new_event(guest_event);
-                        root_current->walk_tree(&touch_shipper, epoc::window_tree_walk_style::bonjour_children_and_previous_siblings);
-                        touch_shipper.clear();
+                        touch_shipper.deliver(kern, root_current, get_focus(), guest_event);
                     }
                 } else {
                     if (input_event.key_.state_ != drivers::key_state::repeat) {
@@ -2165,26 +2460,33 @@ namespace eka2l1 {
 
         // Fill with white
         std::uint8_t *fill_start = reinterpret_cast<std::uint8_t *>(buffer->host_base());
-        std::fill(fill_start, fill_start + max_chunk_size, epoc::SCREEN_BUFFER_UNTOUCHED_FILL);
+        std::fill(fill_start, fill_start + max_chunk_size, epoc::SCREEN_BUFFER_INITIAL_FILL);
 
         scr->screen_buffer_chunk = buffer;
+        scr->reset_framebuffer_tracking();
     }
 
     void window_server::init_screens() {
         kernel_system *kern = get_kernel_system();
-        const bool is_screenplay = (kern->get_epoc_version() >= epocver::epoc10);
+        const bool is_screenplay = (kern->get_epoc_version() >= epocver::epoc95);
+
+        // Sony Ericsson's UIQ 3 LCD drivers fix the line length at 256 pixels (0x400 bytes
+        // at 32bpp); games that write the HAL screen address rely on that pitch.
+        const std::uint32_t min_row_pixels = is_sony_ericsson_p1i(get_system()) ? 256 : 0;
 
         // Create first screen
-        screens = new epoc::screen(0, get_screen_config(0));
+        screens = new epoc::screen(0, get_screen_config(0), kern->is_eka1());
         screens->set_is_screenplay_architecture(is_screenplay);
+        screens->set_min_row_pixels(min_row_pixels);
 
         epoc::screen *crr = screens;
         create_screen_buffer_for_dsa(kern, crr);
 
         // Create other available screens. Plugged in screen later will be created explicitly
         for (std::size_t i = 0; i < screen_configs.size() - 1; i++) {
-            crr->next = new epoc::screen(1, get_screen_config(1));
+            crr->next = new epoc::screen(1, get_screen_config(1), kern->is_eka1());
             crr->next->set_is_screenplay_architecture(is_screenplay);
+            crr->next->set_min_row_pixels(min_row_pixels);
 
             crr = crr->next;
 
@@ -2204,7 +2506,7 @@ namespace eka2l1 {
     }
 
     epoc::screen *window_server::get_screen(const int number) {
-        if (!screens) {
+        if (!loaded) {
             do_base_init();
         }
 
@@ -2235,7 +2537,7 @@ namespace eka2l1 {
 
         while (current) {
             epoc::window_group *group = reinterpret_cast<epoc::window_group *>(current->root->child);
-            while (group && (group->id != id)) {
+            while (group && (!group->client || group->id != id)) {
                 group = reinterpret_cast<epoc::window_group *>(group->sibling);
             }
 
@@ -2254,6 +2556,9 @@ namespace eka2l1 {
 
         while (current) {
             epoc::window_group *group = reinterpret_cast<epoc::window_group *>(current->root->child);
+            while (group && !group->client) {
+                group = reinterpret_cast<epoc::window_group *>(group->sibling);
+            }
             if (group) {
                 return group;
             }
@@ -2283,7 +2588,7 @@ namespace eka2l1 {
         std::uint8_t *loop_begin = emitter.get_writeable_code_ptr();
 
         // Load euser to get WaitForRequest
-        codeseg_ptr seg = kern->get_lib_manager()->load(u"euser.dll");
+        codeseg_ptr seg = kern->get_lib_manager()->load(guest_path(u"euser.dll"));
         if (seg) {
             address wait_for_request_addr = seg->lookup(nullptr, kern->is_eka1() ? 1210 : 604);
 
@@ -2357,9 +2662,9 @@ namespace eka2l1 {
 
         config::state *conf = kern->get_config();
 
+        // The maps start empty, so every bind of the profile is kept: one phone key can have
+        // several sources (a keyboard key, the D-pad and a stick, more than one pad).
         for (auto &kb : conf->keybinds.keybinds) {
-            delete_key_mapping(kb.target);
-
             bool is_mouse = (kb.source.type == config::KEYBIND_TYPE_MOUSE);
 
             if ((kb.source.type == config::KEYBIND_TYPE_KEY) || is_mouse) {
@@ -2372,6 +2677,11 @@ namespace eka2l1 {
     }
 
     void window_server::do_base_init() {
+        const std::lock_guard<std::mutex> guard(base_init_lock_);
+        if (loaded) {
+            return;
+        }
+
         load_wsini();
         parse_wsini();
         init_screens();
@@ -2388,7 +2698,7 @@ namespace eka2l1 {
         repeatable_event_ = kern->get_ntimer()->register_event("WsRepeatableKeyEvent",
             [this](std::uint64_t data, std::uint64_t microsecs_late) {
                 const std::uint32_t scancode = static_cast<std::uint32_t>(data);
-                const std::uint32_t code = static_cast<std::uint32_t>(data >> 32);
+                const std::uint32_t code = key_shipper.translator_.key_code(scancode);
 
                 epoc::event repeatable_evt;
                 ntimer *timing = kern->get_ntimer();
@@ -2404,9 +2714,7 @@ namespace eka2l1 {
                     repeatable_evt.key_evt_.scancode = scancode;
                     repeatable_evt.key_evt_.repeats = 1;
 
-                    // TODO: Mark the modifiers currently being held in the server,
-                    // and add them to the flags here!
-                    repeatable_evt.key_evt_.modifiers = epoc::event_modifier_repeatable;
+                    repeatable_evt.key_evt_.modifiers = epoc::event_modifier_repeatable | key_shipper.translator_.modifiers();
 
                     kern->reset_inactivity_time();
 
@@ -2430,11 +2738,8 @@ namespace eka2l1 {
             [this](std::uint64_t userdata, std::uint64_t microsecs_late) {
                 epoc::canvas_base *cv = reinterpret_cast<epoc::canvas_base *>(userdata);
                 if (cv) {
-                    // Match guest dispatch and animation redraw: kernel first,
-                    // then screen. The timer callback used the reverse order,
-                    // deadlocking against the browser's deferred redraw when
-                    // J9 reports visibility during startup or a screen change.
-                    const std::lock_guard<kernel_system> kernel_guard(*kern);
+                    // Kernel lock first: SVC handlers already hold it when they take screen_mutex.
+                    const std::lock_guard<kernel_system> kern_guard(*kern);
                     const std::lock_guard<std::mutex> guard(cv->scr->screen_mutex);
 
                     if (cv->scr->need_update_visible_regions()) {
@@ -2798,7 +3103,7 @@ namespace eka2l1 {
         }
 
         bool do_it(epoc::window *win) {
-            if (win && (win->type != epoc::window_kind::group)) {
+            if (!win || !win->client || win->type != epoc::window_kind::group) {
                 return false;
             }
 
@@ -2911,7 +3216,7 @@ namespace eka2l1 {
     }
 
     epoc::bitwise_bitmap *window_server::get_bitmap(const std::uint32_t h) {
-        fbsbitmap *bmp = get_fbs_server()->get<fbsbitmap>(h);
+        fbsbitmap *bmp = get_raw_fbsbitmap(h);
         if (bmp) {
             bmp = bmp->final_clean();
             return bmp->bitmap_;
@@ -2921,7 +3226,12 @@ namespace eka2l1 {
     }
 
     fbsbitmap *window_server::get_raw_fbsbitmap(const std::uint32_t h) {
-        return get_fbs_server()->get<fbsbitmap>(h);
+        fbs_server *fbss = get_fbs_server();
+        if (fbsbitmap *bmp = fbss->get<fbsbitmap>(h)) {
+            return bmp;
+        }
+
+        return fbss->get_rom_bitmap(h);
     }
 
     void window_server::set_keyboard_repeat_rate(const std::uint64_t initial_time, const std::uint64_t next_time) {
@@ -2937,6 +3247,9 @@ namespace eka2l1 {
 
     void window_server::send_event_to_window_group(epoc::window_group *group, const epoc::event &evt) {
         epoc::window_server_client *cli = group->client;
+        if (!cli) {
+            return;
+        }
 
         epoc::event evt_copy = evt;
         evt_copy.handle = group->client_handle;
@@ -2944,13 +3257,21 @@ namespace eka2l1 {
         cli->queue_event(evt_copy);
     }
 
-    void window_server::send_event_to_window_groups(const epoc::event &evt) {
+    void window_server::send_event_to_window_groups(const epoc::event &evt, const bool one_per_client) {
         epoc::screen *scr = get_screens();
-
         while (scr) {
+            std::vector<epoc::window_server_client *> served;
             epoc::window_group *group = scr->get_group_chain();
             while (group) {
-                send_event_to_window_group(group, evt);
+                // The chain is in ordinal order, so the first group met is the client's frontmost.
+                if (group->client && (!one_per_client || (std::find(served.begin(), served.end(), group->client) == served.end()))) {
+                    send_event_to_window_group(group, evt);
+
+                    if (one_per_client) {
+                        served.push_back(group->client);
+                    }
+                }
+
                 group = reinterpret_cast<epoc::window_group *>(group->sibling);
             }
 

@@ -8,7 +8,8 @@
   </p>
 
   <p align="center">
-    <a href="https://github.com/EKA2L1/EKA2L1/actions?query=branch%3Amaster"><img src="https://github.com/eka2l1/eka2l1/workflows/C/C++%20CI/badge.svg"></a>
+    <a href="https://github.com/yeatse/EKA2L1/actions/workflows/ios-unsigned-ipa.yml"><img src="https://github.com/yeatse/EKA2L1/actions/workflows/ios-unsigned-ipa.yml/badge.svg?branch=ios"></a>
+    <a href="https://github.com/yeatse/EKA2L1/actions/workflows/ios-testflight.yml"><img src="https://github.com/yeatse/EKA2L1/actions/workflows/ios-testflight.yml/badge.svg?branch=ios"></a>
     <a href="https://crowdin.com/project/eka2l1"><img src="https://badges.crowdin.net/eka2l1/localized.svg"></a>
   </p>
 
@@ -37,7 +38,7 @@ The emulator *emulates* Symbian OS/N-Gage's kernel, and *reimplement* most of it
 
 For more information, discussion and support, please visit these links:
 
-- [**Homepage**](https://12l1.com/)
+- [**Homepage**](https://eka2l1.github.io/)
 - [**Emulator Wiki**](https://eka2l1.miraheze.org/wiki/Main_Page)
 - [**Discord server**](https://discord.gg/5Bm5SJ9)
 
@@ -57,7 +58,7 @@ From 2022, developing the emulator has shifted to become a part-time hobby and s
 
 Still, if you feel like our work has benefited you much and you want to support or give us some cheers, feel free to donate to two developers that maintain the PC/Android version by visiting the **Sponsor this project** section of the Github page.
 
-Visit this [link](https://12l1.com/quickstart/donation/) for more information.
+Visit this [link](https://eka2l1.github.io/quickstart/donation/) for more information.
 
   -------------
  *GIFs are provided by [**Stranno**](https://www.youtube.com/user/9esferas1)!*

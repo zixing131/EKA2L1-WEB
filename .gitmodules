@@ -6,7 +6,7 @@
 	url = https://github.com/glfw/glfw
 [submodule "src/external/capstone"]
 	path = src/external/capstone
-	url = https://github.com/aquynh/capstone
+	url = https://github.com/capstone-engine/capstone
 [submodule "src/external/yaml-cpp"]
 	path = src/external/yaml-cpp
 	url = https://github.com/jbeder/yaml-cpp
@@ -103,6 +103,12 @@
 [submodule "src/external/freetype"]
 	path = src/external/freetype
 	url = https://github.com/freetype/freetype
+[submodule "src/external/discord-rpc"]
+	path = src/external/discord-rpc
+	url = https://github.com/discord/discord-rpc
+[submodule "src/external/rapidjson"]
+	path = src/external/rapidjson
+	url = https://github.com/Tencent/rapidjson
 [submodule "src/external/xz"]
 	path = src/external/xz
 	url = https://github.com/tukaani-project/xz
@@ -112,3 +118,6 @@
 [submodule "src/external/zlib"]
 	path = src/external/zlib
 	url = https://github.com/madler/zlib
+[submodule "src/external/opencore-amr"]
+	path = src/external/opencore-amr
+	url = https://git.code.sf.net/p/opencore-amr/code

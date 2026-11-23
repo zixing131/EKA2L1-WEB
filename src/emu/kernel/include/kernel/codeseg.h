@@ -19,6 +19,7 @@
  */
 
 #pragma once
+#include <common/path_types.h>
 
 #include <common/linked.h>
 #include <kernel/kernel_obj.h>
@@ -55,7 +56,7 @@ namespace eka2l1::kernel {
     }
 
     struct codeseg_create_info {
-        std::u16string full_path;
+        guest_path full_path;
 
         std::uint32_t uids[3];
         std::uint32_t code_base = 0;
@@ -145,7 +146,7 @@ namespace eka2l1::kernel {
         std::uint32_t exception_descriptor;
 
         // Full path (if there is)
-        std::u16string full_path;
+        guest_path full_path;
 
         std::vector<std::uint32_t> export_table;
         std::vector<codeseg_dependency_info> dependencies;
@@ -156,6 +157,7 @@ namespace eka2l1::kernel {
         std::unique_ptr<std::uint8_t[]> code_data;
 
         bool mark{ false };
+        bool loading_ = false;
 
         std::vector<std::unique_ptr<attached_info>> attaches;
         std::vector<address> premade_eps;
@@ -165,6 +167,8 @@ namespace eka2l1::kernel {
         std::vector<std::uint64_t> relocation_list;
         std::uint32_t hash_;
 
+        // Ordinals whose export holds an absolute address set by set_export.
+        std::vector<bool> absolute_exports_;
         bool patched_{ false };
         bool ep_disabled_{ false };
         bool hash_inited_{ false };
@@ -192,7 +196,7 @@ namespace eka2l1::kernel {
         virtual ~codeseg() {}
         int destroy() override;
 
-        void queries_call_list(kernel::process *pr, std::vector<std::uint32_t> &call_list, const bool for_init = true);
+        void queries_call_list(kernel::process *pr, std::vector<std::uint32_t> &call_list, const bool for_init = true, const bool include_entry = true);
         void unmark();
 
         /**
@@ -215,11 +219,17 @@ namespace eka2l1::kernel {
 
         codeseg_state state_with(kernel::process *foe);
 
+        // The process holding this executable's fixed data address, which admits one instance. Null when the data is not fixed.
+        kernel::process *fixed_data_owner();
+
         void deref(kernel::thread *foe_thread);
 
         /*! \brief Add new dependency.
         */
         bool add_dependency(const codeseg_dependency_info &codeseg);
+        void clear_dependencies();
+        void set_loading(const bool loading) { loading_ = loading; }
+        int decrease_access_count() override;
 
         /*! \brief Lookup for export.
         */
@@ -228,11 +238,11 @@ namespace eka2l1::kernel {
 
         bool eligible_for_codeseg_reuse();
 
-        void set_full_path(const std::u16string &seg_full_path) {
+        void set_full_path(const guest_path &seg_full_path) {
             full_path = seg_full_path;
         }
 
-        std::u16string get_full_path() {
+        guest_path get_full_path() {
             return full_path;
         }
 

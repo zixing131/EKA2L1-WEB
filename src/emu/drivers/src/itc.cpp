@@ -33,14 +33,15 @@ using namespace std::chrono_literals;
 
 namespace eka2l1::drivers {
     static int send_sync_command(graphics_driver *drv, command cmd) {
+        if (!drv) {
+            return -1;
+        }
+
         int status = -100;
         cmd.status_ = &status;
 
         command_list cmd_list(1);
-        cmd_list.renew();
-
-        cmd_list.size_ = 1;
-        *cmd_list.base_ = cmd;
+        *cmd_list.retrieve_next() = cmd;
 
 #ifdef __EMSCRIPTEN__
         // On the browser main thread the submit dispatches inline (see
@@ -76,7 +77,7 @@ namespace eka2l1::drivers {
         return reinterpret_cast<std::uint64_t>(copy);
     }
 
-    drivers::handle create_bitmap(graphics_driver *driver, const eka2l1::vec2 &size, const std::uint32_t bpp) {
+    drivers::handle create_bitmap(graphics_driver *driver, const eka2l1::vec2 &size, const std::uint32_t bpp, const std::uint32_t depth_bits) {
         drivers::handle handle_num = 0;
 
         command cmd;
@@ -84,6 +85,7 @@ namespace eka2l1::drivers {
         cmd.data_[0] = PACK_2U32_TO_U64(size.x, size.y);
         cmd.data_[1] = bpp;
         cmd.data_[2] = reinterpret_cast<std::uint64_t>(&handle_num);
+        cmd.data_[3] = depth_bits;
 
         if (send_sync_command(driver, cmd) != 0) {
             return 0;
@@ -300,7 +302,7 @@ namespace eka2l1::drivers {
             set_feature(graphics_feature::stencil_test, false);
 
             eka2l1::rect to_scale = region.rects_[0];
-            to_scale.scale(scale_factor);
+            scale_rectangle(to_scale, scale_factor);
 
             clip_bitmap_rect(to_scale);
         } else {
@@ -344,6 +346,20 @@ namespace eka2l1::drivers {
         cmd->data_[3] = PACK_2U32_TO_U64(offset.x, offset.y);
         cmd->data_[4] = PACK_2U32_TO_U64(dim.x, dim.y);
         cmd->data_[5] = pixels_per_line;
+    }
+
+    void graphics_command_builder::copy_framebuffer_to_texture(drivers::handle source, drivers::handle texture,
+        std::uint32_t dimension, std::int32_t level, const eka2l1::rect &source_rect, const eka2l1::rect &dest_rect, bool alpha_as_last_channel) {
+        command *cmd = list_.retrieve_next();
+        cmd->opcode_ = graphics_driver_copy_framebuffer_to_texture;
+        cmd->data_[0] = source;
+        cmd->data_[1] = texture;
+        cmd->data_[2] = PACK_2U32_TO_U64(dimension, level);
+        cmd->data_[3] = PACK_2U32_TO_U64(source_rect.top.x, source_rect.top.y);
+        cmd->data_[4] = PACK_2U32_TO_U64(source_rect.size.x, source_rect.size.y);
+        cmd->data_[5] = PACK_2U32_TO_U64(dest_rect.top.x, dest_rect.top.y);
+        cmd->data_[6] = PACK_2U32_TO_U64(dest_rect.size.x, dest_rect.size.y);
+        cmd->data_[7] = alpha_as_last_channel;
     }
 
     void graphics_command_builder::update_texture(drivers::handle h, const char *data, const std::size_t size, const std::uint8_t lvl,

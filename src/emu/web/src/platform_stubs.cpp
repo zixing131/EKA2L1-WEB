@@ -67,6 +67,7 @@ EM_JS(void, web_show_question, (std::uint32_t id, const char *message, const cha
             Module._wasm_answer_question(request.id, choice);
             if (queue.length) queue[0]();
         };
+        show.cancel = function() { finish(-1); };
         const captureKey = function(event) {
             // A dialog key must never also press a guest phone key.
             event.stopImmediatePropagation();
@@ -91,8 +92,17 @@ EM_JS(void, web_show_question, (std::uint32_t id, const char *message, const cha
         dialog.showModal();
         actions.lastChild.focus();
     };
+    show.id = id;
     queue.push(show);
     if (queue.length === 1) show();
+});
+
+EM_JS(void, web_cancel_question, (std::uint32_t id), {
+    const queue = Module.ekaQuestions || [];
+    const index = queue.findIndex(request => request.id === id);
+    if (index < 0) return;
+    if (index === 0) queue[0].cancel();
+    else queue.splice(index, 1);
 });
 
 namespace eka2l1::common {
@@ -113,7 +123,7 @@ namespace eka2l1::drivers::ui {
         // No-op stub
     }
 
-    void show_yes_no_dialog(const std::u16string &text, const std::u16string &button1_text,
+    dialog_cancel_callback show_yes_no_dialog(const std::u16string &text, const std::u16string &button1_text,
         const std::u16string &button2_text, yes_no_dialog_complete_callback complete_callback) {
         const auto id = ++next_question;
         questions.emplace(id, std::move(complete_callback));
@@ -121,5 +131,9 @@ namespace eka2l1::drivers::ui {
         const auto first = common::ucs2_to_utf8(button1_text);
         const auto second = common::ucs2_to_utf8(button2_text);
         web_show_question(id, message.c_str(), first.c_str(), second.c_str());
+        return [id]() {
+            questions.erase(id);
+            web_cancel_question(id);
+        };
     }
 }

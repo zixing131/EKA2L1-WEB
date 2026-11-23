@@ -110,7 +110,8 @@ namespace eka2l1 {
     }
 
     bool socket_client_session::is_oldarch() {
-        return server<socket_server>()->get_kernel_object_owner()->get_epoc_version() < epocver::epoc81a;
+        // 8.0a esock already uses the 8.1a request codes (e.g. RHostResolver::Open is 0x28, not 0x24).
+        return server<socket_server>()->get_kernel_object_owner()->get_epoc_version() < epocver::epoc80;
     }
 
     void socket_client_session::fetch(service::ipc_context *ctx) {
@@ -118,6 +119,10 @@ namespace eka2l1 {
             switch (ctx->msg->function) {
             case socket_old_pr_find:
                 pr_find(ctx);
+                return;
+
+            case socket_old_pr_start:
+                pr_start(ctx);
                 return;
 
             case socket_old_so_create:
@@ -146,6 +151,10 @@ namespace eka2l1 {
                     pr_find(ctx);
                     return;
 
+                case socket_reform_pr_start:
+                    pr_start(ctx);
+                    return;
+
                 case socket_reform_so_create:
                     so_create(ctx);
                     return;
@@ -168,6 +177,10 @@ namespace eka2l1 {
 
                 case socket_reform_cn_open_with_cn_type:
                     cn_open(ctx);
+                    return;
+
+                case socket_reform_cn_open_with_name:
+                    cn_open(ctx, true);
                     return;
 
                 case socket_reform_cn_get_long_des_setting:
@@ -196,6 +209,10 @@ namespace eka2l1 {
                     pr_find(ctx);
                     return;
 
+                case socket_pr_start:
+                    pr_start(ctx);
+                    return;
+
                 case socket_so_create:
                     so_create(ctx);
                     return;
@@ -222,6 +239,10 @@ namespace eka2l1 {
 
                 case socket_cn_open_with_cn_type:
                     cn_open(ctx);
+                    return;
+
+                case socket_cn_open_with_name:
+                    cn_open(ctx, true);
                     return;
 
                 case socket_cn_get_long_des_setting:
@@ -272,17 +293,11 @@ namespace eka2l1 {
     }
 
     static void fill_protocol_description(epoc::socket::protocol *pr, protocol_description &des) {
-        // NOTE: On emulator some protocols are merged for feasable implementation
-        // TODO: Make them separable for this fill
         des.addr_fam_ = pr->family_ids()[0];
         des.protocol_ = pr->supported_ids()[0];
         des.ver_ = pr->ver();
         des.bord_ = pr->get_byte_order();
-        des.sock_type_ = 0;
-        if (des.addr_fam_ == 0x800 || des.addr_fam_ == 0x806) {
-            if (des.protocol_ == 6) des.sock_type_ = epoc::socket::socket_type_stream;
-            if (des.protocol_ == 17) des.sock_type_ = epoc::socket::socket_type_datagram;
-        }
+        des.sock_type_ = pr->sock_type();
         des.message_size_ = pr->message_size();
 
         des.name_.assign(nullptr, pr->name());
@@ -291,6 +306,25 @@ namespace eka2l1 {
         des.service_info_ = 0;
         des.naming_services_ = 0;
         des.service_sec_ = 0;
+    }
+
+    void socket_client_session::pr_start(service::ipc_context *ctx) {
+        const auto family = ctx->get_argument_value<std::uint32_t>(0);
+        const auto type = ctx->get_argument_value<std::uint32_t>(1);
+        const auto id = ctx->get_argument_value<std::uint32_t>(2);
+        if (!family || !type || !id) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+
+        const auto protocol = server<socket_server>()->find_protocol(*family, *id);
+        if (!protocol || (protocol->sock_type() && protocol->sock_type() != *type)) {
+            ctx->complete(epoc::error_not_supported);
+            return;
+        }
+
+        // HLE protocols are registered eagerly; StartProtocol only preloads them.
+        ctx->complete(epoc::error_none);
     }
 
     void socket_client_session::pr_find(service::ipc_context *ctx) {
@@ -497,15 +531,30 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
-    void socket_client_session::cn_open(eka2l1::service::ipc_context *ctx) {
-        // TODO: Implement
-        socket_subsession_instance cn_inst = std::make_unique<epoc::socket::socket_connection_proxy>(this, nullptr);
+    void socket_client_session::cn_open(eka2l1::service::ipc_context *ctx, bool with_name) {
+        auto connection = std::make_unique<epoc::socket::socket_connection_proxy>(this, nullptr);
+        if (with_name) {
+            const auto name = ctx->get_argument_value<std::u16string>(0);
+            if (!name) {
+                ctx->complete(epoc::error_argument);
+                return;
+            }
+            const auto result = connection->clone_from(*name, ctx->msg->own_thr->owning_process()->get_sec_info());
+            if (result != epoc::error_none) {
+                ctx->complete(result);
+                return;
+            }
+        }
+        socket_subsession_instance cn_inst = std::move(connection);
 
         const std::uint32_t id = static_cast<std::uint32_t>(subsessions_.add(cn_inst));
         subsessions_.get(id)->get()->set_id(id);
 
-        // Write the subsession handle
-        ctx->write_data_to_descriptor_argument<std::uint32_t>(3, id);
+        if (!ctx->write_data_to_descriptor_argument<std::uint32_t>(3, id)) {
+            subsessions_.remove(id);
+            ctx->complete(epoc::error_argument);
+            return;
+        }
         ctx->complete(epoc::error_none);
     }
 

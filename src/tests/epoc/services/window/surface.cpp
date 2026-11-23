@@ -433,4 +433,731 @@ TEST_CASE("Opaque legacy GDI preserves RGB when the unused bitmap byte is zero",
     gdi.build_single_command(draw);
     submit(driver, builder);
     REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 192, 96, 48, 0 });
+
+#include <dispatch/dispatcher.h>
+#include <drivers/graphics/graphics.h>
+#include <kernel/timing.h>
+#include <services/window/surface.h>
+#include <services/window/bitmap_cache.h>
+#include <services/window/classes/gstore.h>
+#include <services/window/classes/winbase.h>
+#include <services/window/screen.h>
+#include <services/fbs/bitmap.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <map>
+#include <thread>
+
+using namespace eka2l1;
+
+TEMPLATE_TEST_CASE("GDI command storage aligns every payload", "[window_surface],[gdi_store]",
+    epoc::gdi_store_command_draw_rect_data,
+    epoc::gdi_store_command_draw_line_data,
+    epoc::gdi_store_command_draw_polygon_data,
+    epoc::gdi_store_command_draw_text_data,
+    epoc::gdi_store_command_draw_bitmap_data,
+    epoc::gdi_store_command_update_texture_data,
+    epoc::gdi_store_command_set_clip_rect_single_data,
+    epoc::gdi_store_command_set_clip_rect_multiple_data) {
+    epoc::gdi_store_command commands[2];
+    for (auto &command : commands) {
+        REQUIRE(reinterpret_cast<std::uintptr_t>(command.data_) % alignof(TestType) == 0);
+        REQUIRE(static_cast<void *>(&command.get_data_struct<TestType>()) == command.data_);
+        const auto &stored = command;
+        REQUIRE(static_cast<const void *>(&stored.get_data_struct_const<TestType>()) == command.data_);
+    }
+}
+
+namespace {
+    class surface_driver : public drivers::graphics_driver {
+        drivers::handle next_ = 1;
+        drivers::handle bound_ = 0;
+        bool blend_ = false;
+        vec4 brush_{ 0, 0, 0, 0 };
+        drivers::blend_factor factors_[4]{};
+
+        void paint(const std::vector<std::uint8_t> &source) {
+            auto &destination = images[bound_];
+            if (!blend_) {
+                destination = source;
+                return;
+            }
+            destination.resize(source.size());
+            for (std::size_t i = 0; i < source.size(); ++i) {
+                const double alpha = source[i / 4 * 4 + 3] / 255.0;
+                const auto factor = [&, alpha](drivers::blend_factor value) {
+                    if (value == drivers::blend_factor::one) return 1.0;
+                    if (value == drivers::blend_factor::frag_out_alpha) return alpha;
+                    if (value == drivers::blend_factor::one_minus_frag_out_alpha) return 1.0 - alpha;
+                    if (value == drivers::blend_factor::one_minus_frag_out_color) return 1.0 - source[i] / 255.0;
+                    if (value == drivers::blend_factor::one_minus_current_color) return 1.0 - destination[i] / 255.0;
+                    return 0.0;
+                };
+                const int offset = i % 4 == 3 ? 2 : 0;
+                destination[i] = static_cast<std::uint8_t>(std::lround(std::min(255.0,
+                    source[i] * factor(factors_[offset]) + destination[i] * factor(factors_[offset + 1]))));
+            }
+        }
+
+    public:
+        std::map<drivers::handle, std::vector<std::uint8_t>> images;
+        std::size_t uploads = 0;
+        bool invalid_use = false;
+
+        surface_driver() : graphics_driver(drivers::graphic_api::opengl) {}
+        void run() override {}
+        void abort() override {}
+        void update_bitmap(drivers::handle, std::size_t, const vec2 &, const vec2 &, const void *, std::size_t) override {}
+        void set_viewport(const rect &) override {}
+        void update_surface(void *) override {}
+        void update_surface_size(const vec2 &) override {}
+        void set_upscale_shader(const std::string &) override {}
+        std::string get_active_upscale_shader() const override { return {}; }
+        bool support_extension(drivers::graphics_driver_extension) override { return false; }
+        bool query_extension_value(drivers::graphics_driver_extension_query, void *) override { return false; }
+
+        void submit_command_list(drivers::command_list &commands) override {
+            for (std::size_t i = 0; i < commands.size_; ++i) {
+                auto &command = commands.base_[i];
+                const auto handle = command.data_[0];
+                switch (command.opcode_) {
+                case drivers::graphics_driver_set_feature:
+                    if (static_cast<std::uint32_t>(handle) == static_cast<std::uint32_t>(drivers::graphics_feature::blend)) {
+                        blend_ = handle >> 32;
+                    }
+                    break;
+                case drivers::graphics_driver_blend_formula:
+                    factors_[0] = static_cast<drivers::blend_factor>(static_cast<std::uint32_t>(command.data_[1]));
+                    factors_[1] = static_cast<drivers::blend_factor>(command.data_[1] >> 32);
+                    factors_[2] = static_cast<drivers::blend_factor>(static_cast<std::uint32_t>(command.data_[2]));
+                    factors_[3] = static_cast<drivers::blend_factor>(command.data_[2] >> 32);
+                    break;
+                case drivers::graphics_driver_set_brush_color:
+                    brush_ = { static_cast<int>(handle), static_cast<int>(handle >> 32),
+                        static_cast<int>(command.data_[1]), static_cast<int>(command.data_[1] >> 32) };
+                    break;
+                case drivers::graphics_driver_draw_rectangle:
+                    paint({ static_cast<std::uint8_t>(brush_.x), static_cast<std::uint8_t>(brush_.y),
+                        static_cast<std::uint8_t>(brush_.z), static_cast<std::uint8_t>(brush_.w) });
+                    break;
+                case drivers::graphics_driver_create_bitmap:
+                case drivers::graphics_driver_create_texture: {
+                    const auto created = next_++;
+                    images[created] = {};
+                    const auto slot = command.opcode_ == drivers::graphics_driver_create_bitmap ? 2 : 8;
+                    *reinterpret_cast<drivers::handle*>(command.data_[slot]) = created;
+                    break;
+                }
+                case drivers::graphics_driver_bind_bitmap:
+                    bound_ = handle;
+                    break;
+                case drivers::graphics_driver_update_bitmap:
+                case drivers::graphics_driver_update_texture: {
+                    const auto *data = reinterpret_cast<const std::uint8_t*>(command.data_[1]);
+                    invalid_use |= !images.count(handle);
+                    images[handle].assign(data, data + command.data_[2]);
+                    delete[] reinterpret_cast<const char*>(data);
+                    ++uploads;
+                    break;
+                }
+                case drivers::graphics_driver_draw_bitmap:
+                    invalid_use |= !images.count(handle);
+                    if (bound_) {
+                        paint(images[handle]);
+                    }
+                    break;
+                case drivers::graphics_driver_destroy_bitmap:
+                case drivers::graphics_driver_destroy_object:
+                    invalid_use |= images.erase(handle) != 1;
+                    break;
+                default:
+                    break;
+                }
+                if (command.status_) {
+                    *command.status_ = 0;
+                }
+            }
+            delete[] commands.base_;
+        }
+    };
+
+    void submit(surface_driver &driver, drivers::graphics_command_builder &builder) {
+        auto commands = builder.retrieve_command_list();
+        driver.submit_command_list(commands);
+    }
+}
+
+TEST_CASE("Screen VSync waits share early edges and skip elapsed periods", "[window_surface][vsync]") {
+    epoc::screen_vsync_clock clock;
+    CHECK(clock.wait_us(1000, 50) == 0);
+    CHECK(clock.wait_us(1100, 50) == 19900);
+    CHECK(clock.wait_us(20999, 50) == 1);
+    CHECK(clock.wait_us(21000, 50) == 20000);
+    CHECK(clock.wait_us(101500, 50) == 0);
+    CHECK(clock.wait_us(102000, 50) == 19000);
+    CHECK(clock.wait_us(103000, 100) == 0);
+    CHECK(clock.wait_us(104000, 100) == 9000);
+    CHECK(clock.wait_us(105000, 0) == 0);
+    CHECK(clock.wait_us(106000, 0) == 0);
+    CHECK(clock.wait_us(107000, 50) == 0);
+}
+
+TEST_CASE("Cancelling a queued VSync releases the posting request", "[window_surface][vsync_cancel]") {
+    ntimer timing(1000000);
+    timing.reset();
+    timing.stop();
+    dispatch::screen_post_transferer transfer;
+    transfer.construct(&timing);
+    epoc::notify_info request{};
+    transfer.wait_vsync(1000000, request);
+    REQUIRE(timing.advance().has_value());
+    transfer.cancel_wait_vsync(request);
+    CHECK_FALSE(timing.advance().has_value());
+    transfer.cancel_wait_vsync(request);
+    transfer.destroy(nullptr);
+}
+
+TEST_CASE("Screen modes change before graphics is available", "[screen_mode]") {
+    epoc::config::screen config{};
+    config.modes = {
+        { 0, 1, { 176, 208 }, 0, "", epoc::display_mode::color16mu, epoc::display_mode::color64k },
+        { 90, 2, { 208, 176 }, 0, "", epoc::display_mode::color64k, epoc::display_mode::color64k }
+    };
+    epoc::screen screen(0, config);
+    int notified_old_mode = -1;
+    screen.add_screen_mode_change_callback(&notified_old_mode, [](void *data, epoc::screen *, int old_mode) {
+        *static_cast<int *>(data) = old_mode;
+    });
+
+    screen.set_screen_mode(nullptr, nullptr, 1);
+    screen.redraw(nullptr);
+    screen.present_framebuffer(nullptr, nullptr);
+    CHECK(screen.crr_mode == 1);
+    CHECK(screen.current_mode().size == vec2(208, 176));
+    CHECK(screen.disp_mode == epoc::display_mode::color64k);
+    CHECK(notified_old_mode == 0);
+    CHECK(screen.screen_texture == 0);
+
+    surface_driver driver;
+    screen.redraw(&driver);
+    CHECK(driver.images.count(screen.screen_texture) == 1);
+    CHECK(screen.crr_mode == 1);
+    screen.deinit(&driver);
+    CHECK_FALSE(driver.invalid_use);
+}
+
+TEST_CASE("Same-size screen modes switch color depth and discard the old DSA texture", "[screen_mode]") {
+    epoc::config::screen config{};
+    config.modes = {
+        { 0, 1, { 176, 208 }, 0, "", epoc::display_mode::color16mu, epoc::display_mode::color64k },
+        { 0, 2, { 176, 208 }, 0, "", epoc::display_mode::color64k, epoc::display_mode::color64k }
+    };
+    epoc::screen screen(0, config);
+    surface_driver driver;
+
+    CHECK(screen.disp_mode == epoc::display_mode::color16mu);
+    CHECK(screen.screen_buffer_byte_width() == 704);
+    CHECK(screen.dsa_disp_mode == epoc::display_mode::color64k);
+
+    screen.dsa_disp_mode = epoc::display_mode::color16mu;
+    const auto old_texture = drivers::create_bitmap(&driver, { 208, 208 }, 32);
+    screen.dsa_texture = old_texture;
+    screen.set_screen_mode(nullptr, &driver, 1);
+    CHECK(screen.crr_mode == 1);
+    CHECK(screen.disp_mode == epoc::display_mode::color64k);
+    CHECK(screen.screen_buffer_byte_width() == 352);
+    CHECK(screen.dsa_disp_mode == epoc::display_mode::color64k);
+    CHECK(screen.dsa_texture == 0);
+    CHECK(driver.images.count(old_texture) == 0);
+
+    screen.set_screen_mode(nullptr, &driver, 0);
+    CHECK(screen.disp_mode == epoc::display_mode::color16mu);
+    CHECK(screen.screen_buffer_byte_width() == 704);
+    CHECK(screen.dsa_disp_mode_initial == epoc::display_mode::color64k);
+
+    screen.dsa_disp_mode = epoc::display_mode::color16mu;
+    screen.set_screen_mode(nullptr, &driver, 0);
+    CHECK(screen.dsa_disp_mode == epoc::display_mode::color16mu);
+    screen.set_screen_mode(nullptr, &driver, -1);
+    screen.set_screen_mode(nullptr, &driver, 2);
+    CHECK(screen.crr_mode == 0);
+    CHECK(screen.disp_mode == epoc::display_mode::color16mu);
+
+    screen.deinit(&driver);
+    CHECK_FALSE(driver.invalid_use);
+}
+
+TEST_CASE("Window background replacement is independent of producer publication", "[window_surface]") {
+    auto gl = std::make_shared<epoc::window_surface>();
+    auto movie = std::make_shared<epoc::window_surface>();
+    epoc::window_surface_attachment window;
+    const std::uint8_t white[] = { 255, 255, 255, 255 };
+    const std::uint8_t red[] = { 255, 0, 0, 255 };
+
+    window.attach(gl, {});
+    window.attach(movie, {});
+    REQUIRE(movie->publish_pixels(red, sizeof(red), { 1, 1 }));
+    REQUIRE(gl->publish_pixels(white, sizeof(white), { 1, 1 }));
+    REQUIRE(window.surface == movie);
+    REQUIRE(window.changed());
+    REQUIRE_FALSE(window.detach(gl));
+    REQUIRE(window.surface == movie);
+    REQUIRE(window.detach(movie));
+    REQUIRE_FALSE(window.surface);
+    REQUIRE(gl->publish_pixels(white, sizeof(white), { 1, 1 }));
+    REQUIRE_FALSE(window.surface);
+    window.attach(gl, {});
+    REQUIRE(window.surface == gl);
+}
+
+TEST_CASE("Surface mailbox owns and coalesces complete frames", "[window_surface]") {
+    epoc::window_surface surface;
+    std::vector<std::uint8_t> first(16, 17);
+    REQUIRE(surface.publish_pixels(first.data(), first.size(), { 2, 2 }));
+    std::fill(first.begin(), first.end(), 42);
+    auto pending = surface.take_pixels();
+    REQUIRE(pending);
+    REQUIRE(pending->rgba == std::vector<std::uint8_t>(16, 17));
+    REQUIRE_FALSE(surface.take_pixels());
+
+    REQUIRE(surface.publish_pixels(first.data(), first.size(), { 2, 2 }));
+    std::fill(first.begin(), first.end(), 91);
+    REQUIRE(surface.publish_pixels(first.data(), first.size(), { 2, 2 }));
+    pending = surface.take_pixels();
+    REQUIRE(pending->revision == 3);
+    REQUIRE(pending->rgba == first);
+    REQUIRE_FALSE(surface.publish_pixels(first.data(), 15, { 2, 2 }));
+    REQUIRE_FALSE(surface.publish_pixels(nullptr, 16, { 2, 2 }));
+    REQUIRE_FALSE(surface.publish_pixels(first.data(), 16, { -1, 2 }));
+    REQUIRE_FALSE(surface.publish_pixels(first.data(), 16, { std::numeric_limits<int>::max(), std::numeric_limits<int>::max() }));
+    REQUIRE(surface.revision() == 3);
+}
+
+TEST_CASE("Surface clipping preserves the mapping instead of stretching into the clip", "[window_surface]") {
+    epoc::surface_configuration config;
+    config.extent = rect({ 10, 20 }, { 200, 100 });
+    config.clip = rect({ 60, 20 }, { 50, 100 });
+    auto placement = epoc::place_surface(config, rect({ 30, 40 }, { 300, 200 }), { 640, 320 }, 2.0f, 0);
+    REQUIRE(placement.destination == rect({ 80, 120 }, { 400, 200 }));
+    REQUIRE(placement.source == rect({ 0, 0 }, { 640, 320 }));
+    REQUIRE(placement.clip == rect({ 90, 60 }, { 50, 100 }));
+
+    config.rotation = 90;
+    placement = epoc::place_surface(config, rect({ 30, 40 }, { 300, 200 }), { 640, 320 }, 2.0f, 0);
+    REQUIRE(placement.destination == rect({ 480, 120 }, { 200, 400 }));
+    REQUIRE(placement.clip == rect({ 90, 60 }, { 50, 100 }));
+    REQUIRE(placement.rotation == 90);
+
+    config.clip = rect({ 500, 500 }, { 10, 10 });
+    placement = epoc::place_surface(config, rect({ 30, 40 }, { 300, 200 }), { 640, 320 }, 1.0f, 0);
+    REQUIRE(placement.clip.empty());
+}
+
+TEST_CASE("A presented EGL image survives further writes and producer destruction", "[window_surface]") {
+    surface_driver driver;
+    const auto drawing = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    driver.images[drawing] = { 255, 0, 0, 255 };
+    auto surface = std::make_shared<epoc::window_surface>();
+    REQUIRE(surface->publish_bitmap(&driver, drawing, { 1, 1 }));
+    driver.images[drawing] = { 255, 255, 255, 255 };
+
+    epoc::window_surface_attachment window;
+    window.attach(surface, {});
+    surface.reset();
+    drivers::graphics_command_builder builder;
+    const auto presented = window.surface->prepare(&driver, builder);
+    REQUIRE(driver.images[presented] == std::vector<std::uint8_t>{ 255, 0, 0, 255 });
+    REQUIRE(presented != drawing);
+    submit(driver, builder);
+    window.surface.reset();
+    REQUIRE_FALSE(driver.images.count(presented));
+    REQUIRE(driver.images.count(drawing));
+    REQUIRE_FALSE(driver.invalid_use);
+}
+
+TEST_CASE("Multiple targets upload one video frame and retire replaced textures in order", "[window_surface]") {
+    surface_driver driver;
+    auto surface = std::make_shared<epoc::window_surface>();
+    const std::uint8_t red[] = { 255, 0, 0, 255 };
+    REQUIRE(surface->publish_pixels(red, sizeof(red), { 1, 1 }));
+    drivers::graphics_command_builder builder;
+    const auto first = surface->prepare(&driver, builder);
+    builder.draw_bitmap(first, 0, rect({ 0, 0 }, { 1, 1 }), {});
+    REQUIRE(surface->prepare(&driver, builder) == first);
+    submit(driver, builder);
+    REQUIRE(driver.uploads == 1);
+
+    const std::vector<std::uint8_t> bigger(16, 128);
+    REQUIRE(surface->publish_pixels(bigger.data(), bigger.size(), { 2, 2 }));
+    builder.draw_bitmap(first, 0, rect({ 0, 0 }, { 1, 1 }), {});
+    const auto second = surface->prepare(&driver, builder);
+    builder.draw_bitmap(second, 0, rect({ 0, 0 }, { 2, 2 }), {});
+    submit(driver, builder);
+    REQUIRE(first != second);
+    REQUIRE_FALSE(driver.images.count(first));
+    REQUIRE(driver.images[second] == bigger);
+    surface.reset();
+    REQUIRE(driver.images.empty());
+    REQUIRE_FALSE(driver.invalid_use);
+}
+
+TEST_CASE("Publishing continues safely while window attachments are replaced and removed", "[window_surface]") {
+    auto source = std::make_shared<epoc::window_surface>();
+    std::atomic<bool> done{ false };
+    std::thread producer([source, &done] {
+        for (unsigned i = 0; i < 10000; ++i) {
+            const std::vector<std::uint8_t> bytes(256, static_cast<std::uint8_t>(i));
+            source->publish_pixels(bytes.data(), bytes.size(), { 8, 8 });
+        }
+        done = true;
+    });
+    std::uint64_t revision = 0;
+    bool torn_frame = false;
+    while (!done) {
+        epoc::window_surface_attachment window;
+        window.attach(source, {});
+        auto replacement = std::make_shared<epoc::window_surface>();
+        window.attach(replacement, {});
+        window.detach(source);
+        if (auto pixels = source->take_pixels()) {
+            torn_frame |= pixels->revision <= revision;
+            revision = pixels->revision;
+            torn_frame |= !std::all_of(pixels->rgba.begin(), pixels->rgba.end(), [&](auto value) { return value == pixels->rgba.front(); });
+        }
+    }
+    producer.join();
+    REQUIRE_FALSE(torn_frame);
+    REQUIRE(source->revision() == 10000);
+}
+
+TEST_CASE("Retained GDI pixels preserve alpha and redraw clears expose the surface", "[window_surface]") {
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto ui = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    builder.bind_bitmap(ui);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip, true);
+    epoc::gdi_store_command rectangle;
+    rectangle.opcode_ = epoc::gdi_store_command_draw_rect;
+    auto &data = rectangle.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
+    data.rect_ = rect({ 0, 0 }, { 1, 1 });
+    data.color_ = { 255, 0, 0, 128 };
+    gdi.build_single_command(rectangle);
+    submit(driver, builder);
+    REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 128, 0, 0, 128 });
+
+    const auto screen = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    driver.images[screen] = { 0, 0, 255, 255 };
+    builder.bind_bitmap(screen);
+    builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+        drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha,
+        drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
+    builder.draw_bitmap(ui, 0, rect({ 0, 0 }, { 1, 1 }), {});
+    submit(driver, builder);
+    REQUIRE(driver.images[screen] == std::vector<std::uint8_t>{ 128, 0, 127, 255 });
+
+    builder.bind_bitmap(ui);
+    data.color_ = { 0, 0, 0, 0 };
+    gdi.build_single_command(rectangle);
+    submit(driver, builder);
+    REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 0, 0, 0, 0 });
+}
+
+TEST_CASE("Binary-colour XOR rectangles preserve destination pixels and undo themselves", "[window_surface]") {
+    const bool premultiplied = GENERATE(false, true);
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto target = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    const std::vector<std::uint8_t> original{ 0x12, 0x34, 0x56, 255 };
+    driver.images[target] = original;
+    builder.bind_bitmap(target);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip, premultiplied);
+    epoc::gdi_store_command rectangle;
+    rectangle.opcode_ = epoc::gdi_store_command_xor_rect;
+    auto &data = rectangle.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
+    data.rect_ = rect({ 0, 0 }, { 1, 1 });
+    data.color_ = { 255, 0, 255, 0 };
+    REQUIRE(epoc::gdi_store_command_draws_pixels(rectangle.opcode_));
+    gdi.build_single_command(rectangle);
+    submit(driver, builder);
+    REQUIRE(driver.images[target] == std::vector<std::uint8_t>{ 0xED, 0x34, 0xA9, 255 });
+
+    gdi.build_single_command(rectangle);
+    submit(driver, builder);
+    REQUIRE(driver.images[target] == original);
+
+    rectangle.opcode_ = epoc::gdi_store_command_draw_rect;
+    data.color_ = { 0, 127, 255, 255 };
+    gdi.build_single_command(rectangle);
+    submit(driver, builder);
+    REQUIRE(driver.images[target] == std::vector<std::uint8_t>{ 0, 127, 255, 255 });
+}
+
+TEST_CASE("Initial GDI replay consumes pending uploads without repeating pixel draws", "[window_surface]") {
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto ui = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    const auto bitmap = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    driver.images[ui] = { 0, 0, 0, 0 };
+    builder.bind_bitmap(ui);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip, true);
+
+    epoc::gdi_store_command_segment pending;
+    epoc::gdi_store_command update;
+    update.opcode_ = epoc::gdi_store_command_update_texture;
+    auto &upload = update.get_data_struct<epoc::gdi_store_command_update_texture_data>();
+    upload = {};
+    upload.handle_ = bitmap;
+    upload.texture_data_ = new char[4]{ 127, 0, 0, 127 };
+    upload.texture_size_ = 4;
+    upload.dim_ = { 1, 1 };
+    upload.pixel_per_line_ = 1;
+    pending.add_command(update);
+
+    epoc::gdi_store_command rectangle;
+    rectangle.opcode_ = epoc::gdi_store_command_draw_rect;
+    auto &fill = rectangle.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
+    fill.rect_ = rect({ 0, 0 }, { 1, 1 });
+    fill.color_ = { 0, 255, 0, 255 };
+    pending.add_command(rectangle);
+    gdi.build_texture_updates(pending);
+    submit(driver, builder);
+    REQUIRE(driver.images[bitmap] == std::vector<std::uint8_t>{ 127, 0, 0, 127 });
+    REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 0, 0, 0, 0 });
+    REQUIRE(driver.uploads == 1);
+}
+
+TEST_CASE("Retained GDI accepts both straight and premultiplied alpha bitmaps", "[window_surface]") {
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto ui = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    const auto bitmap = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    builder.bind_bitmap(ui);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip, true);
+
+    epoc::bitwise_bitmap source{};
+    source.header_.size_pixels = object_size(1, 1);
+    epoc::gdi_store_command draw;
+    draw.opcode_ = epoc::gdi_store_command_draw_bitmap;
+    auto &data = draw.get_data_struct<epoc::gdi_store_command_draw_bitmap_data>();
+    data = {};
+    data.main_fbs_bitmap_ = &source;
+    data.main_drv_ = bitmap;
+    data.gdi_flags_ = epoc::GDI_STORE_COMMAND_MAIN_RAW;
+    data.dest_rect_ = rect({ 0, 0 }, { 1, 1 });
+    data.source_rect_ = data.dest_rect_;
+
+    for (const auto mode : { epoc::display_mode::color16ma, epoc::display_mode::color16map }) {
+        source.settings_.current_display_mode(mode);
+        driver.images[bitmap] = { static_cast<std::uint8_t>(mode == epoc::display_mode::color16ma ? 255 : 128), 0, 0, 128 };
+        gdi.build_single_command(draw);
+        submit(driver, builder);
+        REQUIRE(driver.images[ui] == std::vector<std::uint8_t>{ 128, 0, 0, 128 });
+    }
+}
+
+
+TEST_CASE("Deferred bitmap versions survive mutation eviction and queued draws", "[window_surface]") {
+    struct bitmap_fixture {
+        epoc::bitwise_bitmap bitmap{};
+        std::uint8_t pixels[8]{ 12, 34, 56, 255, 78, 90, 12, 255 };
+
+        bitmap_fixture() {
+            bitmap.header_.header_len = sizeof(loader::sbm_header);
+            bitmap.header_.bitmap_size = sizeof(loader::sbm_header) + 4;
+            bitmap.header_.size_pixels = vec2(1, 1);
+            bitmap.header_.bit_per_pixels = 32;
+            bitmap.header_.color = epoc::color_bitmap_with_alpha;
+            bitmap.byte_width_ = 4;
+            bitmap.data_offset_ = offsetof(bitmap_fixture, pixels);
+            bitmap.settings_.initial_display_mode(epoc::display_mode::color16ma);
+        }
+    };
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    bitmap_fixture source;
+    drivers::graphics_command_builder builder;
+    std::shared_ptr<drivers::handle> first;
+    const auto first_handle = cache.add_or_get(&driver, &source.bitmap, &builder, nullptr, &first);
+    submit(driver, builder);
+    REQUIRE(first);
+    REQUIRE(*first == first_handle);
+    REQUIRE(driver.images[first_handle] == std::vector<std::uint8_t>{ 12, 34, 56, 255 });
+
+    std::shared_ptr<drivers::handle> same;
+    REQUIRE(cache.add_or_get(&driver, &source.bitmap, &builder, nullptr, &same) == first_handle);
+    REQUIRE(same == first);
+    REQUIRE(driver.uploads == 1);
+    same.reset();
+
+    source.pixels[0] = 99;
+    std::shared_ptr<drivers::handle> second;
+    const auto second_handle = cache.add_or_get(&driver, &source.bitmap, &builder, nullptr, &second);
+    REQUIRE(second_handle != first_handle);
+    submit(driver, builder);
+    REQUIRE(driver.images[first_handle][0] == 12);
+    REQUIRE(driver.images[second_handle][0] == 99);
+
+    // The store may release a version after recording a draw but before submitting it.
+    const auto target = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    builder.bind_bitmap(target);
+    builder.draw_bitmap(first_handle, 0, rect({ 0, 0 }, { 1, 1 }), {});
+    first.reset();
+    cache.flush_retired(builder);
+    submit(driver, builder);
+    REQUIRE(driver.images[target][0] == 12);
+    REQUIRE(driver.images.count(first_handle) == 0);
+
+    SECTION("a resize retains the old dimensions and pixels") {
+        source.bitmap.header_.size_pixels = vec2(2, 1);
+        source.bitmap.header_.bitmap_size += 4;
+        source.bitmap.byte_width_ = 8;
+        std::shared_ptr<drivers::handle> resized;
+        const auto handle = cache.add_or_get(&driver, &source.bitmap, &builder, nullptr, &resized);
+        REQUIRE(handle != second_handle);
+        submit(driver, builder);
+        REQUIRE(driver.images[handle].size() == 8);
+        REQUIRE(driver.images[second_handle].size() == 4);
+    }
+    SECTION("eviction retains a version still owned by a command") {
+        std::vector<bitmap_fixture> bitmaps(epoc::MAX_CACHE_SIZE);
+        for (auto &bitmap : bitmaps) {
+            cache.add_or_get(&driver, &bitmap.bitmap, &builder);
+        }
+        cache.flush_retired(builder);
+        submit(driver, builder);
+        REQUIRE(driver.images.count(second_handle) == 1);
+    }
+    second.reset();
+    cache.clean(&driver);
+    REQUIRE(driver.images.size() == 1);
+    REQUIRE_FALSE(driver.invalid_use);
+    builder.destroy_bitmap(target);
+    submit(driver, builder);
+}
+
+TEST_CASE("Flattened GDI pixels leave undrawn areas to what lies beneath", "[window_surface],[gdi_store]") {
+    surface_driver driver;
+    epoc::bitmap_cache cache(nullptr);
+    drivers::graphics_command_builder builder;
+    const auto flattened = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    const auto screen = drivers::create_bitmap(&driver, { 1, 1 }, 32);
+    submit(driver, builder);
+    common::region clip;
+    clip.add_rect(rect({ 0, 0 }, { 1, 1 }));
+    epoc::gdi_command_builder gdi(&driver, builder, cache, drivers::filter_option::nearest,
+        { 0, 0 }, 1.0f, clip);
+
+    epoc::gdi_store_command draw;
+    draw.opcode_ = epoc::gdi_store_command_draw_raw_texture;
+    auto &data = draw.get_data_struct<epoc::gdi_store_command_draw_raw_texture_data>();
+    data.texture_ = flattened;
+    data.dest_rect_ = rect({ 0, 0 }, { 1, 1 });
+    data.flags_ = 0;
+    REQUIRE(epoc::gdi_store_command_draws_pixels(draw.opcode_));
+
+    const std::vector<std::uint8_t> beneath{ 0, 0, 255, 255 };
+    const auto composite = [&](const std::vector<std::uint8_t> &pixels) {
+        driver.images[flattened] = pixels;
+        driver.images[screen] = beneath;
+        builder.bind_bitmap(screen);
+        gdi.build_single_command(draw);
+        submit(driver, builder);
+        return driver.images[screen];
+    };
+
+    REQUIRE(composite({ 0, 0, 0, 0 }) == beneath);
+    REQUIRE(composite({ 0, 255, 0, 255 }) == std::vector<std::uint8_t>{ 0, 255, 0, 255 });
+    REQUIRE(composite({ 64, 0, 0, 128 }) == std::vector<std::uint8_t>{ 64, 0, 127, 255 });
+    REQUIRE_FALSE(driver.invalid_use);
+}
+
+TEST_CASE("Expiring no-redraw segments merges everything older instead of dropping it", "[gdi_store]") {
+    const bool with_flattener = GENERATE(false, true);
+    const rect window({ 0, 0 }, { 4, 4 });
+
+    epoc::gdi_store_command_collection store;
+    const auto *redraw = store.add_new_segment(window, epoc::gdi_store_command_segment_redraw);
+    std::vector<const epoc::gdi_store_command_segment *> non_redraw;
+    for (std::uint32_t i = 0; i <= epoc::gdi_store_command_collection::LIMIT_NON_REDRAW_SEGMENTS; i++) {
+        non_redraw.push_back(store.add_new_segment(window, epoc::gdi_store_command_segment_non_redraw));
+    }
+    const auto *current = store.get_current_segment();
+    REQUIRE(current == non_redraw.back());
+
+    std::vector<const epoc::gdi_store_command_segment *> merged_inputs;
+    const epoc::gdi_store_command_segment *merged = nullptr;
+    epoc::gdi_store_command_collection::segment_flattener flatten;
+    if (with_flattener) {
+        flatten = [&](const std::unique_ptr<epoc::gdi_store_command_segment> *segments, const std::size_t count) {
+            for (std::size_t i = 0; i < count; i++) {
+                merged_inputs.push_back(segments[i].get());
+            }
+            auto result = std::make_unique<epoc::gdi_store_command_segment>();
+            result->type_ = epoc::gdi_store_command_segment_redraw;
+            result->region_.add_rect(window);
+            merged = result.get();
+            return result;
+        };
+    }
+
+    REQUIRE(store.clean_old_nonredraw_segments(flatten));
+    REQUIRE(store.get_current_segment() == current);
+
+    std::vector<const epoc::gdi_store_command_segment *> remaining;
+    for (const auto &segment : store.get_segments()) {
+        remaining.push_back(segment.get());
+    }
+
+    if (with_flattener) {
+        // Every segment older than the newest expired one may lie beneath it, in replay order.
+        std::vector<const epoc::gdi_store_command_segment *> expected_inputs{ redraw };
+        expected_inputs.insert(expected_inputs.end(), non_redraw.begin(), non_redraw.end() - 1);
+        REQUIRE(merged_inputs == expected_inputs);
+        REQUIRE(remaining == std::vector<const epoc::gdi_store_command_segment *>{ merged, current });
+    } else {
+        std::vector<const epoc::gdi_store_command_segment *> expected{ redraw };
+        expected.insert(expected.end(), non_redraw.begin(),
+            non_redraw.begin() + epoc::gdi_store_command_collection::KEEP_NON_REDRAW_SEGMENTS);
+        expected.push_back(current);
+        REQUIRE(remaining == expected);
+    }
+}
+
+TEST_CASE("Registered surface IDs survive lookup without retaining producers", "[window_surface]") {
+    epoc::surface_registry registry;
+    auto surface = std::make_shared<epoc::window_surface>();
+    const auto first = registry.add(surface);
+    REQUIRE(first != epoc::surface_id{});
+    REQUIRE(registry.add(surface) == first);
+    REQUIRE(registry.find(first) == surface);
+
+    epoc::window_surface_attachment window;
+    window.attach(surface, {});
+    std::weak_ptr<epoc::window_surface> producer = surface;
+    surface.reset();
+    REQUIRE_FALSE(producer.expired());
+    REQUIRE(registry.find(first) == window.surface);
+    REQUIRE(registry.add(window.surface) == first);
+    window.detach(window.surface);
+    REQUIRE(producer.expired());
+    REQUIRE_FALSE(registry.find(first));
+    REQUIRE_FALSE(registry.find(epoc::surface_id{}));
 }

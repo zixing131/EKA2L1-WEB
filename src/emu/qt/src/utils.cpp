@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <qt/utils.h>
 
 #include <config/app_settings.h>
@@ -143,6 +144,9 @@ QString epocver_to_symbian_readable_name(const epocver ver) {
     case epocver::epoc6:
         return QString("S60v1");
 
+    case epocver::epoc70:
+        return QString("UIQ - 7.0");
+
     case epocver::epoc7:
         return QString("S60 - 7.0");
 
@@ -154,6 +158,9 @@ QString epocver_to_symbian_readable_name(const epocver ver) {
 
     case epocver::epoc81b:
         return QString("S60v2 - 8.1b");
+
+    case epocver::epoc91:
+        return QString("S60v3 MR");
 
     case epocver::epoc93fp1:
         return QString("S60v3 FP1");
@@ -177,8 +184,8 @@ QString epocver_to_symbian_readable_name(const epocver ver) {
     return QString("Unknown");
 }
 
-std::optional<std::string> get_mmc_id_from_path(const std::string &path) {
-    std::string folder_name = eka2l1::filename(path);
+std::optional<std::string> get_mmc_id_from_path(const eka2l1::host_path &path) {
+    std::string folder_name = path.filename().utf8();
     if (folder_name.empty()) {
         return std::nullopt;
     }

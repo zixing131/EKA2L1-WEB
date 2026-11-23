@@ -19,6 +19,7 @@
  */
 #pragma once
 
+#include <common/path_types.h>
 #include <kernel/btrace.h>
 #include <kernel/change_notifier.h>
 #include <kernel/chunk.h>
@@ -382,6 +383,9 @@ namespace eka2l1 {
         address exception_handler_guard_;
 
         bool wiping_;
+        std::vector<std::pair<guest_path, bool>> queued_boot_servers_;
+        kernel::uid starting_boot_server_ = 0;
+        std::vector<kernel::uid> processes_awaiting_boot_;
 
         config::panic_blacklist panic_blacklist_;
 
@@ -503,9 +507,22 @@ namespace eka2l1 {
         kernel::thread *crr_thread();
         kernel::process *crr_process();
 
-        process_ptr spawn_new_process(const std::u16string &path,
+        process_ptr spawn_new_process(const guest_path &path,
             const std::u16string &cmd_arg = u"", const kernel::uid promised_uid3 = 0,
-            const std::uint32_t stack_size = 0);
+            const std::uint32_t stack_size = 0, int *error = nullptr);
+
+        process_ptr spawn_new_process(std::u16string_view path,
+            const std::u16string &cmd_arg = u"", const kernel::uid promised_uid3 = 0,
+            const std::uint32_t stack_size = 0, int *error = nullptr) {
+            return spawn_new_process(guest_path::from_utf16(path), cmd_arg, promised_uid3, stack_size, error);
+        }
+
+        // Starts a server the device's own startup sequence launches before any application, after the previous one settles.
+        bool start_boot_server(const guest_path &path, const bool wait_for_start = true);
+
+        // Runs the process once every boot server has rendezvoused or died; at once when none is pending.
+        bool run_after_boot_servers(process_ptr pr);
+        void boot_server_settled(kernel::process *server_process);
 
         bool should_terminate();
         void do_state(common::chunkyseri &seri);
@@ -515,7 +532,7 @@ namespace eka2l1 {
 
         codeseg_ptr pull_codeseg_by_ep(const address ep);
 
-        bool map_rom(const mem::vm_address addr, const std::string &path);
+        bool map_rom(const mem::vm_address addr, const host_path &path);
         void unmap_rom();
 
         bool is_address_in_rom(const address addr) const;
@@ -690,14 +707,16 @@ namespace eka2l1 {
         }
 
         template <typename T>
-        T *get_by_name_and_type(const std::string &name, const kernel::object_type obj_type) {
+        T *get_by_name_and_type(const std::string &name, const kernel::object_type obj_type, const bool ignore_case = false) {
             switch (obj_type) {
 #define OBJECT_SEARCH(obj_type, obj_map)                                               \
     case kernel::object_type::obj_type: {                                              \
         auto res = std::find_if(obj_map.begin(), obj_map.end(), [&](const auto &rhs) { \
             std::string the_full_name;                                                 \
             rhs->full_name(the_full_name);                                             \
-            return the_full_name == name;                                              \
+            return ignore_case                                                        \
+                ? common::compare_ignore_case(the_full_name.c_str(), name.c_str()) == 0  \
+                : the_full_name == name;                                               \
         });                                                                            \
         if (res == obj_map.end())                                                      \
             return nullptr;                                                            \

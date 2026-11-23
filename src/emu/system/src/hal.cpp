@@ -160,6 +160,19 @@ namespace eka2l1::epoc {
         }
     };
 
+    static constexpr std::uint32_t PALETTE_BYTES = sizeof(std::uint16_t) * epoc::WORD_PALETTE_ENTRIES_COUNT;
+
+    // Nokia EKA1 panels start with a 16-word palette that their scdv skips. UIQ 2's
+    // scdv takes iScreenAddress as the first pixel, so its panel starts at the pixels.
+    static bool panel_has_palette(eka2l1::system *sys) {
+        return sys->get_symbian_version_use() != epocver::epoc70;
+    }
+
+    static address panel_address(eka2l1::system *sys, epoc::screen *scr) {
+        const address base = scr->screen_buffer_chunk->base(nullptr).ptr_address();
+        return panel_has_palette(sys) ? base : base + PALETTE_BYTES;
+    }
+
     struct display_hal : public hal {
         window_server *winserv_;
         std::int32_t contrast_;
@@ -247,11 +260,13 @@ namespace eka2l1::epoc {
             return epoc::error_none;
         }
 
-        static void get_screen_info_from_scr_object(epoc::screen *scr, epoc::screen_info_v1 &info) {
+        void get_screen_info_from_scr_object(epoc::screen *scr, epoc::screen_info_v1 &info) {
             info.window_handle_valid_ = false;
             info.screen_address_valid_ = true;
-            info.screen_address_ = scr->screen_buffer_chunk->base(nullptr).cast<void>();
+            info.screen_address_ = panel_address(sys, scr);
             info.screen_size_ = scr->size();
+
+            winserv_->map_direct_framebuffer(scr);
         }
 
         void get_video_info_from_scr_object(epoc::screen *scr, const epoc::display_mode &mode, epoc::video_info_v1 &info) {
@@ -269,11 +284,14 @@ namespace eka2l1::epoc {
 
             // TODO: Verify
             info.is_pixel_order_landspace_ = (info.size_in_pixels_.x > info.size_in_pixels_.y);
-            info.is_palettelized_ = !info.is_mono_ && (mode < epoc::display_mode::color4k);
+            // Only the indexed modes carry a palette; comparing against color4k marked
+            // every 16- and 24-bit mode palettised because 4K sorts after them in the enum.
+            info.is_palettelized_ = !info.is_mono_ && (info.bits_per_pixel_ <= 8);
 
             // Intentional
-            info.video_address_ = scr->screen_buffer_chunk->base(nullptr).ptr_address();
-            info.offset_to_first_pixel_ = sizeof(std::uint16_t) * epoc::WORD_PALETTE_ENTRIES_COUNT;
+            info.video_address_ = panel_address(sys, scr);
+            winserv_->map_direct_framebuffer(scr);
+            info.offset_to_first_pixel_ = panel_has_palette(sys) ? PALETTE_BYTES : 0;
             info.offset_between_lines_ = scr->screen_buffer_byte_width();
             info.display_mode_ = 0;
         }
@@ -589,17 +607,16 @@ namespace eka2l1::epoc {
             *reinterpret_cast<std::uint32_t *>(data) = 1000000 / epoc::TICK_TIMER_HZ;
             break;
 
-        case kernel::hal_data_eka1_display_contrast_max:
-            *reinterpret_cast<std::uint32_t *>(data) = HAL_CONTRAST_MAX;
-            break;
-
         case kernel::hal_data_eka1_display_memory_address: {    
             window_server *winserv = reinterpret_cast<window_server *>(sys->get_kernel_system()->get_by_name<service::server>(
                 eka2l1::get_winserv_name_by_epocver(sys->get_symbian_version_use())));
 
             epoc::screen *crr_screen = winserv->get_current_focus_screen();
 
-            *reinterpret_cast<std::uint32_t *>(data) = crr_screen->screen_buffer_chunk->base(nullptr).ptr_address();
+            *reinterpret_cast<std::uint32_t *>(data) = panel_address(sys, crr_screen);
+
+            winserv->map_direct_framebuffer(crr_screen);
+
             break;
         }
 
@@ -623,6 +640,7 @@ namespace eka2l1::epoc {
             return the_hal->current_mode_info(reinterpret_cast<int *>(data), nullptr, 0);
         }
 
+        case kernel::hal_data_eka1_display_num_of_colors:
         case kernel::hal_data_eka1_screen_num_of_colors: {
             display_hal *the_hal = reinterpret_cast<display_hal *>(sys->get_hal(hal_category_display));
 

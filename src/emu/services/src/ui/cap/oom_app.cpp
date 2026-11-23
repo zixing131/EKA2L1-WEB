@@ -61,6 +61,14 @@ namespace eka2l1 {
         return sgc.get();
     }
 
+    epoc::cap::eik_server *oom_ui_app_server::get_eik_server() {
+        if (!eik) {
+            init(sys->get_kernel_system(), sys->get_io_system(), sys->get_device_manager());
+        }
+
+        return eik.get();
+    }
+
     oom_ui_app_session::oom_ui_app_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_version, const bool is_old_layout)
         : service::typical_session(svr, client_ss_uid, client_version)
         , blank_count(0)
@@ -306,7 +314,7 @@ namespace eka2l1 {
             return;
         }
 
-        eik->key_block_mode(!static_cast<bool>(disable_it.value()));
+        get_eik_server()->key_block_mode(!static_cast<bool>(disable_it.value()));
         ctx.complete(epoc::error_none);
     }
 
@@ -323,7 +331,7 @@ namespace eka2l1 {
             coe_storage = std::make_unique<epoc::coe_data_storage>(cenrep, io, mngr);
 
             const std::u16string EIKSRV_RSC_FILE_PATH = u"z:\\resource\\uiklaf\\eikpriv.rsc";
-            const std::u16string designated_file = utils::get_nearest_lang_file(io, EIKSRV_RSC_FILE_PATH,
+            const guest_path designated_file = utils::get_nearest_lang_file(io, eka2l1::guest_path{EIKSRV_RSC_FILE_PATH},
                 kern->get_current_language(), drive_z);
 
             symfile resource_priv = io->open_file(designated_file, READ_MODE | BIN_MODE);

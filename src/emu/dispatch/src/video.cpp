@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <common/log.h>
 #include <common/cvt.h>
 #include <dispatch/video.h>
@@ -228,6 +229,10 @@ namespace eka2l1::dispatch {
             on_play_done(0);
             return;
         }
+        if (playback_completed_ && !range) {
+            video_player_->set_position(0);
+        }
+        playback_completed_ = false;
         if (!surface_) {
             surface_ = std::make_shared<epoc::window_surface>();
         }
@@ -256,6 +261,7 @@ namespace eka2l1::dispatch {
             detach_target(posting);
         }
         surface_created_ = false;
+        playback_completed_ = false;
         surface_.reset();
         custom_stream_.reset();
     }
@@ -269,7 +275,7 @@ namespace eka2l1::dispatch {
         }
     }
 
-    bool epoc_video_player::open_file(const std::u16string &real_path) {
+    bool epoc_video_player::open_file(const host_path &real_path) {
         if (!video_player_) {
             // No decode backend: pretend the open succeeded. The clip then
             // behaves as a zero-length video — play() completes the done
@@ -277,10 +283,10 @@ namespace eka2l1::dispatch {
             // intro video (the N-Gage 2.0 launcher loops retrying the open
             // when it gets not-supported) simply skip it and move on.
             LOG_WARN(HLE_DISPATCHER, "No video backend: pretending '{}' opened (clip will complete instantly)",
-                common::ucs2_to_utf8(real_path));
+                real_path);
             return true;
         }
-        return video_player_->open_file(common::ucs2_to_utf8(real_path));
+        return video_player_->open_file(real_path);
     }
 
     bool epoc_video_player::open_with_custom_stream(std::unique_ptr<common::ro_stream> &stream) {
@@ -307,11 +313,57 @@ namespace eka2l1::dispatch {
         }
     }
 
+    std::int32_t epoc_video_player::set_window_rotation(std::int32_t managed_handle, int rotation) {
+        auto *target = managed_handle > 0 ? postings_.get(static_cast<std::size_t>(managed_handle)) : nullptr;
+        if (!target || !target->target_window_) {
+            return epoc::error_bad_handle;
+        }
+        if (rotation < ROTATION_TYPE_NONE || rotation > ROTATION_TYPE_CLOCKWISE270) {
+            return epoc::error_argument;
+        }
+        target->config_.rotation = rotation * 90;
+        auto *window = target->target_window_;
+        const std::lock_guard<std::mutex> guard(window->scr->screen_mutex);
+        window->configure_surface(surface_, target->config_);
+        return epoc::error_none;
+    }
+
     void epoc_video_player::post_new_image(const std::uint8_t *buffer_data, const std::size_t buffer_size) {
         if (!video_player_ || !surface_) {
             return;
         }
         surface_->publish_pixels(buffer_data, buffer_size, video_player_->get_video_size());
+    }
+
+    void epoc_video_player::pause() {
+        if (video_player_) {
+            video_player_->pause();
+        }
+        if (surface_) {
+            surface_->set_streaming(false);
+        }
+    }
+
+    void epoc_video_player::set_position(std::uint64_t position) {
+        if (video_player_) {
+            video_player_->set_position(position);
+        }
+        playback_completed_ = false;
+    }
+
+    std::uint64_t epoc_video_player::duration() const {
+        return video_player_->duration();
+    }
+
+    epoc::surface_id epoc_video_player::export_surface(epoc::surface_registry &registry) {
+        if (!surface_) {
+            surface_ = std::make_shared<epoc::window_surface>();
+        }
+        return registry.add(surface_);
+    }
+
+    eka2l1::vec2 epoc_video_player::frame_size() const {
+        return video_player_ ? video_player_->get_video_size() : eka2l1::vec2();
     }
 
     std::uint64_t epoc_video_player::position() const {
@@ -338,6 +390,7 @@ namespace eka2l1::dispatch {
         // this thread release the kernel lock around the join, so taking it here
         // cannot deadlock.
         kern_->lock();
+        playback_completed_ = error == 0;
 
         if (!play_done_notify_.empty() && kern_->is_thread_alive(play_done_notify_.requester)) {
             play_done_notify_.complete((error == 0) ? epoc::error_none : epoc::error_general);
@@ -364,6 +417,43 @@ namespace eka2l1::dispatch {
         auto player = std::make_unique<epoc_video_player>(sys->get_kernel_system(), sys->get_graphics_driver(),
             sys->get_audio_driver(), version == 1);
         return sys->get_dispatcher()->video_player_container_.add_object(player);
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_window_rotation, const std::uint32_t handle, const std::int32_t managed_handle, const int rotation) {
+        auto *player = sys->get_dispatcher()->video_player_container_.get_object(handle);
+        return player ? player->set_window_rotation(managed_handle, rotation) : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_surface_id, const std::uint32_t handle, epoc::surface_id *id) {
+        auto *dispatcher = sys->get_dispatcher();
+        auto *player = dispatcher->video_player_container_.get_object(handle);
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+        if (!id) {
+            return epoc::error_argument;
+        }
+        if (!dispatcher->winserv_ || player->frame_size().x <= 0) {
+            return epoc::error_not_ready;
+        }
+        *id = player->export_surface(dispatcher->winserv_->surfaces());
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_frame_size, const std::uint32_t handle, eka2l1::vec2 *size) {
+        auto *player = sys->get_dispatcher()->video_player_container_.get_object(handle);
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+        if (!size) {
+            return epoc::error_argument;
+        }
+        const auto dimensions = player->frame_size();
+        if (dimensions.x <= 0 || dimensions.y <= 0) {
+            return epoc::error_not_ready;
+        }
+        *size = dimensions;
+        return epoc::error_none;
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_crop, const std::uint32_t handle, const eka2l1::rect *crop) {
@@ -521,18 +611,18 @@ namespace eka2l1::dispatch {
 
         io_system *ios = sys->get_io_system();
 
-        if (!ios->exist(virtual_filename)) {
+        if (!ios->exist(eka2l1::guest_path{virtual_filename})) {
             return epoc::error_not_found;            
         }
 
-        std::optional<std::u16string> real_filename = ios->get_raw_path(virtual_filename);
+        std::optional<host_path> real_filename = ios->get_raw_path(eka2l1::guest_path{virtual_filename});
 
         bool open_res = false;
 
         if (real_filename.has_value()) {
             open_res = player->open_file(real_filename.value());            
         } else {
-            symfile f = ios->open_file(virtual_filename, READ_MODE | BIN_MODE);
+            symfile f = ios->open_file(eka2l1::guest_path{virtual_filename}, READ_MODE | BIN_MODE);
             if (!f) {
                 return epoc::error_not_found;
             }
@@ -629,10 +719,51 @@ namespace eka2l1::dispatch {
         kern->unlock();
         player->stop();
         kern->lock();
+        player->set_position(0);
 
         return epoc::error_none;
     }
     
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_pause, const std::uint32_t handle) {
+        auto *player = sys->get_dispatcher()->video_player_container_.get_object(handle);
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+        kernel_system *kern = sys->get_kernel_system();
+        kern->unlock();
+        player->pause();
+        kern->lock();
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_position, const std::uint32_t handle, const std::uint64_t *position_us) {
+        auto *player = sys->get_dispatcher()->video_player_container_.get_object(handle);
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+        if (!position_us) {
+            return epoc::error_argument;
+        }
+        const auto position = *position_us;
+        kernel_system *kern = sys->get_kernel_system();
+        kern->unlock();
+        player->set_position(position);
+        kern->lock();
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_duration, const std::uint32_t handle, std::uint64_t *duration_us) {
+        auto *player = sys->get_dispatcher()->video_player_container_.get_object(handle);
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+        if (!duration_us) {
+            return epoc::error_argument;
+        }
+        *duration_us = player->duration();
+        return epoc::error_none;
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_position, const std::uint32_t handle, std::uint64_t *position_us) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         dispatch::epoc_video_player *player = dispatcher->video_player_container_.get_object(handle);

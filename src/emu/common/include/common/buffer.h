@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <common/algorithm.h>
 #include <common/platform.h>
 #include <common/fileutils.h>
@@ -48,6 +49,8 @@ namespace eka2l1 {
 
         class basic_stream {
         public:
+            virtual ~basic_stream() = default;
+
             virtual void seek(const std::int64_t amount, seek_where wh) = 0;
             virtual bool valid() = 0;
             virtual std::uint64_t left() = 0;
@@ -289,7 +292,7 @@ namespace eka2l1 {
             mutable FILE *fi_;
 
         public:
-            explicit ro_std_file_stream(const std::string &path, const bool binary) {
+            explicit ro_std_file_stream(const host_path &path, const bool binary) {
                 fi_ = common::open_c_file(path, binary ? "rb" : "r");
             }
 
@@ -366,7 +369,7 @@ namespace eka2l1 {
             mutable FILE *fo_;
 
         public:
-            explicit wo_std_file_stream(const std::string &path, const bool binary)
+            explicit wo_std_file_stream(const host_path &path, const bool binary)
                 : fo_(nullptr) {
                 fo_ = common::open_c_file(path, binary ? "wb" : "w");
             }

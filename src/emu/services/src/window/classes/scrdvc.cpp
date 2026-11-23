@@ -53,9 +53,10 @@ namespace eka2l1::epoc {
         return epoc::graphics_orientation::normal;
     }
 
-    screen_device::screen_device(window_server_client_ptr client, epoc::screen *scr)
+    screen_device::screen_device(window_server_client_ptr client, epoc::screen *scr, const std::uint32_t client_pointer)
         : window_client_obj(client, scr)
-        , local_screen_mode_(scr->crr_mode) {
+        , local_screen_mode_(scr->crr_mode)
+        , client_pointer_(client_pointer) {
     }
 
     void screen_device::set_screen_mode_and_rotation(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd) {
@@ -64,7 +65,7 @@ namespace eka2l1::epoc {
         for (int i = 0; i < scr->scr_config.modes.size(); i++) {
             epoc::config::screen_mode &mode = scr->scr_config.modes[i];
 
-            if (mode.size == info->pixel_size && number_to_orientation(mode.rotation) == info->orientation) {
+            if (mode.defined && mode.size == info->pixel_size && number_to_orientation(mode.rotation) == info->orientation) {
                 // Eureka... Bắt được mày rồi....
                 local_screen_mode_ = i;
 
@@ -83,7 +84,7 @@ namespace eka2l1::epoc {
         for (int i = 0; i < scr->scr_config.modes.size(); i++) {
             epoc::config::screen_mode &mode = scr->scr_config.modes[i];
 
-            if (mode.size == info->pixel_size && number_to_orientation(mode.rotation) == info->orientation) {
+            if (mode.defined && mode.size == info->pixel_size && number_to_orientation(mode.rotation) == info->orientation) {
                 // Eureka... Bắt được mày rồi....
                 local_screen_mode_ = i;
 
@@ -98,20 +99,28 @@ namespace eka2l1::epoc {
 
     void screen_device::set_screen_mode(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd) {
         const int mode = *reinterpret_cast<int *>(cmd.data_ptr);
+        const epoc::config::screen_mode *mode_info = scr->mode_info(mode);
+        if (!mode_info || !mode_info->defined) {
+            ctx.complete(epoc::error_argument);
+            return;
+        }
         scr->set_screen_mode(&client->get_ws(), client->get_ws().get_graphics_driver(), mode);
+        ctx.complete(epoc::error_none);
     }
 
     void screen_device::get_screen_size_mode_list(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd) {
         std::vector<int> modes;
 
         for (int i = 0; i < scr->scr_config.modes.size(); i++) {
-            modes.push_back(i);
+            if (scr->scr_config.modes[i].defined) {
+                modes.push_back(i);
+            }
         }
 
-        ctx.write_data_to_descriptor_argument(reply_slot, reinterpret_cast<std::uint8_t *>(&modes[0]),
+        ctx.write_data_to_descriptor_argument(reply_slot, reinterpret_cast<std::uint8_t *>(modes.data()),
             static_cast<std::uint32_t>(sizeof(int) * modes.size()));
 
-        ctx.complete(scr->total_screen_mode());
+        ctx.complete(static_cast<int>(modes.size()));
     }
 
     void screen_device::get_screen_size_mode_and_rotation(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd,
@@ -201,7 +210,7 @@ namespace eka2l1::epoc {
         for (int i = 0; i < scr->total_screen_mode(); i++) {
             const epoc::config::screen_mode *mode = scr->mode_info(i);
 
-            if (mode) {
+            if (mode && mode->defined) {
                 mode_list |= (1 << static_cast<std::int32_t>(get_orientation_from_rotation(mode->rotation)));
             }
         }
@@ -211,9 +220,10 @@ namespace eka2l1::epoc {
 
     void screen_device::set_app_screen_mode(eka2l1::service::ipc_context &ctx, eka2l1::ws_cmd &cmd) {
         int mode = *reinterpret_cast<int*>(cmd.data_ptr);
-        if (mode >= scr->total_screen_mode()) {
-            LOG_ERROR(SERVICE_WINDOW, "Trying to set screen mode number out of range!");
+        const auto *info = scr->mode_info(mode);
+        if (!info || !info->defined) {
             ctx.complete(epoc::error_argument);
+            return;
         }
 
         local_screen_mode_ = mode;
@@ -283,7 +293,6 @@ namespace eka2l1::epoc {
 
         case ws_sd_op_set_screen_mode: {
             set_screen_mode(ctx, cmd);
-            ctx.complete(epoc::error_none);
 
             break;
         }
@@ -316,10 +325,9 @@ namespace eka2l1::epoc {
         }
 
         case ws_sd_op_get_screen_mode_display_mode: {
-            int mode = *reinterpret_cast<int *>(cmd.data_ptr);
-
-            ctx.write_data_to_descriptor_argument(reply_slot, scr->disp_mode);
-            ctx.complete(epoc::error_none);
+            const int mode = *reinterpret_cast<int *>(cmd.data_ptr);
+            const auto *info = scr->mode_info(mode);
+            ctx.complete(info ? static_cast<int>(info->disp_mode) : epoc::error_argument);
 
             break;
         }
@@ -337,7 +345,7 @@ namespace eka2l1::epoc {
 
             for (int i = 0; i < scr->total_screen_mode(); i++) {
                 const epoc::config::screen_mode *candidate = scr->mode_info(i);
-                if (candidate) {
+                if (candidate && candidate->defined) {
                     alternative_rotations |= 1U << static_cast<std::uint32_t>(
                         get_orientation_from_rotation(candidate->rotation));
                 }
@@ -363,7 +371,7 @@ namespace eka2l1::epoc {
             // Fixed/direct-colour panels still report their colour capacity.
             // Use the native panel layout, which can differ from the backing bitmap.
             // Leave ws_sd_op_setable_bit_flag clear: custom palettes are unsupported.
-            ctx.complete(epoc::get_num_colors_from_display_mode(scr->dsa_disp_mode));
+            ctx.complete(epoc::get_num_colors_from_display_mode(scr->current_mode().dsa_disp_mode));
             break;
 
         case ws_sd_op_display_mode: {

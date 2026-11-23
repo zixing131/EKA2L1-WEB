@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <common/vecx.h>
 #include <common/container.h>
 #include <dispatch/def.h>
@@ -56,6 +57,7 @@ namespace eka2l1::dispatch {
     private:
         std::shared_ptr<epoc::window_surface> surface_;
         bool surface_created_ = false;
+        bool playback_completed_ = false;
         bool legacy_display_;
         std::optional<eka2l1::rect> crop_region_;
         drivers::video_player_instance video_player_;
@@ -92,14 +94,20 @@ namespace eka2l1::dispatch {
         std::uint32_t current_volume() const;
         bool set_volume(const std::uint32_t vol);
 
-        bool open_file(const std::u16string &real_path);
+        bool open_file(const host_path &real_path);
         bool open_with_custom_stream(std::unique_ptr<common::ro_stream> &stream);
 
         void set_rotation(const int rotation);
+        std::int32_t set_window_rotation(std::int32_t managed_handle, int rotation);
 
         void play(const std::uint64_t *range);
         void close();
         void stop();
+        void pause();
+        void set_position(std::uint64_t position);
+        std::uint64_t duration() const;
+        eka2l1::vec2 frame_size() const;
+        epoc::surface_id export_surface(epoc::surface_registry &registry);
 
         bool set_done_notify(epoc::notify_info &info);
         void cancel_done_notify();
@@ -114,6 +122,9 @@ namespace eka2l1::dispatch {
 
     BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, evideo_player_inst);
     BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, evideo_player_inst_with_version, const std::uint32_t version);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_window_rotation, const std::uint32_t handle, const std::int32_t managed_handle, const int rotation);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_surface_id, const std::uint32_t handle, epoc::surface_id *id);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_frame_size, const std::uint32_t handle, eka2l1::vec2 *size);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_crop, const std::uint32_t handle, const eka2l1::rect *crop);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_destroy, const std::uint32_t handle);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_register_window, const std::uint32_t handle, const std::uint32_t wss_handle, const std::uint32_t win_ws_handle);
@@ -126,6 +137,9 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_volume, const std::uint32_t handle, const std::int32_t new_vol);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_rotation, const std::uint32_t handle, const int rot_type);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_play, const std::uint32_t handle, const std::uint64_t *range);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_pause, const std::uint32_t handle);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_position, const std::uint32_t handle, const std::uint64_t *position_us);
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_duration, const std::uint32_t handle, std::uint64_t *duration_us);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_stop, const std::uint32_t handle);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_close, const std::uint32_t handle);
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_set_done_notify, const std::uint32_t handle, eka2l1::ptr<epoc::request_status> sts);

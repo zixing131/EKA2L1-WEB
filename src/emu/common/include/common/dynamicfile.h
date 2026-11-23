@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdio>
+#include <common/path_types.h>
 #include <string>
 
 namespace eka2l1::common {
@@ -38,7 +39,7 @@ namespace eka2l1::common {
         bool  fail_;
 
     public:
-        explicit dynamic_ifile(const std::string &name);
+        explicit dynamic_ifile(const host_path &name);
 
         // Allow move-assignment (used when retrying with another filename).
         dynamic_ifile(dynamic_ifile &&o) noexcept

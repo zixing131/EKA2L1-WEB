@@ -17,6 +17,9 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
+#include <climits>
+
 #include <common/buffer.h>
 #include <common/log.h>
 #include <common/time.h>
@@ -31,28 +34,26 @@ namespace eka2l1::drivers {
     void player_ffmpeg::deinit() {
         if (format_context_) {
             avformat_close_input(&format_context_);
-            avformat_free_context(format_context_);
-        }
-
-        if (custom_io_buffer_) {
-            av_freep(&custom_io_buffer_);
         }
 
         if (custom_io_) {
+            // libavformat may replace the buffer supplied to avio_alloc_context.
+            av_freep(&custom_io_->buffer);
             avio_context_free(&custom_io_);
         }
 
         if (codec_) {
             avcodec_free_context(&codec_);
         }
+        if (packet_) {
+            av_packet_unref(packet_);
+        }
+        duration_us_ = 0;
     }
 
     bool player_ffmpeg::open_ffmpeg_stream() {
         if (avformat_find_stream_info(format_context_, nullptr) < 0) {
             LOG_ERROR(DRIVER_AUD, "Error while finding stream info of input {}", url_);
-            avformat_free_context(format_context_);
-            format_context_ = nullptr;
-
             return false;
         }
 
@@ -81,32 +82,53 @@ namespace eka2l1::drivers {
             return false;
         }
 
+        if (nice_codec->id == AV_CODEC_ID_MP3) {
+            // Symbian's MP3 controller counts complete frames, including encoder padding.
+            codec_->flags2 |= AV_CODEC_FLAG2_SKIP_MANUAL;
+        }
+
         if (avcodec_open2(codec_, nice_codec, nullptr) < 0) {
             LOG_ERROR(DRIVER_AUD, "Unable to open codec of stream url {}", url_);
-
-            avformat_free_context(format_context_);
-            format_context_ = nullptr;
 
             return false;
         }
 
-        channels_ = codec_->channels;
+        channels_ = codec_->ch_layout.nb_channels;
         freq_ = codec_->sample_rate;
 
-        const double time_base = av_q2d(stream->time_base);
-        duration_us_ = static_cast<std::uint64_t>(static_cast<double>(stream->duration) * time_base * common::microsecs_per_sec);
+        std::int64_t duration = std::max<std::int64_t>(stream->duration, 0);
+        const bool padded_mp3 = (nice_codec->id == AV_CODEC_ID_MP3) && (stream->start_time > 0);
+        const bool guessed = (duration == 0) || (format_context_->duration_estimation_method == AVFMT_DURATION_FROM_BITRATE);
+        if ((padded_mp3 || guessed)
+            && format_context_->pb && (format_context_->pb->seekable & AVIO_SEEKABLE_NORMAL)) {
+            // The demuxer's LAME duration excludes padding, and raw streams such as AMR only have a bit rate guess.
+            // Packet durations retain the full frame timeline without relying on private demuxer fields.
+            std::int64_t frame_duration = 0;
+            int result;
+            while ((result = av_read_frame(format_context_, packet_)) >= 0) {
+                if (packet_->stream_index == best_stream_index) {
+                    frame_duration += packet_->duration;
+                }
+                av_packet_unref(packet_);
+            }
+            if ((result == AVERROR_EOF) && (frame_duration > 0)) {
+                duration = frame_duration;
+            }
+            if (!set_position_for_custom_format(0)) {
+                return false;
+            }
+        }
+        duration_us_ = av_rescale_q_rnd(duration, stream->time_base,
+            AVRational{1, common::microsecs_per_sec}, AV_ROUND_DOWN);
 
         return true;
     }
 
     bool player_ffmpeg::open_url(const std::string &url) {
-        const std::lock_guard<std::mutex> guard(lock_);
-        flags_ |= 1;
-
-        if (output_stream_ && output_stream_->is_playing()) {
-            output_stream_->stop();
+        if (!stop()) {
+            return false;
         }
-
+        const std::lock_guard<std::mutex> guard(lock_);
         flags_ &= ~1;
 
         deinit();
@@ -136,18 +158,23 @@ namespace eka2l1::drivers {
             return;
         }
 
-        if (av_read_frame(format_context_, &packet_) < 0) {
+        av_packet_unref(packet_);
+        if (av_read_frame(format_context_, packet_) < 0) {
             flags_ |= 1;
             return;
         }
 
         // Send packet to decoder
-        if (avcodec_send_packet(codec_, &packet_) >= 0) {
+        if (avcodec_send_packet(codec_, packet_) >= 0) {
             AVFrame *frame = av_frame_alloc();
             int err = avcodec_receive_frame(codec_, frame);
 
             if (err < 0) {
-                LOG_ERROR(DRIVER_AUD, "Error while decoding a frame err={}!", err);
+                // Decoders may hold back output, e.g. AAC dropping its priming frame.
+                if (err != AVERROR(EAGAIN)) {
+                    LOG_ERROR(DRIVER_AUD, "Error while decoding a frame err={}!", err);
+                }
+
                 av_frame_free(&frame);
                 return;
             }
@@ -161,18 +188,20 @@ namespace eka2l1::drivers {
 
             data_.resize(base_ptr + channels_ * frame->nb_samples * sizeof(std::int16_t));
 
-            if ((frame->format != AV_SAMPLE_FMT_S16) || (frame->channels != channels_)
+            if ((frame->format != AV_SAMPLE_FMT_S16) || (frame->ch_layout.nb_channels != channels_)
                 || (frame->sample_rate != freq_)) {
-                // Resample it
-                const int dest_channel_type = (channels_ == 2) ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO;
-
-                SwrContext *swr = swr_alloc_set_opts(nullptr,
-                    dest_channel_type, AV_SAMPLE_FMT_S16, freq_,
-                    frame->channel_layout, static_cast<AVSampleFormat>(frame->format), frame->sample_rate,
+                AVChannelLayout output_layout{};
+                av_channel_layout_default(&output_layout, channels_);
+                SwrContext *swr = nullptr;
+                const int result = swr_alloc_set_opts2(&swr,
+                    &output_layout, AV_SAMPLE_FMT_S16, freq_,
+                    &frame->ch_layout, static_cast<AVSampleFormat>(frame->format), frame->sample_rate,
                     0, nullptr);
+                av_channel_layout_uninit(&output_layout);
 
-                if (swr_init(swr) < 0) {
+                if (result < 0 || swr_init(swr) < 0) {
                     LOG_ERROR(DRIVER_AUD, "Error initializing SWR context");
+                    swr_free(&swr);
                     av_frame_free(&frame);
 
                     return;
@@ -181,23 +210,23 @@ namespace eka2l1::drivers {
                 std::uint8_t *output = data_.data() + base_ptr;
                 const std::uint8_t **source = const_cast<const std::uint8_t**>(frame->extended_data);
 
-                const int result = swr_convert(swr, &output, frame->nb_samples, source, frame->nb_samples);
+                const int converted = swr_convert(swr, &output, frame->nb_samples, source, frame->nb_samples);
                 swr_free(&swr);
 
-                if (result < 0) {
+                if (converted < 0) {
                     LOG_ERROR(DRIVER_AUD, "Error resample audio data!");
+                    av_frame_free(&frame);
                     flags_ |= 1;
                     return;
                 }
+                data_.resize(base_ptr + channels_ * converted * sizeof(std::int16_t));
             } else {
-                // Just gonna copy smh
-                std::memcpy(&data_[base_ptr], frame->data[0], data_.size());
+                std::memcpy(&data_[base_ptr], frame->data[0], data_.size() - base_ptr);
             }
 
             av_frame_free(&frame);
+            data_pointer_ = base_ptr;
         }
-
-        data_pointer_ = 0;
     }
 
     static int ffmpeg_custom_rw_io_read(void *opaque, std::uint8_t *buf, int buf_size) {
@@ -207,7 +236,7 @@ namespace eka2l1::drivers {
         return ((size <= 0) ? AVERROR_EOF : static_cast<int>(size));
     }
 
-    static int ffmpeg_custom_rw_io_write(void *opaque, std::uint8_t *buf, int buf_size) {
+    static int ffmpeg_custom_rw_io_write(void *opaque, const std::uint8_t *buf, int buf_size) {
         common::rw_stream *stream = reinterpret_cast<common::rw_stream *>(opaque);
         const std::uint64_t size = stream->write(buf, buf_size);
 
@@ -231,7 +260,9 @@ namespace eka2l1::drivers {
             pos_seek_mode = common::seek_where::end;
             break;
 
-        // Missing SEEK_SIZE support
+        case AVSEEK_SIZE:
+            return static_cast<common::rw_stream *>(opaque)->size();
+
         default:
             return -1;
         }
@@ -243,29 +274,28 @@ namespace eka2l1::drivers {
     }
 
     bool player_ffmpeg::open_custom(common::rw_stream *the_stream) {
-        const std::lock_guard<std::mutex> guard(lock_);
-        flags_ |= 1;
-
-        if (output_stream_ && output_stream_->is_playing()) {
-            output_stream_->stop();
+        if (!stop()) {
+            return false;
         }
-
+        const std::lock_guard<std::mutex> guard(lock_);
         flags_ &= ~1;
         deinit();
 
+        the_stream->seek(0, common::seek_where::beg);
+
         static constexpr std::uint32_t CUSTOM_IO_BUFFER_SIZE = 8192;
 
-        custom_io_buffer_ = reinterpret_cast<std::uint8_t *>(av_malloc(CUSTOM_IO_BUFFER_SIZE));
+        auto *custom_io_buffer = reinterpret_cast<std::uint8_t *>(av_malloc(CUSTOM_IO_BUFFER_SIZE));
 
-        if (!custom_io_buffer_) {
+        if (!custom_io_buffer) {
             return false;
         }
 
-        custom_io_ = avio_alloc_context(custom_io_buffer_, CUSTOM_IO_BUFFER_SIZE,
+        custom_io_ = avio_alloc_context(custom_io_buffer, CUSTOM_IO_BUFFER_SIZE,
             0, the_stream, ffmpeg_custom_rw_io_read, ffmpeg_custom_rw_io_write, ffmpeg_custom_rw_io_seek);
 
         if (!custom_io_) {
-            av_freep(&custom_io_buffer_);
+            av_freep(&custom_io_buffer);
             return false;
         }
 
@@ -285,6 +315,7 @@ namespace eka2l1::drivers {
             LOG_ERROR(DRIVER_AUD, "Error seeking the stream!");
             return false;
         }
+        avcodec_flush_buffers(codec_);
 
         return true;
     }
@@ -305,14 +336,17 @@ namespace eka2l1::drivers {
             return false;
         }
 
-        const int *sample_rate_support_array = output_encoder_->supported_samplerates;
-        while (*sample_rate_support_array) {
-            if (*sample_rate_support_array == static_cast<std::int32_t>(freq)) {
-                freq_ = static_cast<std::int32_t>(freq);
-                return true;
-            }
+        const void *configs = nullptr;
+        int count = 0;
+        if (!freq || freq > INT_MAX || avcodec_get_supported_config(nullptr, output_encoder_,
+                AV_CODEC_CONFIG_SAMPLE_RATE, 0, &configs, &count) < 0) {
+            return false;
         }
-
+        const auto *rates = static_cast<const int *>(configs);
+        if (!rates || std::find(rates, rates + count, static_cast<int>(freq)) != rates + count) {
+            freq_ = freq;
+            return true;
+        }
         return false;
     }
 
@@ -322,16 +356,19 @@ namespace eka2l1::drivers {
             return false;
         }
 
-        const std::uint64_t *layout_support_layout = output_encoder_->channel_layouts;
-        while (*layout_support_layout) {
-            if (av_get_channel_layout_nb_channels(*layout_support_layout) == static_cast<std::int32_t>(cn)) {
-                channels_ = cn;
-                channel_layout_dest_ = *layout_support_layout;
-
-                return true;
-            }
+        const void *configs = nullptr;
+        int count = 0;
+        if (!cn || cn > INT_MAX || avcodec_get_supported_config(nullptr, output_encoder_,
+                AV_CODEC_CONFIG_CHANNEL_LAYOUT, 0, &configs, &count) < 0) {
+            return false;
         }
-
+        const auto *layouts = static_cast<const AVChannelLayout *>(configs);
+        if (!layouts || std::any_of(layouts, layouts + count, [cn](const auto &layout) {
+                return layout.nb_channels == cn;
+            })) {
+            channels_ = cn;
+            return true;
+        }
         return false;
     }
 
@@ -369,14 +406,16 @@ namespace eka2l1::drivers {
             return false;
         }
 
-        if (!(new_codec->supported_samplerates) || !(new_codec->channel_layouts)) {
-            // One of those arrays is empty. Return
-            LOG_ERROR(DRIVER_AUD, "Supported sample rates or supported channel layouts array is empty!");
+        const void *rates = nullptr;
+        const void *layouts = nullptr;
+        if (avcodec_get_supported_config(nullptr, new_codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &rates, nullptr) < 0
+            || avcodec_get_supported_config(nullptr, new_codec, AV_CODEC_CONFIG_CHANNEL_LAYOUT, 0, &layouts, nullptr) < 0) {
             return false;
         }
 
-        channels_ = av_get_channel_layout_nb_channels(*new_codec->channel_layouts);
-        freq_ = *new_codec->supported_samplerates;
+        // A null configuration list means the encoder accepts any value.
+        channels_ = layouts ? static_cast<const AVChannelLayout *>(layouts)->nb_channels : 2;
+        freq_ = rates ? *static_cast<const int *>(rates) : 44100;
         encoding_ = enc;
         output_encoder_ = new_codec;
 
@@ -384,46 +423,25 @@ namespace eka2l1::drivers {
     }
 
     bool player_ffmpeg::make_backend_source() {
-        if (format_context_) {
-            avformat_free_context(format_context_);
-        }
-
         format_context_ = avformat_alloc_context();
+        if (!format_context_ || !packet_) {
+            deinit();
+            return false;
+        }
 
         if (custom_io_) {
             format_context_->pb = custom_io_;
             format_context_->flags |= AVFMT_FLAG_CUSTOM_IO;
-
-            url_ = "Dummy";
         }
 
-        auto do_free_custom = [&]() {
-            if (custom_io_buffer_) {
-                av_freep(&custom_io_buffer_);
-            }
-
-            if (custom_io_) {
-                avio_context_free(&custom_io_);
-            }
-        };
-
-        if (avformat_open_input(&format_context_, url_.c_str(), nullptr, nullptr) < 0) {
+        if (avformat_open_input(&format_context_, custom_io_ ? nullptr : url_.c_str(), nullptr, nullptr) < 0) {
             LOG_ERROR(DRIVER_AUD, "Error while opening AVFormat Input!");
-            avformat_free_context(format_context_);
-
-            format_context_ = nullptr;
-            do_free_custom();
-
+            deinit();
             return false;
         }
 
-        // The open input above already freed the custom IO buffer
-        custom_io_buffer_ = nullptr;
-
         if (!open_ffmpeg_stream()) {
-            format_context_ = nullptr;
-            do_free_custom();
-    
+            deinit();
             return false;
         }
 
@@ -434,24 +452,17 @@ namespace eka2l1::drivers {
         : player_shared(driver)
         , codec_(nullptr)
         , format_context_(nullptr)
+        , packet_(av_packet_alloc())
         , output_encoder_(nullptr)
-        , channel_layout_dest_(0)
         , custom_io_(nullptr)
-        , custom_io_buffer_(nullptr)
         , duration_us_(0) {
-        av_init_packet(&packet_);
     }
 
     player_ffmpeg::~player_ffmpeg() {
-        // Stop the hardware stream before freeing the decode contexts: the
-        // render callback pulls get_more_data(), which reads them, and once
-        // this destructor finishes the vtable rolls back to player_shared
-        // where get_more_data is pure. ~player_shared's own stop runs too
-        // late for both.
-        if (output_stream_) {
-            output_stream_->stop();
-        }
+        // Render callbacks must finish before their decoder and derived vtable disappear.
+        stop();
 
         deinit();
+        av_packet_free(&packet_);
     }
 }

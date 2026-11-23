@@ -91,6 +91,9 @@ namespace eka2l1 {
         void active_view(service::ipc_context *ctx, const bool should_complete);
         void deactive_view(service::ipc_context *ctx, const bool should_complete);
         void get_custom_message(service::ipc_context *ctx);
+        void get_current_active_view_id(service::ipc_context *ctx);
+        void check_source_of_view_switch(service::ipc_context *ctx);
+        void notify_next_transition(service::ipc_context *ctx, const bool activation);
 
         explicit view_session(service::typical_server *server, const kernel::uid session_uid, epoc::version client_version);
         void fetch(service::ipc_context *ctx) override;
@@ -103,8 +106,9 @@ namespace eka2l1 {
         void on_view_activation(const ui::view::view_id &id);
         void on_view_deactivation(const ui::view::view_id &id);
 
-        void queue_event(const ui::view::view_event &evt, const ui::view::custom_message &msg = {}) {
-            queue_.queue_event(evt, msg);
+        void queue_event(const ui::view::view_event &evt, const ui::view::custom_message &msg = {},
+            const epoc::notify_info &on_acknowledged = epoc::notify_info{}, const std::optional<epoc::security_info> &switch_source = {}) {
+            queue_.queue_event(evt, msg, on_acknowledged, switch_source);
         }
     };
 
@@ -132,7 +136,7 @@ namespace eka2l1 {
         view_session *active_view_session();
 
         void make_view_active(view_session *activator, const ui::view::view_id &active_id,
-            const ui::view::custom_message &msg);
+            const ui::view::custom_message &msg, const epoc::security_info &source, const epoc::notify_info &on_activated = epoc::notify_info{});
         void deactivate_active_view();
 
         void call_activation_listener(const ui::view::view_id id);

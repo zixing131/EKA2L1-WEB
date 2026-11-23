@@ -21,6 +21,10 @@
 
 #include <kernel/ldd.h>
 
+namespace eka2l1::kernel {
+    class chunk;
+}
+
 namespace eka2l1::ldd {
     enum video_driver_control_op {
         video_driver_control_op_get_screen_display_constrast = 3,
@@ -31,11 +35,25 @@ namespace eka2l1::ldd {
         video_driver_control_op_get_screen_extra_info = 16      // Same as 15, just fill other fields
     };
 
+    // Each base port numbers the display LDD's control functions itself. Symbian 7.0
+    // (UIQ 2.x) uses a different table from the Series 80 one above.
+    enum video_driver_control_op_epoc70 {
+        video_driver_control_op_epoc70_get_backlight_state = 6,
+        video_driver_control_op_epoc70_get_display_mode = 11,
+        video_driver_control_op_epoc70_get_mode_count = 12,
+        video_driver_control_op_epoc70_get_screen_display_state = 16,
+        video_driver_control_op_epoc70_get_screen_num_of_colors = 17,
+        video_driver_control_op_epoc70_get_current_mode_info = 18,
+        video_driver_control_op_epoc70_get_specified_mode_info = 19
+    };
+
     class video_driver_channel : public channel {
     private:
         std::int32_t get_screen_number_of_colors(kernel::thread *r, const std::uint32_t n, const eka2l1::ptr<void> arg1,
             const eka2l1::ptr<void> arg2);
         std::int32_t get_screen_info(kernel::thread *r, const std::uint32_t n, const eka2l1::ptr<void> arg1,
+            const eka2l1::ptr<void> arg2);
+        std::int32_t do_control_epoc70(kernel::thread *r, const std::uint32_t n, const eka2l1::ptr<void> arg1,
             const eka2l1::ptr<void> arg2);
     public:
         explicit video_driver_channel(kernel_system *kern, system *sys, epoc::version ver);
@@ -117,6 +135,33 @@ namespace eka2l1::ldd {
         ~display_driver_factory() override {
         }
 
+        void install() override;
+        std::unique_ptr<channel> make_channel(epoc::version ver) override;
+    };
+
+    enum lcd_driver_control_op {
+        lcd_driver_get_framebuffer = 0x1001,
+        lcd_driver_create_context = 0x2001,
+        lcd_driver_submit_queue = 0x2003,
+        lcd_driver_get_orientation = 0x2008,
+        lcd_driver_get_scale = 0x200B
+    };
+
+    class lcd_driver_channel : public channel {
+        kernel::chunk *command_queue_ = nullptr;
+
+    public:
+        explicit lcd_driver_channel(kernel_system *kern, system *sys, epoc::version ver);
+        int destroy() override;
+        std::int32_t do_control(kernel::thread *r, std::uint32_t n, eka2l1::ptr<void> arg1,
+            eka2l1::ptr<void> arg2) override;
+        std::int32_t do_request(epoc::notify_info info, std::uint32_t n, eka2l1::ptr<void> arg1,
+            eka2l1::ptr<void> arg2, bool is_supervisor) override;
+    };
+
+    class lcd_driver_factory : public factory {
+    public:
+        explicit lcd_driver_factory(kernel_system *kern, system *sys);
         void install() override;
         std::unique_ptr<channel> make_channel(epoc::version ver) override;
     };

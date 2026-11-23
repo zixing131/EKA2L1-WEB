@@ -9,15 +9,18 @@ add_library(epocldd
         include/ldd/iad/iad.h
         include/ldd/nokiaisc/nokiaisc.h
         include/ldd/oldcamera/oldcamera.h
+        include/ldd/accelerometer/accelerometer.h
         include/ldd/videodriver/videodriver.h
         src/collection.cpp
         src/ecomm/ecomm.cpp
+        src/extsound/extsound.cpp
         src/ekeyb/ekeyb.cpp
         src/hal/hal.cpp
         src/mmcif/mmcif.cpp
         src/iad/iad.cpp
         src/nokiaisc/nokiaisc.cpp
         src/oldcamera/oldcamera.cpp
+        src/accelerometer/accelerometer.cpp
         src/videodriver/videodriver.cpp
 )
 

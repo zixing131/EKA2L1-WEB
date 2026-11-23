@@ -91,8 +91,28 @@ HLE_DISPATCH_FUNC(TInt, EAudioPlayerGetDestinationEncoding, TAny *aInstance, TUi
 
 HLE_DISPATCH_FUNC(TInt, EAudioPlayerSetContainerFormat, TAny *aInstance, const TUint32 aFourCC);
 
+// Capture the input device into the clip at aUrl until EAudioPlayerStop.
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerRecord, TAny *aInstance, const TUint16 *aUrl, const TUint aUrlLength);
+
+// Name the clip a recorder utility opened; its format decides the destination settings below.
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerOpenRecordClip, TAny *aInstance, const TUint16 *aUrl, const TUint aUrlLength);
+
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerGetDestinationBitRate, TAny *aInstance);
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerSetDestinationBitRate, TAny *aInstance, const TUint aBitRate);
+
+enum TAudioPlayerDestinationValueKind {
+    EAudioPlayerDestinationSampleRates = 0,
+    EAudioPlayerDestinationChannelCounts = 1,
+    EAudioPlayerDestinationBitRates = 2,
+    EAudioPlayerDestinationDataTypes = 3
+};
+
+// Fill up to aMaxCount supported values; returns their total count, or an error.
+HLE_DISPATCH_FUNC(TInt, EAudioPlayerGetSupportedDestinationValues, TAny *aInstance, const TInt aKind, TUint32 *aValues, const TInt aMaxCount);
+
 /// TONE PLAYER
 HLE_DISPATCH_FUNC(TAny *, ETonePlayerNewInstance);
+HLE_DISPATCH_FUNC(TInt, ETonePlayerDestroy, TAny *aInstance);
 HLE_DISPATCH_FUNC(TInt, ETonePlayerNotifyAnyDone, TAny *aInstance, TRequestStatus &aStatus);
 
 HLE_DISPATCH_FUNC(TInt, ETonePlayerSetVolume, TAny *aInstance, const TInt aVolume);
@@ -104,6 +124,9 @@ HLE_DISPATCH_FUNC(TInt, ETonePlayerSetBufferToneSequence, TAny *aInstance, const
 HLE_DISPATCH_FUNC(TInt, ETonePlayerSetFileToneSequence, TAny *aInstance, const TDesC16 &aSequence);
 HLE_DISPATCH_FUNC(TInt, ETonePlayerSetFixedToneSequence, TAny *aInstance, const TInt aSequenceIndex);
 HLE_DISPATCH_FUNC(TInt, ETonePlayerSetSingleTone, TAny *aInstance, TInt aFrequency, TInt aDurationMicrosLow, TInt aDurationMicrosHigh);
+HLE_DISPATCH_FUNC(TInt, ETonePlayerSetDualTone, TAny *aInstance, TInt aFrequencyOne, TInt aFrequencyTwo, TInt aDurationMicrosLow, TInt aDurationMicrosHigh);
+HLE_DISPATCH_FUNC(TInt, ETonePlayerSetDTMFString, TAny *aInstance, const TDesC16 &aDTMF);
+HLE_DISPATCH_FUNC(TInt, ETonePlayerSetDTMFLengths, TAny *aInstance, TInt aToneOnMicros, TInt aToneOffMicros, TInt aPauseMicros);
 HLE_DISPATCH_FUNC(TInt, ETonePlayerGetFixedSequenceCount, TAny *aInstance);
 
 HLE_DISPATCH_FUNC(TInt, ETonePlayerSetBalance, TAny *aInstance, TInt aBalance);

@@ -1,110 +1,542 @@
-name: WASM CI
+# Vita3K emulator project
+# Copyright (C) 2018 Vita3K team
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-on: 
+name: C/C++ CI
+
+on:
   push:
   pull_request:
-  workflow_dispatch: # 正确的位置：放在 on 下面，允许手动触发
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
-  build-wasm:
+  build-android:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./src/emu/android
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v6
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install build-essential libc6-dev
+
+    - name: Identify FFmpeg cache
+      id: ffmpeg
+      run: |
+        echo "revision=$(git -C ../../external/ffmpeg rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+    - name: Cache FFmpeg
+      uses: actions/cache@v6
+      with:
+        path: build/ffmpeg-cache
+        key: ffmpeg-android-${{ steps.ffmpeg.outputs.image }}-${{ steps.ffmpeg.outputs.revision }}-${{ hashFiles('src/emu/android/app/build.gradle', '.github/workflows/build.yml') }}
+
+    - name: Build with Gradle
+      run: ./gradlew assembleRelease -PciArg='-DCI=ON'
+
+    - name: Compute git short sha
+      id: git_short_sha
+      run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+    # Signing secrets are not exposed to pull requests coming from a fork, so the
+    # APK is only signed when they are available. Everything else still runs, and
+    # the unsigned APK is uploaded instead so the build stays verifiable.
+    - name: Sign APK
+      env:
+        SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        ALIAS: ${{ secrets.ALIAS }}
+        KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        APK_NAME: eka2l1-${{ steps.git_short_sha.outputs.value }}.apk
+      run: |
+        set -e
+        UNSIGNED=app/build/outputs/apk/release/app-release-unsigned.apk
+        OUT="${GITHUB_WORKSPACE}/${APK_NAME}"
+
+        if [ -z "${SIGNING_KEY}" ]; then
+          echo "No signing key available, uploading the unsigned APK."
+          cp "${UNSIGNED}" "${OUT}"
+          exit 0
+        fi
+
+        BUILD_TOOLS_VERSION=$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -printf "%f\n" | sort -V | tail -n 1)
+        echo "Signing with build tools ${BUILD_TOOLS_VERSION}"
+
+        echo "${SIGNING_KEY}" | base64 -d > "${RUNNER_TEMP}/keystore.jks"
+        "${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}/apksigner" sign \
+          --ks "${RUNNER_TEMP}/keystore.jks" \
+          --ks-pass "pass:${KEY_STORE_PASSWORD}" \
+          --ks-key-alias "${ALIAS}" \
+          --key-pass "pass:${KEY_PASSWORD}" \
+          --out "${OUT}" "${UNSIGNED}"
+        rm -f "${RUNNER_TEMP}/keystore.jks"
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v7
+      with:
+        name: eka2l1-${{ steps.git_short_sha.outputs.value }}-android
+        path: eka2l1-${{ steps.git_short_sha.outputs.value }}.apk
+
+  build-desktop:
+    runs-on: ${{ matrix.os }}
+    env:
+      cache-version: v1
+      config: Release
+      MACOSX_DEPLOYMENT_TARGET: 12.0
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: macos-latest
+            label: macos
+          - os: ubuntu-latest
+            label: linux
+
+    steps:
+    - name: Set up build environment (macOS)
+      run: brew install ccache
+      if: matrix.label == 'macos'
+
+    # Ubuntu ships Qt 6 and SDL 2, so both come from apt instead of being
+    # installed by aqt / built from source.
+    - name: Set up build environment (Linux)
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install ccache libgtk-3-dev libpulse-dev libasound2-dev \
+          libsdl2-dev pulseaudio qt6-base-dev qt6-base-private-dev qt6-tools-dev \
+          qt6-tools-dev-tools qt6-l10n-tools libqt6svg6-dev qt6-multimedia-dev
+      if: matrix.label == 'linux'
+
+    - name: Configure ccache
+      run: echo "CCACHE_DIR=${{ runner.temp }}/ccache" >> "$GITHUB_ENV"
+      if: matrix.label != 'windows'
+
+    - uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: ccache-${{ env.cache-version }}-${{ matrix.label }}-${{ github.sha }}
+        restore-keys: ccache-${{ env.cache-version }}-${{ matrix.label }}-
+      if: matrix.label != 'windows'
+
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Set up FFmpeg build tools (Windows)
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        install: make
+      if: matrix.label == 'windows'
+
+    - name: Install Qt6 (macOS)
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.9.3'
+        host: 'mac'
+        target: 'desktop'
+        arch: 'clang_64'
+        modules: 'qtmultimedia'
+        cache: true
+      if: matrix.label == 'macos'
+
+    # Qt 6 links OpenSSL 3, so tools_opensslv3_x64 is the runtime Qt Network
+    # needs; the 1.1 package Qt used to publish is gone with OpenSSL 1.1 itself.
+    - name: Install Qt6 (Windows)
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.9.3'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2022_64'
+        modules: 'qtmultimedia'
+        tools: 'tools_opensslv3_x64'
+        cache: true
+      if: matrix.label == 'windows'
+
+    - name: CMake configure (macOS)
+      run: cmake -B build -DCI=ON -DEKA2L1_DEPLOY_DMG=ON -DEKA2L1_ENABLE_UNEXPECTED_EXCEPTION_HANDLER=ON -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=ON -DCMAKE_PREFIX_PATH=${{ env.QT_ROOT_DIR }} -DCMAKE_BUILD_TYPE=${{ env.config }}
+      if: matrix.label == 'macos'
+
+    - name: CMake configure (Windows)
+      run: cmake -B build -DEKA2L1_FFMPEG_BASH="${{ steps.msys2.outputs.msys2-location }}/usr/bin/bash.exe" -DEKA2L1_FFMPEG_MAKE="${{ steps.msys2.outputs.msys2-location }}/usr/bin/make.exe" -DCI=ON -DEKA2L1_ENABLE_UNEXPECTED_EXCEPTION_HANDLER=ON -DEKA2L1_NO_TERMINAL=ON -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=ON -DCMAKE_PREFIX_PATH=${{ env.QT_ROOT_DIR }} -DCMAKE_BUILD_TYPE=${{ env.config }}
+      if: matrix.label == 'windows'
+
+    - name: CMake configure (Linux)
+      run: cmake -B build -DCI=ON -DEKA2L1_ENABLE_UNEXPECTED_EXCEPTION_HANDLER=ON -DEKA2L1_NO_TERMINAL=ON -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=ON -DCMAKE_BUILD_TYPE=${{ env.config }}
+      if: matrix.label == 'linux'
+
+    - name: Cache FFmpeg
+      uses: actions/cache@v6
+      with:
+        path: build/ffmpeg-cache
+        key: ffmpeg-${{ matrix.label }}-${{ runner.arch }}-${{ hashFiles('build/src/external/ffmpeg/ffmpeg-build-config.cmake') }}
+
+    - name: CMake build
+      run: cmake --build build --config ${{ env.config }} --parallel 4 --target eka2l1_qt ekatests
+      if: matrix.label != 'windows'
+
+    - name: CMake build
+      run: cmake --build build --config ${{ env.config }} --parallel 4 --target eka2l1_qt updater ekatests
+      if: matrix.label == 'windows'
+
+    # -C matters on the multi-config Windows generator; it is harmless elsewhere.
+    - name: Run unit tests
+      run: ctest --test-dir build -C ${{ env.config }} --output-on-failure
+
+    # linuxdeploy and its plugins are AppImages themselves, and the runner image
+    # no longer ships FUSE 2 to mount them.
+    - name: Generate AppImage
+      env:
+        APPIMAGE_EXTRACT_AND_RUN: 1
+        QMAKE: /usr/bin/qmake6
+      run: |
+        chmod u+x scripts/generate_appimage.sh
+        ./scripts/generate_appimage.sh
+      if: matrix.label == 'linux'
+
+    - name: Compute git short sha
+      id: git_short_sha
+      run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      shell: bash
+
+    # Restores the TLS backend the Windows build lost when Qt retired its
+    # OpenSSL 1.1 package: without it the in-app updater cannot reach
+    # api.github.com.
+    - name: Copy OpenSSL binaries
+      run: |
+        $tools = $env:IQTA_TOOLS
+        if (-not $tools) { Write-Warning "Qt tools directory unknown, skipping OpenSSL"; exit 0 }
+        foreach ($dll in @("libcrypto-3-x64.dll", "libssl-3-x64.dll")) {
+          $src = Get-ChildItem -Path $tools -Filter $dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($src) {
+            Copy-Item $src.FullName "build\bin\"
+          } else {
+            Write-Warning "$dll not found under $tools"
+          }
+        }
+      shell: pwsh
+      if: matrix.label == 'windows'
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: eka2l1-${{ steps.git_short_sha.outputs.value }}-${{ matrix.label }}
+        path: build/bin
+      if: matrix.label == 'windows'
+
+    # The bundle left in build/bin is what macdeployqt packed into the DMG, not
+    # a second deliverable, and the DMG is what people install from.
+    - uses: actions/upload-artifact@v7
+      with:
+        name: eka2l1-${{ steps.git_short_sha.outputs.value }}-${{ matrix.label }}
+        path: build/bin/EKA2L1.dmg
+      if: matrix.label == 'macos'
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: eka2l1-${{ steps.git_short_sha.outputs.value }}-${{ matrix.label }}
+        path: build/eka2l1-qt-x64.AppImage
+      if: matrix.label == 'linux'
+
+  # Device only, and never signed. Signing on CI mints a development certificate
+  # per run and Apple caps how many an account may hold, so a signing CI is a CI
+  # that eventually stops working; an App Store export needs a distribution
+  # certificate on top of that, which this repository does not hold. Nothing
+  # here needs a signature to prove the code compiles, links and packages.
+  #
+  # Both slices are arm64 and compile almost the same translation units, so a
+  # simulator build would be mostly a second copy of the device one at twice the
+  # wall clock -- and what has to keep working is that the app builds for a
+  # phone. The cost is that code behind TARGET_OS_SIMULATOR (the synthetic
+  # camera backend) is not compiled here; add a matrix back if that grows past
+  # a stub.
+  build-ios:
+    runs-on: macos-26
+    env:
+      EKA2L1_IOS_CONFIGURATION: Release
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Identify FFmpeg cache
+      id: ffmpeg
+      run: |
+        echo "revision=$(git -C src/external/ffmpeg rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+    - name: Cache FFmpeg
+      uses: actions/cache@v6
+      with:
+        path: build/ffmpeg-cache
+        key: ffmpeg-ios-device-${{ steps.ffmpeg.outputs.image }}-${{ steps.ffmpeg.outputs.revision }}-${{ hashFiles('scripts/build_ios.sh', 'cmake/ios.toolchain.cmake', '.github/workflows/build.yml') }}
+
+    - name: Build
+      run: ./scripts/build_ios.sh device
+      env:
+        EKA2L1_IOS_UNFILTERED_IMPORT: ON
+
+    - name: Compute git short sha
+      id: git_short_sha
+      run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+    # Payload/EKA2L1.app zipped as an .ipa, which is the shape the sideloading
+    # tools expect. It carries no signature, so installing it needs something
+    # that applies one -- AltStore, Sideloadly, or Xcode with a developer
+    # account. Packaging here rather than in the release job keeps the .app out
+    # of an artifact zip, which does not preserve a bundle's symlinks.
+    - name: Package unsigned IPA
+      run: |
+        set -euo pipefail
+        app="build/ios-device/src/emu/ios/${EKA2L1_IOS_CONFIGURATION}-iphoneos/EKA2L1.app"
+        if [ ! -d "${app}" ]; then
+          echo "Built app not found: ${app}" >&2
+          exit 1
+        fi
+        rm -rf build/ios-release
+        mkdir -p build/ios-release/Payload
+        cp -R "${app}" build/ios-release/Payload/
+        (cd build/ios-release && zip -qry EKA2L1-iOS-unsigned.ipa Payload && rm -rf Payload)
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: eka2l1-${{ steps.git_short_sha.outputs.value }}-ios-device
+        path: build/ios-release/EKA2L1-iOS-unsigned.ipa
+        if-no-files-found: error
+
+  # One check with a stable name for branch protection to require. The matrix
+  # job names carry their runner labels, so they change whenever an image is
+  # swapped -- a required check pinned to those silently stops applying. This
+  # one does not move.
+  dyncom-difftest:
+    name: dyncom differential test
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    # Same package set as the Linux desktop job. The harness itself only needs
+    # cpu + common + dynarmic, but src/emu/qt is added unconditionally on
+    # desktop, so CMake still has to find Qt at configure time.
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install build-essential libc6-dev libgtk-3-dev \
+          libpulse-dev libasound2-dev libsdl2-dev qt6-base-dev \
+          qt6-base-private-dev qt6-tools-dev qt6-tools-dev-tools \
+          qt6-l10n-tools libqt6svg6-dev qt6-multimedia-dev
+
+    # Its own build directory on purpose: the harness needs
+    # EKA2L1_DYNCOM_DIFFTEST, which instruments the cpu library, so it must not
+    # share a tree with the jobs that publish artifacts.
+    - name: Run the dyncom differential test
+      run: ./scripts/cpu_difftest.sh 1 20000
+
+  sanitisers:
+    name: sanitisers
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install build-essential clang libc6-dev libgtk-3-dev \
+          libpulse-dev libasound2-dev libsdl2-dev qt6-base-dev \
+          qt6-base-private-dev qt6-tools-dev qt6-tools-dev-tools \
+          qt6-l10n-tools libqt6svg6-dev qt6-multimedia-dev
+
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    # Its own build directory, like the difftest job: the sanitisers change code
+    # generation everywhere, so this tree must not be shared with the jobs that
+    # publish artifacts. XZ_SANDBOX=no is xz's own instruction when it sees
+    # -fsanitize=: its Landlock sandbox and the sanitisers cannot both be on.
+    - name: CMake configure
+      env:
+        CC: clang
+        CXX: clang++
+        SANITISER_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+      run: >
+        cmake -B build-sanitisers -DCI=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        -DEKA2L1_ENABLE_SCRIPTING_ABILITY=OFF -DXZ_SANDBOX=no
+        -DCMAKE_C_FLAGS="$SANITISER_FLAGS"
+        -DCMAKE_CXX_FLAGS="$SANITISER_FLAGS"
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+    - name: Build the unit tests
+      run: cmake --build build-sanitisers --parallel 4 --target ekatests
+
+    # halt_on_error makes an undefined-behaviour report fail the job; without it
+    # UBSan only prints and the test still passes. Leak detection stays off for
+    # now: the suite exits with objects the emulator never frees on purpose, and
+    # sorting those out is a separate piece of work from catching memory errors
+    # and undefined behaviour.
+    - name: Run the unit tests under the sanitisers
+      env:
+        ASAN_OPTIONS: detect_leaks=0
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: ctest --test-dir build-sanitisers --output-on-failure
+
+  ci:
+    name: CI
+    needs: [build-android, build-desktop, build-ios, dyncom-difftest, sanitisers]
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Cache emsdk
-        uses: actions/cache@v4
-        with:
-          path: emsdk-cache
-          key: emsdk-${{ runner.os }}-latest-${{ github.run_id }}
-          restore-keys: |
-            emsdk-${{ runner.os }}-latest-
-
-      - name: Setup Emscripten
-        uses: mymindstorm/setup-emsdk@v13
-        with:
-          version: latest
-          actions-cache-folder: 'emsdk-cache'
-          no-cache: true
-
-      - name: Verify Emscripten
-        run: emcc --version
-
-      - name: Cache build
-        uses: actions/cache@v4
-        with:
-          path: build_wasm
-          key: wasm-build-${{ github.sha }}
-          restore-keys: wasm-build-
-
-      - name: CMake Configure
-        run: |
-          emcmake cmake -B build_wasm \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCI=ON \
-            -DEKA2L1_BUILD_TOOLS=OFF \
-            -DEKA2L1_BUILD_TESTS=OFF \
-            -DEKA2L1_ENABLE_SCRIPTING_ABILITY=OFF \
-            -DEKA2L1_BUILD_VULKAN_BACKEND=OFF \
-            -DEKA2L1_ENABLE_DISCORD_RICH_PRESENCE=OFF
-
-      - name: CMake Build
-        run: cmake --build build_wasm --config Release --parallel $(nproc)
-
-      - name: Compute git short sha
-        id: git_short_sha
-        run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Package WASM output
-        run: |
-          mkdir -p wasm-package
-          cp build_wasm/bin/eka2l1.js wasm-package/ 2>/dev/null || true
-          cp build_wasm/bin/eka2l1.wasm wasm-package/ 2>/dev/null || true
-          cp build_wasm/bin/eka2l1.html wasm-package/ 2>/dev/null || true
-          cp build_wasm/bin/eka2l1.data wasm-package/ 2>/dev/null || true
-          cp build_wasm/bin/eka2l1.worker.js wasm-package/ 2>/dev/null || true
-          cp build_wasm/bin/eka2l1.js.mem wasm-package/ 2>/dev/null || true
-          cp src/emu/web/shell.html wasm-package/index.html 2>/dev/null || true
-
-      - name: Upload WASM Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}
-          path: wasm-package/
+    - name: Check the build and test jobs
+      run: |
+        echo "android:    ${{ needs.build-android.result }}"
+        echo "desktop:    ${{ needs.build-desktop.result }}"
+        echo "ios:        ${{ needs.build-ios.result }}"
+        echo "difftest:   ${{ needs.dyncom-difftest.result }}"
+        echo "sanitisers: ${{ needs.sanitisers.result }}"
+        if [ "${{ needs.build-android.result }}" != "success" ] || \
+           [ "${{ needs.build-desktop.result }}" != "success" ] || \
+           [ "${{ needs.build-ios.result }}" != "success" ] || \
+           [ "${{ needs.dyncom-difftest.result }}" != "success" ] || \
+           [ "${{ needs.sanitisers.result }}" != "success" ]; then
+          echo "::error::A build or test job did not pass"
+          exit 1
+        fi
 
   roll-release:
-    needs: [build-wasm]
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+   needs: [build-android, build-desktop, build-ios]
+   runs-on: macos-26
+   timeout-minutes: 180
+   if: github.repository == 'EKA2L1/EKA2L1' && github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+   permissions:
+     contents: write
+   steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
 
-      - name: Compute git short sha
-        id: git_short_sha
-        run: echo "value=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+    - name: Compute git short sha
+      id: git_short_sha
+      run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Download WASM Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: "eka2l1-wasm-${{ steps.git_short_sha.outputs.value }}"
-          path: wasm-files
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: "eka2l1-${{ steps.git_short_sha.outputs.value }}-windows"
+        path: windows-files
 
-      - name: Package for release
-        run: |
-          cd wasm-files
-          zip -r ../EKA2L1-WebAssembly.zip .
-          cd ..
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: "eka2l1-${{ steps.git_short_sha.outputs.value }}-macos"
+        path: mac-files
 
-      - name: Create release
-        uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "continuous" # 修正了单词拼写: continous -> continuous
-          prerelease: false
-          title: "Automatic CI builds (WebAssembly)"
-          files: |
-            EKA2L1-WebAssembly.zip
+    - name: Sign and notarize the macOS release
+      id: macos_notarization
+      continue-on-error: true
+      env:
+        MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
+        MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+        MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        MACOS_NOTARY_PRIVATE_KEY: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY }}
+      run: bash scripts/notarize_macos_release.sh mac-files/EKA2L1.dmg EKA2L1-MacOS-arm64.dmg
+
+    - name: Use the original macOS artifact if notarization failed
+      if: steps.macos_notarization.outcome == 'failure'
+      run: |
+        echo "::warning::macOS signing or notarization failed; publishing the original CI DMG."
+        cp -f mac-files/EKA2L1.dmg EKA2L1-MacOS-arm64.dmg
+
+    - name: Upload notarization diagnostics
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@v7
+      with:
+        name: macos-notarization-${{ github.sha }}
+        path: macos-notarization/*.json
+        if-no-files-found: ignore
+
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: "eka2l1-${{ steps.git_short_sha.outputs.value }}-linux"
+
+    - name: Download Android artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: "eka2l1-${{ steps.git_short_sha.outputs.value }}-android"
+
+    - name: Download iOS artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: "eka2l1-${{ steps.git_short_sha.outputs.value }}-ios-device"
+
+    # get_platform_release_filename() in src/emu/qt/src/update_dialog.cpp looks
+    # the asset up by this exact name, so renaming one means renaming both.
+    - name: Rename artifacts for release
+      run: |
+        (cd windows-files && zip -r ../EKA2L1-Windows-x86_64.zip .)
+        mv eka2l1-qt-x64.AppImage EKA2L1-Linux-x86_64.AppImage
+        mv eka2l1-${{ steps.git_short_sha.outputs.value }}.apk EKA2L1-Android.apk
+
+    # The release is a rolling one, so the tag has to be moved to the commit
+    # being published before the release itself is updated.
+    - name: Move the rolling tag
+      run: |
+        git tag -f continous
+        git push -f origin refs/tags/continous
+
+    - name: Create release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: continous
+        name: "Automatic CI builds"
+        prerelease: false
+        files: |
+          EKA2L1-Windows-x86_64.zip
+          EKA2L1-MacOS-arm64.dmg
+          EKA2L1-Linux-x86_64.AppImage
+          EKA2L1-Android.apk
+          EKA2L1-iOS-unsigned.ipa

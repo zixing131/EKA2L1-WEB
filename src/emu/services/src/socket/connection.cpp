@@ -21,12 +21,154 @@
 #include <services/socket/connection.h>
 #include <services/socket/server.h>
 #include <services/socket/socket.h>
+#include <services/centralrepo/centralrepo.h>
 
 #include <common/log.h>
 #include <utils/err.h>
 #include <system/epoc.h>
+#include <algorithm>
+#include <cstring>
+#include <iterator>
 
 namespace eka2l1::epoc::socket {
+    namespace {
+        const central_repo_entry *find_iap_field(service::ipc_context *ctx, std::uint32_t field, std::uint32_t iap) {
+            auto *cenrep = reinterpret_cast<central_repo_server *>(ctx->sys->get_kernel_system()
+                ->get_by_name<service::server>(CENTRAL_REPO_SERVER_NAME));
+            auto *repo = cenrep ? cenrep->load_repo_with_lookup(ctx->sys->get_io_system(),
+                ctx->sys->get_device_manager(), 0xCCCCCC00) : nullptr;
+            if (!repo) {
+                return nullptr;
+            }
+            repo->access_count--;
+            return repo->find_entry(field | (iap << 8));
+        }
+
+        // CommsDat hands IAP link fields to clients as plain record ids, whichever form is stored
+        // (TMDBRecordLinkVisitor::MaintainBCForLegacyLinks).
+        std::uint32_t link_record_id(std::uint32_t link) {
+            return (link > 255) ? ((link & 0xFF00) >> 8) : link;
+        }
+    }
+
+    connection_state::~connection_state() {
+        if (active) {
+            advance(conn_progress_link_layer_closed);
+            advance(conn_progress_connection_closed);
+        }
+    }
+
+    void connection_state::advance(std::int32_t new_stage) {
+        const bool was_active = active;
+        stage = new_stage;
+        active = new_stage == conn_progress_connection_opened || new_stage == conn_progress_link_layer_open;
+        const auto callbacks = observers;
+        for (const auto &[owner, callback] : callbacks) {
+            if (observers.count(owner)) {
+                callback(new_stage);
+            }
+        }
+        if (active != was_active) {
+            if (const auto listeners = interface_observers_.lock()) {
+                const interface_notification event{ info, active ? 0U : 1U };
+                for (const auto &listener : *listeners) {
+                    if (const auto callback = listener.lock()) {
+                        (*callback)(event);
+                    }
+                }
+            }
+        }
+    }
+
+    void connection_registry::observe_interfaces(const std::shared_ptr<interface_observer> &observer) {
+        auto &listeners = *interface_observers_;
+        listeners.erase(std::remove_if(listeners.begin(), listeners.end(),
+            [](const auto &listener) { return listener.expired(); }), listeners.end());
+        listeners.push_back(observer);
+    }
+
+    std::shared_ptr<connection_state> connection_registry::create() {
+        states_.erase(std::remove_if(states_.begin(), states_.end(),
+            [](const auto &state) { return state.expired(); }), states_.end());
+        auto state = std::make_shared<connection_state>();
+        state->interface_observers_ = interface_observers_;
+        states_.push_back(state);
+        return state;
+    }
+
+    std::vector<connection_info> connection_registry::enumerate() {
+        std::vector<connection_info> result;
+        for (const auto &weak : states_) {
+            auto state = weak.lock();
+            if (state && state->active && std::none_of(result.begin(), result.end(), [&](const auto &info) {
+                    return info.iap_id == state->info.iap_id && info.network_id == state->info.network_id;
+                })) {
+                result.push_back(state->info);
+            }
+        }
+        return result;
+    }
+
+    std::shared_ptr<connection_state> connection_registry::find(const connection_info &info) {
+        for (const auto &weak : states_) {
+            auto state = weak.lock();
+            if (state && state->active && state->info.iap_id == info.iap_id && state->info.network_id == info.network_id) {
+                return state;
+            }
+        }
+        return nullptr;
+    }
+
+    bool connection_reference::enable_clone(const std::string &data) {
+        if (data.size() != sizeof(security_policy)) {
+            return false;
+        }
+        security_policy policy;
+        std::memcpy(&policy, data.data(), sizeof(policy));
+        if (policy.type > security_policy::v3) {
+            return false;
+        }
+        const auto valid_cap = [](std::uint8_t cap) { return cap < cap_limit || cap == 0xFF; };
+        if ((policy.type >= security_policy::c3 && !std::all_of(policy.caps, policy.caps + 3, valid_cap))
+            || (policy.type == security_policy::c7 && !std::all_of(policy.extra_caps, policy.extra_caps + 4, valid_cap))) {
+            return false;
+        }
+        clone_policy = policy;
+        clone_enabled = true;
+        return true;
+    }
+
+    std::shared_ptr<connection_reference> connection_registry::create_reference() {
+        for (auto it = references_.begin(); it != references_.end();) {
+            it = it->second.expired() ? references_.erase(it) : std::next(it);
+        }
+        auto reference = std::make_shared<connection_reference>();
+        const auto number = std::to_string(++next_reference_);
+        reference->name = u"Connection_" + std::u16string(number.begin(), number.end());
+        references_[reference->name] = reference;
+        return reference;
+    }
+
+    std::int32_t connection_registry::clone(const std::u16string &name, const security_info &caller,
+        std::shared_ptr<connection_state> &state) {
+        state.reset();
+        const auto found = references_.find(name);
+        auto reference = found == references_.end() ? nullptr : found->second.lock();
+        if (!reference) {
+            return epoc::error_not_found;
+        }
+        security_info missing;
+        if (!reference->clone_enabled || !reference->clone_policy.check(caller, missing)) {
+            return epoc::error_permission_denied;
+        }
+        auto source = reference->state.lock();
+        if (!source || !source->active) {
+            return epoc::error_not_ready;
+        }
+        state = std::move(source);
+        return epoc::error_none;
+    }
+
     connection::connection(protocol *pr, saddress dest)
         : pr_(pr)
         , sock_(nullptr)
@@ -45,23 +187,307 @@ namespace eka2l1::epoc::socket {
         : socket_subsession(parent)
         , conn_(conn)
         , progress_reported_(false) {
+        reference_ = parent_->server<socket_server>()->connections().create_reference();
+    }
+
+    socket_connection_proxy::~socket_connection_proxy() {
+        if (auto state = observed_state_.lock()) {
+            state->observers.erase(this);
+        }
+        cancel_progress();
+        cancel_interface_notification();
+    }
+
+    void socket_connection_proxy::bind_state(const std::shared_ptr<connection_state> &state, bool monitor) {
+        if (auto previous = observed_state_.lock()) {
+            previous->observers.erase(this);
+        }
+        observed_state_ = state;
+        reference_->state = state;
+        state_ = monitor ? nullptr : state;
+        state->observers[this] = [this](std::int32_t stage) { set_progress(stage); };
+        set_progress(state->stage);
+    }
+
+    std::int32_t socket_connection_proxy::clone_from(const std::u16string &name, const security_info &caller) {
+        std::shared_ptr<connection_state> state;
+        const auto result = parent_->server<socket_server>()->connections().clone(name, caller, state);
+        if (result == epoc::error_none) {
+            bind_state(state);
+        }
+        return result;
+    }
+
+    void socket_connection_proxy::name(service::ipc_context *ctx) {
+        ctx->complete(ctx->write_arg(0, reference_->name) ? epoc::error_none : epoc::error_argument);
+    }
+
+    void socket_connection_proxy::control(service::ipc_context *ctx) {
+        std::optional<std::uint32_t> level;
+        std::optional<std::uint32_t> option;
+        if (ctx->sys->get_symbian_version_use() < epocver::epoc95) {
+            // Pre-reform Control packages the option in slot 0 and puts the level in slot 1.
+            const auto data = ctx->get_argument_value<std::string>(0);
+            if (!data || data->size() != sizeof(connection_control_description)) {
+                ctx->complete(epoc::error_argument);
+                return;
+            }
+            connection_control_description description;
+            std::memcpy(&description, data->data(), sizeof(description));
+            option = description.option;
+            level = ctx->get_argument_value<std::uint32_t>(1);
+        } else {
+            level = ctx->get_argument_value<std::uint32_t>(0);
+            option = ctx->get_argument_value<std::uint32_t>(1);
+        }
+        if (level != 1 || (option != 0x20000005 && option != 0x20000006)) {
+            ctx->complete(epoc::error_not_supported);
+            return;
+        }
+        if (option == 0x20000006) {
+            reference_->clone_enabled = false;
+        } else {
+            const auto policy = ctx->get_argument_value<std::string>(2);
+            if (!policy || !reference_->enable_clone(*policy)) {
+                ctx->complete(epoc::error_argument);
+                return;
+            }
+        }
+        ctx->complete(epoc::error_none);
+    }
+
+    void socket_connection_proxy::attach(service::ipc_context *ctx) {
+        const auto type = ctx->get_argument_value<std::uint32_t>(0);
+        const auto data = ctx->get_argument_value<std::string>(1);
+        if (!type || *type > 1 || !data || data->size() != sizeof(connection_info)) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        connection_info info;
+        std::memcpy(&info, data->data(), sizeof(info));
+        if ((info.version & 0xFF) != 1) {
+            ctx->complete(epoc::error_not_supported);
+            return;
+        }
+        auto state = parent_->server<socket_server>()->connections().find(info);
+        if (!state) {
+            ctx->complete(epoc::error_not_found);
+            return;
+        }
+        // Monitor attachments observe the interface without extending its lifetime.
+        bind_state(state, *type == 1);
+        ctx->complete(epoc::error_none);
+    }
+
+    void socket_connection_proxy::cancel_progress() {
+        if (progress_request_) {
+            if (progress_request_->sys->get_kernel_system()->is_thread_alive(progress_request_->msg->own_thr)) {
+                progress_request_->complete(epoc::error_cancel);
+            }
+            progress_request_.reset();
+        }
+    }
+
+    void socket_connection_proxy::request_interface_notification(service::ipc_context *ctx) {
+        if (interface_request_ || !observed_state_.expired()) {
+            ctx->complete(epoc::error_in_use);
+            return;
+        }
+        if (ctx->get_argument_max_data_size(0) < sizeof(interface_notification)
+            || ctx->msg->args.get_arg_type(0) != ipc_arg_type::des8) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        if (!interface_observer_) {
+            interface_observer_ = std::make_shared<interface_observer>([this](const interface_notification &event) {
+                constexpr std::size_t MAX_NOTIFICATIONS = 8;
+                if (interface_events_.size() == MAX_NOTIFICATIONS) {
+                    interface_events_.pop_front();
+                }
+                interface_events_.push_back(event);
+                complete_interface_notification();
+            });
+            parent_->server<socket_server>()->connections().observe_interfaces(interface_observer_);
+        }
+        interface_request_ = ctx->move_to_new();
+        complete_interface_notification();
+    }
+
+    void socket_connection_proxy::complete_interface_notification() {
+        if (!interface_request_ || interface_events_.empty()) {
+            return;
+        }
+        auto request = std::move(interface_request_);
+        if (request->sys->get_kernel_system()->is_thread_alive(request->msg->own_thr)) {
+            const bool written = request->write_data_to_descriptor_argument(0, interface_events_.front());
+            if (written) {
+                interface_events_.pop_front();
+            }
+            request->complete(written ? epoc::error_none : epoc::error_bad_descriptor);
+        }
+    }
+
+    void socket_connection_proxy::cancel_interface_notification() {
+        interface_observer_.reset();
+        interface_events_.clear();
+        if (interface_request_) {
+            if (interface_request_->sys->get_kernel_system()->is_thread_alive(interface_request_->msg->own_thr)) {
+                interface_request_->complete(epoc::error_cancel);
+            }
+            interface_request_.reset();
+        }
+    }
+
+    void socket_connection_proxy::set_progress(std::int32_t stage) {
+        progress_ = {stage, 0};
+        progress_reported_ = false;
+        if (progress_request_) {
+            auto request = std::move(progress_request_);
+            if (request->sys->get_kernel_system()->is_thread_alive(request->msg->own_thr)) {
+                progress_notify(request.get());
+            }
+        }
     }
 
     void socket_connection_proxy::progress_notify(service::ipc_context *ctx) {
-        if (!progress_reported_) {
-            epoc::socket::conn_progress progress;
-            progress.error_ = 0;
-            progress.stage_ = epoc::socket::conn_progress_connection_opened;
-
-            ctx->write_data_to_descriptor_argument<epoc::socket::conn_progress>(0, progress);
-            ctx->complete(epoc::error_none);
-
+        if (progress_request_) {
+            ctx->complete(epoc::error_in_use);
+            return;
+        }
+        if (ctx->get_argument_max_data_size(0) < sizeof(progress_)) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        const auto selected = ctx->get_argument_value<std::int32_t>(1).value_or(0);
+        if (!progress_reported_ && progress_.stage_ && (!selected || selected == progress_.stage_)) {
+            ctx->complete(ctx->write_data_to_descriptor_argument(0, progress_) ? epoc::error_none : epoc::error_argument);
             progress_reported_ = true;
+        } else {
+            progress_request_ = ctx->move_to_new();
+        }
+    }
 
-            LOG_TRACE(SERVICE_ESOCK, "Connection progress notify stubbed to opened!");
+    void socket_connection_proxy::start(service::ipc_context *ctx, bool with_preferences) {
+        std::uint32_t iap = 0;
+        auto preferences = with_preferences ? ctx->get_argument_value<std::string>(0) : std::move(start_preferences_);
+        start_preferences_.reset();
+        if (with_preferences || preferences) {
+            if (!preferences || preferences->size() < 24) {
+                ctx->complete(epoc::error_argument);
+                return;
+            }
+            std::uint16_t extension = 0;
+            std::memcpy(&extension, preferences->data(), sizeof(extension));
+            if (extension != 1) {
+                ctx->complete(epoc::error_not_supported);
+                return;
+            }
+            // TConnPref's four-byte header precedes SCommDbConnPref (commdbconnpref.h).
+            std::memcpy(&iap, preferences->data() + 4, sizeof(iap));
         }
 
-        // For now, since it's stubbed, nothing else will got reported :D
+        auto *cenrep = reinterpret_cast<central_repo_server *>(ctx->sys->get_kernel_system()
+            ->get_by_name<service::server>(CENTRAL_REPO_SERVER_NAME));
+        auto *repo = cenrep ? cenrep->load_repo_with_lookup(ctx->sys->get_io_system(),
+            ctx->sys->get_device_manager(), 0xCCCCCC00) : nullptr;
+        if (!repo) {
+            ctx->complete(epoc::error_not_found);
+            return;
+        }
+        repo->access_count--;
+        if (!iap) {
+            for (std::uint32_t id = 1; id < 255; id++) {
+                if (repo->find_entry(0x02820000 | (id << 8))) {
+                    iap = id;
+                    break;
+                }
+            }
+        }
+        auto *network = iap && iap < 255 ? repo->find_entry(0x02870000 | (iap << 8)) : nullptr;
+        if (!network || network->data.etype != central_repo_entry_type::integer) {
+            ctx->complete(epoc::error_not_found);
+            return;
+        }
+        const connection_info info{1, iap, link_record_id(static_cast<std::uint32_t>(network->data.intd))};
+        auto &registry = parent_->server<socket_server>()->connections();
+        auto state = registry.find(info);
+        if (!state) {
+            state = registry.create();
+            state->info = info;
+        }
+        bind_state(state);
+        if (!state->active) {
+            state->advance(conn_progress_connection_opened);
+            state->advance(conn_progress_link_layer_open);
+        }
+        ctx->complete(epoc::error_none);
+    }
+
+    void socket_connection_proxy::enumerate(service::ipc_context *ctx) {
+        snapshot_ = parent_->server<socket_server>()->connections().enumerate();
+        ctx->complete(ctx->write_data_to_descriptor_argument(0, static_cast<std::uint32_t>(snapshot_.size()))
+            ? epoc::error_none : epoc::error_argument);
+    }
+
+    void socket_connection_proxy::get_info(service::ipc_context *ctx) {
+        const auto index = ctx->get_argument_value<std::uint32_t>(0);
+        if (!index || !*index || *index > snapshot_.size()) {
+            ctx->complete(epoc::error_argument);
+            return;
+        }
+        ctx->complete(ctx->write_data_to_descriptor_argument(1, snapshot_[*index - 1])
+            ? epoc::error_none : epoc::error_argument);
+    }
+
+    void socket_connection_proxy::get_int_setting(service::ipc_context *ctx) {
+        const auto name = ctx->get_argument_value<std::u16string>(0);
+        const auto state = observed_state_.lock();
+        if (!state || !state->active) {
+            ctx->complete(epoc::error_not_ready);
+        } else if (name == u"IAP\\Id" || name == u"IAP\\IAPNetwork") {
+            const auto value = name == u"IAP\\Id" ? state->info.iap_id : state->info.network_id;
+            ctx->complete(ctx->write_data_to_descriptor_argument(1, value) ? epoc::error_none : epoc::error_argument);
+        } else if (name == u"IAP\\IAPService") {
+            const auto *entry = find_iap_field(ctx, 0x02840000, state->info.iap_id);
+            if (!entry || entry->data.etype != central_repo_entry_type::integer) {
+                ctx->complete(epoc::error_not_found);
+                return;
+            }
+            const auto value = link_record_id(static_cast<std::uint32_t>(entry->data.intd));
+            ctx->complete(ctx->write_data_to_descriptor_argument(1, value) ? epoc::error_none : epoc::error_argument);
+        } else {
+            ctx->complete(epoc::error_not_found);
+        }
+    }
+
+    void socket_connection_proxy::get_des_setting(service::ipc_context *ctx) {
+        const auto name = ctx->get_argument_value<std::u16string>(0);
+        const auto state = observed_state_.lock();
+        if (!state || !state->active) {
+            ctx->complete(epoc::error_not_ready);
+            return;
+        }
+        std::uint32_t field = 0;
+        if (name == u"IAP\\Name") {
+            field = 0x02820000;
+        } else if (name == u"IAP\\IAPServiceType") {
+            field = 0x02830000;
+        } else if (name == u"IAP\\IAPBearerType") {
+            field = 0x02850000;
+        }
+        const auto *entry = field ? find_iap_field(ctx, field, state->info.iap_id) : nullptr;
+        if (!entry || entry->data.etype != central_repo_entry_type::string) {
+            ctx->complete(epoc::error_not_found);
+            return;
+        }
+        const auto &value = entry->data.strd;
+        if (value.size() > ctx->get_argument_max_data_size(1)) {
+            ctx->complete(epoc::error_overflow);
+            return;
+        }
+        ctx->complete(ctx->write_data_to_descriptor_argument(1,
+            reinterpret_cast<const std::uint8_t *>(value.data()), static_cast<std::uint32_t>(value.size()))
+            ? epoc::error_none : epoc::error_argument);
     }
 
     void socket_connection_proxy::dispatch(service::ipc_context *ctx) {
@@ -77,6 +503,36 @@ namespace eka2l1::epoc::socket {
         } else {
             if (ctx->sys->get_symbian_version_use() >= epocver::epoc95) {
                 switch (ctx->msg->function) {
+                case socket_reform_cn_set_start_preferences:
+                    start_preferences_ = ctx->get_argument_value<std::string>(0);
+                    ctx->complete(start_preferences_ ? epoc::error_none : epoc::error_argument);
+                    break;
+
+                case socket_reform_cn_start:
+                    start(ctx, false);
+                    break;
+
+                case socket_reform_cn_get_int_setting:
+                    get_int_setting(ctx);
+                    break;
+
+                case socket_reform_cn_get_des_setting:
+                    get_des_setting(ctx);
+                    break;
+
+                case socket_reform_cn_close:
+                    parent_->subsessions_.remove(id_);
+                    ctx->complete(epoc::error_none);
+                    break;
+
+                case socket_reform_cn_name:
+                    name(ctx);
+                    break;
+
+                case socket_reform_cn_control:
+                    control(ctx);
+                    break;
+
                 default:
                     LOG_ERROR(SERVICE_ESOCK, "Unimplemented socket connection opcode: {}", ctx->msg->function);
                     ctx->complete(epoc::error_none);
@@ -85,6 +541,69 @@ namespace eka2l1::epoc::socket {
                 }
             } else {
                 switch (ctx->msg->function) {
+                case socket_cn_name:
+                    name(ctx);
+                    break;
+
+                case socket_cn_control:
+                    control(ctx);
+                    break;
+
+                case socket_cn_close:
+                    parent_->subsessions_.remove(id_);
+                    ctx->complete(epoc::error_none);
+                    break;
+
+                case socket_cn_start_default:
+                case socket_cn_start:
+                    start(ctx, ctx->msg->function == socket_cn_start);
+                    break;
+
+                case socket_cn_enumerate_connections:
+                    enumerate(ctx);
+                    break;
+
+                case socket_cn_get_connection_info:
+                    get_info(ctx);
+                    break;
+
+                case socket_cn_get_int_setting:
+                    get_int_setting(ctx);
+                    break;
+
+                case socket_cn_get_des_setting:
+                    get_des_setting(ctx);
+                    break;
+
+                case socket_cn_attach:
+                    attach(ctx);
+                    break;
+
+                case socket_cn_stop: {
+                    const auto state = observed_state_.lock();
+                    if (!state || !state->active) {
+                        ctx->complete(epoc::error_not_ready);
+                        break;
+                    }
+                    state->advance(conn_progress_link_layer_closed);
+                    state->advance(conn_progress_connection_closed);
+                    ctx->complete(epoc::error_none);
+                    break;
+                }
+
+                case socket_cn_progress:
+                    ctx->complete(ctx->write_data_to_descriptor_argument(0, progress_) ? epoc::error_none : epoc::error_argument);
+                    break;
+
+                case socket_cn_last_progress_error:
+                    ctx->complete(ctx->write_data_to_descriptor_argument(0, conn_progress{}) ? epoc::error_none : epoc::error_argument);
+                    break;
+
+                case socket_cn_cancel_progress_notification:
+                    cancel_progress();
+                    ctx->complete(epoc::error_none);
+                    break;
+
                 case socket_cm_api_ext_interface_send_receive:
                     // Async, but we should complete it in sometimes
                     // Complete with not right result will create stuck or crash sometimes
@@ -92,6 +611,15 @@ namespace eka2l1::epoc::socket {
 
                 case socket_cn_progress_notification:
                     progress_notify(ctx);
+                    break;
+
+                case socket_cn_all_interface_notification:
+                    request_interface_notification(ctx);
+                    break;
+
+                case socket_cn_cancel_all_interface_notification:
+                    cancel_interface_notification();
+                    ctx->complete(epoc::error_none);
                     break;
 
                 default:

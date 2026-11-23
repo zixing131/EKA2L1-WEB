@@ -20,6 +20,7 @@
 #include <Log.h>
 #include <SoftInt.h>
 
+#include "common.h"
 #include "dispatch.h"
 #include "impl.h"
 
@@ -29,19 +30,31 @@
 
 #include <e32def.h>
 #include <e32std.h>
+#include <f32file.h>
+
+#if defined(EKA2) && (MCA_NEW >= 2)
+#include <badesca.h>
+#include <mmf/common/mmfcontrollerpluginresolver.h>
+#include <mmf/server/mmfdatasourcesink.hrh>
+#endif
 
 static const TUint32 KBlackListAudioClipFormat[2] = { KUidMdaClipFormatRawAudioDefine, KUidMdaClipFormatAuDefine };
 static const TUint32 KBlackListAudioClipFormatCount = sizeof(KBlackListAudioClipFormat) / sizeof(TUint32);
 
+static const TInt KOpenerPriority = 100;
+static const TInt KToneOpenerPriority = KOpenerPriority + 1;
+
 CMMFMdaAudioOpenComplete::CMMFMdaAudioOpenComplete()
-    : CIdle(100)
-    , iIsFixup(EFalse)
+    : CIdle(KOpenerPriority)
     , iTarget(NULL)
-    , iIsTone(EFalse) {
+    , iIsTone(EFalse)
+    , iTargetState(EMdaStateReady)
+    , iPreviousState(EMdaStateIdle)
+    , iStateApplied(EFalse)
+    , iError(KErrNone) {
 }
 
 CMMFMdaAudioOpenComplete::~CMMFMdaAudioOpenComplete() {
-    iIsFixup = EFalse;
     Deque();
 }
 
@@ -61,38 +74,74 @@ void CMMFMdaAudioOpenComplete::CompleteOpen() {
         stream->CompletePrepare(KErrNone);
     } else {
         CMMFMdaAudioUtility *stream = reinterpret_cast<CMMFMdaAudioUtility *>(iTarget);
-        stream->TransitionState(EMdaStateReady, KErrNone);
+
+        if (iStateApplied) {
+            stream->OnStateChanged(iTargetState, iPreviousState, iError);
+        } else {
+            stream->TransitionState(iTargetState, iError);
+        }
     }
 }
 
 void CMMFMdaAudioOpenComplete::Open(CMMFMdaAudioUtility *aUtil) {
+    Complete(aUtil, EMdaStateReady, KErrNone);
+}
+
+void CMMFMdaAudioOpenComplete::Complete(CMMFMdaAudioUtility *aUtil, const TMdaState aTargetState, const TInt aError) {
     iTarget = aUtil;
     iIsTone = EFalse;
+    iTargetState = aTargetState;
+    iStateApplied = EFalse;
+    iError = aError;
 
     Start(TCallBack(OpenCompleteCallback, this));
+}
+
+void CMMFMdaAudioOpenComplete::Notify(CMMFMdaAudioUtility *aUtil, const TMdaState aPreviousState, const TMdaState aCurrentState, const TInt aError) {
+    if (IsActive()) {
+        // A pending open must still complete; an older notification is superseded.
+        if (!IsNotifying()) {
+            return;
+        }
+
+        FixupActiveStatus();
+    }
+
+    iTarget = aUtil;
+    iIsTone = EFalse;
+    iTargetState = aCurrentState;
+    iPreviousState = aPreviousState;
+    iStateApplied = ETrue;
+    iError = aError;
+
+    Start(TCallBack(OpenCompleteCallback, this));
+}
+
+void CMMFMdaAudioOpenComplete::FlushNotify() {
+    if (IsNotifying()) {
+        FixupActiveStatus();
+        CompleteOpen();
+    }
+}
+
+void CMMFMdaAudioOpenComplete::DiscardNotify() {
+    if (IsNotifying()) {
+        FixupActiveStatus();
+    }
 }
 
 void CMMFMdaAudioOpenComplete::Open(CMMFMdaAudioToneUtility *aUtil) {
     iTarget = aUtil;
     iIsTone = ETrue;
+    iStateApplied = EFalse;
 
     Start(TCallBack(OpenCompleteCallback, this));
 }
 
 void CMMFMdaAudioOpenComplete::FixupActiveStatus() {
-    iIsFixup = ETrue;
-
+    // CIdle::Start already completed the request; Cancel() consumes that signal, so completing again would leave a stray.
     if (IsActive()) {
         Cancel();
-    }
-
-    iIsFixup = EFalse;
-}
-
-void CMMFMdaAudioOpenComplete::DoCancel() {
-    if (iIsFixup) {
-        TRequestStatus *statusPointer = &iStatus;
-        User::RequestComplete(statusPointer, KErrCancel);
     }
 }
 
@@ -101,7 +150,9 @@ CMMFMdaAudioUtility::CMMFMdaAudioUtility(const TInt aPriority, const TMdaPriorit
     , iPriority(aPriority)
     , iPref(aPref)
     , iState(EMdaStateIdle)
-    , iDuration(0) {
+    , iDuration(0)
+    , iPosition(0)
+    , iRecordTimeAvailable(0) {
 }
 
 void CMMFMdaAudioUtility::ConstructL(const TUint32 aInitFlags) {
@@ -133,6 +184,8 @@ CMMFMdaAudioUtility::~CMMFMdaAudioUtility() {
 }
 
 void CMMFMdaAudioUtility::RunL() {
+    // This object outranks the notifier, so a completion can arrive before the start is reported.
+    iOpener.FlushNotify();
     TransitionState(EMdaStateReady);
 }
 
@@ -165,7 +218,14 @@ void CMMFMdaAudioUtility::SupplyUrlL(const TDesC &aFilename) {
     iOpener.FixupActiveStatus();
 
     TUint64 localDuration = 0;
-    User::LeaveIfError(EAudioPlayerSupplyUrl(0, iDispatchInstance, aFilename.Ptr(), aFilename.Length(), &localDuration));
+    const TInt err = EAudioPlayerSupplyUrl(0, iDispatchInstance, aFilename.Ptr(), aFilename.Length(), &localDuration);
+
+    // MMF never leaves on an unopenable source; the error arrives through the open callback.
+    if (err != KErrNone) {
+        iDuration = TTimeIntervalMicroSeconds(0);
+        iOpener.Complete(this, EMdaStateIdle, err);
+        return;
+    }
 
 #ifndef EKA2
     iDuration = TTimeIntervalMicroSeconds(MakeSoftwareInt64FromHardwareUint64(localDuration));
@@ -197,7 +257,13 @@ void CMMFMdaAudioUtility::SupplyDataL(const TDesC8 &aData) {
     iOpener.FixupActiveStatus();
 
     TUint64 localDuration = 0;
-    User::LeaveIfError(EAudioPlayerSupplyData(0, iDispatchInstance, aData, &localDuration));
+    const TInt err = EAudioPlayerSupplyData(0, iDispatchInstance, aData, &localDuration);
+
+    if (err != KErrNone) {
+        iDuration = TTimeIntervalMicroSeconds(0);
+        iOpener.Complete(this, EMdaStateIdle, err);
+        return;
+    }
 
 #ifndef EKA2
     iDuration = TTimeIntervalMicroSeconds(MakeSoftwareInt64FromHardwareUint64(localDuration));
@@ -208,6 +274,84 @@ void CMMFMdaAudioUtility::SupplyDataL(const TDesC8 &aData) {
     iPlayType = EMdaPlayTypeBuffer;
 
     iOpener.Open(this);
+}
+
+void CMMFMdaAudioUtility::OpenClip(const TDesC &aFilename, const TInt aSize) {
+    iOpener.FixupActiveStatus();
+    iClipName.Copy(aFilename.Left(iClipName.MaxLength()));
+
+    // A clip the host cannot record into may still be played back.
+    if (EAudioPlayerOpenRecordClip(0, iDispatchInstance, iClipName.Ptr(), iClipName.Length()) != KErrNone) {
+        LogOut(KMcaCat, _L("Clip %S can not be recorded into"), &iClipName);
+    }
+
+    if (aSize == 0) {
+        iDuration = TTimeIntervalMicroSeconds(0);
+        iPlayType = EMdaPlayTypeFile;
+        iOpener.Complete(this, EMdaStateReady, KErrNone);
+
+        return;
+    }
+
+    TRAPD(err, SupplyUrlL(aFilename));
+
+    if (err != KErrNone) {
+        iOpener.Complete(this, EMdaStateIdle, err);
+    }
+}
+
+const TTimeIntervalMicroSeconds &CMMFMdaAudioUtility::RecordTimeAvailable() {
+    iRecordTimeAvailable = TTimeIntervalMicroSeconds(0);
+
+    TInt drive = 0;
+    TParsePtrC parse(iClipName);
+
+    RFs fs;
+    if (!parse.DrivePresent() || (RFs::CharToDrive(parse.Drive()[0], drive) != KErrNone) || (fs.Connect() != KErrNone)) {
+        return iRecordTimeAvailable;
+    }
+
+    const TInt bitRate = EAudioPlayerGetDestinationBitRate(0, iDispatchInstance);
+
+    TVolumeInfo info;
+    if ((bitRate > 0) && (fs.Volume(info, drive) == KErrNone)) {
+        iRecordTimeAvailable = TTimeIntervalMicroSeconds(info.iFree * TInt64(8000000) / TInt64(bitRate));
+    }
+
+    fs.Close();
+    return iRecordTimeAvailable;
+}
+
+void CMMFMdaAudioUtility::Record() {
+    if (iState != EMdaStateReady) {
+        iOpener.Notify(this, iState, iState, KErrNotReady);
+        return;
+    }
+
+    const TInt err = EAudioPlayerRecord(0, iDispatchInstance, iClipName.Ptr(), iClipName.Length());
+
+    if (err != KErrNone) {
+        iOpener.Notify(this, EMdaStateReady, EMdaStateReady, err);
+        return;
+    }
+
+    iState = EMdaStateRecord;
+    iOpener.Notify(this, EMdaStateReady, EMdaStateRecord, KErrNone);
+}
+
+void CMMFMdaAudioUtility::ReloadRecordedClip() {
+    TUint64 localDuration = 0;
+
+    if (EAudioPlayerSupplyUrl(0, iDispatchInstance, iClipName.Ptr(), iClipName.Length(), &localDuration) != KErrNone) {
+        LogOut(KMcaCat, _L("Unable to reopen the recorded clip for playback"));
+        return;
+    }
+
+#ifndef EKA2
+    iDuration = TTimeIntervalMicroSeconds(MakeSoftwareInt64FromHardwareUint64(localDuration));
+#else
+    iDuration = TTimeIntervalMicroSeconds(localDuration);
+#endif
 }
 
 void CMMFMdaAudioUtility::Play() {
@@ -221,39 +365,60 @@ void CMMFMdaAudioUtility::Play() {
         } else {
             LogOut(KMcaCat, _L("Can't play audio due to no data not being yet queued."));
 
-            TransitionState(EMdaStateReady, KErrNotReady);
+            // MMF fails Prime() on an unopened controller and reports it as an async play completion;
+            // observers may call Play() again from that callback.
+            iOpener.Notify(this, EMdaStatePlay, EMdaStateReady, KErrNotReady);
             return;
         }
     }
 
-    TransitionState(EMdaStatePlay, KErrNone);
     TInt err = EAudioPlayerPlay(0, iDispatchInstance);
 
     if (err != KErrNone) {
         Cancel();
         TransitionState(EMdaStateReady, err);
+        return;
     }
+
+    // Callers commonly start waiting for the state change right after the call.
+    const TMdaState previousState = iState;
+    iState = EMdaStatePlay;
+    iOpener.Notify(this, previousState, EMdaStatePlay, KErrNone);
 }
 
 void CMMFMdaAudioUtility::Stop() {
-    TransitionState(EMdaStateReady, EAudioPlayerStop(0, iDispatchInstance) ? 2 : 1);
+    // Stop reports nothing, so a start the observer has not heard of yet never happened for it.
+    iOpener.DiscardNotify();
 
-    // Do cancel
+    if (iState == EMdaStateRecord) {
+        EAudioPlayerStop(0, iDispatchInstance);
+        iState = EMdaStateReady;
+
+        Cancel();
+        ReloadRecordedClip();
+
+        return;
+    }
+
+    if ((iState == EMdaStatePlay) || (iState == EMdaStateRecord) || (iState == EMdaStatePause)) {
+        EAudioPlayerStop(0, iDispatchInstance);
+        iState = EMdaStateReady;
+    }
+
     Cancel();
 }
 
 void CMMFMdaAudioUtility::Close() {
-    // Closing a clip will of course first will put a stop to playing
-    // The emulator side will auto handle closing when open a new URL. Here we are just complying
-    // with the rules...
-    TransitionState(EMdaStateIdle, KErrNone);
+    // Closing also cancels a pending open, as MMF does; its result must not reach the observer.
+    iOpener.FixupActiveStatus();
+    iState = EMdaStateIdle;
     EAudioPlayerStop(0, iDispatchInstance);
-
-    // Do cancel
     Cancel();
 }
 
 TInt CMMFMdaAudioUtility::Pause() {
+    iOpener.FlushNotify();
+
     const TInt result = EAudioPlayerPause(0, iDispatchInstance);
 
     if (result != KErrNone) {
@@ -276,17 +441,22 @@ TInt CMMFMdaAudioUtility::GetVolume() {
     return EAudioPlayerGetVolume(0, iDispatchInstance);
 }
 
-TTimeIntervalMicroSeconds CMMFMdaAudioUtility::CurrentPosition() {
-#ifdef EKA2
+const TTimeIntervalMicroSeconds &CMMFMdaAudioUtility::CurrentPosition() {
     TUint64 result = 0;
     EAudioPlayerGetCurrentPlayPos(0, iDispatchInstance, result);
 
-    return result;
+#ifdef EKA2
+    iPosition = TTimeIntervalMicroSeconds(result);
 #else
-    TUint64 result = 0;
-    EAudioPlayerGetCurrentPlayPos(0, iDispatchInstance, result);
-    return TTimeIntervalMicroSeconds(MakeSoftwareInt64FromHardwareUint64(result));
+    iPosition = TTimeIntervalMicroSeconds(MakeSoftwareInt64FromHardwareUint64(result));
 #endif
+
+    // While recording, the clip grows with the captured audio.
+    if (iState == EMdaStateRecord) {
+        iDuration = iPosition;
+    }
+
+    return iPosition;
 }
 
 void CMMFMdaAudioUtility::SetCurrentPosition(const TTimeIntervalMicroSeconds &aPos) {
@@ -337,6 +507,13 @@ CMMFMdaAudioPlayerUtility *CMMFMdaAudioPlayerUtility::NewL(MMdaAudioPlayerCallba
 
 void CMMFMdaAudioPlayerUtility::OnStateChanged(const TMdaState aCurrentState, const TMdaState aPrevState, const TInt aErr) {
     switch (aCurrentState) {
+    case EMdaStateIdle:
+        if (aErr < KErrNone) {
+            iCallback.MapcInitComplete(aErr, iDuration);
+        }
+
+        break;
+
     case EMdaStateReady:
         if (aPrevState != EMdaStateIdle) {
             if (aErr < 1) {
@@ -354,14 +531,15 @@ void CMMFMdaAudioPlayerUtility::OnStateChanged(const TMdaState aCurrentState, co
 }
 
 ///================== AUDIO RECORDER UTILITY =======================
-CMMFMdaAudioRecorderUtility::CMMFMdaAudioRecorderUtility(MMdaObjectStateChangeObserver &aObserver, const TInt aPriority, const TMdaPriorityPreference aPref)
+CMMFMdaAudioRecorderUtility::CMMFMdaAudioRecorderUtility(CMdaAudioRecorderUtility &aParent, MMdaObjectStateChangeObserver &aObserver, const TInt aPriority, const TMdaPriorityPreference aPref)
     : CMMFMdaAudioUtility(aPriority, aPref)
     , iObserver(aObserver)
-    , iContainerFormat(0) {
+    , iContainerFormat(0)
+    , iParent(aParent) {
 }
 
-CMMFMdaAudioRecorderUtility *CMMFMdaAudioRecorderUtility::NewL(MMdaObjectStateChangeObserver &aObserver, const TInt aPriority, const TMdaPriorityPreference aPref) {
-    CMMFMdaAudioRecorderUtility *newUtil = new (ELeave) CMMFMdaAudioRecorderUtility(aObserver, aPriority, aPref);
+CMMFMdaAudioRecorderUtility *CMMFMdaAudioRecorderUtility::NewL(CMdaAudioRecorderUtility &aParent, MMdaObjectStateChangeObserver &aObserver, const TInt aPriority, const TMdaPriorityPreference aPref) {
+    CMMFMdaAudioRecorderUtility *newUtil = new (ELeave) CMMFMdaAudioRecorderUtility(aParent, aObserver, aPriority, aPref);
     CleanupStack::PushL(newUtil);
     newUtil->ConstructL(0);
     CleanupStack::Pop(newUtil);
@@ -411,8 +589,67 @@ void CMMFMdaAudioRecorderUtility::OnStateChanged(const TMdaState aCurrentState, 
         realError = 0;
     }
 
-    iObserver.MoscoStateChangeEvent(this, prevTrans, currentTrans, realError);
+    iObserver.MoscoStateChangeEvent(&iParent, prevTrans, currentTrans, realError);
 }
+
+#if defined(EKA2) && (MCA_NEW >= 2)
+static void CheckPlaybackSourceL(const TDesC &aFileName, TUid aControllerUid, TUid aFormatUid) {
+    if (aControllerUid == KNullUid) {
+        User::Leave(KErrNotSupported);
+    }
+
+    CMMFControllerImplementationInformation *info = CMMFControllerImplementationInformation::NewL(aControllerUid);
+    CleanupStack::PushL(info);
+    if (info->SupportedMediaIds().Find(KUidMediaTypeAudio) == KErrNotFound) {
+        User::Leave(KErrNotSupported);
+    }
+
+    RFs fs;
+    User::LeaveIfError(fs.Connect());
+    CleanupClosePushL(fs);
+    RFile file;
+    User::LeaveIfError(file.Open(fs, aFileName, EFileRead | EFileShareReadersOnly));
+    CleanupClosePushL(file);
+    TBuf8<256> header;
+    User::LeaveIfError(file.Read(header));
+    TBuf8<KMaxFileName> extension;
+    extension.Copy(TParsePtrC(aFileName).Ext());
+
+    TBool supported = EFalse;
+    const RMMFFormatImplInfoArray &formats = info->PlayFormats();
+    for (TInt i = 0; (i < formats.Count()) && !supported; ++i) {
+        const CMMFFormatImplementationInformation &format = *formats[i];
+        if ((aFormatUid != KNullUid) && (format.Uid() != aFormatUid)) {
+            continue;
+        }
+
+        supported = format.SupportsHeaderDataL(header);
+        if (!supported && format.SupportsFileExtension(extension)) {
+            const CDesC8Array &headers = format.SupportedHeaderData();
+            supported = (header.Length() == 0) || (headers.Count() == 0);
+            for (TInt j = 0; (j < headers.Count()) && !supported; ++j) {
+                supported = (headers[j].Length() == 0);
+            }
+        }
+    }
+    CleanupStack::PopAndDestroy(3, info);
+    if (!supported) {
+        User::Leave(KErrNotSupported);
+    }
+}
+
+void CMMFMdaAudioRecorderUtility::OpenPlaybackFileL(const TDesC &aFileName, TUid aControllerUid, TUid aFormatUid) {
+    Close();
+    TRAPD(err, CheckPlaybackSourceL(aFileName, aControllerUid, aFormatUid));
+    if (err != KErrNone) {
+        iDuration = TTimeIntervalMicroSeconds(0);
+        iOpener.Complete(this, EMdaStateIdle, err);
+        return;
+    }
+
+    SupplyUrlL(aFileName);
+}
+#endif
 
 TInt CMMFMdaAudioRecorderUtility::SetDestCodec(TFourCC aDestCodec) {
     return EAudioPlayerSetDestinationEncoding(0, iDispatchInstance, aDestCodec.FourCC());
@@ -440,6 +677,27 @@ TInt CMMFMdaAudioRecorderUtility::GetDestChannelCount() {
 
 TInt CMMFMdaAudioRecorderUtility::GetDestSampleRate() {
     return EAudioPlayerGetDestinationSampleRate(0, iDispatchInstance);
+}
+
+TInt CMMFMdaAudioRecorderUtility::SetDestBitRate(const TUint aBitRate) {
+    return EAudioPlayerSetDestinationBitRate(0, iDispatchInstance, aBitRate);
+}
+
+TInt CMMFMdaAudioRecorderUtility::GetDestBitRate() {
+    return EAudioPlayerGetDestinationBitRate(0, iDispatchInstance);
+}
+
+void CMMFMdaAudioRecorderUtility::GetSupportedDestValuesL(const TInt aKind, RArray<TUint> &aValues) {
+    aValues.Reset();
+
+    TUint32 values[16];
+    const TInt count = EAudioPlayerGetSupportedDestinationValues(0, iDispatchInstance, aKind, values, 16);
+
+    User::LeaveIfError(count);
+
+    for (TInt i = 0; i < Min(count, 16); i++) {
+        User::LeaveIfError(aValues.Append(values[i]));
+    }
 }
 
 TInt CMMFMdaAudioRecorderUtility::SetDestContainerFormat(const TUint32 aUid) {
@@ -493,8 +751,16 @@ void CMMFMdaAudioToneUtility::ConstructL() {
 
     iOpener.FixupActiveStatus();
 
+    // DevSound prepares a tone near-instantly; clients play it right after a pending clip open completes.
+    iOpener.SetPriority(KToneOpenerPriority);
+
     CActiveScheduler::Add(&iOpener);
     CActiveScheduler::Add(this);
+}
+
+CMMFMdaAudioToneUtility::~CMMFMdaAudioToneUtility() {
+    Cancel();
+    ETonePlayerDestroy(0, iDispatchInstance);
 }
 
 CMMFMdaAudioToneUtility *CMMFMdaAudioToneUtility::NewL(MMdaAudioToneObserver &aObserver, const TInt aPriority, const TMdaPriorityPreference aPref) {
@@ -555,6 +821,22 @@ void CMMFMdaAudioToneUtility::PrepareToPlayTone(const TInt aFreq, const TTimeInt
 #endif
 }
 
+void CMMFMdaAudioToneUtility::PrepareToPlayDualTone(const TInt aFreqOne, const TInt aFreqTwo, const TTimeIntervalMicroSeconds &aDuration) {
+#ifdef EKA2
+    CALL_PREARE(ETonePlayerSetDualTone, aFreqOne, aFreqTwo, aDuration.Int64() & 0xFFFFFFFF, (aDuration.Int64() >> 32) & 0xFFFFFFFF)
+#else
+    CALL_PREARE(ETonePlayerSetDualTone, aFreqOne, aFreqTwo, aDuration.Int64().GetTInt(), 0)
+#endif
+}
+
+void CMMFMdaAudioToneUtility::PrepareToPlayDTMFString(const TDesC &aDTMF) {
+    CALL_PREARE(ETonePlayerSetDTMFString, aDTMF)
+}
+
+void CMMFMdaAudioToneUtility::SetDTMFLengths(const TInt aToneOnMicros, const TInt aToneOffMicros, const TInt aPauseMicros) {
+    ETonePlayerSetDTMFLengths(0, iDispatchInstance, aToneOnMicros, aToneOffMicros, aPauseMicros);
+}
+
 void CMMFMdaAudioToneUtility::CancelPrepare() {
     // Not gonna do anything :)
 }
@@ -605,9 +887,10 @@ void CMMFMdaAudioToneUtility::RunL() {
     iObserver.MatoPlayComplete(iStatus.Int());
 }
 
+// CancelPlay reports nothing to the observer (CMMFMdaAudioToneUtility::ToneFinished skips KErrCancel).
 void CMMFMdaAudioToneUtility::DoCancel() {
     ETonePlayerStop(0, iDispatchInstance);
-    iObserver.MatoPlayComplete(KErrCancel);
+    iState = EMdaAudioToneUtilityPrepared;
 }
 
 void CMMFMdaAudioToneUtility::CompletePrepare(TInt aError) {

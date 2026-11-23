@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <common/algorithm.h>
 #include <common/cvt.h>
 #include <common/dynamicfile.h>
@@ -31,10 +32,9 @@
 
 namespace eka2l1::common {
     ini_node_ptr ini_section::find(const char *name) {
-        const std::size_t len = strlen(name);
-
         for (auto node : nodes) {
-            if (strncmp(name, node->name(), len) == 0) {
+            // Prefix matching would let a lookup of "epoc7" hit an "epoc70" section.
+            if (strcmp(name, node->name()) == 0) {
                 return node;
             }
         }
@@ -57,10 +57,8 @@ namespace eka2l1::common {
     }
 
     bool ini_section::node_exists(const char *name) {
-        const std::size_t len = strlen(name);
-
         for (auto node : nodes) {
-            if (strncmp(name, node->name(), len) == 0) {
+            if (strcmp(name, node->name()) == 0) {
                 return true;
             }
         }
@@ -369,7 +367,7 @@ namespace eka2l1::common {
         }
     };
 
-    int ini_file::load(const char *path, bool ignore_spaces) {
+    int ini_file::load(const host_path &path, bool ignore_spaces) {
         common::dynamic_ifile ifile(path);
 
         if (ifile.fail()) {

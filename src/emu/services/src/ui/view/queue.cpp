@@ -36,20 +36,22 @@ namespace eka2l1::ui::view {
         }
     }
 
-    void event_queue::queue_event(const view_event &evt, const custom_message &msg) {
+    void event_queue::queue_event(const view_event &evt, const custom_message &msg, const epoc::notify_info &on_acknowledged, const std::optional<epoc::security_info> &switch_source) {
         const std::lock_guard<std::mutex> guard(lock_);
 
         if (!nof_info_.empty()) {
             complete_write_and_notify_event(nof_info_, buffer_, evt);
 
-            current_custom_ = std::move(msg);
+            current_custom_ = msg;
+            current_switch_source_ = switch_source;
             buffer_ = nullptr;
+            awaiting_acknowledgement_ = on_acknowledged;
 
             return;
         }
 
         // Queue the event
-        events_.push({ evt, msg });
+        events_.push({ evt, msg, on_acknowledged, switch_source });
     }
 
     bool event_queue::hear(epoc::notify_info info, std::uint8_t *buffer) {
@@ -60,12 +62,18 @@ namespace eka2l1::ui::view {
             return false;
         }
 
+        // Asking for the next event is how the client reports it has handled the last one.
+        awaiting_acknowledgement_.complete(epoc::error_none);
+        current_switch_source_.reset();
+
         if (!events_.empty()) {
             auto evt = std::move(events_.front());
             events_.pop();
 
             complete_write_and_notify_event(info, buffer, evt.evt_);
             current_custom_ = std::move(evt.custom_);
+            current_switch_source_ = evt.switch_source_;
+            awaiting_acknowledgement_ = evt.on_acknowledged_;
 
             return true;
         }
@@ -75,6 +83,11 @@ namespace eka2l1::ui::view {
         buffer_ = buffer;
 
         return true;
+    }
+
+    std::optional<epoc::security_info> event_queue::current_switch_source() {
+        const std::lock_guard<std::mutex> guard(lock_);
+        return current_switch_source_;
     }
 
     void event_queue::cancel() {

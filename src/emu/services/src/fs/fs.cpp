@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <services/fs/fs.h>
 #include <services/fs/op.h>
 #include <services/fs/parser.h>
@@ -28,6 +29,7 @@
 #include <clocale>
 #include <cwctype>
 #include <memory>
+#include <string_view>
 
 #include <common/algorithm.h>
 #include <common/cvt.h>
@@ -45,18 +47,16 @@
 #include <utils/err.h>
 
 #include <services/fs/sec.h>
-#include <re2/re2.h>
 
 namespace eka2l1 {
     void note_j9_fs_miss(const std::u16string &raw, const int err);
     bool resolve_j9_jxe_path(io_system *io, kernel::process *pr, std::u16string &path, std::string &path_utf8);
-    bool check_path_capabilities_pass(const std::u16string &path, kernel::process *pr, epoc::security_policy &private_policy, epoc::security_policy &sys_policy, epoc::security_policy &resource_policy) {
+    bool check_path_capabilities_pass(const guest_path &path, kernel::process *pr, epoc::security_policy &private_policy, epoc::security_policy &sys_policy, epoc::security_policy &resource_policy) {
         if (!pr->get_kernel_object_owner()->support_capabilities()) {
             return true;
         }
 
-        const std::u16string path_lowered = common::lowercase_ucs2_string(path);
-        eka2l1::path_iterator_16 iterator(path_lowered);
+        eka2l1::path_iterator_16 iterator(path.lookup_key());
 
         std::int8_t policy_checK_type = -1;
 
@@ -108,15 +108,15 @@ namespace eka2l1 {
         return true;
     }
 
-    static std::u16string get_private_path_trim_uid(kernel::process *pr) {
-        // Try to get the app uid
-        uint32_t uid = std::get<2>(pr->get_uid_type());
-        std::string hex_id = common::uppercase_string(common::to_string(uid, std::hex));
+    static guest_path get_private_path_trim_uid(kernel::process *pr) {
+        const std::uint32_t uid = pr->get_kernel_object_owner()->support_capabilities()
+            ? pr->get_sec_info().secure_id : std::get<2>(pr->get_uid_type());
+        const std::string hex_id = fmt::format("{:08X}", uid);
 
-        return u"\\Private\\" + common::utf8_to_ucs2(hex_id) + u"\\";
+        return guest_path(u"\\Private\\" + common::utf8_to_ucs2(hex_id) + u"\\");
     }
 
-    static std::u16string get_private_path(kernel::process *pr, const drive_number drive) {
+    static guest_path get_private_path(kernel::process *pr, const drive_number drive) {
         const char16_t drive_dos_char = drive_to_char16(drive);
         const std::u16string drive_u16 = std::u16string(&drive_dos_char, 1) + u":";
 
@@ -153,8 +153,8 @@ namespace eka2l1 {
         return path;
     }
 
-    std::u16string get_full_symbian_path(const std::u16string &session_path, const std::u16string &target_path) {
-        const std::u16string normalized = normalize_guest_fs_path(target_path);
+    guest_path get_full_symbian_path(const guest_path &session_path, const guest_path &target_path) {
+        const std::u16string normalized = normalize_guest_fs_path(target_path.utf16());
         if (normalized.empty()) {
             return session_path;
         }
@@ -164,24 +164,15 @@ namespace eka2l1 {
         // but not the case for other OSes
         if (is_separator(normalized[0])) {
             // Only append the root directory to the beginning
-            return common::trim_spaces(eka2l1::absolute_path(normalized, eka2l1::root_name(session_path, true), true));
+            return guest_path(common::trim_spaces(eka2l1::absolute_path(normalized, eka2l1::root_name(session_path.utf16(), true), true)));
         }
 
         // Check if the path has a root directory
         if (!eka2l1::has_root_dir(normalized)) {
-            return common::trim_spaces(eka2l1::absolute_path(normalized, session_path, true));
+            return guest_path(common::trim_spaces(eka2l1::absolute_path(normalized, session_path.utf16(), true)));
         }
 
-        return common::trim_spaces(normalized);
-    }
-
-    size_t fs_path_case_insensitive_hasher::operator()(const utf16_str &key) const {
-        utf16_str copy = common::lowercase_ucs2_string(key);
-        return std::hash<utf16_str>()(copy);
-    }
-
-    bool fs_path_case_insensitive_comparer::operator()(const utf16_str &x, const utf16_str &y) const {
-        return (common::compare_ignore_case(x, y) == -1);
+        return guest_path(common::trim_spaces(normalized));
     }
 
     fs_server_client::fs_server_client(service::typical_server *srv, kernel::uid suid, epoc::version client_version, kernel::thread *own_thr)
@@ -202,7 +193,7 @@ namespace eka2l1 {
         , flags(0) {
         // Create property references to system drive
         // TODO (pent0): Not hardcode the drive. Maybe dangerous, who knows.
-        default_sys_path = u"C:\\";
+        default_sys_path = guest_path(u"C:\\");
         system_drive_prop = &(*sys->get_kernel_system()->create<service::property>());
         system_drive_prop->define(service::property_type::int_data, 0);
         system_drive_prop->set_int(drive_c);
@@ -235,8 +226,8 @@ namespace eka2l1 {
             java_ipc_complete_cb_ = 0;
         }
         io_system *io = sys->get_io_system();
-        for (const std::u16string &path: temporary_file_cleanset_) {
-            io->delete_entry(path);
+        for (const guest_path &path: temporary_file_cleanset_) {
+            io->delete_entry(eka2l1::guest_path{path});
         }
     }
 
@@ -267,10 +258,10 @@ namespace eka2l1 {
         }
     }
 
-    void fs_server::notify_change(const std::u16string &path, const fs_server_client::notify_type type) {
+    void fs_server::notify_change(const guest_path &path, const fs_server_client::notify_type type) {
         for (auto &[uid, session] : sessions) {
             (void)uid;
-            reinterpret_cast<fs_server_client *>(session.get())->notify(path, type);
+            reinterpret_cast<fs_server_client *>(session.get())->notify(path.utf16(), type);
         }
     }
 
@@ -376,6 +367,9 @@ namespace eka2l1 {
             HANDLE_CLIENT_IPC(file_read, epoc::fs_msg_file_read, "Fs::FileRead");
             HANDLE_CLIENT_IPC(file_write, epoc::fs_msg_file_write, "Fs::FileWrite");
             HANDLE_CLIENT_IPC(file_flush, epoc::fs_msg_file_flush, "Fs::FileFlush");
+            HANDLE_CLIENT_IPC(file_map_open, epoc::fs_msg_file_map_open_name, "Fs::FileMapOpenName");
+            HANDLE_CLIENT_IPC(file_map_open, epoc::fs_msg_file_map_open_handle, "Fs::FileMapOpenHandle");
+            HANDLE_CLIENT_IPC(file_map_flush, epoc::fs_msg_file_map_flush, "Fs::FileMapFlush");
             HANDLE_CLIENT_IPC(file_temp, epoc::fs_msg_file_temp, "Fs::FileTemp");
             HANDLE_CLIENT_IPC(file_duplicate, epoc::fs_msg_file_duplicate, "Fs::FileDuplicate");
             HANDLE_CLIENT_IPC(file_adopt, epoc::fs_msg_file_adopt, "Fs::FileAdopt");
@@ -474,22 +468,22 @@ namespace eka2l1 {
     }
 
     void fs_server_client::replace(service::ipc_context *ctx) {
-        auto given_path_target = ctx->get_argument_value<std::u16string>(0);
-        auto given_path_dest = ctx->get_argument_value<std::u16string>(1);
+        auto given_path_target = ctx->get_path_argument(0);
+        auto given_path_dest = ctx->get_path_argument(1);
 
         if (!given_path_target || !given_path_dest) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        auto target = get_full_symbian_path(ss_path, given_path_target.value());
-        auto dest = get_full_symbian_path(ss_path, given_path_dest.value());
+        auto target = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{given_path_target.value()});
+        auto dest = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{given_path_dest.value()});
 
         io_system *io = ctx->sys->get_io_system();
 
         // If exists, delete it so the new file can be replaced
-        if (io->exist(dest)) {
-            io->delete_entry(dest);
+        if (io->exist(eka2l1::guest_path{dest})) {
+            io->delete_entry(eka2l1::guest_path{dest});
         }
 
         bool res = io->rename(target, dest);
@@ -506,20 +500,20 @@ namespace eka2l1 {
     }
 
     void fs_server_client::rename(service::ipc_context *ctx) {
-        auto given_path_target = ctx->get_argument_value<std::u16string>(0);
-        auto given_path_dest = ctx->get_argument_value<std::u16string>(1);
+        auto given_path_target = ctx->get_path_argument(0);
+        auto given_path_dest = ctx->get_path_argument(1);
 
         if (!given_path_target || !given_path_dest) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        std::u16string target = get_full_symbian_path(ss_path, given_path_target.value());
-        std::u16string dest = get_full_symbian_path(ss_path, given_path_dest.value());
+        guest_path target = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{given_path_target.value()});
+        guest_path dest = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{given_path_dest.value()});
 
         io_system *io = ctx->sys->get_io_system();
 
-        if (!io->exist(target)) {
+        if (!io->exist(eka2l1::guest_path{target})) {
             if (eka2l1::is_separator(target.back())) {
                 // Want to rename a directory. It's path not found in this case
                 ctx->complete(epoc::error_path_not_found);
@@ -530,7 +524,7 @@ namespace eka2l1 {
             return;
         }
 
-        if (io->exist(dest)) {
+        if (io->exist(eka2l1::guest_path{dest})) {
             ctx->complete(epoc::error_already_exists);
             return;
         }
@@ -549,14 +543,14 @@ namespace eka2l1 {
     }
 
     void fs_server_client::delete_entry(service::ipc_context *ctx) {
-        auto given_path = ctx->get_argument_value<std::u16string>(0);
+        auto given_path = ctx->get_path_argument(0);
 
         if (!given_path) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        auto path = get_full_symbian_path(ss_path, given_path.value());
+        auto path = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{given_path.value()});
         if (!check_path_capabilities_pass(path, ctx->msg->own_thr->owning_process(), epoc::fs::private_comp_access_policy, epoc::fs::sys_resource_modify_access_policy, epoc::fs::sys_resource_modify_access_policy)) {
             ctx->complete(epoc::error_permission_denied);
             return;
@@ -564,7 +558,7 @@ namespace eka2l1 {
 
         io_system *io = ctx->sys->get_io_system();
 
-        bool success = io->delete_entry(path);
+        bool success = io->delete_entry(eka2l1::guest_path{path});
 
         if (!success) {
             ctx->complete(epoc::error_not_found);
@@ -580,7 +574,7 @@ namespace eka2l1 {
     }
 
     void fs_server::set_default_system_path(service::ipc_context *ctx) {
-        auto new_path = ctx->get_argument_value<std::u16string>(0);
+        auto new_path = ctx->get_path_argument(0);
 
         if (!new_path) {
             ctx->complete(epoc::error_argument);
@@ -592,13 +586,13 @@ namespace eka2l1 {
     }
 
     void fs_server::get_default_system_path(service::ipc_context *ctx) {
-        ctx->write_arg(0, default_sys_path);
+        ctx->write_arg(0, default_sys_path.utf16());
         ctx->complete(epoc::error_none);
     }
 
-    bool fs_server::is_file_opened(const std::u16string &path) {
+    bool fs_server::is_file_opened(const guest_path &path) {
         for (auto &[path_attrib, attrib] : attribs) {
-            if (common::compare_ignore_case(path_attrib, path) == 0) {
+            if (path_attrib == path) {
                 return true;
             }
         }
@@ -626,10 +620,18 @@ namespace eka2l1 {
                     system_apps_dir[0] = drive_to_char16(drv);
                     shared_data_dir[0] = drive_to_char16(drv);
 
-                    io->create_directories(system_apps_dir);
-                    io->create_directories(shared_data_dir);
+                    io->create_directories(eka2l1::guest_path{system_apps_dir});
+                    io->create_directories(eka2l1::guest_path{shared_data_dir});
                 }
             }
+
+            // Composer saves new tones here (PathInfo::SimpleSoundsPath); retail ROMs leave it to the factory C: image.
+            if (io->get_drive_entry(drive_c)) {
+                io->create_directories(eka2l1::guest_path{u"C:\\Nokia\\Sounds\\Simple\\"});
+            }
+        } else if (io_system *io = sys->get_io_system(); io->get_drive_entry(drive_c)) {
+            // PathInfo::OthersPath() normally exists in the factory C: image.
+            io->create_directories(eka2l1::guest_path{u"C:\\Data\\Others\\"});
         }
 
         std::u16string temp_data_dir = u"?:\\System\\Temp\\";
@@ -643,14 +645,14 @@ namespace eka2l1 {
             if (io->get_drive_entry(drv)) {
                 temp_data_dir[0] = drive_to_char16(drv);
 
-                if (auto dir = io->open_dir(temp_data_dir)) {
+                if (auto dir = io->open_dir(eka2l1::guest_path{temp_data_dir})) {
                     while (auto dir_entry = dir->get_next_entry()) {
                         if (dir_entry->type == io_component_type::file) {
-                            io->delete_entry(common::utf8_to_ucs2(dir_entry->full_path));
+                            io->delete_entry(eka2l1::guest_path{common::utf8_to_ucs2(dir_entry->full_path)});
                         }
                     }
                 } else {
-                    io->create_directories(temp_data_dir);
+                    io->create_directories(eka2l1::guest_path{temp_data_dir});
                 }
             }
         }
@@ -685,12 +687,12 @@ namespace eka2l1 {
     }
 
     void fs_server_client::session_path(service::ipc_context *ctx) {
-        ctx->write_arg(0, ss_path);
+        ctx->write_arg(0, ss_path.utf16());
         ctx->complete(epoc::error_none);
     }
 
     void fs_server_client::set_session_path(service::ipc_context *ctx) {
-        auto new_path = ctx->get_argument_value<std::u16string>(0);
+        auto new_path = ctx->get_path_argument(0);
 
         if (!new_path) {
             ctx->complete(epoc::error_argument);
@@ -720,7 +722,7 @@ namespace eka2l1 {
     }
 
     void fs_server_client::create_private_path(service::ipc_context *ctx) {
-        const std::u16string private_path = get_private_path(ctx->msg->own_thr->owning_process(),
+        const guest_path private_path = get_private_path(ctx->msg->own_thr->owning_process(),
             static_cast<drive_number>(ctx->get_argument_value<std::int32_t>(0).value()));
 
         eka2l1::io_system *io = ctx->sys->get_io_system();
@@ -741,15 +743,15 @@ namespace eka2l1 {
     }
 
     void fs_server_client::is_file_in_rom(service::ipc_context *ctx) {
-        std::optional<utf16_str> path = ctx->get_argument_value<utf16_str>(0);
+        std::optional<guest_path> path = ctx->get_path_argument(0);
 
         if (!path) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        auto final_path = get_full_symbian_path(ss_path, path.value());
-        symfile f = ctx->sys->get_io_system()->open_file(final_path, READ_MODE);
+        auto final_path = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{path.value()});
+        symfile f = ctx->sys->get_io_system()->open_file(eka2l1::guest_path{final_path}, READ_MODE);
 
         // The address must be written back even when the file does not exist at all: clients read it
         // unconditionally on KErrNone, so leaving it untouched hands them uninitialised stack as a ROM address.
@@ -764,6 +766,107 @@ namespace eka2l1 {
         ctx->complete(epoc::error_none);
     }
 
+    std::int32_t validate_file_name(const std::u16string &name, const guest_path &session_path,
+        char16_t &bad_character, file_name_validation_params *params) {
+        const auto invalid = [&](const char16_t character, const file_name_error error = file_name_error::bad_character) {
+            bad_character = character;
+            if (params) {
+                params->error_ = error;
+                const std::size_t pos = (character == u'.') ? name.find(character) : name.rfind(character);
+                params->invalid_char_pos_ = (error == file_name_error::bad_character && pos != std::u16string::npos)
+                    ? static_cast<std::uint32_t>(pos + 1) : 0;
+            }
+            return epoc::error_bad_name;
+        };
+        const auto valid = [&]() {
+            bad_character = 0;
+            if (params) {
+                params->error_ = file_name_error::none;
+                params->invalid_char_pos_ = 0;
+            }
+            return epoc::error_none;
+        };
+
+        if (name.empty()) {
+            return invalid(u' ', file_name_error::bad_name);
+        }
+        const bool use_session_path = !params || params->use_session_path_;
+        if (name.size() + ((params && use_session_path) ? session_path.size() : 0) > 256) {
+            return invalid(u' ', file_name_error::too_long);
+        }
+
+        constexpr std::u16string_view illegal_characters(u"<>:\"/|\0", 7);
+        const std::size_t drive_end = (name.size() >= 2 && name[1] == u':') ? 2 : 0;
+        if (drive_end && !((name[0] >= u'A' && name[0] <= u'Z') || (name[0] >= u'a' && name[0] <= u'z'))) {
+            return invalid(u':');
+        }
+        const std::u16string_view remainder(name.data() + drive_end, name.size() - drive_end);
+        // TParse accepts rooted paths and bare filenames, but not relative directories.
+        if (!remainder.empty() && remainder.front() != u'\\' && remainder.find(u'\\') != std::u16string_view::npos) {
+            const std::size_t pos = name.find_last_of(illegal_characters);
+            return (pos == std::u16string::npos) ? invalid(u' ', file_name_error::bad_name) : invalid(name[pos]);
+        }
+
+        const std::size_t filename_start = name.find_last_of(u'\\');
+        const std::u16string_view filename = std::u16string_view(name).substr(
+            filename_start == std::u16string::npos ? drive_end : filename_start + 1);
+        for (const char16_t wildcard : { u'*', u'?' }) {
+            if (filename.find(wildcard) != std::u16string_view::npos) {
+                return invalid(wildcard);
+            }
+        }
+        for (const char16_t wildcard : { u'?', u'*' }) {
+            if (name.find(wildcard) != std::u16string::npos) {
+                return invalid(wildcard);
+            }
+        }
+
+        std::u16string path(name);
+        if (use_session_path) {
+            const std::size_t first_separator = session_path.find(u'\\');
+            const std::size_t last_separator = session_path.rfind(u'\\');
+            path = drive_end ? name.substr(0, 2) : session_path.root_name().utf16();
+            if ((remainder.empty() || remainder.front() != u'\\') && first_separator != std::u16string::npos) {
+                path += session_path.utf16().substr(first_separator, last_separator - first_separator + 1);
+            }
+            path += remainder;
+        }
+        if (path.size() > 256) {
+            return invalid(u' ', file_name_error::too_long);
+        }
+        std::size_t start = (path.size() >= 2 && path[1] == u':') ? 2 : 0;
+        if (start < path.size() && path[start] == u'\\') {
+            ++start;
+        }
+        // TChar::IsSpace includes separator categories and U+0009..U+000D.
+        constexpr std::u16string_view spaces = u" \t\n\r\f\v\u00a0\u1680\u180e"
+            u"\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000";
+        while (start < path.size()) {
+            const std::size_t separator = path.find(u'\\', start);
+            const std::size_t end = (separator == std::u16string::npos) ? path.size() : separator;
+            if (start == end) {
+                return invalid(u'\\');
+            }
+            const std::u16string_view component(path.data() + start, end - start);
+            const std::size_t last = component.find_last_not_of(spaces);
+            if (last == std::u16string_view::npos) {
+                return invalid(u' ', file_name_error::bad_name);
+            }
+            if (component[last] == u'.') {
+                return invalid(u'.');
+            }
+            const std::size_t pos = component.find_last_of(illegal_characters);
+            if (pos != std::u16string_view::npos) {
+                return invalid(component[pos]);
+            }
+            if (separator == std::u16string::npos) {
+                return valid();
+            }
+            start = separator + 1;
+        }
+        return (params && path.back() == u'\\') ? valid() : invalid(u' ', file_name_error::bad_name);
+    }
+
     void fs_server_client::is_valid_name(service::ipc_context *ctx) {
         std::optional<utf16_str> path = ctx->get_argument_value<utf16_str>(0);
 
@@ -772,12 +875,27 @@ namespace eka2l1 {
             return;
         }
 
-        RE2 pattern("[<>:\"/|*?]+");
-        std::string path_utf8 = common::ucs2_to_utf8(path.value());
-        std::uint32_t valid = !(RE2::PartialMatch(path_utf8, pattern) || path->empty());
+        char16_t bad_character = 0;
+        if (ctx->msg->args.args[3]) {
+            auto params = ctx->get_argument_data_from_descriptor<file_name_validation_params>(3);
+            if (!params) {
+                ctx->complete(epoc::error_argument);
+                return;
+            }
+            const std::int32_t result = validate_file_name(*path, ss_path, bad_character, &*params);
+            ctx->write_data_to_descriptor_argument(3, *params);
+            ctx->complete(result);
+            return;
+        }
 
-        ctx->write_data_to_descriptor_argument<std::uint32_t>(1, valid);
-        ctx->complete(epoc::error_none);
+        const std::int32_t result = validate_file_name(*path, ss_path, bad_character);
+        const auto return_bad_character = ctx->get_argument_data_from_descriptor<std::uint32_t>(1);
+        if (return_bad_character && *return_bad_character) {
+            ctx->write_data_to_descriptor_argument<char16_t>(2, bad_character);
+        }
+
+        // RFs::IsValidName derives its boolean result from the IPC completion code.
+        ctx->complete(result);
     }
 
     void fs_server_client::notify_change(service::ipc_context *ctx) {
@@ -897,14 +1015,14 @@ namespace eka2l1 {
     }
 
     void fs_server_client::mkdir(service::ipc_context *ctx) {
-        std::optional<std::u16string> dir = ctx->get_argument_value<std::u16string>(0);
+        std::optional<guest_path> dir = ctx->get_path_argument(0);
 
         if (!dir) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        dir.value() = get_full_symbian_path(ss_path, dir.value());
+        dir.value() = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{dir.value()});
 
         if (!check_path_capabilities_pass(dir.value(), ctx->msg->own_thr->owning_process(), epoc::fs::private_comp_access_policy, epoc::fs::sys_resource_modify_access_policy, epoc::fs::sys_resource_modify_access_policy)) {
             ctx->complete(epoc::error_permission_denied);
@@ -915,11 +1033,11 @@ namespace eka2l1 {
 
         bool res = false;
 
-        if (!io->exist(dir.value())) {
+        if (!io->exist(eka2l1::guest_path{dir.value()})) {
             if (*ctx->get_argument_value<std::int32_t>(1)) {
-                res = io->create_directories(eka2l1::file_directory(*dir));
+                res = io->create_directories(eka2l1::guest_path{eka2l1::file_directory(*dir)});
             } else {
-                res = io->create_directory(eka2l1::file_directory(*dir));
+                res = io->create_directory(eka2l1::guest_path{eka2l1::file_directory(*dir)});
             }
         }
 
@@ -935,7 +1053,7 @@ namespace eka2l1 {
     }
 
     void fs_server_client::rmdir(service::ipc_context *ctx) {
-        std::optional<std::u16string> dir = ctx->get_argument_value<std::u16string>(0);
+        std::optional<guest_path> dir = ctx->get_path_argument(0);
 
         if (!dir) {
             ctx->complete(epoc::error_argument);
@@ -944,7 +1062,7 @@ namespace eka2l1 {
 
         dir.value() = get_full_symbian_path(ss_path, dir.value());
         io_system *io = ctx->sys->get_io_system();
-        io->delete_entry(dir.value());
+        io->delete_entry(eka2l1::guest_path{dir.value()});
 
         server<fs_server>()->notify_change(dir.value(), notify_type::all);
         ctx->complete(epoc::error_none);
@@ -961,21 +1079,21 @@ namespace eka2l1 {
         }
 
         file_parser parser(name.value(), related.value_or(u""), parse.value());
-        parser.parse(server<fs_server>()->default_sys_path);
+        parser.parse(server<fs_server>()->default_sys_path.utf16());
 
         ctx->write_data_to_descriptor_argument(2, parser.get_result());
         ctx->complete(epoc::error_none);
     }
 
     void fs_server_client::entry(service::ipc_context *ctx) {
-        std::optional<std::u16string> fname_op = ctx->get_argument_value<std::u16string>(0);
+        std::optional<guest_path> fname_op = ctx->get_path_argument(0);
 
         if (!fname_op) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        std::u16string fname = std::move(*fname_op);
+        guest_path fname = std::move(*fname_op);
         const std::string raw_utf8 = common::ucs2_to_utf8(fname);
         fname = get_full_symbian_path(ss_path, fname);
 
@@ -1023,7 +1141,7 @@ namespace eka2l1 {
                     LOG_WARN(EMULATED_STDOUT,
                         "[j9-nf] fs Entry redirect '{}' -> '{}' (jclcdc -> jclcldc) from {}",
                         common::ucs2_to_utf8(fname), common::ucs2_to_utf8(REAL_JCL), opener_name);
-                    fname = REAL_JCL;
+                    fname = guest_path(REAL_JCL);
                     entry_hle = io->get_entry_info(fname);
                 }
             }
@@ -1032,14 +1150,14 @@ namespace eka2l1 {
         if (j9_opener && (fname.size() >= 2) && (fname[1] == u':')) {
             const std::string lower_miss = common::lowercase_string(common::ucs2_to_utf8(fname));
             if (lower_miss.find("\\resource\\ive\\lib") != std::string::npos) {
-                std::u16string alt = fname;
+                std::u16string alt = fname.utf16();
                 if ((alt[0] == u'Z') || (alt[0] == u'z')) {
                     alt[0] = u'C';
                     if (io->exist(alt)) {
                         LOG_WARN(EMULATED_STDOUT,
                             "[j9-nf] fs Entry redirect '{}' -> '{}' (prefer staged ive/lib) from {}",
                             common::ucs2_to_utf8(fname), common::ucs2_to_utf8(alt), opener_name);
-                        fname = alt;
+                        fname = guest_path(std::move(alt));
                         entry_hle = io->get_entry_info(fname);
                     }
                 } else if (((alt[0] == u'C') || (alt[0] == u'c')) && !entry_hle) {
@@ -1048,7 +1166,7 @@ namespace eka2l1 {
                         LOG_WARN(EMULATED_STDOUT,
                             "[j9-nf] fs Entry redirect '{}' -> '{}' (ive/lib ROM fallback) from {}",
                             common::ucs2_to_utf8(fname), common::ucs2_to_utf8(alt), opener_name);
-                        fname = alt;
+                        fname = guest_path(std::move(alt));
                         entry_hle = io->get_entry_info(fname);
                     }
                 }
@@ -1058,13 +1176,13 @@ namespace eka2l1 {
         if (!entry_hle && j9_opener && opener_pr) {
             const std::string lower_jxe = common::lowercase_string(common::ucs2_to_utf8(fname));
             if (lower_jxe.find("jxe=") != std::string::npos) {
-                std::u16string alt = fname;
+                std::u16string alt = fname.utf16();
                 std::string alt8 = common::ucs2_to_utf8(alt);
                 if (resolve_j9_jxe_path(io, opener_pr, alt, alt8)) {
                     LOG_WARN(EMULATED_STDOUT,
                         "[j9-nf] fs Entry redirect '{}' -> '{}' (jxe pointer) from {}",
                         common::ucs2_to_utf8(fname), alt8, opener_name);
-                    fname = alt;
+                    fname = guest_path(std::move(alt));
                     entry_hle = io->get_entry_info(fname);
                 }
             }
@@ -1083,7 +1201,7 @@ namespace eka2l1 {
                 && (tail.find('.') == std::string::npos)
                 && (tail.find_first_not_of("0123456789") == std::string::npos);
             if (numeric_home) {
-                std::u16string home = fname;
+                std::u16string home = fname.utf16();
                 if (!home.empty() && (home.back() != u'\\')) {
                     home.push_back(u'\\');
                 }
@@ -1102,7 +1220,7 @@ namespace eka2l1 {
 
         if (!entry_hle) {
             if (j9_opener) {
-                note_j9_fs_miss(fname, -12);
+                note_j9_fs_miss(fname.utf16(), -12);
             }
             ctx->complete(epoc::error_not_found);
             LOG_TRACE(SERVICE_EFSRV, "Get entry completed not found: {}", common::ucs2_to_utf8(fname));
@@ -1118,7 +1236,7 @@ namespace eka2l1 {
     }
 
     void fs_server_client::set_entry(service::ipc_context *ctx) {
-        std::optional<std::u16string> fname_op = ctx->get_argument_value<std::u16string>(0);
+        std::optional<guest_path> fname_op = ctx->get_path_argument(0);
         std::optional<epoc::time> time = ctx->get_argument_data_from_descriptor<epoc::time>(1);
         std::uint32_t set_att_mask = *ctx->get_argument_value<std::uint32_t>(2);
         std::uint32_t clear_att_mask = *ctx->get_argument_value<std::uint32_t>(3);
@@ -1128,7 +1246,7 @@ namespace eka2l1 {
             return;
         }
 
-        const std::u16string fname = get_full_symbian_path(ss_path, fname_op.value());
+        const guest_path fname = get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{fname_op.value()});
         LOG_INFO(SERVICE_EFSRV, "Set entry of: {}", common::ucs2_to_utf8(fname));
 
         io_system *io = ctx->sys->get_io_system();
@@ -1145,9 +1263,9 @@ namespace eka2l1 {
     }
 
     void fs_server::private_path(service::ipc_context *ctx) {
-        std::u16string path = get_private_path_trim_uid(ctx->msg->own_thr->owning_process());
+        guest_path path(get_private_path_trim_uid(ctx->msg->own_thr->owning_process()));
 
-        ctx->write_arg(0, path);
+        ctx->write_arg(0, path.utf16());
         ctx->complete(epoc::error_none);
     }
 
@@ -1183,14 +1301,14 @@ namespace eka2l1 {
     }
 
     void fs_server_client::is_file_opened(service::ipc_context *ctx) {
-        std::optional<utf16_str> path = ctx->get_argument_value<utf16_str>(0);
+        std::optional<guest_path> path = ctx->get_path_argument(0);
 
         if (!path) {
             ctx->complete(epoc::error_argument);
             return;
         }
 
-        std::u16string final_path = get_full_symbian_path(ss_path, path.value());
+        guest_path final_path(get_full_symbian_path(eka2l1::guest_path{ss_path}, eka2l1::guest_path{path.value()}));
         const std::int32_t result = server<fs_server>()->is_file_opened(final_path);
 
         ctx->write_data_to_descriptor_argument<std::int32_t>(1, result);

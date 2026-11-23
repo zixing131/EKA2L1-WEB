@@ -137,6 +137,7 @@ namespace eka2l1::drivers {
         eka2l1::vec2 new_surface_size_;
 
         bool is_gles;
+        const bool force_bgra_conversion_;
         bool support_line_width_;
         std::uint32_t max_texture_size_ = 2048;
         bool line_width_range_ready_;
@@ -151,6 +152,7 @@ namespace eka2l1::drivers {
         std::string active_upscale_shader_;
 
         float anisotrophy_max_;
+        float point_size_range_[2] = { 1.0f, 1.0f };
 
         void do_init();
         void prepare_draw_lines_shared();
@@ -192,6 +194,7 @@ namespace eka2l1::drivers {
         void bind_framebuffer(command &cmd);
         void set_blend_colour(command &cmd);
         void read_framebuffer(command &cmd);
+        void copy_framebuffer_to_texture(command &cmd);
 
         void save_gl_state();
         void load_gl_state();
@@ -221,6 +224,10 @@ namespace eka2l1::drivers {
 
         bool is_stricted() const override {
             return is_gles;
+        }
+
+        bool convert_bgra_uploads() const {
+            return is_gles && force_bgra_conversion_;
         }
 
         std::uint32_t max_texture_size() const override {

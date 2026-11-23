@@ -27,6 +27,7 @@
 #include <system/epoc.h>
 
 #include <services/fbs/fbs.h>
+#include <services/fbs/palette.h>
 #include <services/fs/std.h>
 
 #include <common/cvt.h>
@@ -40,6 +41,8 @@
 #include <vfs/vfs.h>
 
 #include <config/config.h>
+
+#include <cstring>
 
 namespace eka2l1 {
     namespace epoc {
@@ -322,6 +325,8 @@ namespace eka2l1 {
         , fntstr_seg(nullptr)
         , bmp_font_vtab(0)
         , session_cache_list(nullptr) {
+        // Host icon decoding reads the palette from frontend threads, possibly before any client connects.
+        palette_256_ = epoc::get_suitable_palette_256(sys->get_symbian_version_use());
     }
 
     static void compressor_thread_func(compress_queue *queue) {
@@ -330,7 +335,7 @@ namespace eka2l1 {
     }
 
     int fbs_server::legacy_level() const {
-        if (kern->get_epoc_version() <= epocver::epoc6) {
+        if (kern->get_epoc_version() <= epocver::epoc70) {
             return FBS_LEGACY_LEVEL_S60V1;
         }
 
@@ -346,7 +351,8 @@ namespace eka2l1 {
             return FBS_LEGACY_LEVEL_SYMBIAN_92;
         }
 
-        if (large_bitmap_access_mutex->get_access_count() > 0) {
+        // The server holds one reference itself; only an older client opening the mutex adds more.
+        if (large_bitmap_access_mutex->get_access_count() > 1) {
             return FBS_LEGACY_LEVEL_EARLY_EKA2;
         }
 
@@ -406,10 +412,14 @@ namespace eka2l1 {
         base_shared_chunk = reinterpret_cast<std::uint8_t *>(shared_chunk->host_base());
         base_large_chunk = reinterpret_cast<std::uint8_t *>(large_chunk->host_base());
 
+        // Anna/Belle fbscli keeps an 8-byte header (touch count, volatile flag) in front of plain large
+        // bitmap pixels, because clients can no longer write the read-only shared heap.
+        bitmap_data_header_size_ = (kern->get_epoc_version() >= epocver::epoc95) ? 8 : 0;
+
         shared_chunk_allocator = std::make_unique<epoc::chunk_allocator>(shared_chunk);
         large_chunk_allocator = std::make_unique<epoc::chunk_allocator>(large_chunk);
 
-        if (fntstr_seg = sys->get_lib_manager()->load(u"fntstr.dll")) {
+        if (fntstr_seg = sys->get_lib_manager()->load(guest_path(u"fntstr.dll"))) {
             // _ZTV11CBitmapFont @ 97 NONAME ; #<VT>#
             // Skip the filler (vtable start address) and the typeinfo
             if (kern->is_eka1()) {
@@ -529,6 +539,16 @@ namespace eka2l1 {
 
         const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
         return large_chunk_allocator->freep(ptr);
+    }
+
+    void *fbs_server::allocate_bitmap_pixels(const std::size_t s) {
+        std::uint8_t *block = reinterpret_cast<std::uint8_t *>(allocate_large_data(s + bitmap_data_header_size_));
+        if (!block) {
+            return nullptr;
+        }
+
+        std::memset(block, 0, bitmap_data_header_size_);
+        return block + bitmap_data_header_size_;
     }
 
     fbs_server::~fbs_server() {

@@ -22,7 +22,14 @@
 
 -keep class com.github.eka2l1.emu.Emulator { *; }
 -keep class com.github.eka2l1.emu.EmulatorCamera { *; }
+-keep class com.github.eka2l1.emu.EmulatorLocation { *; }
+-keep class com.github.eka2l1.emu.TlsTrust { *; }
 -keep class com.github.eka2l1.util.SparseIntArrayAdapter { *; }
+
+# Inflated by name from res/xml/preferences_android.xml
+-keep class com.github.eka2l1.settings.LongClickPreference {
+  <init>(android.content.Context, android.util.AttributeSet);
+}
 
 # Gson
 ### The following rules are needed for R8 in "full mode" which only adheres to `-keepattribtues` if

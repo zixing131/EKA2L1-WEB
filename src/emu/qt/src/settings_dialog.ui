@@ -183,6 +183,35 @@
               </widget>
              </item>
              <item>
+              <layout class="QHBoxLayout" name="app_config_screen_mode_layout">
+               <property name="spacing">
+                <number>11</number>
+               </property>
+               <property name="leftMargin">
+                <number>11</number>
+               </property>
+               <property name="topMargin">
+                <number>0</number>
+               </property>
+               <property name="rightMargin">
+                <number>11</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QLabel" name="app_config_screen_mode_label">
+                 <property name="text">
+                  <string>Guest screen mode</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QComboBox" name="app_config_screen_mode_combo_box"/>
+               </item>
+              </layout>
+             </item>
+             <item>
               <layout class="QHBoxLayout" name="app_config_screen_scale_edit_widget">
                <property name="spacing">
                 <number>11</number>
@@ -844,6 +873,19 @@ Preferred option will automatically enable this on S60v1/S60v2 devices.</string>
               </property>
              </widget>
             </item>
+            <item>
+             <widget class="QPushButton" name="system_device_current_delete_btn">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="text">
+               <string>Delete</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
           <item row="1" column="0">
@@ -1348,6 +1390,24 @@ Preferred option will automatically enable this on S60v1/S60v2 devices.</string>
           <string>Note: One of the bindings is associated with a mouse button, touchscreen functionalities will be disabled.</string>
          </property>
         </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="control_bind_edit_layout">
+         <item>
+          <widget class="QLabel" name="control_bind_edit_label">
+           <property name="text">
+            <string>Edit Key</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="control_bind_edit_btn">
+           <property name="text">
+            <string notr="true">PushButton</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
        </item>
        <item>
         <layout class="QHBoxLayout" name="control_bind_row1_layout">

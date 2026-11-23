@@ -118,6 +118,7 @@ private slots:
     void on_device_combo_choose(const int index);
     void on_device_rename_requested();
     void on_device_rescan_requested();
+    void on_device_delete_requested();
     void on_device_validate_requested();
     void on_friendly_phone_name_edited(const QString &text);
     void on_rta_combo_choose(const int index);
@@ -131,6 +132,7 @@ private slots:
     void on_use_shader_for_upscale_toggled(bool checked);
     void on_upscale_shader_choose(const int index);
     void on_upscale_factor_choose(const int index);
+    void on_guest_screen_mode_choose(const int index);
     void on_theme_changed(int value);
     void on_cpu_backend_changed(int value);
     void on_ui_clear_all_configs_clicked();

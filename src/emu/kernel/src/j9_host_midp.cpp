@@ -1060,7 +1060,7 @@ namespace eka2l1::hle {
                     "DroidSansFallback.ttf",
                 };
                 for (const char *path : k_paths) {
-                    FILE *f = common::open_c_file(path, "rb");
+                    FILE *f = common::open_c_file(host_path::from_utf8(path), "rb");
                     if (!f) {
                         continue;
                     }

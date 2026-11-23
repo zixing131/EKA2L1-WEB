@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 #pragma once
+#include <common/path_types.h>
 
 #include <common/container.h>
 #include <common/linked.h>
@@ -153,7 +154,7 @@ namespace eka2l1::kernel {
 
         std::array<pass_arg, 16> args;
 
-        std::u16string exe_path;
+        guest_path exe_path;
         std::u16string cmd_args;
 
         object_ix process_handles;
@@ -168,7 +169,7 @@ namespace eka2l1::kernel {
 
         std::uint32_t thread_count = 0;
 
-        mutex_ptr dll_lock;
+        mutex_ptr dll_lock = nullptr;
         epoc::security_info sec_info;
 
         common::roundabout thread_list;
@@ -180,6 +181,7 @@ namespace eka2l1::kernel {
         kernel::process *parent_process_;
 
         std::uint32_t time_delay_;
+        std::uint32_t tick_count_mask_ = ~0U;
         bool setting_inheritence_;
 
         std::int32_t generation_;
@@ -190,7 +192,7 @@ namespace eka2l1::kernel {
         common::identity_container<process_logon_callback> logon_requests_emu;
 
     protected:
-        thread_ptr primary_thread;
+        thread_ptr primary_thread = nullptr;
 
         std::int32_t refresh_generation();
 
@@ -239,7 +241,7 @@ namespace eka2l1::kernel {
             const process_priority pri);
 
         explicit process(kernel_system *kern, memory_system *mem, const std::string &process_name,
-            const std::u16string &exe_path, const std::u16string &cmd_args, bool use_memory = true);
+            const guest_path &exe_path, const std::u16string &cmd_args, bool use_memory = true);
 
         ~process() = default;
 
@@ -287,7 +289,7 @@ namespace eka2l1::kernel {
             return cmd_args;
         }
 
-        std::u16string get_exe_path() const {
+        guest_path get_exe_path() const {
             return exe_path;
         }
 
@@ -317,6 +319,14 @@ namespace eka2l1::kernel {
 
         std::uint32_t get_flags() const {
             return flags;
+        }
+
+        std::uint32_t get_tick_count_mask() const {
+            return tick_count_mask_;
+        }
+
+        void set_tick_count_mask(const std::uint32_t mask) {
+            tick_count_mask_ = mask;
         }
 
         chunk_ptr get_rom_bss_chunk(const address addr);

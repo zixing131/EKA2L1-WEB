@@ -17,9 +17,11 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <common/arghandler.h>
 #include <common/cvt.h>
 #include <common/path.h>
+#include <common/platform.h>
 #include <common/pystr.h>
 #include <qt/cmdhandler.h>
 #include <qt/mainwindow.h>
@@ -36,6 +38,8 @@
 #endif
 #endif
 
+#include <j2me/applist.h>
+#include <j2me/interface.h>
 #include <kernel/kernel.h>
 #include <services/applist/applist.h>
 
@@ -43,9 +47,82 @@
 #include <vfs/vfs.h>
 #include <qt/utils.h>
 
+#include <charconv>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 
+#if EKA2L1_PLATFORM(WIN32)
+#include <Windows.h>
+#include <io.h>
+
+static void attach_command_line_console() {
+    if (!AttachConsole(ATTACH_PARENT_PROCESS) && GetLastError() != ERROR_ACCESS_DENIED) {
+        return;
+    }
+
+    // Keep inherited files and pipes; only bind streams that have no output handle.
+    if (_fileno(stdout) < 0 || _get_osfhandle(_fileno(stdout)) == -1) {
+        std::freopen("CONOUT$", "w", stdout);
+        std::cout.clear();
+    }
+    if (_fileno(stderr) < 0 || _get_osfhandle(_fileno(stderr)) == -1) {
+        std::freopen("CONOUT$", "w", stderr);
+        std::cerr.clear();
+    }
+}
+#endif
+
 using namespace eka2l1;
+
+void register_command_line_options(eka2l1::common::arg_parser &parser) {
+    parser.add("--debug-control-port", "Enable the loopback HTTP control API on this port (1..65535). Disabled by default.", debug_control_option_handler);
+    parser.add("--help, -h", "Display this help and exit", help_option_handler);
+    parser.add("--listapp", "List all installed applications", list_app_option_handler);
+    parser.add("--listdevices", "List all installed devices", list_devices_option_handler);
+    parser.add("--app, -a, --run", "Run an app with given name or UID, or the absolute virtual path to executable.\n"
+                                    "\t\t\t  See list of apps with --listapp.\n"
+                                    "\t\t\t  Extra command line arguments can be passed to the application.\n"
+                                    "\n"
+                                    "\t\t\t  Some example:\n"
+                                    "\t\t\t    eka2l1 --run C:\\sys\\bin\\BitmapTest.exe \"--hi --arg 5\"\n"
+                                    "\t\t\t    eka2l1 --run Bounce\n"
+                                    "\t\t\t    eka2l1 --run 0x200412ED\n",
+        app_specifier_option_handler);
+    parser.add("--device, -dvc", "Set a device to be ran, through the given firmware code. This device will also be saved in the configuration as the current device.\n"
+                           "\t\t\t Example: --device RH-29",
+        device_set_option_handler);
+    parser.add("--install, -i", "Install a SIS.", app_install_option_handler);
+    parser.add("--remove, -r", "Remove an package.", package_remove_option_handler);
+    parser.add("--fullscreen, -f", "Display the emulator in fullscreen.", fullscreen_option_handler);
+    parser.add("--mount, -m", "Load a folder/zip as a Game Card ROM.", mount_card_option_handler);
+    parser.add("--keybindprofile, -kbp", "Set a keybind profile to associate with the emulator launch. Don't include any file extension here.\n"
+                                          "\t Example: eka2l1 --kbp controller_for_octopus",
+        keybind_profile_option_handler);
+    parser.add("--mmcid, --cid, -cid", "Set the MMC-ID for the mounted card", set_mmcid_option_handler);
+    parser.add("--runng, --appng, -rng, -ang", "Run a single N-Gage game inside the E drive", run_ngage_game_option_handler);
+    parser.add("--jar", "Install a MIDP-1.0 JAR, or refresh the installed copy, and run it. S60v1 devices only.", run_jar_option_handler);
+
+#if ENABLE_PYTHON_SCRIPTING
+    parser.add("--gendocs", "Generate Python documentation", python_docgen_option_handler);
+#endif
+}
+
+bool handle_command_line_help(const int argc, const char **argv) {
+    // Later tokens may be arguments to a guest app, so only inspect the first option.
+    if (argc <= 1 || (std::strcmp(argv[1], "--help") != 0 && std::strcmp(argv[1], "-h") != 0)) {
+        return false;
+    }
+
+#if EKA2L1_PLATFORM(WIN32)
+    attach_command_line_console();
+#endif
+
+    eka2l1::common::arg_parser parser(argc, argv);
+    register_command_line_options(parser);
+    help_option_handler(&parser, nullptr, nullptr);
+    return true;
+}
 
 bool app_install_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err) {
     const char *path = parser->next_token();
@@ -60,9 +137,10 @@ bool app_install_option_handler(eka2l1::common::arg_parser *parser, void *userda
     // Since it's inconvenient for user to specify the drive (they are all the same on computer),
     // and it's better to install in C since there is many apps required
     // to be in it and hardcoded the drive, just hardcode drive E here.
-    bool result = emu->symsys->install_package(common::utf8_to_ucs2(path), drive_e);
+    // An installation_result, where success is 0
+    const int result = emu->symsys->install_package(eka2l1::host_path{path}, emu->symsys->get_default_install_drive());
 
-    if (!result) {
+    if (result != package::installation_result_success) {
         *err = "Installation of SIS failed";
         return false;
     }
@@ -147,7 +225,6 @@ bool app_specifier_option_handler(eka2l1::common::arg_parser *parser, void *user
         if (registry) {
             // Load the app
             epoc::apa::command_line cmdline;
-            cmdline.launch_cmd_ = epoc::apa::command_create;
 
             svr->launch_app(*registry, cmdline, nullptr, [emu](kernel::process *pr) {
                 return emu->ui_main->get_process_exit_callback()(pr);
@@ -165,7 +242,7 @@ bool app_specifier_option_handler(eka2l1::common::arg_parser *parser, void *user
         *err += " doesn't exist";
     } else {
         if (eka2l1::has_root_dir(tokstr)) {
-            process_ptr pr = kern->spawn_new_process(common::utf8_to_ucs2(tokstr), common::utf8_to_ucs2(cmdlinestr));
+            process_ptr pr = kern->spawn_new_process(guest_path::from_utf8(tokstr), common::utf8_to_ucs2(cmdlinestr));
 
             if (!pr) {
                 LOG_ERROR(FRONTEND_CMDLINE, "Unable to launch process: {}", tokstr);
@@ -191,7 +268,6 @@ bool app_specifier_option_handler(eka2l1::common::arg_parser *parser, void *user
                 == tokstr) {
                 // Load the app
                 epoc::apa::command_line cmdline;
-                cmdline.launch_cmd_ = epoc::apa::command_create;
 
                 emu->launched_app_name_ = tokstr;
 
@@ -231,7 +307,14 @@ bool list_app_option_handler(eka2l1::common::arg_parser *parser, void *userdata,
         return false;
     }
 
-    [[maybe_unused]] const auto &regs = svr->get_registerations();
+    std::vector<apa_app_registry> &regs = svr->get_registerations();
+
+    // The caption and the UID are the two forms --run accepts.
+    for (std::size_t i = 0; i < regs.size(); i++) {
+        const std::string name = common::ucs2_to_utf8(regs[i].mandatory_info.long_caption.to_std_string(nullptr));
+        std::cout << fmt::format("{} : {} (0x{:08X})", i, name, regs[i].mandatory_info.uid) << std::endl;
+    }
+
     return false;
 }
 
@@ -251,6 +334,11 @@ bool list_devices_option_handler(eka2l1::common::arg_parser *parser, void *userd
 
         case epocver::epoc6: {
             std::cout << " 6.0";
+            break;
+        }
+
+        case epocver::epoc91: {
+            std::cout << " 9.1";
             break;
         }
 
@@ -320,12 +408,12 @@ bool mount_card_option_handler(eka2l1::common::arg_parser *parser, void *userdat
 
     io->unmount(drive_e);
 
-    if (eka2l1::common::is_dir(path)) {
-        io->mount_physical_path(drive_e, drive_media::physical, io_attrib_removeable | (writable_sd ? 0 : io_attrib_write_protected), common::utf8_to_ucs2(path));
+    if (eka2l1::common::is_dir(eka2l1::host_path{path})) {
+        io->mount_physical_path(drive_e, drive_media::physical, io_attrib_removeable | (writable_sd ? 0 : io_attrib_write_protected), eka2l1::host_path{path});
     } else {
         std::cout << "Mounting in progress. Please wait..." << std::endl;
 
-        eka2l1::zip_mount_error error = emu->symsys->mount_game_zip(drive_e, drive_media::physical, path, (writable_sd ? 0 : io_attrib_write_protected));
+        eka2l1::zip_mount_error error = emu->symsys->mount_game_zip(drive_e, drive_media::physical, eka2l1::host_path{path}, (writable_sd ? 0 : io_attrib_write_protected));
         if (error != eka2l1::zip_mount_error_none) {
             switch (error) {
             case eka2l1::zip_mount_error_corrupt:
@@ -349,7 +437,7 @@ bool mount_card_option_handler(eka2l1::common::arg_parser *parser, void *userdat
         }
     }
 
-    std::optional<std::string> mmc_id_found = get_mmc_id_from_path(path);
+    std::optional<std::string> mmc_id_found = get_mmc_id_from_path(eka2l1::host_path(path));
     if (mmc_id_found.has_value()) {
         emu->conf.current_mmc_id = mmc_id_found.value();
     }
@@ -394,7 +482,7 @@ bool keybind_profile_option_handler(eka2l1::common::arg_parser *parser, void *us
     }
 
     // Check if profile exists
-    const std::string profile_path = fmt::format("bindings//{}.yml", profile);
+    const eka2l1::host_path profile_path(fmt::format("bindings//{}.yml", profile));
     if (!eka2l1::common::exists(profile_path)) {
         *err = "No profile with name {} exists";
         return true;
@@ -442,7 +530,6 @@ bool run_ngage_game_option_handler(eka2l1::common::arg_parser *parser, void *use
     }
 
     epoc::apa::command_line cmdline;
-    cmdline.launch_cmd_ = epoc::apa::command_create;
 
     if (!svr->launch_app(registry, cmdline, nullptr, [](kernel::process*) {
         exit(0);
@@ -452,6 +539,61 @@ bool run_ngage_game_option_handler(eka2l1::common::arg_parser *parser, void *use
     }
 
     emu->app_launch_from_command_line = true;
+    return true;
+}
+
+bool run_jar_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err) {
+    const char *path = parser->next_token();
+
+    if (!path) {
+        *err = "Request to run a JAR, but path not given";
+        return false;
+    }
+
+    desktop::emulator *emu = reinterpret_cast<desktop::emulator *>(userdata);
+
+    // Installing again an installed JAR only refreshes its copy, so it keeps its id
+    j2me::app_entry entry;
+    const j2me::install_error result = j2me::install(emu->symsys.get(), eka2l1::host_path(path), entry);
+
+    if (result != j2me::INSTALL_ERROR_JAR_SUCCESS) {
+        switch (result) {
+        case j2me::INSTALL_ERROR_JAR_NOT_FOUND:
+            *err = "Can not find the JAR file";
+            break;
+
+        case j2me::INSTALL_ERROR_JAR_INVALID:
+            *err = "The given file is not a valid JAR file";
+            break;
+
+        case j2me::INSTALL_ERROR_JAR_ONLY_MIDP1_SUPPORTED:
+            *err = "The JAR needs MIDP-2.0, but only MIDP-1.0 JARs on S60v1 devices are supported";
+            break;
+
+        case j2me::INSTALL_ERROR_NOT_SUPPORTED_FOR_PLAT:
+            *err = "JARs can only be run on S60v1 devices";
+            break;
+
+        default:
+            *err = "Installation of JAR failed";
+            break;
+        }
+
+        return false;
+    }
+
+    emu->symsys->get_j2me_applist()->flush();
+
+    if (!j2me::launch(emu->symsys.get(), entry.id_, [emu](kernel::process *pr) {
+        return emu->ui_main->get_process_exit_callback()(pr);
+    })) {
+        *err = "Launch of JAR failed";
+        return false;
+    }
+
+    emu->app_launch_from_command_line = true;
+    emu->launched_app_name_ = entry.title_;
+
     return true;
 }
 
@@ -472,3 +614,18 @@ bool python_docgen_option_handler(eka2l1::common::arg_parser *parser, void *user
     return false;
 }
 #endif
+
+bool debug_control_option_handler(eka2l1::common::arg_parser *parser, void *userdata, std::string *err) {
+    const char *value = parser->next_token();
+    int port = 0;
+    if (value) {
+        auto end = value + std::strlen(value);
+        auto parsed = std::from_chars(value, end, port);
+        if (parsed.ec == std::errc{} && parsed.ptr == end && port > 0 && port <= 65535) {
+            reinterpret_cast<desktop::emulator *>(userdata)->debug_control_port = port;
+            return true;
+        }
+    }
+    *err = "--debug-control-port requires a port between 1 and 65535";
+    return false;
+}

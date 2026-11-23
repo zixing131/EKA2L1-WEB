@@ -20,6 +20,10 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <atomic>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <functional>
 #include <memory>
@@ -96,7 +100,10 @@ namespace eka2l1::drivers {
         SENSOR_PROPERTY_MODEL_NAME = 0x11,
         SENSOR_PROPERTY_CONNECTION_TYPE = 0x12,
         SENSOR_PROPERTY_DESCRIPTION = 0x13,
-        SENSOR_PROPERTY_ACCELEROMETER_AXIS_ACTIVE = 0x1001
+        SENSOR_PROPERTY_ACCELEROMETER_AXIS_ACTIVE = 0x1001,
+        SENSOR_PROPERTY_MAGNETOMETER_AUTO_CALIBRATION_ACTIVE = 0x1006,
+        SENSOR_PROPERTY_MAGNETOMETER_CALIBRATION_LEVEL = 0x1007,
+        SENSOR_PROPERTY_MAGNETOMETER_AUTO_CALIBRATION_SUPPORTED = 0x1008
     };
 
     struct sensor_info {
@@ -169,11 +176,26 @@ namespace eka2l1::drivers {
     static_assert(sizeof(sensor_accelerometer_axis_data) == 24);
 
     using sensor_data_callback = std::function<void(std::vector<std::uint8_t> &, std::size_t)>;
+    using sensor_property_change_callback = std::function<void(const sensor_property_data &)>;
 
-    // TODO: Property listening
     class sensor {
+    protected:
+        sensor_property_change_callback property_change_callback_;
+
+        void notify_property_change(const sensor_property_data &data) {
+            if (property_change_callback_) {
+                property_change_callback_(data);
+            }
+        }
+
     public:
         virtual ~sensor() = default;
+
+        // Receives properties the sensor changes on its own, such as a calibration level.
+        void set_property_change_callback(sensor_property_change_callback callback) {
+            property_change_callback_ = std::move(callback);
+        }
+
         virtual bool get_property(const sensor_property prop, const std::int32_t item_index,
             const std::int32_t array_index, sensor_property_data &data) = 0;
         virtual bool set_property(const sensor_property_data &data) = 0;
@@ -204,7 +226,25 @@ namespace eka2l1::drivers {
     };
 
     class sensor_driver {
+        std::atomic<bool> acceleration_override_enabled_{false};
+        std::mutex acceleration_override_mutex_;
+        std::optional<std::array<double, 3>> host_acceleration_override_;
     public:
+        // Samples are in the guest device's own axes, before any host rotation.
+        virtual void set_acceleration_override(const double *values) {
+            std::lock_guard<std::mutex> guard(acceleration_override_mutex_);
+            if (values) host_acceleration_override_ = std::array<double, 3>{values[0], values[1], values[2]};
+            else host_acceleration_override_.reset();
+            acceleration_override_enabled_.store(values != nullptr, std::memory_order_release);
+        }
+        std::optional<std::array<double, 3>> acceleration_override() {
+            if (!acceleration_override_enabled_.load(std::memory_order_acquire)) return std::nullopt;
+            std::lock_guard<std::mutex> guard(acceleration_override_mutex_);
+            return host_acceleration_override_;
+        }
+
+        virtual ~sensor_driver() = default;
+
         virtual std::vector<sensor_info> queries_active_sensor(const sensor_info &search_info) = 0;
         virtual std::unique_ptr<sensor> new_sensor_controller(const std::uint32_t id) = 0;
 
@@ -219,6 +259,20 @@ namespace eka2l1::drivers {
          * @return True on success.
          */
         virtual bool resume() = 0;
+
+        /**
+         * Rotate motion-sensor samples to follow the displayed guest.
+         *
+         * Motion hardware reports in the host device's natural frame, but the
+         * guest expects the frame of the emulated device as the player sees it
+         * on screen. `degrees` is the counterclockwise angle from the host
+         * device's natural orientation to the emulated device's natural
+         * orientation: guest screen-mode rotation plus host interface-
+         * orientation rotation. Backends that source host-frame samples apply
+         * it to the X/Y axes; the default keeps samples in the host frame.
+         */
+        virtual void set_motion_rotation(const int degrees) {
+        }
 
         static std::unique_ptr<sensor_driver> instantiate();
     };

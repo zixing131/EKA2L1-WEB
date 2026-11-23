@@ -18,6 +18,7 @@
  */
 
 #include <j2me/applist.h>
+#include <common/path_types.h>
 #include <j2me/interface.h>
 #include <j2me/kmidrun.h>
 
@@ -84,8 +85,7 @@ namespace eka2l1::j2me {
         }
         const epocver sysver = sys->get_symbian_version_use();
         if (sysver <= epocver::epoc6) {
-            launch_through_kmidrun(sys, entry.value(), exit_cb);
-            return true;
+            return launch_through_kmidrun(sys, entry.value(), exit_cb);
         }
 
         return launch_through_midp2(sys, entry.value(), exit_cb);
@@ -369,7 +369,7 @@ namespace eka2l1::j2me {
         }
         int converted = 0;
         while (auto ent = listing->get_next_entry()) {
-            const std::string fname = ent->name;
+            const std::string fname = ent->name.utf8();
             const std::string lower_fn = common::lowercase_string(fname);
             if ((lower_fn.size() < 4) || (lower_fn.compare(lower_fn.size() - 4, 4, ".odc") != 0)) {
                 continue;
@@ -585,7 +585,7 @@ namespace eka2l1::j2me {
                 continue;
             }
             while (auto ent = listing->get_next_entry()) {
-                const std::string lower = common::lowercase_string(ent->name);
+                const std::string lower = common::lowercase_string(ent->name.utf8());
                 if ((lower.size() < 4)
                     || ((lower.compare(lower.size() - 4, 4, ".jad") != 0)
                         && (lower.compare(lower.size() - 4, 4, ".jar") != 0))) {
@@ -968,14 +968,15 @@ namespace eka2l1::j2me {
             return host_uid;
         }
         while (auto ent = dir->get_next_entry()) {
-            if ((ent->type != io_component_type::dir) || (ent->name == ".") || (ent->name == "..")) {
+            if ((ent->type != io_component_type::dir) || (ent->name == u".") || (ent->name == u"..")) {
                 continue;
             }
             if (ent->name.size() != 8) {
                 continue;
             }
             char *end = nullptr;
-            const unsigned long parsed = std::strtoul(ent->name.c_str(), &end, 16);
+            const std::string name = ent->name.utf8();
+            const unsigned long parsed = std::strtoul(name.c_str(), &end, 16);
             if (!end || (*end != '\0') || (parsed > 0xFFFFFFFFul)) {
                 continue;
             }
@@ -1463,7 +1464,7 @@ namespace eka2l1::j2me {
 
         epoc::apa::command_line cmd;
         cmd.launch_cmd_ = epoc::apa::command_open;
-        cmd.executable_path_ = suite_jad;
+        cmd.executable_path_ = guest_path(suite_jad);
         cmd.document_name_ = suite_jad;
         set_java_launch_opaque(cmd, suite_uid);
 
@@ -1941,7 +1942,7 @@ namespace eka2l1::j2me {
             if (ent->type != io_component_type::file) {
                 continue;
             }
-            std::string low = ent->name;
+            std::string low = ent->name.utf8();
             std::transform(low.begin(), low.end(), low.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if ((low.size() >= 4) && (low.compare(low.size() - 4, 4, ".jar") == 0)) {
@@ -2414,7 +2415,7 @@ namespace eka2l1::j2me {
             code[options + 48] = 1;
         }
         kernel::codeseg_create_info info{};
-        info.full_path = uninstalling ? u"C:\\sys\\bin\\eka_midlet_uninstall.exe" : u"C:\\sys\\bin\\eka_midlet_install.exe";
+        info.full_path = guest_path(uninstalling ? u"C:\\sys\\bin\\eka_midlet_uninstall.exe" : u"C:\\sys\\bin\\eka_midlet_install.exe");
         info.code_data = reinterpret_cast<std::uint8_t *>(code.data());
         info.code_size = info.text_size = static_cast<std::uint32_t>(code.size() * 4);
         info.uids[0] = 0x1000007A;
@@ -2450,38 +2451,29 @@ namespace eka2l1::j2me {
         io->delete_entry(storage_dir + storage_name + u".jad");
 
         if (!entry.icon_path_.empty()) {
-            const std::string icon_real_path = eka2l1::add_path(sys->get_config()->storage, entry.icon_path_);
+            const host_path icon_real_path = eka2l1::add_path(sys->get_config()->storage, entry.icon_path_);
             common::remove(icon_real_path);
         }
     }
 
-    static install_error install_for_midp2(system *sys, app_list *applist, const std::string &path,
+    static install_error install_for_midp2(system *sys, app_list *applist, const host_path &path,
         app_entry &entry_info, std::function<void(kernel::process*)> install_exit_cb, std::string_view keypad) {
-        FILE *jar_file = common::open_c_file(path, "rb");
-        if (!jar_file) {
+        if (!common::exists(path)) {
             return INSTALL_ERROR_JAR_NOT_FOUND;
         }
 
         std::string jad_content;
+        std::string icon_entry;
         int midp_version = 0;
-        const install_error parse_result = get_app_entry(jar_file, entry_info, jad_content, midp_version);
+        const install_error parse_result = get_app_entry(path, entry_info, jad_content, midp_version, icon_entry);
         if (parse_result != INSTALL_ERROR_JAR_SUCCESS) {
-            fclose(jar_file);
             return parse_result;
         }
         set_jad_keypad(jad_content, keypad);
 
-        // Extract the MIDlet icon from the JAR to host storage (same logic as
-        // install_for_kmidrun). Without this, icon_path_ is empty and the web
-        // frontend can't render an icon for the MIDlet.
-        {
-            fseek(jar_file, 0, SEEK_SET);
-            std::string real_icon_path;
-            if (extract_icon_to_store(jar_file, *sys->get_config(), entry_info, real_icon_path) == INSTALL_ERROR_JAR_SUCCESS) {
-                entry_info.icon_path_ = real_icon_path;
-            }
+        if (!icon_entry.empty()) {
+            extract_icon_to_store(path, *sys->get_config(), entry_info, icon_entry, entry_info.icon_path_);
         }
-        fclose(jar_file);
 
         io_system *io = sys->get_io_system();
         static constexpr char16_t SILENT_INSTALLER[] = u"Z:\\sys\\bin\\midp2silentmidletinstall.exe";
@@ -2495,13 +2487,13 @@ namespace eka2l1::j2me {
             const std::string safe_name = make_safe_preinstall_name(entry_info.name_);
             const std::u16string storage_name = common::utf8_to_ucs2(safe_name);
             if (io->create_directories(storage_dir)) {
-                const std::optional<std::u16string> raw_storage_jar = io->get_raw_path(storage_dir + storage_name + u".jar");
+                const std::optional<host_path> raw_storage_jar = io->get_raw_path(storage_dir + storage_name + u".jar");
                 if (raw_storage_jar) {
-                    if (!common::copy_file(path, common::ucs2_to_utf8(*raw_storage_jar), true)) {
+                    if (!common::copy_file(path, *raw_storage_jar, true)) {
                         LOG_WARN(J2ME, "Failed to copy JAR to per-MIDlet storage: {} -> {}",
-                            path, common::ucs2_to_utf8(*raw_storage_jar));
+                            path, *raw_storage_jar);
                     } else {
-                        LOG_INFO(J2ME, "JAR copied to per-MIDlet storage: {}", common::ucs2_to_utf8(*raw_storage_jar));
+                        LOG_INFO(J2ME, "JAR copied to per-MIDlet storage: {}", *raw_storage_jar);
                     }
                 } else {
                     LOG_WARN(J2ME, "Can't resolve host path for per-MIDlet storage JAR at {}", common::ucs2_to_utf8(storage_dir));
@@ -2589,9 +2581,9 @@ namespace eka2l1::j2me {
         io->delete_entry(guest_jar_path);
         io->delete_entry(guest_jad_path);
 
-        const std::optional<std::u16string> raw_jar_path = io->get_raw_path(guest_jar_path);
+        const std::optional<host_path> raw_jar_path = io->get_raw_path(guest_jar_path);
         if (!raw_jar_path
-            || !common::copy_file(path, common::ucs2_to_utf8(*raw_jar_path), true)) {
+            || !common::copy_file(path, *raw_jar_path, true)) {
             return INSTALL_ERROR_JAR_CANT_COPY;
         }
 
@@ -2690,7 +2682,7 @@ namespace eka2l1::j2me {
         return INSTALL_ERROR_JAR_SUCCESS;
     }
 
-    install_error install(system *sys, const std::string &path, app_entry &entry_info,
+    install_error install(system *sys, const host_path &path, app_entry &entry_info,
         std::function<void(kernel::process*)> install_exit_cb, std::string_view keypad) {
         app_list *applist = sys->get_j2me_applist();
         const epocver sysver = sys->get_symbian_version_use();
@@ -2762,15 +2754,15 @@ namespace eka2l1::j2me {
         const std::u16string storage_name = common::utf8_to_ucs2(safe_name);
         const std::u16string storage_jar = storage_dir + storage_name + u".jar";
 
-        const std::optional<std::u16string> raw_path = io->get_raw_path(storage_jar);
+        const std::optional<host_path> raw_path = io->get_raw_path(guest_path(storage_jar));
         if (!raw_path.has_value()) {
             LOG_WARN(J2ME, "extract_midlet_icon_png: no host path for JAR at {}", common::ucs2_to_utf8(storage_jar));
             return false;
         }
 
-        FILE *jar_file = common::open_c_file(common::ucs2_to_utf8(*raw_path), "rb");
+        FILE *jar_file = common::open_c_file(*raw_path, "rb");
         if (!jar_file) {
-            LOG_WARN(J2ME, "extract_midlet_icon_png: can't open JAR at {}", common::ucs2_to_utf8(*raw_path));
+            LOG_WARN(J2ME, "extract_midlet_icon_png: can't open JAR at {}", raw_path->utf8());
             return false;
         }
 
@@ -2778,21 +2770,19 @@ namespace eka2l1::j2me {
         app_entry parsed;
         std::string jad_content;
         int midp_ver = 0;
-        if (get_app_entry(jar_file, parsed, jad_content, midp_ver) != INSTALL_ERROR_JAR_SUCCESS) {
+        std::string icon_entry;
+        if (get_app_entry(*raw_path, parsed, jad_content, midp_ver, icon_entry) != INSTALL_ERROR_JAR_SUCCESS) {
             LOG_WARN(J2ME, "extract_midlet_icon_png: can't parse manifest");
             fclose(jar_file);
             return false;
         }
 
-        if (parsed.icon_path_.empty()) {
+        if (icon_entry.empty()) {
             LOG_WARN(J2ME, "extract_midlet_icon_png: manifest has no icon path (MIDlet-1 entry)");
             fclose(jar_file);
             return false;
         }
 
-        // get_app_entry leaves the FILE* seeked to the end; rewind before
-        // re-initialising the zip reader on the same handle.
-        fseek(jar_file, 0, SEEK_SET);
         std::unique_ptr<mz_zip_archive> archive = std::make_unique<mz_zip_archive>();
         if (!mz_zip_reader_init_cfile(archive.get(), jar_file, 0, 0)) {
             LOG_WARN(J2ME, "extract_midlet_icon_png: can't re-init zip reader");
@@ -2805,7 +2795,7 @@ namespace eka2l1::j2me {
         mz_zip_archive_file_stat stat;
         for (mz_uint i = 0; i < mz_zip_reader_get_num_files(archive.get()); i++) {
             if (mz_zip_reader_file_stat(archive.get(), i, &stat)) {
-                if (common::compare_ignore_case(parsed.icon_path_.c_str(), stat.m_filename) == 0) {
+                if (common::compare_ignore_case(icon_entry.c_str(), stat.m_filename) == 0) {
                     icon_index = i;
                     found = true;
                     break;
@@ -2814,7 +2804,7 @@ namespace eka2l1::j2me {
         }
 
         if (!found) {
-            LOG_WARN(J2ME, "extract_midlet_icon_png: icon entry '{}' not found in JAR", parsed.icon_path_);
+            LOG_WARN(J2ME, "extract_midlet_icon_png: icon entry '{}' not found in JAR", icon_entry);
             mz_zip_reader_end(archive.get());
             fclose(jar_file);
             return false;
@@ -2827,7 +2817,7 @@ namespace eka2l1::j2me {
         fclose(jar_file);
 
         if (!ok) {
-            LOG_WARN(J2ME, "extract_midlet_icon_png: extract_to_mem failed for '{}'", parsed.icon_path_);
+            LOG_WARN(J2ME, "extract_midlet_icon_png: extract_to_mem failed for '{}'", icon_entry);
             out.clear();
             return false;
         }

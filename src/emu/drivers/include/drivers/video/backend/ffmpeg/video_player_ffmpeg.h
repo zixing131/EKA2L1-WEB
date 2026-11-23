@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <atomic>
 #include <thread>
 
@@ -46,6 +47,9 @@ namespace eka2l1::drivers {
         common::event done_event_;
 
         std::atomic_bool should_stop_;
+        std::atomic<std::uint64_t> position_us_{0};
+        std::uint64_t playback_start_us_ = 0;
+        std::uint64_t playback_end_us_ = UINT64_MAX;
 
         audio_driver *aud_driver_;
 
@@ -72,7 +76,7 @@ namespace eka2l1::drivers {
         explicit video_player_ffmpeg(audio_driver *driver);
         ~video_player_ffmpeg() override;
 
-        bool open_file(const std::string &path) override;
+        bool open_file(const host_path &path) override;
         bool open_custom_io(common::ro_stream &stream) override;
         void close() override;
 

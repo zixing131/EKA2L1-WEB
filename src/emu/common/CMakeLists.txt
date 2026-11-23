@@ -2,11 +2,7 @@ if (WIN32)
     set(CUSTOM_COMMON_SOURCE
             src/watcher_win32.h
             src/watcher_win32.cpp)
-elseif (EMSCRIPTEN)
-    set(CUSTOM_COMMON_SOURCE
-            src/watcher_null.h
-            src/watcher_null.cpp)
-elseif (UNIX AND NOT APPLE)
+elseif (UNIX AND NOT APPLE AND NOT EMSCRIPTEN AND NOT OHOS)
     set(CUSTOM_COMMON_SOURCE
             src/watcher_unix.h
             src/watcher_unix.cpp)
@@ -17,8 +13,11 @@ else ()
 endif ()
 
 add_library(common
-        include/common/archive.h
+        include/common/path_types.h
+        src/path_types.cpp
+        src/path_case_folding.inl
         include/common/applauncher.h
+        include/common/archive.h
         include/common/arghandler.h
         include/common/atomic.h
         include/common/advstream.h
@@ -108,11 +107,11 @@ add_library(common
         ${CUSTOM_COMMON_SOURCE}
         )
 
-# OHOS, like WASM, has no miniupnpc here; use the null UPnP implementation.
-if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
-    target_sources(common PRIVATE src/upnp.cpp)
-else()
+if (EMSCRIPTEN OR EKA2L1_OHOS)
     target_sources(common PRIVATE src/upnp_null.cpp)
+else()
+    target_sources(common PRIVATE src/upnp.cpp)
+    target_link_libraries(common PRIVATE miniupnpc::miniupnpc)
 endif()
 
 if (ANDROID)
@@ -126,6 +125,11 @@ if (ANDROID)
         src/android/storage.cpp
         src/android/jniutils.cpp
         )
+elseif (EKA2L1_IOS)
+    target_sources(common PRIVATE
+        src/ios/applauncher.mm
+        )
+    target_link_libraries(common PRIVATE "-framework UIKit" "-framework Foundation")
 endif()
 
 if (APPLE)
@@ -139,10 +143,12 @@ target_include_directories(common PUBLIC
         "${COMMON_GENERATED_INCLUDE_DIR}"
         include)
 target_link_libraries(common PUBLIC fmt spdlog zlibstatic)
-if (NOT EMSCRIPTEN AND NOT EKA2L1_OHOS)
-    target_link_libraries(common PRIVATE pugixml miniupnpc::miniupnpc re2::re2)
-else()
-    target_link_libraries(common PRIVATE pugixml re2::re2)
+target_link_libraries(common PRIVATE archive_static pugixml re2::re2)
+
+if (WIN32)
+    # libarchive names its temporary files with BCryptGenRandom whatever ENABLE_CNG says, but only links
+    # bcrypt when that option is on. It cannot be added to its own target from here (CMP0079).
+    target_link_libraries(common PRIVATE bcrypt)
 endif()
 
 if (UNIX OR APPLE)
@@ -174,8 +180,3 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/configure.h.in
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/common/version.h.in
         ${COMMON_GENERATED_INCLUDE_DIR}/common/version.h)
-
-target_link_libraries(common PRIVATE archive_static)
-if (WIN32)
-    target_link_libraries(common PRIVATE bcrypt)
-endif()

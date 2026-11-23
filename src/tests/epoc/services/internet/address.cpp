@@ -20,14 +20,17 @@
 #include <catch2/catch.hpp>
 
 #include <common/platform.h>
+#include <config/config.h>
 #include <services/internet/protocols/common.h>
 #include <services/internet/protocols/inet.h>
+#include <utils/err.h>
 
 #if EKA2L1_PLATFORM(WIN32)
 #include <ws2tcpip.h>
 #else
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <netdb.h>
 
 #include <netinet/in.h>
 #endif
@@ -35,6 +38,121 @@
 #include <cstring>
 
 using namespace eka2l1;
+
+TEST_CASE("Internet protocol descriptions distinguish TCP and UDP", "[internet]") {
+    // in_sock.h and es_sock.h define the IDs and socket types returned by FindProtocol.
+    epoc::internet::inet_bridged_protocol tcp(nullptr, true, 6);
+    epoc::internet::inet_bridged_protocol udp(nullptr, true, 17);
+
+    REQUIRE(tcp.name() == u"tcp");
+    REQUIRE(tcp.supported_ids() == std::vector<std::uint32_t>{6});
+    REQUIRE(tcp.sock_type() == 1);
+    REQUIRE(tcp.message_size() == 0);
+    REQUIRE(tcp.family_ids().front() == 0x800);
+    REQUIRE(udp.name() == u"udp");
+    REQUIRE(udp.supported_ids() == std::vector<std::uint32_t>{17});
+    REQUIRE(udp.sock_type() == 2);
+    REQUIRE(udp.family_ids().front() == 0x800);
+}
+
+TEST_CASE("Host overrides prefer exact names then the longest wildcard suffix", "[internet][config]") {
+    config::state settings;
+    settings.hosts = {{"Game.Example.", "127.0.0.1"}, {"*.example", "private.example:8192"},
+        {"*.game.example", "[::1]:8193"}};
+
+    REQUIRE(settings.host_override("GAME.example") == config::host_target{"127.0.0.1", std::nullopt});
+    REQUIRE(settings.host_override("game.example.") == config::host_target{"127.0.0.1", std::nullopt});
+    REQUIRE(settings.host_override("sub.game.example") == config::host_target{"::1", 8193});
+    REQUIRE(settings.host_override("other.example") == config::host_target{"private.example", 8192});
+    REQUIRE_FALSE(settings.host_override("example"));
+    REQUIRE_FALSE(settings.host_override("game.example.invalid"));
+    settings.hosts.clear();
+    REQUIRE_FALSE(settings.host_override("game.example"));
+}
+
+TEST_CASE("Host mappings accept DNS targets without recursive rewriting", "[internet][config]") {
+    config::state settings;
+    settings.hosts = {{"Arena.Example.", " Private.Example. "}, {"private.example", "127.0.0.1"}};
+    REQUIRE(settings.host_override("ARENA.EXAMPLE") == config::host_target{"private.example", std::nullopt});
+    REQUIRE(settings.host_override("private.example") == config::host_target{"127.0.0.1", std::nullopt});
+    REQUIRE(config::normalize_host_name(" \tGame.Example.\r\n") == "game.example");
+    REQUIRE(config::normalize_host_name(" \t\r\n").empty());
+}
+
+TEST_CASE("Host mapping validation accepts addresses and bounds DNS labels", "[internet][config]") {
+    for (const auto *target : {"127.0.0.1", "127.0.0.1:8192", "2001:db8::1", "[::1]:8192",
+            "private.example", "private.example:8192", "localhost", "xn--bcher-kva.example"}) {
+        INFO(target);
+        CHECK(config::valid_host_target(target));
+    }
+    for (const auto *target : {"", "https://private.example", "private.example:", "private.example:0",
+            "private.example:65536", "[::1]", "[::1]:", "1.2.3.999", "private..example",
+            "private/example", "private example", "::invalid"}) {
+        INFO(target);
+        CHECK_FALSE(config::valid_host_target(target));
+    }
+    CHECK(config::valid_host_name(std::string(63, 'a') + ".example"));
+    CHECK(config::valid_host_pattern("*.n-gage.com"));
+    CHECK_FALSE(config::valid_host_pattern("*n-gage.com"));
+    CHECK_FALSE(config::valid_host_pattern("*.*.n-gage.com"));
+    CHECK_FALSE(config::valid_host_name(std::string(64, 'a') + ".example"));
+    CHECK_FALSE(config::valid_host_name(std::string(254, 'a')));
+    CHECK_FALSE(config::valid_host_target(std::string("127.0.0.1\0.example", 18)));
+    CHECK(config::numeric_host_address("::ffff:192.0.2.1"));
+    CHECK_FALSE(config::numeric_host_address("localhost"));
+}
+
+TEST_CASE("Port-mapped DNS results retain their target after the guest replaces the port", "[internet][config]") {
+    const auto mapper = std::make_shared<epoc::internet::host_port_mapper>();
+    epoc::internet::inet_bridged_protocol resolver_protocol(nullptr, true, 17, mapper);
+    epoc::internet::inet_bridged_protocol socket_protocol(nullptr, true, 6, mapper);
+    sockaddr_in host_addr{};
+    host_addr.sin_family = AF_INET;
+    host_addr.sin_addr.s_addr = htonl(0x7F000001);
+    epoc::socket::saddress guest_addr{};
+
+    resolver_protocol.map_host_port(reinterpret_cast<sockaddr *>(&host_addr), 8124, guest_addr);
+    const auto proxy = *static_cast<epoc::internet::sinet_address &>(guest_addr).addr_long();
+    REQUIRE(proxy != 0x7F000001);
+    guest_addr.port_ = 80;
+    REQUIRE(socket_protocol.apply_host_port(guest_addr));
+    REQUIRE(*static_cast<epoc::internet::sinet_address &>(guest_addr).addr_long() == 0x7F000001);
+    REQUIRE(guest_addr.port_ == 8124);
+}
+
+TEST_CASE("A mapped socket reports the address the guest connected to", "[internet][config]") {
+    // RSocket::RemoteName and the datagram source address must stay inside the synthetic
+    // address space the resolver handed out, or the guest sees an endpoint it never asked for.
+    const auto mapper = std::make_shared<epoc::internet::host_port_mapper>();
+    epoc::internet::inet_bridged_protocol protocol(nullptr, true, 6, mapper);
+    sockaddr_in host_addr{};
+    host_addr.sin_family = AF_INET;
+    host_addr.sin_addr.s_addr = htonl(0x7F000001);
+
+    epoc::socket::saddress guest_endpoint{};
+    protocol.map_host_port(reinterpret_cast<sockaddr *>(&host_addr), 8124, guest_endpoint);
+    guest_endpoint.port_ = 80;
+
+    epoc::socket::saddress host_endpoint = guest_endpoint;
+    REQUIRE(protocol.apply_host_port(host_endpoint));
+
+    epoc::socket::saddress reported = host_endpoint;
+    REQUIRE(epoc::internet::restore_mapped_endpoint(guest_endpoint, host_endpoint, reported));
+    REQUIRE(*static_cast<epoc::internet::sinet_address &>(reported).addr_long()
+        == *static_cast<epoc::internet::sinet_address &>(guest_endpoint).addr_long());
+    REQUIRE(reported.port_ == 80);
+
+    // An unrelated peer keeps whatever the host reported.
+    epoc::socket::saddress other{};
+    other.family_ = epoc::internet::INET_ADDRESS_FAMILY;
+    *static_cast<epoc::internet::sinet_address &>(other).addr_long() = 0x08080808;
+    other.port_ = 53;
+
+    epoc::socket::saddress untouched = other;
+    REQUIRE_FALSE(epoc::internet::restore_mapped_endpoint(guest_endpoint, host_endpoint, untouched));
+    REQUIRE(*static_cast<epoc::internet::sinet_address &>(untouched).addr_long() == 0x08080808);
+    REQUIRE(untouched.port_ == 53);
+}
 
 namespace {
     // in_sock.h:
@@ -96,4 +214,74 @@ TEST_CASE("An address a guest built with INET_ADDR goes out to the host correctl
     REQUIRE(converted_v4->sin_family == AF_INET);
     REQUIRE(ntohs(converted_v4->sin_port) == 8080);
     REQUIRE(converted_v4->sin_addr.s_addr == htonl(K_INET_ADDR_LOOP));
+}
+
+TEST_CASE("DNS results contain a complete copyable TSockAddr", "[internet]") {
+    sockaddr_in address = make_host_v4(K_INET_ADDR_LOOP, 0);
+    addrinfo resolved{};
+    resolved.ai_family = AF_INET;
+    resolved.ai_addr = reinterpret_cast<sockaddr *>(&address);
+    epoc::socket::name_entry entry;
+    entry.length_ = 0x30000008;
+    entry.flags_ = epoc::socket::name_entry::FLAG_ALIAS_NAME;
+
+    epoc::internet::addrinfo_to_name_entry(entry, &resolved);
+
+    // TSockAddr starts with just its family and port; copying the descriptor must include the IPv4 word.
+    REQUIRE(entry.length_ == 0x3000000C);
+    REQUIRE(entry.max_length_ == 32);
+    REQUIRE(entry.flags_ == 0);
+    REQUIRE(*static_cast<epoc::internet::sinet_address &>(entry.addr_).addr_long() == K_INET_ADDR_LOOP);
+
+    sockaddr_in6 address6{};
+    address6.sin6_family = AF_INET6;
+    address6.sin6_addr.s6_addr[15] = 1;
+    resolved.ai_family = AF_INET6;
+    resolved.ai_addr = reinterpret_cast<sockaddr *>(&address6);
+    epoc::internet::addrinfo_to_name_entry(entry, &resolved);
+    REQUIRE(entry.length_ == 0x30000020);
+    REQUIRE(entry.addr_.family_ == epoc::internet::INET6_ADDRESS_FAMILY);
+}
+
+TEST_CASE("SetLocalPort binds an unspecified TSockAddr to the socket family", "[internet]") {
+    epoc::socket::saddress guest_addr;
+    std::memset(&guest_addr, 0xA5, sizeof(guest_addr));
+    guest_addr.family_ = 0;
+    guest_addr.port_ = 2000;
+    sockaddr_in6 host_addr;
+
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x800, host_addr) == epoc::error_none);
+    const auto &ipv4 = reinterpret_cast<const sockaddr_in &>(host_addr);
+    REQUIRE(ipv4.sin_family == AF_INET);
+    REQUIRE(ntohs(ipv4.sin_port) == 2000);
+    REQUIRE(ipv4.sin_addr.s_addr == htonl(INADDR_ANY));
+
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x806, host_addr) == epoc::error_none);
+    REQUIRE(host_addr.sin6_family == AF_INET6);
+    REQUIRE(ntohs(host_addr.sin6_port) == 2000);
+    REQUIRE(IN6_IS_ADDR_UNSPECIFIED(&host_addr.sin6_addr));
+    REQUIRE(host_addr.sin6_flowinfo == 0);
+    REQUIRE(host_addr.sin6_scope_id == 0);
+
+    guest_addr.port_ = 0;
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x800, host_addr) == epoc::error_none);
+    REQUIRE(reinterpret_cast<const sockaddr_in &>(host_addr).sin_port == 0);
+}
+
+TEST_CASE("Bind retains explicit addresses and rejects invalid arguments", "[internet]") {
+    epoc::socket::saddress guest_addr{};
+    guest_addr.family_ = 0x800;
+    guest_addr.port_ = 65535;
+    *static_cast<epoc::internet::sinet_address &>(guest_addr).addr_long() = K_INET_ADDR_LOOP;
+    sockaddr_in6 host_addr;
+
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x800, host_addr) == epoc::error_none);
+    REQUIRE(reinterpret_cast<const sockaddr_in &>(host_addr).sin_addr.s_addr == htonl(K_INET_ADDR_LOOP));
+    REQUIRE(ntohs(reinterpret_cast<const sockaddr_in &>(host_addr).sin_port) == 65535);
+
+    guest_addr.port_ = 65536;
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x800, host_addr) == epoc::error_too_big);
+    guest_addr.port_ = 2000;
+    guest_addr.family_ = epoc::socket::INVALID_FAMILY_ID;
+    REQUIRE(epoc::internet::guest_bind_address_to_host(guest_addr, 0x800, host_addr) == epoc::error_argument);
 }

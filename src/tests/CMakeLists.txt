@@ -12,14 +12,18 @@ add_executable(ekatests
     notifier_queries.cpp
     mp3_player.cpp
     dyncom_memory.cpp
+    control.cpp
     ${COMMON_TEST_FILES}
     ${CORE_TEST_FILES})
 
 
 target_link_libraries(ekatests PRIVATE
     Catch2
+    control_native
+    glm
     common
     config
+    j2me
     epoc
     epocio
     epockern
@@ -27,9 +31,20 @@ target_link_libraries(ekatests PRIVATE
     epocpkg
     epocservs
     epocdispatch
-    j2me
+    drivers
+    gdbstub
+    mbedtls
     libtess2
     lunasvg)
+
+if (WIN32)
+    target_compile_definitions(ekatests PRIVATE NOMINMAX)
+endif()
+
+if (EKA2L1_HAVE_FFMPEG)
+    target_link_libraries(ekatests PRIVATE ffmpeg)
+    target_compile_definitions(ekatests PRIVATE EKA2L1_HAS_FFMPEG=1)
+endif()
 
 # The fixtures are copied next to the executable, and the tests open them by a
 # relative path. Multi-config generators put the executable in a per-config
@@ -40,11 +55,26 @@ add_test(
   WORKING_DIRECTORY $<TARGET_FILE_DIR:ekatests>
 )
 
+# Discovery owns the default libuv loop on a worker thread for this process.
+add_test(
+  NAME bluetooth_netplay
+  COMMAND ekatests "[.btinet]"
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:ekatests>
+)
+set_tests_properties(bluetooth_netplay PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+add_test(
+  NAME internet_connect
+  COMMAND ekatests "[.inetconnect]"
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:ekatests>
+)
+set_tests_properties(internet_connect PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
 if (WIN32)
     # SDL2 and the other runtime DLLs are copied next to the frontend, which is
     # not where the test executable is built, so the loader has to be told.
     file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/bin" EKATESTS_RUNTIME_DLL_DIR)
-    set_tests_properties(ekatests PROPERTIES
+    set_tests_properties(ekatests bluetooth_netplay internet_connect PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${EKATESTS_RUNTIME_DLL_DIR}")
 endif()
 
@@ -62,3 +92,18 @@ add_assets(ekatests ${SERVICES_APPLIST_ASSETS_PATH} "applistassets")
 
 set(PACKAGE_ASSETS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/epoc/package/assets/")
 add_assets(ekatests ${PACKAGE_ASSETS_PATH} "packageassets")
+
+set(SYSTEM_ASSETS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/epoc/system/assets/")
+add_assets(ekatests ${SYSTEM_ASSETS_PATH} "systemassets")
+
+add_assets(ekatests "${CMAKE_CURRENT_SOURCE_DIR}/epoc/services/internet/tlsassets/" "tlsassets")
+
+add_assets(ekatests "${CMAKE_CURRENT_SOURCE_DIR}/epoc/drivers/assets/" "audioassets")
+
+add_assets(ekatests "${CMAKE_CURRENT_SOURCE_DIR}/epoc/drivers/videoassets/" "videoassets")
+
+add_custom_command(TARGET ekatests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ekatests>/fontassets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/src/emu/qt/resources/overlay_font.ttf"
+        "$<TARGET_FILE_DIR:ekatests>/fontassets/")

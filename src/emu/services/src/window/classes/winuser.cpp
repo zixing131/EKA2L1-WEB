@@ -34,6 +34,7 @@
 #include <kernel/timing.h>
 
 #include <common/log.h>
+#include <common/time.h>
 #include <common/vecx.h>
 #include <config/config.h>
 
@@ -136,6 +137,7 @@ namespace eka2l1::epoc {
         }
 
         client->remove_redraws(this);
+        client->get_ws().release_pointer_grab(this);
     }
 
     void canvas_base::add_canvas_observer(canvas_observer *ob) {
@@ -154,6 +156,9 @@ namespace eka2l1::epoc {
 
     void canvas_base::attach_surface(const std::shared_ptr<window_surface> &surface, const surface_configuration &config, bool direct) {
         (direct ? direct_surface_ : background_surface_).attach(surface, config);
+        if (surface_transparent_ && !direct) {
+            scr->need_update_visible_regions(true);
+        }
         surface_damage();
     }
 
@@ -161,6 +166,9 @@ namespace eka2l1::epoc {
         const bool detached_background = background_surface_.detach(surface);
         const bool detached_direct = direct_surface_.detach(surface);
         if (detached_background || detached_direct) {
+            if (surface_transparent_ && detached_background) {
+                scr->need_update_visible_regions(true);
+            }
             surface_damage();
         }
     }
@@ -209,12 +217,19 @@ namespace eka2l1::epoc {
             return false;
         }
 
-        builder.set_feature(drivers::graphics_feature::blend, false);
+        const bool blend = surface_transparent_ && (&attachment == &background_surface_);
+        builder.set_feature(drivers::graphics_feature::blend, blend);
+        if (blend) {
+            builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+                drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha,
+                drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
+        }
         builder.set_feature(drivers::graphics_feature::depth_test, false);
         builder.clip_bitmap_region(clip, scr->display_scale_factor);
         builder.set_texture_filter(handle, false, drivers::filter_option::linear);
         builder.set_texture_filter(handle, true, drivers::filter_option::linear);
         builder.draw_bitmap(handle, 0, placement.destination, placement.source, { 0, 0 }, static_cast<float>(placement.rotation));
+        builder.set_feature(drivers::graphics_feature::blend, false);
         return true;
     }
 
@@ -275,14 +290,30 @@ namespace eka2l1::epoc {
                 source_bitmap_bw = reinterpret_cast<fbsbitmap*>(data.main_fbs_bitmap_)->final_clean()->bitmap_;
             }
 
-            data.main_drv_ = bcache->add_or_get(drv, source_bitmap_bw, nullptr, &new_update_command_main);
+            struct bitmap_snapshot {
+                bitwise_bitmap metadata;
+                std::shared_ptr<drivers::handle> texture;
+            };
+            auto main_snapshot = std::make_shared<bitmap_snapshot>();
+            main_snapshot->metadata = *source_bitmap_bw;
+            data.main_drv_ = bcache->add_or_get(drv, source_bitmap_bw, nullptr, &new_update_command_main,
+                &main_snapshot->texture);
+            data.main_fbs_bitmap_ = &main_snapshot->metadata;
+            data.gdi_flags_ |= GDI_STORE_COMMAND_MAIN_RAW;
+            command.resources_.push_back(main_snapshot);
             
             if (mask_bitmap_bw) {
                 if ((data.gdi_flags_ & GDI_STORE_COMMAND_MASK_RAW) == 0) {
                     mask_bitmap_bw = reinterpret_cast<fbsbitmap*>(data.mask_fbs_bitmap_)->final_clean()->bitmap_;
                 }
 
-                data.mask_drv_ = bcache->add_or_get(drv, mask_bitmap_bw, nullptr, &new_update_command_mask);
+                auto mask_snapshot = std::make_shared<bitmap_snapshot>();
+                mask_snapshot->metadata = *mask_bitmap_bw;
+                data.mask_drv_ = bcache->add_or_get(drv, mask_bitmap_bw, nullptr, &new_update_command_mask,
+                    &mask_snapshot->texture);
+                data.mask_fbs_bitmap_ = &mask_snapshot->metadata;
+                data.gdi_flags_ |= GDI_STORE_COMMAND_MASK_RAW;
+                command.resources_.push_back(mask_snapshot);
             }
 
             // Upload now: the cache already records these textures as current, and this window's
@@ -310,12 +341,26 @@ namespace eka2l1::epoc {
         pending_segment_->add_command(command);
     }
 
+    bool canvas_base::is_translucent() const {
+        return (flags & flags_enable_alpha) || (surface_transparent_ && background_surface_.surface);
+    }
+
     bool canvas_base::can_be_physically_seen() const {
         return is_visible() && !visible_region.empty();
     }
 
     bool canvas_base::is_visible() const {
-        return ((flags & flags_active) && (flags & flags_visible));
+        if (!(flags & flags_active) || !(flags & flags_visible)) {
+            return false;
+        }
+
+        // WSERV folds the parent's state into the child's hidden flag: a client window
+        // whose client parent is hidden is hidden too (CWsClientWindow::ResetHiddenFlag).
+        if (parent && (parent->type == window_kind::client)) {
+            return reinterpret_cast<const canvas_base *>(parent)->is_visible();
+        }
+
+        return true;
     }
 
     eka2l1::rect canvas_base::bounding_rect() const {
@@ -488,6 +533,16 @@ namespace eka2l1::epoc {
         }
 
         if (should_trigger_redraw) {
+            // NGA repaints the area the window covered (CWsClientWindow::ResetHiddenFlag): a translucent
+            // window leaves the visible regions below unchanged, so nothing else would repaint it.
+            if (scr->region_redraw_supported()) {
+                for (const auto &area : visible_region.rects_) {
+                    scr->add_server_redraw_region(area);
+                }
+            } else {
+                scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
+            }
+
             scr->need_update_visible_regions(true);
 
             // Composition is retained: without a full server redraw the pixels
@@ -542,6 +597,10 @@ namespace eka2l1::epoc {
     }
 
     std::uint64_t canvas_base::try_update(kernel::thread *drawer) {
+        return schedule_update(drawer, true);
+    }
+
+    std::uint64_t canvas_base::schedule_update(kernel::thread *drawer, const bool recomposite_if_occluded) {
         if (scr->need_update_visible_regions()) {
             scr->recalculate_visible_regions();
         }
@@ -583,26 +642,17 @@ namespace eka2l1::epoc {
 
             fps_count_++;
 
-            // A client (partial) redraw only repaints this window and does not
-            // recomposite the windows stacked on top of it. When this window is
-            // partially occluded (its visible region is fragmented rather than
-            // its whole bounding rect), a client-only redraw would bleed into
-            // the occluding windows' area and leave it stale, because those
-            // windows have no client content to repaint over it. This happens
-            // e.g. with a live camera viewfinder redrawing every frame beneath a
-            // stationary Avkon menu pane. Escalate to a full server recomposite
-            // so the occluding windows are redrawn on top, back-to-front.
-            bool fully_visible = false;
-            if (!visible_region.empty()) {
-                if (flags & flag_shape_region) {
-                    fully_visible = visible_region.identical(shape_region);
-                } else {
-                    fully_visible = (visible_region.rects_.size() == 1) &&
-                        (visible_region.rects_[0] == abs_rect);
-                }
+            // Only occlusion by another window needs recomposition; screen-edge
+            // clipping leaves no foreground window to repaint.
+            common::region onscreen_region;
+            if (flags & flag_shape_region) {
+                onscreen_region = shape_region;
+            } else {
+                onscreen_region.add_rect(abs_rect);
             }
+            onscreen_region.clip(eka2l1::rect({ 0, 0 }, scr->current_mode().size));
 
-            if (!visible_region.empty() && !fully_visible) {
+            if (recomposite_if_occluded && !visible_region.empty() && !visible_region.identical(onscreen_region)) {
                 scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
             }
 
@@ -643,6 +693,8 @@ namespace eka2l1::epoc {
 
     void canvas_base::set_transparency_alpha_channel(service::ipc_context &context, ws_cmd &cmd) {
         flags |= flags_enable_alpha;
+        scr->need_update_visible_regions(true);
+        surface_damage();
         LOG_TRACE(SERVICE_WINDOW, "Enable alpha for window {}", id);
         context.complete(epoc::error_none);
     }
@@ -770,12 +822,11 @@ namespace eka2l1::epoc {
     }
 
     void canvas_base::scroll(service::ipc_context &context, ws_cmd &cmd) {
-        eka2l1::rect clip_rect;
-        eka2l1::point offset;
-        eka2l1::rect source_rect;
-
-        ws_cmd_scroll *scroll_data = reinterpret_cast<ws_cmd_scroll*>(cmd.data_ptr);
-        offset = scroll_data->offset;
+        const auto *scroll_data = reinterpret_cast<const ws_cmd_scroll *>(cmd.data_ptr);
+        const eka2l1::point offset = scroll_data->offset;
+        eka2l1::rect clip_rect = bounding_rect();
+        // WSERV defines an omitted source so its destination covers the whole window.
+        eka2l1::rect source_rect(eka2l1::point(0, 0) - offset, size());
 
         if ((cmd.header.op == EWsWinOpScrollClip) || (cmd.header.op == EWsWinOpScrollClipRect)) {
             clip_rect = scroll_data->clip_rect;
@@ -999,10 +1050,28 @@ namespace eka2l1::epoc {
         }
 
         case EWsWinOpSetPointerCapture: {
-            // TODO: !
+            // RWindowBase::TCaptureFlags; drag-drop and all-groups only apply with capture enabled.
+            const std::uint32_t capture = *reinterpret_cast<std::uint32_t *>(cmd.data_ptr);
+            flags &= ~(flags_pointer_capture | flags_pointer_capture_drag_drop | flags_pointer_capture_all_groups);
+
+            if (capture & 1) {
+                flags |= flags_pointer_capture;
+                flags |= (capture & 2) ? flags_pointer_capture_drag_drop : 0;
+                flags |= (capture & 4) ? flags_pointer_capture_all_groups : 0;
+            }
+
             ctx.complete(epoc::error_none);
             break;
         }
+
+        case EWsWinOpSetPointerCapturePriority:
+            pointer_capture_priority_ = *reinterpret_cast<std::int32_t *>(cmd.data_ptr);
+            ctx.complete(epoc::error_none);
+            break;
+
+        case EWsWinOpGetPointerCapturePriority:
+            ctx.complete(pointer_capture_priority_);
+            break;
 
         case EWsWinOpActivate:
             activate(ctx, cmd);
@@ -1080,7 +1149,133 @@ namespace eka2l1::epoc {
             fix_native_orientation(ctx, cmd);
             break;
 
+        case EWsWinOpSetBackgroundSurface: {
+            if (cmd.header.cmd_len < sizeof(surface_id)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            const auto id = *static_cast<const surface_id *>(cmd.data_ptr);
+            auto surface = client->get_ws().surfaces().find(id);
+            if (!surface) {
+                ctx.complete(epoc::error_not_found);
+                break;
+            }
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            attach_surface(surface, surface_configuration{});
+            ctx.complete(epoc::error_none);
+            break;
+        }
+
+        case EWsWinOpRemoveBackgroundSurface: {
+            if (cmd.header.cmd_len < sizeof(std::int32_t)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            const bool redraw = *static_cast<const std::int32_t *>(cmd.data_ptr) != 0;
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            if (background_surface_.surface) {
+                background_surface_.detach(background_surface_.surface);
+                if (surface_transparent_) {
+                    scr->need_update_visible_regions(true);
+                }
+                if (redraw) {
+                    surface_damage();
+                }
+            }
+            ctx.complete(epoc::error_none);
+            break;
+        }
+
+        case EWsWinOpGetBackgroundSurfaceConfig:
+        case EWsWinOpSetBackgroundSurfaceConfig: {
+            struct guest_surface_configuration {
+                std::uint32_t size;
+                surface_id id;
+                std::int32_t orientation;
+                eka2l1::rect extent;
+                eka2l1::rect viewport;
+                std::uint32_t flip;
+            };
+            static_assert(sizeof(guest_surface_configuration) == 60);
+            if (cmd.header.cmd_len < sizeof(std::uint32_t)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            guest_surface_configuration config{};
+            const auto config_size = *static_cast<const std::uint32_t *>(cmd.data_ptr);
+            if ((config_size != 56 && config_size < sizeof(config))
+                || cmd.header.cmd_len < std::min<std::uint32_t>(config_size, sizeof(config))) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            if (cmd.header.op == EWsWinOpGetBackgroundSurfaceConfig) {
+                const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+                auto surface = background_surface_.surface;
+                if (!surface) {
+                    ctx.complete(epoc::error_not_found);
+                    break;
+                }
+                config.size = std::min<std::uint32_t>(config_size, sizeof(config));
+                config.id = client->get_ws().surfaces().add(surface);
+                config.orientation = ((-background_surface_.config.rotation / 90) % 4 + 4) % 4;
+                config.extent = background_surface_.config.extent.value_or(eka2l1::rect({ 0, 0 }, size()));
+                config.viewport = background_surface_.config.viewport.value_or(eka2l1::rect({ 0, 0 }, surface->size()));
+                config.extent.transform_to_symbian_rectangle();
+                config.viewport.transform_to_symbian_rectangle();
+                ctx.write_data_to_descriptor_argument(reply_slot, reinterpret_cast<const std::uint8_t *>(&config), config.size);
+                ctx.complete(epoc::error_none);
+                break;
+            }
+            std::memcpy(&config, cmd.data_ptr, std::min<std::uint32_t>(config_size, sizeof(config)));
+            auto surface = client->get_ws().surfaces().find(config.id);
+            if (!surface || config.orientation < 0 || config.orientation > 3) {
+                ctx.complete(surface ? epoc::error_argument : epoc::error_not_found);
+                break;
+            }
+            if (config.flip) {
+                ctx.complete(epoc::error_not_supported);
+                break;
+            }
+            config.extent.transform_from_symbian_rectangle();
+            config.viewport.transform_from_symbian_rectangle();
+            surface_configuration placement;
+            placement.rotation = (4 - config.orientation) % 4 * 90;
+            if (!config.extent.empty()) {
+                placement.extent = config.extent;
+            }
+            if (!config.viewport.empty()) {
+                placement.viewport = config.viewport;
+            }
+            if (cmd.header.cmd_len < config_size + sizeof(std::int32_t)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            // The wire object can be larger than its negotiated Size() field.
+            const auto redraw_offset = cmd.header.cmd_len - sizeof(std::int32_t);
+            const bool redraw = *reinterpret_cast<const std::int32_t *>(static_cast<const std::uint8_t *>(cmd.data_ptr) + redraw_offset) != 0;
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            background_surface_.attach(surface, placement);
+            if (surface_transparent_) {
+                scr->need_update_visible_regions(true);
+            }
+            if (redraw) {
+                surface_damage();
+            }
+            ctx.complete(epoc::error_none);
+            break;
+        }
+
         case EWsWinOpSetSurfaceTransparency:
+            if (cmd.header.cmd_len < sizeof(std::int32_t)) {
+                ctx.complete(epoc::error_argument);
+                break;
+            }
+            surface_transparent_ = *static_cast<const std::int32_t *>(cmd.data_ptr) != 0;
+            scr->need_update_visible_regions(true);
+            surface_damage();
+            ctx.complete(epoc::error_none);
+            break;
+
         case EWsWinOpSendEffectCommand:
             ctx.complete(epoc::error_none);
             break;
@@ -1149,10 +1344,6 @@ namespace eka2l1::epoc {
     }
 
     void redraw_msg_canvas::update_surface_ui(drivers::graphics_command_builder &builder) {
-        // Legacy opaque windows ignore the unused byte of EColor16MU pixels.
-        // Premultiplying it would blacken decoded J9 images on WebGL, which
-        // cannot apply the desktop texture alpha swizzle.
-        const bool premultiplied = scr->is_screenplay_architecture() || is_display_mode_alpha(display_mode());
         auto *driver = client->get_ws().get_graphics_driver();
         const eka2l1::vec2 pixel_size = size() * scr->display_scale_factor;
         const bool initialise = !surface_ui_;
@@ -1183,42 +1374,99 @@ namespace eka2l1::epoc {
         builder.set_feature(drivers::graphics_feature::blend, false);
         builder.clip_bitmap_region(full_region, scr->display_scale_factor);
 
-        if (initialise && scr->is_screenplay_architecture()) {
+        if (initialise) {
             // Cache hashes may already describe uploads queued only in pending_segment_.
             if (pending_segment_) {
                 gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                    { 0, 0 }, scr->display_scale_factor, full_region, premultiplied);
+                    { 0, 0 }, scr->display_scale_factor, full_region, true);
                 gdi_builder.build_texture_updates(*pending_segment_);
             }
             for (const auto &segment : redraw_segments_.get_segments()) {
                 const auto clip = segment->region_.intersect(full_region);
                 builder.clip_bitmap_region(clip, scr->display_scale_factor);
                 gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                    { 0, 0 }, scr->display_scale_factor, clip, premultiplied);
+                    { 0, 0 }, scr->display_scale_factor, clip, true);
                 gdi_builder.build_segment(*segment);
             }
         } else if (pending_segment_) {
             gdi_command_builder gdi_builder(driver, builder, *client->get_ws().get_bitmap_cache(), filter,
-                { 0, 0 }, scr->display_scale_factor, full_region, premultiplied);
+                { 0, 0 }, scr->display_scale_factor, full_region, true);
             gdi_builder.build_segment(*pending_segment_);
         }
         pending_segment_.reset();
         builder.bind_bitmap(scr->screen_texture);
     }
 
+    std::unique_ptr<gdi_store_command_segment> redraw_msg_canvas::flatten_segments(const std::unique_ptr<gdi_store_command_segment> *segments,
+        const std::size_t count) {
+        const eka2l1::vec2 pixel_size = size() * scr->display_scale_factor;
+        if (pixel_size.x <= 0 || pixel_size.y <= 0) {
+            return nullptr;
+        }
+
+        drivers::graphics_driver *driver = client->get_ws().get_graphics_driver();
+        epoc::bitmap_cache *bcache = client->get_ws().get_bitmap_cache();
+        const drivers::filter_option filter = client->get_ws().get_kernel_system()->get_config()->nearest_neighbor_filtering
+            ? drivers::filter_option::nearest : drivers::filter_option::linear;
+
+        const drivers::handle texture = drivers::create_bitmap(driver, pixel_size, 32);
+        if (!texture) {
+            return nullptr;
+        }
+
+        drivers::graphics_command_builder builder;
+        builder.bind_bitmap(texture);
+        builder.set_feature(drivers::graphics_feature::cull, false);
+        builder.set_feature(drivers::graphics_feature::depth_test, false);
+        builder.set_feature(drivers::graphics_feature::clipping, false);
+        builder.set_feature(drivers::graphics_feature::stencil_test, false);
+        builder.set_feature(drivers::graphics_feature::blend, false);
+        builder.clear(eka2l1::vecx<float, 6>({ 0, 0, 0, 0, 1, 0 }), drivers::draw_buffer_bit_color_buffer);
+
+        auto merged = std::make_unique<gdi_store_command_segment>();
+        merged->type_ = gdi_store_command_segment_redraw;
+        merged->creation_date_ = common::get_current_utc_time_in_microseconds_since_epoch();
+
+        for (std::size_t i = 0; i < count; i++) {
+            const gdi_store_command_segment &segment = *segments[i];
+            merged->region_.add_region(segment.region_);
+
+            builder.clip_bitmap_region(segment.region_, scr->display_scale_factor);
+            gdi_command_builder gdi_builder(driver, builder, *bcache, filter, { 0, 0 }, scr->display_scale_factor,
+                segment.region_, true);
+            gdi_builder.build_segment(segment);
+        }
+
+        builder.bind_bitmap(0);
+        drivers::command_list list = builder.retrieve_command_list();
+        driver->submit_command_list(list);
+
+        gdi_store_command draw;
+        draw.opcode_ = gdi_store_command_draw_raw_texture;
+        auto &data = draw.get_data_struct<gdi_store_command_draw_raw_texture_data>();
+        data.texture_ = texture;
+        data.dest_rect_ = eka2l1::rect({ 0, 0 }, size());
+        data.flags_ = 0;
+        draw.resources_.push_back(bcache->retain_texture(texture));
+
+        merged->add_command(draw);
+        return merged;
+    }
+
     bool redraw_msg_canvas::draw_surface_window(drivers::graphics_command_builder &builder) {
         if (size().x <= 0 || size().y <= 0) {
             return false;
         }
-        if (!surface_changed() && !pending_segment_
-            && !(scr->flags_ & screen::FLAG_SERVER_REDRAW_PENDING) && surface_ui_) {
+        const bool server_redraw = (scr->flags_ & screen::FLAG_SERVER_REDRAW_PENDING)
+            && !scr->server_redraw_clip(visible_region).empty();
+        if (!surface_changed() && !pending_segment_ && !server_redraw && surface_ui_) {
             return false;
         }
 
         update_surface_ui(builder);
         builder.set_feature(drivers::graphics_feature::blend, false);
         builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
-        if (clear_color_enable) {
+        if (clear_color_enable && !(surface_transparent_ && background_surface_.surface)) {
             auto color = common::rgba_to_vec(clear_color);
             if (!is_display_mode_alpha(display_mode())) {
                 color.w = 255;
@@ -1230,15 +1478,13 @@ namespace eka2l1::epoc {
         draw_surface(builder, background_surface_);
 
         builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
-        builder.set_feature(drivers::graphics_feature::blend,
-            scr->is_screenplay_architecture() || is_display_mode_alpha(display_mode()));
+        builder.set_feature(drivers::graphics_feature::blend, true);
         builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
             drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha,
             drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
         builder.draw_bitmap(surface_ui_, 0, eka2l1::rect(abs_rect.top * scr->display_scale_factor, size() * scr->display_scale_factor),
             eka2l1::rect({ 0, 0 }, surface_ui_size_));
         builder.set_feature(drivers::graphics_feature::blend, false);
-        draw_surface(builder, direct_surface_);
         return true;
     }
 
@@ -1328,11 +1574,39 @@ namespace eka2l1::epoc {
     }
 
     void redraw_msg_canvas::end_redraw(service::ipc_context &ctx, ws_cmd &cmd) {
+        const eka2l1::rect redrawn_rect = redraw_rect_curr;
         redraw_rect_curr.make_empty();
         redraw_segments_.promote_last_segment();
 
+        if (!surface_ui_ && pending_segment_) {
+            // The server recomposite replays this redraw from the store; keeping it queued too
+            // would pile up stale frames and paint them over newer content later.
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            auto &commands = pending_segment_->commands_;
+            if (pending_commands_before_redraw_ == 0 || pending_commands_before_redraw_ > commands.size()) {
+                pending_segment_.reset();
+            } else {
+                commands.resize(pending_commands_before_redraw_);
+                if (last_clip_command_.opcode_ != gdi_store_command_invalid) {
+                    commands.push_back(last_clip_command_);
+                }
+            }
+        }
+
         if (content_changed()) {
-            try_update(ctx.msg->own_thr);
+            // Newly completed redraw content must be composited in correct z-order:
+            // an incremental client-path update can be overdrawn by later updates of
+            // windows behind this one (or was skipped entirely if a full server pass
+            // ran before this content arrived). Request a server recomposite.
+            const bool region_redraw = scr->region_redraw_supported();
+            if (region_redraw) {
+                // NGA only repaints the redrawn area and, with AUTOCLEAR off, keeps what it
+                // does not draw; clients may redraw the whole window but blit only what moved.
+                scr->add_server_redraw_region(eka2l1::rect(abs_rect.top + redrawn_rect.top, redrawn_rect.size));
+            } else {
+                scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
+            }
+            schedule_update(ctx.msg->own_thr, !region_redraw);
         }
 
         flags &= ~flags_in_redraw;
@@ -1370,6 +1644,10 @@ namespace eka2l1::epoc {
 
         // remove all pending redraws. End redraw will report invalidates later
         client->remove_redraws(this);
+        {
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            pending_commands_before_redraw_ = pending_segment_ ? pending_segment_->commands_.size() : 0;
+        }
         redraw_segments_.add_new_segment(redraw_rect_curr, epoc::gdi_store_command_segment_pending_redraw);
 
         if (surface_ui_ && scr->is_screenplay_architecture()) {
@@ -1414,20 +1692,27 @@ namespace eka2l1::epoc {
     void redraw_msg_canvas::add_draw_command(gdi_store_command &command) {
         const std::lock_guard<std::mutex> guard(scr->screen_mutex);
 
+        const bool retains_pixels = client->get_ws().no_redraw_storing_enabled();
+        bool created_non_redraw_segment = false;
         if ((flags & flags_in_redraw) == 0) {
             eka2l1::rect full_size_rect(eka2l1::vec2(0, 0), abs_rect.size);
 
             // Not in redraw? Try to cleanup non redraw segments to make ways
-            if (redraw_segments_.clean_old_nonredraw_segments()) {
-                // With no redraw store, segments aging is ineffective. So just ignore...
-                if (!client->get_ws().no_redraw_storing_enabled())
-                    invalidate(full_size_rect);
+            if (retains_pixels) {
+                // Without a redraw store the client is never asked to repaint, so aged draws keep their pixels.
+                redraw_segments_.clean_old_nonredraw_segments([this](const std::unique_ptr<gdi_store_command_segment> *segments,
+                    const std::size_t count) {
+                    return flatten_segments(segments, count);
+                });
+            } else if (redraw_segments_.clean_old_nonredraw_segments()) {
+                invalidate(full_size_rect);
             }
 
             gdi_store_command_segment *current_segment = redraw_segments_.get_current_segment();
             if (!current_segment || (current_segment->type_ != gdi_store_command_segment_non_redraw)) {
                 // Create a new non redraw segment, covers the entire screen
                 redraw_segments_.add_new_segment(full_size_rect, gdi_store_command_segment_non_redraw);
+                created_non_redraw_segment = true;
             }
         }
 
@@ -1441,9 +1726,18 @@ namespace eka2l1::epoc {
         }
 
         gdi_store_command_segment *current_segment = redraw_segments_.get_current_segment();
-        current_segment->add_command(command);
-
+        if (!retains_pixels) {
+            // Symbian redraw stores retain bitmap handles, not copies of their pixels.
+            current_segment->add_command(command);
+        }
         canvas_base::add_draw_command(command);
+        if (retains_pixels) {
+            current_segment->add_command(command);
+        }
+        // Without redraw storing, earlier pixels may exist only in the screen bitmap.
+        if ((created_non_redraw_segment && !retains_pixels) || (flags & flags_enable_alpha)) {
+            scr->flags_ |= screen::FLAG_SERVER_REDRAW_PENDING;
+        }
     }
 
     bool redraw_msg_canvas::scroll(eka2l1::rect clip_space, const eka2l1::vec2 offset, eka2l1::rect source_rect) {
@@ -1486,10 +1780,18 @@ namespace eka2l1::epoc {
             return false;
         }
 
+        const common::region server_clip = scr->server_redraw_clip(visible_region);
+
         // If it does not have content drawn to it, it makes no sense to draw the background
         // Else, there's a flag in window server that enables clear on any siutation
         auto draw_background_color = [&]() {
-            if ((scr->is_screenplay_architecture() || !scr->scr_config.blt_offscreen) && clear_color_enable && !background_region.empty()) {        
+            // NGA fills the background only with AUTOCLEAR on (CWsRedrawMsgWindow::DrawWindow).
+            const bool fills_background = scr->is_screenplay_architecture() ? scr->auto_clear_enabled()
+                : !scr->scr_config.blt_offscreen;
+            if (!fills_background) {
+                background_region.make_empty();
+            }
+            if (fills_background && clear_color_enable && !background_region.empty()) {
                 background_region.advance(abs_rect.top);
                 background_region = background_region.intersect(visible_region);
 
@@ -1530,21 +1832,19 @@ namespace eka2l1::epoc {
 
             draw_surface(builder, background_surface_);
 
-            if (!segments.empty()) {
-                builder.clip_bitmap_region(visible_region, scr->display_scale_factor);
-
+            if (!segments.empty() && !server_clip.empty()) {
                 for (std::size_t i = 0; i < segments.size(); i++) {
                     if (segments[i]->type_ != gdi_store_command_segment_pending_redraw) {
-                        // Later Begin/EndRedraw transactions subtract their
-                        // region from old segments. Replaying an old full-window
-                        // clear outside its remaining region erases newer UI.
-                        auto clip = segments[i]->region_;
-                        clip.advance(abs_rect.top);
-                        clip = clip.intersect(visible_region);
-                        if (clip.empty()) continue;
-                        builder.clip_bitmap_region(clip, scr->display_scale_factor);
+                        common::region segment_clip = segments[i]->region_;
+                        segment_clip.advance(abs_rect.top);
+                        segment_clip = segment_clip.intersect(server_clip);
+                        if (segment_clip.empty()) {
+                            continue;
+                        }
+                        builder.clip_bitmap_region(segment_clip, scr->display_scale_factor);
                         gdi_command_builder gdi_builder(client->get_ws().get_graphics_driver(), builder,
-                            *client->get_ws().get_bitmap_cache(), filter, abs_rect.top, scr->display_scale_factor, clip);
+                            *client->get_ws().get_bitmap_cache(), filter, abs_rect.top, scr->display_scale_factor,
+                            segment_clip);
                         gdi_builder.build_segment(*segments[i]);
                     }
                 }
@@ -1635,6 +1935,23 @@ namespace eka2l1::epoc {
         case EWsWinOpStoreDrawCommands:
             store_draw_commands(ctx, cmd);
             break;
+
+        case EWsWinOpClearRedrawStore: {
+            const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+            redraw_segments_ = gdi_store_command_collection();
+            pending_segment_.reset();
+            if (surface_ui_) {
+                drivers::graphics_command_builder cleanup;
+                cleanup.destroy_bitmap(surface_ui_);
+                auto commands = cleanup.retrieve_command_list();
+                client->get_ws().get_graphics_driver()->submit_command_list(commands);
+                surface_ui_ = 0;
+            }
+            invalidate(bounding_rect());
+            surface_damage();
+            ctx.complete(epoc::error_none);
+            break;
+        }
 
         default:
             LOG_WARN(SERVICE_WINDOW, "Unimplemented redraw canvas opcode 0x{:X}!", cmd.header.op);
@@ -1884,6 +2201,12 @@ namespace eka2l1::epoc {
             return false;
         }
 
+        clip_space = clip_space.intersect(bounding_rect());
+        source_rect = source_rect.intersect(clip_space);
+        if (source_rect.empty()) {
+            return false;
+        }
+
         drivers::graphics_driver *drv = client->get_ws().get_graphics_driver();
         drivers::graphics_command_builder cmd_builder;
 
@@ -1896,12 +2219,7 @@ namespace eka2l1::epoc {
             ping_pong_driver_win_id = drivers::create_bitmap(drv, abs_rect.size, 32);
         }
 
-        if (source_rect.empty()) {
-            source_rect.top = eka2l1::vec2(0, 0);
-            source_rect.size = abs_rect.size;
-        }
-        
-        eka2l1::rect dest_rect(offset, source_rect.size);
+        eka2l1::rect dest_rect(source_rect.top + offset, source_rect.size);
 
         cmd_builder.bind_bitmap(ping_pong_driver_win_id);
         cmd_builder.draw_bitmap(driver_win_id, 0, dest_rect, source_rect);
@@ -1985,8 +2303,17 @@ namespace eka2l1::epoc {
             ctx.complete(epoc::error_none);
             break;
 
+        case EWsWinOpEnableBackup:
+            // This window is already a bitmap-backed (backup) canvas, so enabling
+            // backup is a no-op. Just acknowledge it.
+            ctx.complete(epoc::error_none);
+            break;
+
         default:
             LOG_ERROR(SERVICE_WINDOW, "Unimplemented bitmap backed canavas opcode 0x{:X}!", cmd.header.op);
+            // Still complete the synchronous request: leaving it dangling blocks
+            // the guest's SendReceive forever and deadlocks the whole UI.
+            ctx.complete(epoc::error_none);
             break;
         }
 

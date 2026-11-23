@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <common/algorithm.h>
 #include <common/chunkyseri.h>
 #include <common/cvt.h>
@@ -33,9 +34,6 @@
 #include <utils/err.h>
 #include <vfs/vfs.h>
 
-#include <kernel/kernel.h>
-
-#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -546,7 +544,7 @@ namespace eka2l1 {
             return false;
         }
 
-        bool parse_centrep_ini_default_meta(centrep_ini_reader &reader, central_repo &repo, const std::string &path) {
+        bool parse_centrep_ini_default_meta(centrep_ini_reader &reader, central_repo &repo, const host_path &path) {
             // The section opens with the repository-wide default, then lists ranges.
             reader.skip_comments();
             reader.read_uint32(repo.default_meta);
@@ -606,8 +604,8 @@ namespace eka2l1 {
         }
     }
 
-    bool parse_new_centrep_ini(const std::string &path, central_repo &repo) {
-        common::dynamic_ifile creini(path);
+    bool parse_new_centrep_ini(const host_path &path, central_repo &repo) {
+        common::dynamic_ifile creini(eka2l1::host_path{path});
 
         if (creini.fail()) {
             return false;
@@ -781,14 +779,15 @@ namespace eka2l1 {
         return true;
     }
 
-    central_repo_server::central_repo_server(eka2l1::system *sys)
+    central_repo_server::central_repo_server(eka2l1::system *sys,
+        std::function<void(central_repo &)> initializer)
         : service::server(sys->get_kernel_system(), sys, nullptr, CENTRAL_REPO_SERVER_NAME, true)
-        , id_counter(0) {
+        , id_counter(0)
+        , initialize_repo(std::move(initializer)) {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_init, "CenRep::Init");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_int, "CenRep::CreateInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_real, "CenRep::CreateReal");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_create_string, "CenRep::CreateString");
-        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_delete, "CenRep::Delete");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_close, "CenRep::Close");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_reset, "CenRep::Reset");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_set_int, "CenRep::SetInt");
@@ -799,7 +798,6 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_int, "CenRep::GetInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_real, "CenRep::GetReal");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_string, "CenRep::GetString");
-        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_get_meta, "CenRep::GetMeta");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_notify_req_check, "CenRep::NofReqCheck");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_find_eq_int, "CenRep::FindEqInt");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_find_neq_int, "CenRep::FindNeqInt");
@@ -810,26 +808,8 @@ namespace eka2l1 {
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_group_nof_cancel, "CenRep::GroupNofCancel");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_notify_cancel_all, "CenRep::NofCancelAll");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_start, "CenRep::TransactionStart");
-        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_cancel, "CenRep::TransactionCancel");
         REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_commit, "CenRep::TransactionCommit");
-        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_state, "CenRep::TransactionState");
-        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_fail, "CenRep::TransactionFail");
-    }
-
-    static std::string cenrep_requester_name(service::ipc_context *ctx) {
-        if (ctx && ctx->msg && ctx->msg->own_thr && ctx->msg->own_thr->owning_process()) {
-            return ctx->msg->own_thr->owning_process()->name();
-        }
-
-        return "?";
-    }
-
-    static bool cenrep_requester_is_java(const std::string &name) {
-        const std::string lower = common::lowercase_string(name);
-        return (lower.find("j9") != std::string::npos)
-            || (lower.find("java") != std::string::npos)
-            || (lower.find("midp") != std::string::npos)
-            || (lower.find("systemams") != std::string::npos);
+        REGISTER_IPC(central_repo_server, redirect_msg_to_session, cen_rep_transaction_cancel, "CenRep::TransactionCancel");
     }
 
     // 9.1 sessions own one repository and have no subsession id.
@@ -851,27 +831,14 @@ namespace eka2l1 {
         const std::uint32_t repo_uid = *ctx->get_argument_value<std::uint32_t>(0);
         device_manager *mngr = ctx->sys->get_device_manager();
         eka2l1::central_repo *repo = server->load_repo_with_lookup(ctx->sys->get_io_system(), mngr, repo_uid);
-        const std::string requester = cenrep_requester_name(ctx);
 
         if (!repo) {
-            // JCL (jclcldc11_23) calls CRepository::NewL(0x10274B74) from
-            // epoch.jcl.cpp; that UID is not in the 5320 RPKG. NewL LeaveIfError
-            // then kills j9midps60 with reason=1. Native apps still get
-            // KErrNotFound so optional-repo probes stay honest.
-            static constexpr std::uint32_t JCL_EPOCH_REPO = 0x10274B74;
-            if ((repo_uid == JCL_EPOCH_REPO) || cenrep_requester_is_java(requester)) {
-                repo = server->synthesize_missing_repo(repo_uid, requester);
-            }
-        }
-
-        if (!repo) {
-            LOG_WARN(SERVICE_CENREP, "Repository not found with UID 0x{:X} from {}", repo_uid, requester);
+            LOG_TRACE(SERVICE_CENREP, "Repository not found with UID 0x{:X}", repo_uid);
             ctx->complete(epoc::error_not_found);
             return;
         }
 
         // New client session
-        LOG_INFO(SERVICE_CENREP, "CenRep init: repo 0x{:X} opened from {}", repo_uid, requester);
         central_repo_client_subsession clisubsession;
         clisubsession.attach_repo = repo;
         clisubsession.server = server;
@@ -992,12 +959,12 @@ namespace eka2l1 {
             repo_folder_to_searches.push_back(repo_dir + private_dir_persists);
 
             for (const std::u16string &repo_folder : repo_folder_to_searches) {
-                if (is_first_repo && !io->exist(repo_folder)) {
+                if (is_first_repo && !io->exist(eka2l1::guest_path{repo_folder})) {
                     // Create one if it doesn't exist, for the future
-                    io->create_directories(repo_folder);
+                    io->create_directories(eka2l1::guest_path{repo_folder});
                 } else {
                     // We can continue already
-                    std::u16string repo_path = repo_folder + repocre;
+                    guest_path repo_path(repo_folder + repocre);
 
                     if (io->exist(repo_path)) {
                         // Load and check for success
@@ -1030,11 +997,6 @@ namespace eka2l1 {
                             continue;
                         }
 
-                        // central_repo has no constructor, and the CRE loader does not
-                        // necessarily fill the uid, so a CRE-loaded repo was left with
-                        // an uninitialised uid (observed as garbage 0xCCCCCC00). Set it
-                        // from the requested key, matching the INI path below.
-                        repo->uid = key;
                         repo->reside_place = avail_drives[0];
                         repo->access_count = 1;
 
@@ -1043,14 +1005,14 @@ namespace eka2l1 {
                     }
 
                     // Try to load the INI
-                    auto path = io->get_raw_path(repo_folder + repoini);
+                    auto path = io->get_raw_path(eka2l1::guest_path{repo_folder + repoini});
 
                     if (!path) {
                         continue;
                     }
 
                     repo->uid = key;
-                    if (parse_new_centrep_ini(common::ucs2_to_utf8(*path), *repo)) {
+                    if (parse_new_centrep_ini(*path, *repo)) {
                         repo->reside_place = avail_drives[0];
                         repo->access_count = 1;
                         avail_drives.pop_back();
@@ -1079,42 +1041,11 @@ namespace eka2l1 {
             return nullptr;
         }
 
+        if (initialize_repo) {
+            initialize_repo(repo);
+        }
         repos.emplace(key, std::make_unique<eka2l1::central_repo>(repo));
         return repos[key].get();
-    }
-
-    eka2l1::central_repo *central_repo_server::synthesize_missing_repo(const std::uint32_t key, const std::string &requester) {
-        auto stub = std::make_unique<central_repo>();
-        stub->uid = key;
-        stub->owner_uid = key;
-        stub->ver = 1;
-        stub->keyspace_type = 0;
-        stub->access_count = 1;
-        stub->reside_place = drive_c;
-        stub->time_stamp = 0;
-
-        // jclcldc11_23 epoch.jcl.cpp Get(key=0) as TDes16 — a Java TimeZone id.
-        static constexpr std::uint32_t JCL_EPOCH_REPO = 0x10274B74;
-        if (key == JCL_EPOCH_REPO) {
-            central_repo_entry_variant var;
-            var.etype = central_repo_entry_type::string;
-            var.intd = 0;
-            var.reald = 0.0;
-            const std::u16string gmt = u"GMT";
-            var.strd.resize(gmt.size() * sizeof(char16_t));
-            std::memcpy(var.strd.data(), gmt.data(), var.strd.size());
-            stub->add_new_entry(0, var);
-            LOG_WARN(SERVICE_CENREP,
-                "Repository not found with UID 0x{:X} from {}; synthesizing JCL epoch stub (key 0 = GMT)",
-                key, requester);
-        } else {
-            LOG_WARN(SERVICE_CENREP,
-                "Repository not found with UID 0x{:X} from {}; synthesizing empty stub",
-                key, requester);
-        }
-
-        auto inserted = repos.emplace(key, std::move(stub));
-        return inserted.first->second.get();
     }
 
     eka2l1::central_repo *central_repo_server::load_repo_with_lookup(eka2l1::io_system *io, device_manager *mngr, const std::uint32_t key) {
@@ -1178,9 +1109,6 @@ namespace eka2l1 {
 
     void central_repo_client_subsession::handle_message(service::ipc_context *ctx) {
         switch (ctx->msg->function) {
-        case cen_rep_delete:
-            delete_value(ctx);
-            break;
         // TODO: Faster way
         case cen_rep_create_int:
         case cen_rep_create_real:
@@ -1213,21 +1141,6 @@ namespace eka2l1 {
             get_value(ctx);
             break;
 
-        case cen_rep_get_meta: {
-            const std::optional<std::uint32_t> key = ctx->get_argument_value<std::uint32_t>(0);
-            if (!key || !attach_repo) {
-                ctx->complete(epoc::error_argument);
-                break;
-            }
-
-            central_repo_entry *entry = get_entry(*key, 0);
-            const std::uint32_t meta = entry ? entry->metadata_val
-                                             : attach_repo->get_default_meta_for_new_key(*key);
-            ctx->write_data_to_descriptor_argument<std::uint32_t>(1, meta);
-            ctx->complete(epoc::error_none);
-            break;
-        }
-
         case cen_rep_set_int:
         case cen_rep_set_string:
         case cen_rep_set_real:
@@ -1253,26 +1166,12 @@ namespace eka2l1 {
             start_transaction(ctx);
             break;
 
-        case cen_rep_transaction_cancel:
-            cancel_transaction(ctx);
-            break;
-
         case cen_rep_transaction_commit:
             commit_transaction(ctx);
             break;
 
-        case cen_rep_transaction_state: {
-            // No transaction tracking: report state 0 (no failure). Leaving
-            // these opcodes unanswered hangs synchronous clients (WeChat
-            // blocks its UI thread on CommitTransaction at startup).
-            const std::int32_t state = 0;
-            ctx->write_data_to_descriptor_argument<std::int32_t>(0, state);
-            ctx->complete(epoc::error_none);
-            break;
-        }
-
-        case cen_rep_transaction_fail:
-            ctx->complete(epoc::error_none);
+        case cen_rep_transaction_cancel:
+            cancel_transaction(ctx);
             break;
 
         case cen_rep_get_find_res:
@@ -1281,7 +1180,6 @@ namespace eka2l1 {
 
         default: {
             LOG_ERROR(SERVICE_CENREP, "Unhandled message opcode for cenrep 0x{:X}", ctx->msg->function);
-            ctx->complete(epoc::error_none);
             break;
         }
         }

@@ -20,6 +20,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <common/path_types.h>
 #include <drivers/input/common.h>
 #include <drivers/graphics/context.h>
 #include <drivers/ui/input_dialog.h>
@@ -49,6 +50,7 @@ class btnet_dialog;
 class editor_widget;
 
 namespace eka2l1 {
+    namespace control { enum class native_change; }
     class system;
     class window_server;
 
@@ -122,13 +124,8 @@ private:
     std::map<int, int> mouse_to_touch_index_emu_;
     eka2l1::drivers::handle background_image_texture_;
     eka2l1::vec2 previous_background_image_size_;
-    std::string previous_background_image_path_;
+    eka2l1::host_path previous_background_image_path_;
     
-    std::u16string question_dialog_text_;
-    std::u16string question_dialog_button1_text_;
-    std::u16string question_dialog_button2_text_;
-    eka2l1::drivers::ui::yes_no_dialog_complete_callback question_dialog_complete_callback_;
-
     QSystemTrayIcon *tray_icon_;
     QIcon emu_icon_;
 
@@ -136,6 +133,7 @@ private:
 
     void setup_screen_draw();
     void setup_app_list(const bool load_now = false);
+    void finish_stage_two();
     void setup_package_installer_ui_hooks();
     void reprepare_touch_mappings();
     void refresh_recent_mounts();
@@ -154,7 +152,7 @@ private:
 
     void save_ui_layouts();
     void restore_ui_layouts();
-    bool load_background_image(const std::string &path);
+    bool load_background_image(const eka2l1::host_path &path);
 
 private slots:
     void on_about_triggered();
@@ -209,8 +207,7 @@ private slots:
     void on_action_netplay_configure_triggered();
     void on_btnet_friends_dialog_requested_from_conf();
     void on_action_stretch_to_fill_toggled(bool checked);
-    void on_question_dialog_open_request();
-    void on_app_exited(eka2l1::kernel::process *proc);
+    void on_app_exited(const int exit_type, const int exit_reason, const QString exit_category);
 
 signals:
     void progress_dialog_change(const std::size_t now, const std::size_t total);
@@ -224,8 +221,7 @@ signals:
     void input_dialog_delay_launch_asked();
     void input_dialog_close_request();
     void install_ngage_game_name_available(QString name);
-    void question_dialog_open_request();
-    void app_exited(eka2l1::kernel::process *proc);
+    void app_exited(const int exit_type, const int exit_reason, const QString exit_category);
 
 public:
     main_window(QApplication &app, QWidget *parent, eka2l1::desktop::emulator &emulator_state);
@@ -236,6 +232,12 @@ public:
     void dropEvent(QDropEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
+    bool control_launch(std::uint32_t uid);
+    bool control_boot(int index);
+    void control_close();
+    void control_changed(eka2l1::control::native_change change);
+    void control_pause(bool paused);
+    void control_run_blocking(const std::function<void()> &work);
     void setup_and_switch_to_game_mode();
     void draw_enabled_overlay(eka2l1::drivers::graphics_driver *driver,
         eka2l1::drivers::graphics_command_builder &builder, const float scale_factor_x,
@@ -253,7 +255,7 @@ public:
     bool controller_event_handler(eka2l1::drivers::input_event &event);
 
     bool input_dialog_open(const std::u16string &inital_text, const int max_length, eka2l1::drivers::ui::input_dialog_complete_callback complete_callback);
-    void question_dialog_open(const std::u16string &text, const std::u16string &button1_text, const std::u16string &button2_text,
+    eka2l1::drivers::ui::dialog_cancel_callback question_dialog_open(const std::u16string &text, const std::u16string &button1_text, const std::u16string &button2_text,
         eka2l1::drivers::ui::yes_no_dialog_complete_callback complete_callback);
 
     void input_dialog_close();
@@ -261,6 +263,9 @@ public:
 
     int map_mouse_id_to_touch_index(int mouse_id, const bool on_release);
     eka2l1::drivers::handle get_background_image();
+    eka2l1::vec2 get_background_image_size() const {
+        return previous_background_image_size_;
+    }
 
     std::function<void(eka2l1::kernel::process *)> get_process_exit_callback();
 

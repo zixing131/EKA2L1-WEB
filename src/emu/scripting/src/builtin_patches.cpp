@@ -31,9 +31,13 @@
 #include <common/types.h>
 
 #include <scripting/cpu.h>
+#include <scripting/instance.h>
+#include <scripting/mem.h>
 #include <scripting/manager.h>
 
+#include <kernel/kernel.h>
 #include <kernel/libmanager.h>
+#include <kernel/process.h>
 #include <system/epoc.h>
 
 namespace eka2l1::manager {
@@ -95,6 +99,76 @@ namespace eka2l1::manager {
         skip_empty_avkon_menu(0x12C);
     }
 
+    // An empty menu must not expose a CBA and interrupt direct screen access.
+    static void rm92_defer_menu_cba() {
+        // The positioning scratch slot is unused until after menu validation.
+        scripting::write_dword(scripting::cpu::get_register(13) + 0xC, scripting::cpu::get_register(6));
+        scripting::cpu::set_register(15, scripting::cpu::get_pc() + 0x14);
+    }
+
+    static void rm92_skip_empty_avkon_menu() {
+        skip_empty_avkon_menu(0xD2);
+    }
+
+    static void rm92_create_menu_cba() {
+        if (scripting::cpu::get_register(0) != 0) {
+            scripting::write_dword(scripting::cpu::get_register(13), 1);
+            scripting::cpu::set_register(0, 3);
+            scripting::cpu::set_register(1, 1);
+            scripting::cpu::set_register(2, scripting::cpu::get_register(4) + 0x58);
+            scripting::cpu::set_register(3, scripting::read_dword(scripting::cpu::get_register(13) + 0xC));
+            scripting::cpu::set_register(15, scripting::cpu::get_pc() - 0x118);
+        }
+    }
+
+    static void rm92_finish_menu_cba() {
+        scripting::write_dword(scripting::cpu::get_register(4) + 0x64, scripting::cpu::get_register(0));
+        scripting::cpu::set_register(15, scripting::cpu::get_pc() + 0x134);
+    }
+
+    // --- Qt font extras fix (qt_font_extras_fix.lua) ---
+    // Qt 4.7.4+ dereferences QApplication::instance() on the first font lookup,
+    // which is NULL in apps that paint text without a QApplication.
+    static void qt_skip_font_extras_thread_check() {
+        scripting::cpu::set_register(15, scripting::cpu::get_pc() + 0x74);
+    }
+
+    static void ssx_skip_null_client_read() {
+        // A missing menu controller has the same offline state as a null client.
+        if (scripting::cpu::get_register(2) == 0) {
+            scripting::cpu::set_register(3, 0);
+            scripting::cpu::set_register(15, scripting::cpu::get_pc() + 4);
+        }
+    }
+
+    // --- Wave: Against Every Beat (Colorbox) crash fix (wave_crash_fix.lua) ---
+    // Starting a run refreshes a sprite animation that never started (frame -1).
+    // The game then reads 64KB past a heap cell, which only happens to be mapped on the phone.
+    static void wave_skip_unstarted_animation_refresh() {
+        if (static_cast<std::int32_t>(scripting::cpu::get_register(1)) < 0) {
+            scripting::cpu::set_register(15, scripting::cpu::get_pc() + 0x16);
+        }
+    }
+
+    // Only type-0 enemy waves set their fire period, but every live wave is taken modulo it
+    // before the type check. Take the path that check picks anyway instead of dividing by zero.
+    static void wave_skip_zero_fire_period() {
+        if (scripting::cpu::get_register(1) == 0) {
+            scripting::cpu::set_register(15, scripting::cpu::get_pc() - 0x28);
+        }
+    }
+
+    // --- Let's Create! Pottery (Infinite Dreams) startup fix (pottery_startup_fix.lua) ---
+    // CIrrDeviceSymbian never initializes its Close flag, so run() reports the device as
+    // closed whenever the reused heap cell holds a nonzero byte there and nothing is drawn.
+    static void pottery_clear_device_close_flag() {
+        scripting::write_byte(scripting::cpu::get_register(0) + 0xB4, 0);
+    }
+
+    static void worms_mask_clock() {
+        scripting::get_current_instance()->get_kernel_system()->crr_process()->set_tick_count_mask(~1U);
+    }
+
     void scripts::register_builtin_patches() {
         // The kernel-level hooks must be live for breakpoints to fire.
         register_kernel_hooks();
@@ -152,6 +226,29 @@ namespace eka2l1::manager {
             0x182, 0, 0x1000489E, rm409_skip_empty_avkon_menu);
         register_rom_export_breakpoint("eikcoctl.dll", 70, 0x1595EE13,
             0x17E, 0, 0x1000489E, rm320_skip_empty_avkon_menu);
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x5903C871,
+            0x116, 0, 0x1000489E, rm92_defer_menu_cba);
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x5903C871,
+            0x16C, 0, 0x1000489E, rm92_skip_empty_avkon_menu);
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x5903C871,
+            0x23C, 0, 0x1000489E, rm92_create_menu_cba);
+        register_rom_export_breakpoint("eikcoctl.dll", 70, 0x5903C871,
+            0x128, 0, 0x1000489E, rm92_finish_menu_cba);
+
+        // QSymbianFontDatabaseExtrasImplementation::extras() in Qt 4.7.4 and 4.8.0
+        register_breakpoint("qtgui.dll", 0x001570B5, 0, 0x2001B2DD, 0x8E4B3F71, qt_skip_font_extras_thread_check);
+        register_breakpoint("qtgui.dll", 0x0015DC71, 0, 0x2001B2DD, 0xAA4C4DCA, qt_skip_font_extras_thread_check);
+
+        for (const std::uint32_t addr : { 0x10024F88, 0x10024FDC, 0x10025030 }) {
+            register_breakpoint("6r65.app", addr, 0, 0x101FD402, 0xBA80BDA5, ssx_skip_null_client_read);
+        }
+
+        register_breakpoint("cboxapp_0x20041fae.exe", 0x956B, 0, 0x20041FAE, 0xCB7985E9, wave_skip_unstarted_animation_refresh);
+        register_breakpoint("cboxapp_0x20041fae.exe", 0x1D44F, 0, 0x20041FAE, 0xCB7985E9, wave_skip_zero_fire_period);
+
+        register_breakpoint("pottery.exe", 0x187410, 0, 0x20042DDE, 0x58A29E91, pottery_clear_device_close_flag);
+
+        register_breakpoint("mophun.dll", 0x10011B74, 0x101FD3F3, 0, 0x086E4D44, worms_mask_clock);
 
         current_module = nullptr;
 
@@ -164,7 +261,7 @@ namespace eka2l1::manager {
             LOG_INFO(SCRIPTING, "Applying S^3 and higher patch (native)");
 
             if (hle::lib_manager *libmngr = sys->get_lib_manager()) {
-                libmngr->load(u"z:\\sys\\bin\\domaincli.dll");
+                libmngr->load(guest_path(u"z:\\sys\\bin\\domaincli.dll"));
             }
         }
 

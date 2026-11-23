@@ -17,44 +17,162 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
+#include <common/log.h>
 #include <common/platform.h>
 #include <cpu/arm_factory.h>
+#include <cpu/ekalynx.h>
 
 #include <cpu/dyncom/arm_dyncom.h>
 
-// The dyncom-only build (difftest harness, see scripts/cpu_difftest.sh) compiles
-// neither dynarmic nor 12l1r, so its headers/cases must be excluded exactly like
-// the WASM path - on an arm64 host EKA2L1_ARCH(ARM) is false (that macro is
-// 32-bit-only), so without this guard the dynarmic header would still be pulled in.
-#if defined(EKA2L1_CPU_DYNCOM_ONLY_BUILD)
-#define EKA2L1_CPU_DYNCOM_ONLY_FACTORY 1
-#else
-#define EKA2L1_CPU_DYNCOM_ONLY_FACTORY 0
+// Dynarmic availability: on iOS the EKA2L1_IOS_DYNARMIC flag (one cmake
+// option = one compile macro) marks builds that carry dynarmic — simulator
+// builds by default, sideload-only device builds opt in, App Store /
+// TestFlight never. The dyncom-only build (e.g. the differential test
+// harness) forces dynarmic off on any host so it doesn't drag in the
+// dynarmic headers/library.
+#if !defined(EKA2L1_CPU_DYNCOM_ONLY_BUILD)
+#define EKA2L1_CPU_DYNCOM_ONLY_BUILD 0
 #endif
+#define EKA2L1_CPU_HAS_DYNARMIC (!EKA2L1_PLATFORM(WASM) && !EKA2L1_ARCH(ARM) && (!EKA2L1_PLATFORM(IOS) || EKA2L1_IOS_DYNARMIC) && !EKA2L1_CPU_DYNCOM_ONLY_BUILD)
 
-#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_BUILD
 #include <cpu/12l1r/arm_12l1r.h>
-#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
-// Dynarmic is built on every non-WASM, non-32-bit-ARM host, including OHOS
-// (HarmonyOS) arm64. Whether it is actually *used* there is decided at runtime
-// by probing for executable memory - see system_impl's CPU type selection.
+#elif EKA2L1_CPU_HAS_DYNARMIC
 #include <cpu/arm_dynarmic.h>
 #endif
 
 #include <cpu/12l1r/exclusive_monitor.h>
 
+#if EKA2L1_PLATFORM(IOS) && EKA2L1_IOS_DYNARMIC
+#include <libkern/OSCacheControl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 namespace eka2l1::arm {
+#if EKA2L1_PLATFORM(IOS) && EKA2L1_IOS_DYNARMIC
+    // Probe whether this process can actually create and run generated code.
+    // On a jailed iPhone, mprotect(RW -> RX) on dirty anonymous pages only
+    // succeeds when the process is debuggable (CS_DEBUGGED), i.e. a sideloaded
+    // build with JIT enabled via debugger / JIT enabler. App Store and
+    // TestFlight processes always fail the mprotect, so this degrades cleanly.
+    // Mirrors the RW->RX dance oaknut's CodeBlock does on TARGET_OS_IPHONE.
+    static bool probe_ios_jit() {
+        const size_t page = static_cast<size_t>(getpagesize());
+        void *mem = mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (mem == MAP_FAILED) {
+            return false;
+        }
+
+        // AArch64 `ret`.
+        *reinterpret_cast<std::uint32_t *>(mem) = 0xD65F03C0;
+
+        bool ok = (mprotect(mem, page, PROT_READ | PROT_EXEC) == 0);
+        if (ok) {
+            sys_icache_invalidate(mem, page);
+            reinterpret_cast<void (*)()>(mem)();
+        }
+
+        munmap(mem, page);
+        return ok;
+    }
+#endif
+
+    bool host_can_jit() {
+#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_IOS_DYNARMIC
+        static const bool available = probe_ios_jit();
+        return available;
+#else
+        return false;
+#endif
+#elif EKA2L1_ARCH(ARM)
+        // 32-bit ARM hosts use 12l1r rather than dynarmic, treat as JIT-capable.
+        return true;
+#elif EKA2L1_CPU_HAS_DYNARMIC
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    arm_emulator_type resolve_emulator_type(arm_emulator_type requested, const char **out_reason) {
+        const char *reason = nullptr;
+        arm_emulator_type resolved = requested;
+
+#if EKA2L1_PLATFORM(IOS)
+        if (requested == arm_emulator_type::r12l1 || requested == arm_emulator_type::unicorn) {
+            reason = "backend not available on iOS";
+            resolved = arm_emulator_type::dyncom;
+        } else if (requested == arm_emulator_type::dynarmic && !host_can_jit()) {
+#if EKA2L1_IOS_DYNARMIC
+            reason = "process has no JIT permission (needs sideload + debugger/JIT enabler)";
+#else
+            reason = "JIT not compiled into this build (App Store / TestFlight)";
+#endif // EKA2L1_IOS_DYNARMIC
+            resolved = arm_emulator_type::dyncom;
+        }
+#else
+        // Some backend types have no core on a given desktop host: unicorn
+        // support is gone everywhere, 12l1r needs a 32-bit ARM host, and dynarmic is
+        // compiled out of dyncom-only builds. cpu_backend is free text out of
+        // config.yml, so an unsupported name otherwise reaches create_core, which
+        // answers null and takes the emulator down during startup with nothing said.
+        if (requested == arm_emulator_type::unicorn) {
+            reason = "the unicorn backend is no longer supported";
+            resolved = arm_emulator_type::dyncom;
+        }
+
+#if !EKA2L1_ARCH(ARM)
+        if (requested == arm_emulator_type::r12l1) {
+            reason = "the 12l1r recompiler needs a 32-bit ARM host";
+            resolved = arm_emulator_type::dyncom;
+        }
+#endif
+
+#if !EKA2L1_CPU_HAS_DYNARMIC
+        if (requested == arm_emulator_type::dynarmic) {
+            reason = "dynarmic is not compiled into this build";
+            resolved = arm_emulator_type::dyncom;
+        }
+#endif
+#endif
+
+#if EKA2L1_PLATFORM(WASM) || EKA2L1_CPU_DYNCOM_ONLY_BUILD
+        if (resolved == arm_emulator_type::ekalynx) {
+            reason = "the Ekalynx interpreter is not compiled into this build";
+            resolved = arm_emulator_type::dyncom;
+        }
+#endif
+        if (out_reason) {
+            *out_reason = reason;
+        }
+        return resolved;
+    }
+
     core_instance create_core(exclusive_monitor *monitor, arm_emulator_type arm_type) {
-        switch (arm_type) {
+        const char *reason = nullptr;
+        const arm_emulator_type resolved = resolve_emulator_type(arm_type, &reason);
+        if (reason) {
+            LOG_WARN(CPU, "CPU backend request {} downgraded to {} ({})",
+                static_cast<int>(arm_type), static_cast<int>(resolved), reason);
+        }
+
+        switch (resolved) {
         case arm_emulator_type::unicorn:
             return nullptr;
 
-#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_BUILD
         case arm_emulator_type::r12l1:
             return std::make_unique<r12l1_core>(monitor, 12);
-#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
+#elif EKA2L1_CPU_HAS_DYNARMIC
         case arm_emulator_type::dynarmic:
             return std::make_unique<dynarmic_core>(monitor);
+#endif
+
+#if !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_BUILD
+        case arm_emulator_type::ekalynx:
+            return make_ekalynx_interpreter(monitor);
 #endif
 
         case arm_emulator_type::dyncom:
@@ -68,17 +186,22 @@ namespace eka2l1::arm {
     }
 
     exclusive_monitor_instance create_exclusive_monitor(arm_emulator_type arm_type, const std::size_t core_count) {
-        switch (arm_type) {
+        // Resolve exactly as create_core does. Its caller passes the same requested
+        // type to both, and a downgraded core must not be paired with a monitor
+        // built for the backend that was asked for. create_core reports the
+        // downgrade; staying quiet here keeps it to a single message.
+        switch (resolve_emulator_type(arm_type)) {
         case arm_emulator_type::unicorn:
             return nullptr;
 
+        case arm_emulator_type::ekalynx:
         case arm_emulator_type::dyncom:
             return std::make_unique<r12l1::exclusive_monitor>(core_count);
 
-#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
+#if EKA2L1_ARCH(ARM) && !EKA2L1_CPU_DYNCOM_ONLY_BUILD
         case arm_emulator_type::r12l1:
             return std::make_unique<r12l1::exclusive_monitor>(core_count);
-#elif !EKA2L1_PLATFORM(WASM) && !EKA2L1_CPU_DYNCOM_ONLY_FACTORY
+#elif EKA2L1_CPU_HAS_DYNARMIC
         case arm_emulator_type::dynarmic:
             return std::make_unique<dynarmic_exclusive_monitor>(core_count);
 #endif

@@ -20,7 +20,10 @@
 #include <common/algorithm.h>
 #include <common/log.h>
 #include <common/platform.h>
+#include <common/path.h>
 #include <common/rgb.h>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -28,7 +31,12 @@
 #include <drivers/graphics/backend/ogl/graphics_ogl.h>
 #include <drivers/graphics/backend/ogl/buffer_ogl.h>
 #include <drivers/graphics/backend/ogl/fb_ogl.h>
+#include <common/platform.h>
+#if EKA2L1_PLATFORM(IOS)
+#include <drivers/graphics/backend/ogl/ios_gl_loader.h>
+#else
 #include <glad/glad.h>
+#endif
 
 #if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(OHOS)
 #include <EGL/egl.h>
@@ -102,12 +110,18 @@ namespace eka2l1::drivers {
 #endif
     }
 
+    static bool force_bgra_conversion_requested() {
+        const char *value = std::getenv("EKA2L1_FORCE_BGRA_CONVERSION");
+        return value && std::strcmp(value, "1") == 0;
+    }
+
     ogl_graphics_driver::ogl_graphics_driver(const window_system_info &info)
         : shared_graphics_driver(graphic_api::opengl)
         , should_stop(false)
         , surface_update_needed(false)
         , new_surface(nullptr)
         , is_gles(false)
+        , force_bgra_conversion_(force_bgra_conversion_requested())
         , support_line_width_(true)
         , line_width_range_ready_(false)
         , line_width_range_{ 0, 0 }
@@ -145,6 +159,27 @@ namespace eka2l1::drivers {
         context_->set_swap_interval(1);
 
         is_gles = (context_->gl_mode() == graphics::gl_context::mode::opengl_es);
+#ifdef GL_POINT_SIZE_RANGE
+        if (!is_gles) {
+            glGetFloatv(GL_POINT_SIZE_RANGE, point_size_range_);
+        } else
+#endif
+        {
+            glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, point_size_range_);
+        }
+#ifdef GL_PROGRAM_POINT_SIZE
+        if (!is_gles) {
+            glEnable(GL_PROGRAM_POINT_SIZE);
+        }
+#endif
+
+        {
+            GLint max_tex = 0;
+            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+            if (max_tex > 0) {
+                max_texture_size_ = static_cast<std::uint32_t>(max_tex);
+            }
+        }
 
         GLint major_gl = 0;
         GLint minor_gl = 0;
@@ -213,6 +248,9 @@ namespace eka2l1::drivers {
         }
 
         std::string feature = "";
+        if (convert_bgra_uploads()) {
+            feature += "BGRAConvert;";
+        }
 
         if (feature_flags_ & OGL_FEATURE_SUPPORT_ETC2) {
             feature += "ETC2Dec;";
@@ -277,6 +315,10 @@ namespace eka2l1::drivers {
         }
 
         switch (query) {
+        case graphics_driver_extension_query_point_size_range:
+            std::copy(point_size_range_, point_size_range_ + 2, reinterpret_cast<float*>(data_ptr));
+            break;
+
         case graphics_driver_extension_query_max_texture_max_anisotrophy:
             if ((feature_flags_ & OGL_FEATURE_SUPPORT_ANISOTROPHY) == 0) {
                 return false;
@@ -303,15 +345,15 @@ namespace eka2l1::drivers {
     static constexpr const char *pen_f_path = "resources//pen.frag";
 
     void ogl_graphics_driver::do_init() {
-        auto sprite_norm_vertex_module = std::make_unique<ogl_shader_module>(sprite_norm_v_path, shader_module_type::vertex);        
-        auto brush_vertex_module = std::make_unique<ogl_shader_module>(brush_v_path, shader_module_type::vertex);
-        auto pen_vertex_module = std::make_unique<ogl_shader_module>(pen_v_path, shader_module_type::vertex);
+        auto sprite_norm_vertex_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{sprite_norm_v_path}), shader_module_type::vertex);
+        auto brush_vertex_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{brush_v_path}), shader_module_type::vertex);
+        auto pen_vertex_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{pen_v_path}), shader_module_type::vertex);
 
-        auto sprite_norm_fragment_module = std::make_unique<ogl_shader_module>(sprite_norm_f_path, shader_module_type::fragment);
-        auto sprite_mask_fragment_module = std::make_unique<ogl_shader_module>(sprite_mask_f_path, shader_module_type::fragment);
-        auto sprite_upscale_fragment_module = std::make_unique<ogl_shader_module>(sprite_upscaled_f_path, shader_module_type::fragment);
-        auto brush_fragment_module = std::make_unique<ogl_shader_module>(brush_f_path, shader_module_type::fragment);
-        auto pen_fragment_module = std::make_unique<ogl_shader_module>(pen_f_path, shader_module_type::fragment);
+        auto sprite_norm_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{sprite_norm_f_path}), shader_module_type::fragment);
+        auto sprite_mask_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{sprite_mask_f_path}), shader_module_type::fragment);
+        auto sprite_upscale_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{sprite_upscaled_f_path}), shader_module_type::fragment);
+        auto brush_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{brush_f_path}), shader_module_type::fragment);
+        auto pen_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{pen_f_path}), shader_module_type::fragment);
 
         sprite_program = std::make_unique<ogl_shader_program>();
         mask_program = std::make_unique<ogl_shader_program>();
@@ -426,10 +468,11 @@ namespace eka2l1::drivers {
 
         std::string extra_header = "";
 
+        host_path shader_file;
         if ((pending_upscale_shader_ == "default") || (pending_upscale_shader_ == "Default")) {
-            pending_upscale_shader_ = sprite_upscaled_f_path;
+            shader_file = host_path(sprite_upscaled_f_path);
         } else {
-            pending_upscale_shader_ = "resources//upscale//" + pending_upscale_shader_ + ".frag";
+            shader_file = host_path("resources/upscale/").join(pending_upscale_shader_ + ".frag");
             if (is_gles) {
                 extra_header = "#version 300 es\n";
             } else {
@@ -437,8 +480,8 @@ namespace eka2l1::drivers {
             }
         }
 
-        auto sprite_norm_vertex_module = std::make_unique<ogl_shader_module>(sprite_norm_v_path, shader_module_type::vertex);        
-        auto sprite_upscale_fragment_module = std::make_unique<ogl_shader_module>(pending_upscale_shader_, shader_module_type::fragment, extra_header);
+        auto sprite_norm_vertex_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(eka2l1::host_path{sprite_norm_v_path}), shader_module_type::vertex);
+        auto sprite_upscale_fragment_module = std::make_unique<ogl_shader_module>(eka2l1::runtime_resource_path(shader_file), shader_module_type::fragment, extra_header);
 
         auto upscale_program_new = std::make_unique<ogl_shader_program>();
 
@@ -481,7 +524,10 @@ namespace eka2l1::drivers {
             new_surface_size_ = { -1, -1 };
         }
 
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // On iOS, there is no default framebuffer; the EAGL context owns the
+        // FBO whose color attachment is the CAEAGLLayer drawable. Bind that
+        // instead of 0 so the rendered frame actually lands in the layer.
+        glBindFramebuffer(GL_FRAMEBUFFER, context_ ? context_->swapchain_framebuffer() : 0);
     }
 
     void ogl_graphics_driver::update_surface(void *new_surface_set) {
@@ -839,7 +885,7 @@ namespace eka2l1::drivers {
             glDisable(GL_STENCIL_TEST);
 
             eka2l1::rect clip_rect = to_clip.rects_[0];
-            clip_rect.scale(scale);
+            scale_rectangle(clip_rect, scale);
 
             glScissor(clip_rect.top.x, ((binding != nullptr) ? clip_rect.top.y : (current_fb_height - (clip_rect.top.y + clip_rect.size.y))),
                 clip_rect.size.x, clip_rect.size.y);
@@ -857,12 +903,18 @@ namespace eka2l1::drivers {
         glStencilOp(GL_REPLACE, GL_KEEP, GL_KEEP);
         glStencilMask(0xFF);
 
+        GLboolean color_mask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+        glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
         for (std::size_t i = 0; i < to_clip.rects_.size(); i++) {
             if (to_clip.rects_[i].valid()) {
-                to_clip.rects_[i].scale(scale);
+                scale_rectangle(to_clip.rects_[i], scale);
                 draw_rectangle(to_clip.rects_[i]);
             }
         }
+
+        glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
 
         glStencilFunc(GL_EQUAL, 1, 0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
@@ -919,6 +971,17 @@ namespace eka2l1::drivers {
         if (vert_off == 0) {
             glDrawElements(prim_mode_to_gl_enum(prim_mode), count, data_format_to_gl_enum(val_type), reinterpret_cast<GLvoid *>(index_off_64));
         } else {
+#if EKA2L1_PLATFORM(IOS)
+            // ios_gl_loader's glDrawElementsBaseVertex stub drops the base vertex
+            // (GLES3.0 has no base-vertex draw). No caller passes a non-zero base
+            // today; surface it loudly if one ever does instead of silently
+            // rendering the wrong vertices.
+            static bool base_vertex_warned = false;
+            if (!base_vertex_warned) {
+                base_vertex_warned = true;
+                LOG_ERROR(DRIVER_GRAPHICS, "draw_indexed with non-zero base vertex ({}) is unsupported on iOS; geometry will use the wrong vertices", vert_off);
+            }
+#endif
             glDrawElementsBaseVertex(prim_mode_to_gl_enum(prim_mode), count, data_format_to_gl_enum(val_type), reinterpret_cast<GLvoid *>(index_off_64), vert_off);
         }
     }
@@ -1470,7 +1533,7 @@ namespace eka2l1::drivers {
         }
 
         case shader_var_type::mat3: {
-            glUniformMatrix2fv(binding, static_cast<GLsizei>((cmd.data_[2] + 35) / 36), GL_FALSE, reinterpret_cast<const GLfloat *>(data));
+            glUniformMatrix3fv(binding, static_cast<GLsizei>((cmd.data_[2] + 35) / 36), GL_FALSE, reinterpret_cast<const GLfloat *>(data));
             delete[] data;
 
             return;
@@ -1658,7 +1721,10 @@ namespace eka2l1::drivers {
         drivers::framebuffer_bind_type bind_type = static_cast<drivers::framebuffer_bind_type>(cmd.data_[1]);
 
         if (h == 0) {
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            // Handle 0 = "the swapchain". Most platforms get the window's
+            // default framebuffer (FBO 0); iOS GLES has none, so route to
+            // the EAGL-owned FBO instead.
+            glBindFramebuffer(GL_FRAMEBUFFER, context_ ? context_->swapchain_framebuffer() : 0);
             return;
         }
 
@@ -1678,6 +1744,105 @@ namespace eka2l1::drivers {
         glBlendColor(red, green, blue, alpha);
     }
 
+    void ogl_graphics_driver::copy_framebuffer_to_texture(command &cmd) {
+        auto *tex = reinterpret_cast<ogl_texture *>(get_graphics_object(cmd.data_[1]));
+        if (!tex) {
+            return;
+        }
+
+        GLint read_fb, draw_fb;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb);
+        const auto source = cmd.data_[0];
+        ogl_framebuffer *fb = nullptr;
+        if (source & HANDLE_BITMAP) {
+            auto *bmp = get_bitmap(source);
+            if (!bmp) {
+                return;
+            }
+            if (!bmp->fb) {
+                bmp->init_fb(this);
+            }
+            fb = static_cast<ogl_framebuffer *>(bmp->fb.get());
+        } else if (source) {
+            fb = reinterpret_cast<ogl_framebuffer *>(get_graphics_object(source));
+            if (!fb) {
+                return;
+            }
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fb ? fb->get_fbo() : context_->swapchain_framebuffer());
+
+        std::int32_t dimension, level, x, y, width, height, dx, dy, dw, dh;
+        unpack_u64_to_2u32(cmd.data_[2], dimension, level);
+        unpack_u64_to_2u32(cmd.data_[3], x, y);
+        unpack_u64_to_2u32(cmd.data_[4], width, height);
+        unpack_u64_to_2u32(cmd.data_[5], dx, dy);
+        unpack_u64_to_2u32(cmd.data_[6], dw, dh);
+        const GLenum target = dimension == 2 ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP_POSITIVE_X + dimension - 4;
+        if (width <= 0 || height <= 0 || dw <= 0 || dh <= 0) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fb);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fb);
+            return;
+        }
+        if (cmd.data_[7]) {
+            // Legacy alpha is stored in R, and luminance-alpha in RG on the host.
+            const bool luminance_alpha = tex->get_format() == texture_format::rg8;
+            const std::size_t components = luminance_alpha ? 2 : 1;
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+            std::vector<std::uint8_t> converted(static_cast<std::size_t>(dw) * dh * components);
+            GLint pack_alignment, pack_row_length;
+            glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+            glGetIntegerv(GL_PACK_ROW_LENGTH, &pack_row_length);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+            glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
+            for (int row = 0; row < dh; ++row) {
+                for (int col = 0; col < dw; ++col) {
+                    const auto src = (static_cast<std::size_t>((2 * row + 1) * height / (2 * dh)) * width
+                        + (2 * col + 1) * width / (2 * dw)) * 4;
+                    const auto dest = (static_cast<std::size_t>(row) * dw + col) * components;
+                    if (luminance_alpha) {
+                        converted[dest] = pixels[src];
+                    }
+                    converted[dest + components - 1] = pixels[src + 3];
+                }
+            }
+            const GLenum bind_target = dimension == 2 ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+            GLint binding, unpack_alignment, unpack_row_length;
+            glGetIntegerv(dimension == 2 ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &binding);
+            glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack_alignment);
+            glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpack_row_length);
+            glBindTexture(bind_target, static_cast<GLuint>(tex->driver_handle()));
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glTexSubImage2D(target, level, dx, dy, dw, dh, luminance_alpha ? GL_RG : GL_RED,
+                GL_UNSIGNED_BYTE, converted.data());
+            glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, unpack_row_length);
+            glBindTexture(bind_target, binding);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fb);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fb);
+            return;
+        }
+
+        GLuint dest_fb = 0;
+        glGenFramebuffers(1, &dest_fb);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dest_fb);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target,
+            static_cast<GLuint>(tex->driver_handle()), level);
+        const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glBlitFramebuffer(x, y, x + width, y + height, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        if (scissor) {
+            glEnable(GL_SCISSOR_TEST);
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fb);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fb);
+        glDeleteFramebuffers(1, &dest_fb);
+    }
+
     void ogl_graphics_driver::read_framebuffer(command &cmd) {
         drivers::handle h = cmd.data_[0];
         drivers::ogl_framebuffer *fb = nullptr;
@@ -1685,6 +1850,7 @@ namespace eka2l1::drivers {
         if (h != 0) {
             fb = reinterpret_cast<drivers::ogl_framebuffer*>(get_graphics_object(h));
             if (!fb) {
+                finish(cmd.status_, -1);
                 return;
             }
         }
@@ -1701,6 +1867,8 @@ namespace eka2l1::drivers {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fb ? fb->get_fbo() : 0);
         glReadPixels(x, y, width, height, format, type, reinterpret_cast<std::uint64_t*>(cmd.data_[4]));
         glBindFramebuffer(GL_READ_FRAMEBUFFER, last_read_fb);
+
+        finish(cmd.status_, 0);
     }
 
     void ogl_graphics_driver::save_gl_state() {
@@ -1974,6 +2142,10 @@ namespace eka2l1::drivers {
             set_blend_colour(cmd);
             break;
 
+        case graphics_driver_copy_framebuffer_to_texture:
+            copy_framebuffer_to_texture(cmd);
+            break;
+
         case graphics_driver_read_framebuffer:
             read_framebuffer(cmd);
             break;
@@ -1989,7 +2161,10 @@ namespace eka2l1::drivers {
             std::optional<command_list> list = list_queue.pop();
 
             if (!list) {
-                LOG_ERROR(DRIVER_GRAPHICS, "Corrupted graphics command list! Emulation halt.");
+                if (!should_stop) {
+                    LOG_ERROR(DRIVER_GRAPHICS, "Corrupted graphics command list! Emulation halt.");
+                }
+
                 break;
             }
 

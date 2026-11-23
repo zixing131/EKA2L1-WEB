@@ -28,7 +28,6 @@ namespace eka2l1::common {
      */
 
     eka2l1::rect region::bounding_rect() const {
-        if (rects_.empty()) return eka2l1::rect({0, 0}, {0, 0});
         eka2l1::vec2 tl{ INT_MAX, INT_MAX };
         eka2l1::vec2 br{ INT_MIN, INT_MIN };
 
@@ -43,26 +42,38 @@ namespace eka2l1::common {
     }
 
     bool region::add_rect(const eka2l1::rect &rect) {
-        if (rect.size.x <= 0 || rect.size.y <= 0) return false;
-        if (!rects_.empty() && rect.contains(bounding_rect())) {
-            if (rects_.size() == 1 && rects_.front() == rect) return false;
-            const auto copy = rect;
-            rects_ = {copy};
+        if (rect.empty()) {
+            return false;
+        }
+
+        if (rects_.empty()) {
+            rects_.push_back(rect);
             return true;
         }
-        // Add only the uncovered pieces. The previous implementation removed
-        // the existing rectangle and kept pieces of the new one, losing their
-        // intersection and sometimes introducing overlapping rectangles.
-        region remaining;
-        remaining.rects_.push_back(rect);
-        for (const auto &existing : rects_) remaining.eliminate(existing);
-        if (remaining.empty()) return false;
-        rects_.insert(rects_.end(), remaining.rects_.begin(), remaining.rects_.end());
+
+        if (rects_.size() == 1 && rects_.front().contains(rect)) {
+            return false;
+        }
+
+        if (rect.contains(bounding_rect())) {
+            rects_.assign(1, rect);
+            return true;
+        }
+
+        region uncovered;
+        uncovered.rects_.push_back(rect);
+        for (const auto &existing : rects_) {
+            uncovered.eliminate(existing);
+            if (uncovered.empty()) {
+                return false;
+            }
+        }
+
+        rects_.insert(rects_.end(), uncovered.rects_.begin(), uncovered.rects_.end());
         return true;
     }
 
     bool region::add_region(const region &rg) {
-        if (this == &rg) return false;
         bool modded = false;
         for (std::size_t i = 0; i < rg.rects_.size(); i++) {
             if (add_rect(rg.rects_[i])) {
@@ -74,30 +85,37 @@ namespace eka2l1::common {
     }
 
     void region::eliminate(const eka2l1::rect &rect) {
-        if (rect.size.x <= 0 || rect.size.y <= 0) return;
+        if (rect.empty()) {
+            return;
+        }
+
         std::vector<eka2l1::rect> remaining;
         for (const auto &original : rects_) {
-            const auto intersection = original.intersect(rect);
-            if (intersection.empty()) {
+            const auto overlap = original.intersect(rect);
+            if (overlap.empty()) {
                 remaining.push_back(original);
                 continue;
             }
+
             const auto end = original.bottom_right();
-            const auto cut_end = intersection.bottom_right();
-            auto piece = [&](vec2 top, vec2 bottom) {
-                const eka2l1::rect part(top, bottom - top);
-                if (part.size.x > 0 && part.size.y > 0) remaining.push_back(part);
-            };
-            piece(original.top, {end.x, intersection.top.y});
-            piece({original.top.x, cut_end.y}, end);
-            piece({original.top.x, intersection.top.y}, {intersection.top.x, cut_end.y});
-            piece({cut_end.x, intersection.top.y}, {end.x, cut_end.y});
+            const auto cut_end = overlap.bottom_right();
+            if (overlap.top.y > original.top.y) {
+                remaining.emplace_back(original.top, eka2l1::vec2(original.size.x, overlap.top.y - original.top.y));
+            }
+            if (cut_end.y < end.y) {
+                remaining.emplace_back(eka2l1::vec2(original.top.x, cut_end.y), eka2l1::vec2(original.size.x, end.y - cut_end.y));
+            }
+            if (overlap.top.x > original.top.x) {
+                remaining.emplace_back(eka2l1::vec2(original.top.x, overlap.top.y), eka2l1::vec2(overlap.top.x - original.top.x, overlap.size.y));
+            }
+            if (cut_end.x < end.x) {
+                remaining.emplace_back(eka2l1::vec2(cut_end.x, overlap.top.y), eka2l1::vec2(end.x - cut_end.x, overlap.size.y));
+            }
         }
         rects_ = std::move(remaining);
     }
 
     void region::eliminate(const region &reg) {
-        if (this == &reg) { make_empty(); return; }
         for (std::size_t i = 0; i < reg.rects_.size(); i++) {
             eliminate(reg.rects_[i]);
         }
@@ -110,7 +128,7 @@ namespace eka2l1::common {
             for (std::size_t j = 0; j < target.rects_.size(); j++) {
                 eka2l1::rect the_intersect = target.rects_[j].intersect(rects_[i]);
 
-                if (the_intersect.size.x > 0 && the_intersect.size.y > 0) {
+                if (!the_intersect.empty()) {
                     intersection.rects_.push_back(the_intersect);
                 }
             }

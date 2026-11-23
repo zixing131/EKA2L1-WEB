@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <android/state.h>
 
 #include <common/cvt.h>
@@ -33,6 +34,8 @@
 #include <utils/apacmd.h>
 
 #include <string>
+#include <atomic>
+#include <mutex>
 
 namespace eka2l1 {
     class fbs_server;
@@ -61,10 +64,16 @@ namespace eka2l1::android {
         std::uint32_t scale_type_;
         std::uint32_t gravity_;
         eka2l1::drivers::ui::input_dialog_complete_callback input_complete_callback_;
-        eka2l1::drivers::ui::yes_no_dialog_complete_callback yes_no_complete_callback_;
+        struct question_dialog_request {
+            std::uint64_t id;
+            std::atomic<bool> finished{false};
+            drivers::ui::yes_no_dialog_complete_callback complete;
+        };
+        std::mutex question_dialog_mutex_;
+        std::shared_ptr<question_dialog_request> question_dialog_;
 
         eka2l1::drivers::handle background_img_;
-        std::string background_img_path_;
+        eka2l1::host_path background_img_path_;
         float background_img_opacity_;
         int background_width, background_height;
         bool keep_bg_aspect_;
@@ -79,44 +88,47 @@ namespace eka2l1::android {
         explicit launcher(eka2l1::system *sys);
 
         std::vector<std::string> get_apps();
-        jobjectArray get_app_icon(JNIEnv *env, std::uint32_t uid);
+        jobject get_app_icon(JNIEnv *env, std::uint32_t uid);
         void launch_app(std::uint32_t uid);
-        package::installation_result install_app(std::string &path);
+        package::installation_result install_app(const eka2l1::host_path &path);
         std::vector<std::string> get_devices();
         std::vector<std::string> get_device_firwmare_codes();
         void set_current_device(std::uint32_t id, const bool temporary);
         void set_device_name(std::uint32_t id, const char *name);
+        bool delete_device(std::uint32_t id);
         void rescan_devices();
         std::uint32_t get_current_device();
-        device_installation_error install_device(std::string &rpkg_path, std::string &rom_path, bool install_rpkg);
-        bool does_rom_need_rpkg(const std::string &rom_path);
+        bool is_touch_screen_device(const std::string &firmware_code);
+        device_installation_error install_device(const eka2l1::host_path &rpkg_path, const eka2l1::host_path &rom_path, bool install_rpkg, bool isolate_drives);
+        bool does_rom_need_rpkg(const eka2l1::host_path &rom_path);
         std::vector<std::string> get_packages();
         void uninstall_package(std::uint32_t uid, std::int32_t ext_index);
-        void mount_sd_card(std::string &path);
+        void mount_sd_card(const eka2l1::host_path &path);
         void load_config();
         void set_language(std::uint32_t language_id);
         void set_rtos_level(std::uint32_t level);
         void update_app_setting(std::uint32_t uid);
+        std::vector<vec2> get_screen_mode_sizes();
         void draw(drivers::graphics_command_builder &builder, epoc::screen *scr,
                   std::uint32_t width, std::uint32_t height);
         std::vector<std::string> get_language_ids();
         std::vector<std::string> get_language_names();
         void set_screen_params(std::uint32_t background_color, std::uint32_t scale_ratio,
-                               std::uint32_t scale_type, std::uint32_t gravity, const std::string &bg_img_path,
+                               std::uint32_t scale_type, std::uint32_t gravity, const eka2l1::host_path &bg_img_path,
                                float bg_img_opacity, bool keep_bg_aspect);
         bool open_input_view(const std::u16string &initial_text,
                              const int max_len,
                              drivers::ui::input_dialog_complete_callback complete_callback);
         void close_input_view();
         void on_finished_text_input(const std::string &text, const bool force_close);
-        bool open_question_dialog(const std::u16string &text, const std::u16string &button1_text,
+        drivers::ui::dialog_cancel_callback open_question_dialog(const std::u16string &text, const std::u16string &button1_text,
                                   const std::u16string &button2_text,
                                   drivers::ui::yes_no_dialog_complete_callback complete_callback);
-        void on_question_dialog_finished(const int result);
-        int install_ngage_game(const std::string &path);
+        void on_question_dialog_finished(std::uint64_t id, int result);
+        int install_ngage_game(const eka2l1::host_path &path);
         bool install_ng2_game_licenses(const std::string &content);
         void set_current_mmc_id(const std::string &new_mmc_id);
-        bool save_screenshot_to(const std::string &path);
+        bool save_screenshot_to(const eka2l1::host_path &path);
         std::vector<std::string> get_success_installed_license_games();
         std::vector<std::string> get_failed_installed_license_games();
 

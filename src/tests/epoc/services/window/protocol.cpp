@@ -1,0 +1,200 @@
+/*
+ * Copyright (c) 2026 EKA2L1 Team.
+ *
+ * This file is part of EKA2L1 project.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+#include <catch2/catch.hpp>
+#include <services/window/protocol.h>
+#include <services/window/framebuffer.h>
+
+using namespace eka2l1;
+
+TEST_CASE("Framebuffer depth is tracked independently for each update source", "[window][framebuffer]") {
+    using source = epoc::framebuffer_update_source;
+    // Four pixels: RGB565 occupies eight bytes; BGRX also writes the tail.
+    std::vector<std::uint8_t> pixels(16, 255);
+    epoc::framebuffer_depth_tracker depth;
+    depth.reset(pixels.data() + 8, 8);
+
+    SECTION("a 32-bit startup clear does not widen later RGB565 updates") {
+        std::fill(pixels.begin(), pixels.end(), 0);
+        REQUIRE(depth.update(source::draw_device, pixels.data() + 8));
+        const std::uint8_t rgb565[] = { 0, 248, 224, 7, 31, 0, 255, 255 };
+        std::copy(std::begin(rgb565), std::end(rgb565), pixels.begin());
+        REQUIRE_FALSE(depth.update(source::raw, pixels.data() + 8));
+        pixels[0] = 31;
+        REQUIRE_FALSE(depth.update(source::raw, pixels.data() + 8));
+    }
+
+    SECTION("a wide raw update does not widen a narrow draw-device update") {
+        pixels[15] = 0;
+        REQUIRE(depth.update(source::raw, pixels.data() + 8));
+        pixels[0] = 31;
+        REQUIRE_FALSE(depth.update(source::draw_device, pixels.data() + 8));
+        REQUIRE(depth.update(source::raw, pixels.data() + 8));
+    }
+
+    SECTION("both sources retain their own detection until the client resets") {
+        pixels[8] = 0;
+        REQUIRE(depth.update(source::draw_device, pixels.data() + 8));
+        pixels[9] = 127;
+        REQUIRE(depth.update(source::raw, pixels.data() + 8));
+        REQUIRE(depth.update(source::draw_device, pixels.data() + 8));
+        REQUIRE(depth.update(source::raw, pixels.data() + 8));
+        depth.reset(pixels.data() + 8, 8);
+        REQUIRE_FALSE(depth.update(source::draw_device, pixels.data() + 8));
+        REQUIRE_FALSE(depth.update(source::raw, pixels.data() + 8));
+    }
+}
+
+TEST_CASE("Framebuffer depth snapshots accept zero and white pixel data", "[window][framebuffer]") {
+    using source = epoc::framebuffer_update_source;
+    const auto initial_pixel = GENERATE(0, 255);
+    std::vector<std::uint8_t> pixels(16, initial_pixel);
+    epoc::framebuffer_depth_tracker depth;
+    depth.reset(pixels.data() + 8, 8);
+    REQUIRE_FALSE(depth.update(source::raw, pixels.data() + 8));
+
+    std::fill(pixels.begin(), pixels.end(), 255 - initial_pixel);
+    REQUIRE(depth.update(source::draw_device, pixels.data() + 8));
+    REQUIRE_FALSE(depth.update(source::raw, pixels.data() + 8));
+    pixels[15] = initial_pixel;
+    REQUIRE(depth.update(source::raw, pixels.data() + 8));
+
+    depth.reset(nullptr, 0);
+    REQUIRE_FALSE(depth.update(source::draw_device, nullptr));
+    REQUIRE_FALSE(depth.update(source::raw, nullptr));
+}
+
+TEST_CASE("UIQ 2 wire opcodes preserve ROM export contracts", "[window]") {
+    epoc::window_server_protocol uiq(epocver::epoc70, {1, 0, 151});
+    REQUIRE(uiq.session_opcode(47) == ws_cl_op_claim_system_pointer_cursor_list);
+    REQUIRE(uiq.session_opcode(78) == ws_cl_op_prepare_for_switch_off);
+    REQUIRE(uiq.session_opcode(80) == ws_cl_op_log_command);
+    REQUIRE(uiq.session_opcode(82) == ws_cl_op_send_event_to_one_window_group_per_cli);
+    REQUIRE(uiq.window_opcode(12) == EWsWinOpSize);
+    REQUIRE(uiq.window_opcode(13) == EWsWinOpActivate);
+    REQUIRE(uiq.window_opcode(97) == EWsWinOpGetDisplayMode);
+    REQUIRE(uiq.window_opcode(105) == EWsWinOpCaptureLongKey);
+    REQUIRE(uiq.legacy_dsa());
+}
+
+TEST_CASE("SimulateKeyEvent wire opcodes reach the same handler across ROM versions", "[window]") {
+    const struct {
+        epocver os;
+        epoc::version client;
+        std::uint16_t opcode;
+    } cases[] = {
+        { epocver::epoc6, { 1, 0, 139 }, 0x3F },
+        { epocver::epoc70, { 1, 0, 151 }, 0x3F },
+        { epocver::epoc7, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc80, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc81a, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc91, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc93fp1, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc93fp2, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc94, { 1, 0, 151 }, 0x41 },
+        { epocver::epoc10, { 1, 0, 151 }, 0x41 }
+    };
+
+    for (const auto &entry : cases) {
+        INFO("OS version " << static_cast<int>(entry.os));
+        epoc::window_server_protocol protocol(entry.os, entry.client);
+        REQUIRE(protocol.session_opcode(entry.opcode) == ws_cl_op_key_event);
+    }
+    REQUIRE(sizeof(epoc::key_event) == 16);
+}
+
+TEST_CASE("Window protocol extensions do not shift other platform tables", "[window]") {
+    epoc::window_server_protocol s60v1(epocver::epoc6, {1, 0, 139});
+    REQUIRE(s60v1.session_opcode(80) == ws_cl_op_set_faded);
+    epoc::window_server_protocol s60v2(epocver::epoc80, {1, 0, 151});
+    REQUIRE(s60v2.session_opcode(ws_cl_op_log_command) == ws_cl_op_log_command);
+    REQUIRE(s60v2.window_opcode(EWsWinOpAbsPosition) == EWsWinOpAbsPosition);
+    REQUIRE(s60v2.legacy_dsa());
+    epoc::window_server_protocol belle(epocver::epoc10, {1, 0, 151});
+    REQUIRE(belle.window_opcode(EWsWinOpSendAdvancedPointerEvent) == EWsWinOpSendAdvancedPointerEvent);
+    REQUIRE_FALSE(belle.legacy_dsa());
+}
+
+TEST_CASE("Series 90 keeps new session opcodes and old window opcodes", "[window]") {
+    epoc::window_server_protocol s90(epocver::epoc7, {1, 0, 151});
+    REQUIRE(s90.session_opcode(49) == ws_cl_op_claim_system_pointer_cursor_list);
+    REQUIRE(s90.session_opcode(80) == ws_cl_op_prepare_for_switch_off);
+    REQUIRE(s90.session_opcode(85) == ws_cl_op_send_event_to_one_window_group_per_cli);
+    REQUIRE(s90.window_opcode(12) == EWsWinOpSize);
+    REQUIRE(s90.window_opcode(24) == EWsWinOpInquireOffset);
+    REQUIRE(s90.window_opcode(25) == EWsWinOpPointerFilter);
+    REQUIRE(s90.window_opcode(61) == EWsWinOpSetName);
+    REQUIRE(s90.window_opcode(94) == EWsWinOpEnableScreenChangeEvents);
+    REQUIRE(s90.window_opcode(97) == EWsWinOpGetDisplayMode);
+    REQUIRE(s90.window_opcode(105) == EWsWinOpEnableGroupListChangeEvents);
+}
+
+TEST_CASE("Mapped framebuffer tracks writes without a sentinel pixel value", "[window]") {
+    epoc::framebuffer_observer observer;
+    std::vector<std::uint8_t> pixels(16, 255);
+    observer.reset(pixels.data(), 4, 4);
+    REQUIRE_FALSE(observer.update(pixels.data(), 4, 4));
+    pixels[0] = 0;
+    pixels[12] = 0;
+    REQUIRE(observer.update(pixels.data(), 4, 4));
+    REQUIRE(observer.written_rows() == std::vector<bool>{true, false, false, true});
+    pixels[0] = 255;
+    REQUIRE(observer.update(pixels.data(), 4, 4));
+    REQUIRE(observer.written_rows()[0]);
+    REQUIRE_FALSE(observer.update(pixels.data(), 4, 4));
+    pixels[4] = 12;
+    observer.acknowledge(pixels.data());
+    REQUIRE_FALSE(observer.update(pixels.data(), 4, 4));
+    REQUIRE_FALSE(observer.written_rows()[1]);
+    observer.reset(pixels.data(), 8, 2);
+    REQUIRE(observer.written_rows() == std::vector<bool>{false, false});
+    REQUIRE_FALSE(observer.update(pixels.data(), 8, 2));
+    // Reinterpreting unchanged bytes must still redraw every row. Sampling
+    // unchanged pixels afterwards must not discard that invalidation.
+    observer.invalidate();
+    REQUIRE_FALSE(observer.update(pixels.data(), 8, 2));
+    REQUIRE(observer.written_rows() == std::vector<bool>{true, true});
+    observer.reset(pixels.data(), 8, 2);
+    REQUIRE(observer.written_rows() == std::vector<bool>{false, false});
+}
+
+TEST_CASE("Mapped panel updates scan the visible DSA region independently of dirty rectangles", "[window][framebuffer]") {
+    const rect dirty_column(vec2(0, 0), vec2(1, 208)); // Symbian top-left and bottom-right.
+    common::region visible;
+    visible.add_rect(rect(vec2(0, 0), vec2(176, 208)));
+    visible.eliminate(rect(vec2(40, 50), vec2(30, 20)));
+
+    auto update = epoc::explicit_framebuffer_update_region(&dirty_column, 1, visible, true);
+    REQUIRE(update.contains(vec2(100, 100)));
+    REQUIRE(update.contains(vec2(0, 207)));
+    REQUIRE_FALSE(update.contains(vec2(50, 60)));
+    REQUIRE_FALSE(update.contains(vec2(177, 100)));
+
+    common::region covered;
+    REQUIRE(epoc::explicit_framebuffer_update_region(&dirty_column, 1, covered, true).empty());
+    covered.add_rect(rect(vec2(80, 90), vec2(20, 30)));
+    auto restarted = epoc::explicit_framebuffer_update_region(&dirty_column, 1, covered, true);
+    REQUIRE(restarted.contains(vec2(85, 100)));
+    REQUIRE_FALSE(restarted.contains(vec2(20, 100)));
+}
+
+TEST_CASE("Unmapped explicit updates retain dirty-rectangle clipping", "[window][framebuffer]") {
+    const rect dirty(vec2(12, 20), vec2(30, 40)); // Symbian top-left and bottom-right.
+    common::region visible;
+    visible.add_rect(rect(vec2(0, 0), vec2(25, 100)));
+    auto update = epoc::explicit_framebuffer_update_region(&dirty, 1, visible, false);
+    REQUIRE(update.bounding_rect() == rect(vec2(12, 20), vec2(13, 20)));
+    REQUIRE(update.contains(vec2(12, 20)));
+    REQUIRE(update.contains(vec2(24, 39)));
+    REQUIRE_FALSE(update.contains(vec2(26, 30)));
+    REQUIRE_FALSE(update.contains(vec2(20, 41)));
+    REQUIRE_FALSE(update.contains(vec2(10, 30)));
+    REQUIRE(epoc::explicit_framebuffer_update_region(&dirty, 0, visible, false).empty());
+}

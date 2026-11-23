@@ -17,13 +17,14 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <common/platform.h>
 #include <common/watcher.h>
 
 #if EKA2L1_PLATFORM(WIN32)
 #include "watcher_win32.h"
 #else
-#if EKA2L1_PLATFORM(UNIX)
+#if EKA2L1_PLATFORM(UNIX) && !EKA2L1_PLATFORM(WASM) && !EKA2L1_PLATFORM(OHOS)
 #include "watcher_unix.h"
 #else
 #include "watcher_null.h"
@@ -35,7 +36,7 @@ namespace eka2l1::common {
         watcher_ = std::make_shared<directory_watcher_impl>();
     }
 
-    std::int32_t directory_watcher::watch(const std::string &folder, directory_watcher_callback callback,
+    std::int32_t directory_watcher::watch(const host_path &folder, directory_watcher_callback callback,
         void *callback_userdata, const std::uint32_t mask) {
         return watcher_->watch(folder, callback, callback_userdata, mask);
     }

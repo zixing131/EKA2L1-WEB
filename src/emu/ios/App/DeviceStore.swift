@@ -1,0 +1,223 @@
+import SwiftUI
+
+// Emulator session state shared by every frontend surface that shows or
+// changes what is running: the installed devices, which one is booted, its app
+// list, and whether a long emulator operation is in flight.
+//
+// ContentView owns it as a @StateObject and the device-manager page observes
+// the same instance, so the home title menu and the management list can never
+// disagree about the device set or the booted device. Every heavy call
+// (boot, delete, rescan, package install) hops off the main thread — they take
+// the emulator's session lock and stop the os loop — while the published state
+// is only ever written here, on the main actor.
+@MainActor
+final class DeviceStore: ObservableObject {
+    @Published private(set) var devices: [EKA2L1DeviceItem] = []
+    @Published private(set) var currentIndex = -1
+    @Published private(set) var apps: [EKA2L1AppItem] = []
+    @Published private(set) var busy = false
+    @Published private(set) var deviceIsEKA1 = false
+    // Nil when drive E uses the emulator's own storage.
+    @Published private(set) var mountedCardName: String?
+
+    // Keep the security scope open while the guest reads the picked folder.
+    private var mountedCardURL: URL?
+
+    var currentDevice: EKA2L1DeviceItem? {
+        devices.first { $0.index == currentIndex } ?? devices.first
+    }
+
+    func device(withFirmwareCode code: String) -> EKA2L1DeviceItem? {
+        devices.first { $0.firmwareCode.caseInsensitiveCompare(code) == .orderedSame }
+    }
+
+    // Full re-read after boot, used once the emulator is up.
+    func refresh() {
+        devices = EKA2L1Bridge.shared.installedDevices()
+        currentIndex = EKA2L1Bridge.shared.currentDeviceIndex()
+        reloadApps()
+    }
+
+    // Refresh the registry and device traits after a boot or content change.
+    func reloadApps() {
+        apps = currentIndex >= 0 ? EKA2L1Bridge.shared.rescanApps() : []
+        deviceIsEKA1 = currentIndex >= 0 && EKA2L1Bridge.shared.currentDeviceIsEKA1()
+    }
+
+    func mountCard(at url: URL) async -> EKA2L1MountItem {
+        let scoped = url.startAccessingSecurityScopedResource()
+        let report = await perform { EKA2L1Bridge.mountGameCard(path: url.path) }
+        guard report.succeeded else {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            // Early failures retain the previous card and its security scope.
+            if !report.cardMounted {
+                releaseMountedCard()
+            }
+            reloadApps()
+            return report
+        }
+        releaseMountedCard()
+        mountedCardURL = scoped ? url : nil
+        mountedCardName = url.lastPathComponent
+        reloadApps()
+        return report
+    }
+
+    @discardableResult
+    func ejectCard() -> Bool {
+        guard EKA2L1Bridge.shared.unmountGameCard() else { return false }
+        releaseMountedCard()
+        reloadApps()
+        return true
+    }
+
+    private func releaseMountedCard() {
+        mountedCardURL?.stopAccessingSecurityScopedResource()
+        mountedCardURL = nil
+        mountedCardName = nil
+    }
+
+    // A same-device reboot retains the card and its security scope.
+    private func syncMountedCardAfterBoot() {
+        guard !EKA2L1Bridge.shared.isGameCardMounted() else { return }
+        releaseMountedCard()
+    }
+
+    // Pull-to-refresh on the home grid: re-read the device titles and re-scan
+    // the booted device's registry, picking up apps that appeared behind the
+    // frontend's back (a package dropped in through the Files app, a guest-side
+    // installer). The scan stays on the main actor — rescanApps only try-locks
+    // the emulator session and hands back its cached list rather than blocking
+    // (see IosEmulator.mm) — so the async signature exists purely to keep the
+    // refresh control's spinner up until the new list is published.
+    func refreshApps() async {
+        guard !busy else { return }
+        let started = Date()
+        reloadDevices()
+        reloadApps()
+        // A scan that lost the session lock returns instantly; hold the spinner
+        // for a beat so the gesture still reads as "refreshed" instead of
+        // snapping back before the user let go.
+        let remaining = 0.4 - Date().timeIntervalSince(started)
+        if remaining > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        }
+    }
+
+    // Titles only (after a rename): the device set and booted device are
+    // unchanged, so neither a reboot nor an app re-scan is needed.
+    func reloadDevices() {
+        devices = EKA2L1Bridge.shared.installedDevices()
+    }
+
+    func renameDevice(_ device: EKA2L1DeviceItem, to name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !busy, !trimmed.isEmpty,
+              let current = self.device(withFirmwareCode: device.firmwareCode) else { return false }
+        guard EKA2L1Bridge.shared.renameDevice(at: current.index, to: trimmed) else { return false }
+        reloadDevices()
+        return true
+    }
+
+    // Run a blocking emulator operation off the main thread with the busy flag
+    // up. Shared by the device operations below and by the home surface's
+    // package installs, so one flag drives every spinner and disabled control.
+    @discardableResult
+    func perform<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        busy = true
+        defer { busy = false }
+        return await Task.detached(priority: .userInitiated, operation: work).value
+    }
+
+    // Boot a device by device_manager index, adopting it as the current one.
+    @discardableResult
+    func boot(at index: Int) async -> Bool {
+        let ok = await perform { EKA2L1Bridge.bootDevice(at: index) }
+        syncMountedCardAfterBoot()
+        if ok {
+            currentIndex = index
+            reloadApps()
+        }
+        return ok
+    }
+
+    // Device switcher, shared by the home title menu and the management list.
+    @discardableResult
+    func switchDevice(to index: Int) async -> Bool {
+        guard index != currentIndex, !busy else { return false }
+        return await boot(at: index)
+    }
+
+    // The installer selects its device, including when replacing an existing entry.
+    @discardableResult
+    func bootImportedDevice() async -> Bool {
+        reloadDevices()
+        let index = EKA2L1Bridge.shared.lastInstalledDeviceIndex()
+        guard devices.contains(where: { $0.index == index }) else { return false }
+        return await boot(at: index)
+    }
+
+    // Mirrors the Android device-list screen's "Rescan devices" action: rebuild
+    // device_manager from what's on drive Z (recovers devices dropped from
+    // devices.yml), then boot the resulting current device (always index 0
+    // when the scan finds anything).
+    func rescanDevices() async {
+        guard !busy else { return }
+        let bootedOK = await perform {
+            EKA2L1Bridge.rescanDevices() && EKA2L1Bridge.bootDevice(at: 0)
+        }
+        syncMountedCardAfterBoot()
+        devices = EKA2L1Bridge.shared.installedDevices()
+        if bootedOK {
+            currentIndex = 0
+            reloadApps()
+        } else if devices.isEmpty {
+            currentIndex = -1
+            apps = []
+        }
+    }
+
+    // Swipe-to-delete on the management list. Each row is resolved back to a
+    // live device_manager index at delete time (indices shift as devices are
+    // removed), then the list is re-synced: reboot to the surviving device when
+    // the running one was the one deleted, or drop to the empty state when
+    // nothing is left.
+    func deleteDevices(at offsets: IndexSet) async {
+        guard !busy else { return }
+        let firmcodes = offsets.map { devices[$0].firmwareCode }
+        let deletedCurrent = firmcodes.contains { code in
+            currentDevice?.firmwareCode.caseInsensitiveCompare(code) == .orderedSame
+        }
+        // The deleted device's position, needed to pick its replacement below.
+        let previousIndex = currentIndex
+        // Drop the rows now so no surface keeps offering a device that is on
+        // its way out.
+        devices.removeAll { firmcodes.contains($0.firmwareCode) }
+
+        await perform {
+            for firmcode in firmcodes {
+                guard let liveIndex = EKA2L1Bridge.installedDevices()
+                    .first(where: { $0.firmwareCode == firmcode })?.index else { continue }
+                _ = EKA2L1Bridge.deleteDevice(at: liveIndex)
+            }
+        }
+
+        devices = EKA2L1Bridge.shared.installedDevices()
+        if devices.isEmpty {
+            currentIndex = -1
+            apps = []
+            return
+        }
+        guard deletedCurrent else {
+            // The booted device is unchanged; only indices shifted. Re-sync
+            // from device_manager's adjusted current.
+            currentIndex = EKA2L1Bridge.shared.currentDeviceIndex()
+            reloadApps()
+            return
+        }
+        // The booted device was deleted: fall back to the previous device in
+        // the list (clamped into range), so repeated deletes walk backwards
+        // until the list is empty.
+        await boot(at: min(max(0, previousIndex - 1), devices.count - 1))
+    }
+}

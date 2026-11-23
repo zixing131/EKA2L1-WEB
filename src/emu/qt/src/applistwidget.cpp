@@ -17,20 +17,16 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QBitmap>
 #include <QLineEdit>
 #include <QPainter>
 #include <QMovie>
 #include <QSettings>
 #include <QMenu>
 #include <QInputDialog>
-#include <QtSvg/QSvgRenderer>
 #include <QtConcurrent/QtConcurrent>
 
-#include <common/buffer.h>
 #include <common/cvt.h>
 #include <common/path.h>
-#include <common/pystr.h>
 #include <config/config.h>
 #include <qt/applistwidget.h>
 #include <qt/utils.h>
@@ -42,8 +38,6 @@
 #include <j2me/interface.h>
 
 #include <vector>
-
-#include <loader/mif.h>
 
 static QSize ICON_GRID_SIZE = QSize(64, 64);
 static QSize ICON_GRID_SPACING_SIZE = QSize(20, 20);
@@ -414,18 +408,14 @@ void applist_widget::reload_whole_list() {
             std::vector<eka2l1::j2me::app_entry> entries = lister_j2me_->get_entries();
             exit_mutex_.unlock();
 
-            if (entries.size() == 0) {
-                show_no_apps_avail();
-            } else {
-                for (std::size_t i = 0; i < entries.size(); i++) {
-                    const std::lock_guard<std::mutex> guard(exit_mutex_);
-                    if (should_dead_) {
-                        scanning_done_evt_.set();
-                        return;
-                    }
-
-                    add_registeration_item_j2me(entries[i]);
+            for (std::size_t i = 0; i < entries.size(); i++) {
+                const std::lock_guard<std::mutex> guard(exit_mutex_);
+                if (should_dead_) {
+                    scanning_done_evt_.set();
+                    return;
                 }
+
+                add_registeration_item_j2me(entries[i]);
             }
 
             const std::lock_guard<std::mutex> guard(exit_mutex_);
@@ -446,20 +436,16 @@ void applist_widget::reload_whole_list() {
             std::vector<eka2l1::apa_app_registry> &registries = lister_->get_registerations();
             exit_mutex_.unlock();
 
-            if (registries.size() == 0) {
-                show_no_apps_avail();
-            } else {
-                for (std::size_t i = 0; i < registries.size(); i++) {
-                    const std::lock_guard<std::mutex> guard(exit_mutex_);
-                    if (should_dead_) {
-                        scanning_done_evt_.set();
-                        return;
-                    }
+            for (std::size_t i = 0; i < registries.size(); i++) {
+                const std::lock_guard<std::mutex> guard(exit_mutex_);
+                if (should_dead_) {
+                    scanning_done_evt_.set();
+                    return;
+                }
 
-                    if (!registries[i].caps.is_hidden) {
-                        if (!hide_system_apps_ || (hide_system_apps_ && !is_app_reg_system_app(registries.data() + i))) {
-                            add_registeration_item_native(registries[i], static_cast<int>(i));
-                        }
+                if (!registries[i].caps.is_hidden) {
+                    if (!hide_system_apps_ || (hide_system_apps_ && !is_app_reg_system_app(registries.data() + i))) {
+                        add_registeration_item_native(registries[i], static_cast<int>(i));
                     }
                 }
             }
@@ -475,6 +461,8 @@ void applist_widget::reload_whole_list() {
         QCoreApplication::processEvents();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    // Deliver the final scanned items before another reload can clear their owners.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
 
     if (in_j2me) {
         if (list_j2me_widget_->count() == 0) {
@@ -536,8 +524,6 @@ bool applist_widget::launch_from_widget_item(applist_widget_item *item, std::fun
     eka2l1::apa_app_registry *registry = get_registry_from_widget_item(item);
     if (registry) {
         eka2l1::epoc::apa::command_line cmd_line;
-        cmd_line.launch_cmd_ = eka2l1::epoc::apa::command_open;
-
         return lister_->launch_app(*registry, cmd_line, nullptr, done_cb);
     }
 
@@ -546,7 +532,7 @@ bool applist_widget::launch_from_widget_item(applist_widget_item *item, std::fun
 
 void applist_widget::add_registeration_item_j2me(const eka2l1::j2me::app_entry &entry) {
     QIcon display_icon;
-    QString icon_path_relocalized = QString::fromStdString(eka2l1::add_path(conf_.storage, entry.icon_path_));
+    QString icon_path_relocalized = QString::fromStdString(conf_.storage.join(entry.icon_path_).utf8());
 
     if (entry.icon_path_.empty() || !QDir().exists(icon_path_relocalized)) {
         display_icon = QIcon(":/assets/duck_tank.png");
@@ -569,128 +555,13 @@ void applist_widget::add_registeration_item_j2me(const eka2l1::j2me::app_entry &
 void applist_widget::add_registeration_item_native(eka2l1::apa_app_registry &reg, const int index) {
     QString app_name = QString::fromUtf16(reg.mandatory_info.long_caption.to_std_string(nullptr).data(), reg.mandatory_info.long_caption.get_length());
 
-    bool icon_pair_rendered = false;
+    auto image = lister_->get_host_icon(reg, eka2l1::add_path(conf_.storage, "cache/icons"));
+    const bool icon_pair_rendered = image.has_value();
     QPixmap final_pixmap;
-
-    const std::u16string path_ext = eka2l1::common::lowercase_ucs2_string(eka2l1::path_extension(reg.icon_file_path));
-
-    if (path_ext == u".mif") {
-        eka2l1::symfile file_route = io_->open_file(reg.icon_file_path, READ_MODE | BIN_MODE);
-        eka2l1::common::create_directories("cache");
-
-        if (file_route) {
-            const std::uint64_t mif_last_modified = file_route->last_modify_since_0ad();
-            const std::string cached_path = fmt::format("cache/debinarized_{}.svg", eka2l1::common::pystr(app_name.toStdString()).strip_reserverd().strip().std_str());
-
-            std::unique_ptr<QSvgRenderer> renderer = nullptr;
-
-            if (eka2l1::common::exists(cached_path)) {
-                if (eka2l1::common::get_last_modifiy_since_ad(eka2l1::common::utf8_to_ucs2(cached_path)) >= mif_last_modified) {
-                    renderer = std::make_unique<QSvgRenderer>(QString::fromUtf8(cached_path.c_str()));
-                }
-            }
-
-            eka2l1::ro_file_stream file_route_stream(file_route.get());
-            eka2l1::loader::mif_file file_mif_parser(reinterpret_cast<eka2l1::common::ro_stream *>(&file_route_stream));
-
-            if (!renderer && file_mif_parser.do_parse()) {
-                std::vector<std::uint8_t> data;
-                int dest_size = 0;
-                if (file_mif_parser.read_mif_entry(0, nullptr, dest_size) && (dest_size > 0)) {
-                    data.resize(dest_size);
-                    file_mif_parser.read_mif_entry(0, data.data(), dest_size);
-
-                    std::unique_ptr<eka2l1::common::wo_std_file_stream> outfile_stream = std::make_unique<eka2l1::common::wo_std_file_stream>(cached_path, true);
-                    const bool converted = eka2l1::loader::convert_mif_icon_to_svg(data.data(), data.size(), *outfile_stream);
-                    outfile_stream.reset();
-
-                    if (converted) {
-                        renderer = std::make_unique<QSvgRenderer>(QString::fromUtf8(cached_path.c_str()));
-                    } else {
-                        LOG_ERROR(eka2l1::FRONTEND_UI, "Icon for app {} can't be decoded!", app_name.toStdString());
-                        eka2l1::common::remove(cached_path);
-                    }
-                }
-            }
-
-            if (renderer) {
-                final_pixmap = QPixmap(ICON_GRID_SIZE);
-                final_pixmap.fill(Qt::transparent);
-
-                QPainter painter(&final_pixmap);
-                renderer->render(&painter);
-
-                icon_pair_rendered = true;
-            }
-        }
-    } else if (path_ext == u".mbm") {
-        eka2l1::symfile file_route = io_->open_file(reg.icon_file_path, READ_MODE | BIN_MODE);
-        if (file_route) {
-            eka2l1::ro_file_stream file_route_stream(file_route.get());
-            eka2l1::loader::mbm_file file_mbm_parser(reinterpret_cast<eka2l1::common::ro_stream *>(&file_route_stream));
-
-            if (file_mbm_parser.do_read_headers() && !file_mbm_parser.sbm_headers.empty()) {
-                eka2l1::loader::sbm_header *icon_header = &file_mbm_parser.sbm_headers[0];
-                std::vector<std::uint8_t> converted_data(icon_header->size_pixels.x * icon_header->size_pixels.y * 4);
-                eka2l1::common::wo_buf_stream converted_write_stream(converted_data.data(), converted_data.size());
-
-                if (eka2l1::epoc::convert_to_rgba8888(fbss_, file_mbm_parser, 0, converted_write_stream)) {
-                    QImage main_bitmap_image(converted_data.data(), icon_header->size_pixels.x, icon_header->size_pixels.y,
-                        QImage::Format_RGBA8888);
-
-                    final_pixmap = QPixmap::fromImage(main_bitmap_image);
-                    icon_pair_rendered = true;
-                }
-            }
-        }
-    } else {
-        std::optional<eka2l1::apa_app_masked_icon_bitmap> icon_pair = lister_->get_icon(reg, 0);
-
-        if (icon_pair.has_value()) {
-            eka2l1::epoc::bitwise_bitmap *main_bitmap = icon_pair->first;
-            const std::size_t main_bitmap_data_new_size = main_bitmap->header_.size_pixels.x * main_bitmap->header_.size_pixels.y * 4;
-            std::vector<std::uint8_t> main_bitmap_data(main_bitmap_data_new_size);
-            eka2l1::common::wo_buf_stream main_bitmap_buf(main_bitmap_data.data(), main_bitmap_data_new_size);
-
-            if (!eka2l1::epoc::convert_to_rgba8888(fbss_, main_bitmap, main_bitmap_buf)) {
-                LOG_ERROR(eka2l1::FRONTEND_UI, "Unable to load main icon of app {}", app_name.toStdString());
-            } else {
-                QImage main_bitmap_image(main_bitmap_data.data(), main_bitmap->header_.size_pixels.x, main_bitmap->header_.size_pixels.y,
-                    QImage::Format_RGBA8888);
-
-                if (icon_pair->second) {
-                    eka2l1::epoc::bitwise_bitmap *second_bitmap = icon_pair->second;
-                    const std::size_t second_bitmap_data_new_size = second_bitmap->header_.size_pixels.x * second_bitmap->header_.size_pixels.y * 4;
-                    std::vector<std::uint8_t> second_bitmap_data(second_bitmap_data_new_size);
-                    eka2l1::common::wo_buf_stream second_bitmap_buf(second_bitmap_data.data(), second_bitmap_data_new_size);
-
-                    if (!eka2l1::epoc::convert_to_rgba8888(fbss_, second_bitmap, second_bitmap_buf, true)) {
-                        LOG_ERROR(eka2l1::FRONTEND_UI, "Unable to load mask bitmap icon of app {}", app_name.toStdString());
-                    } else {
-                        QImage mask_bitmap_image(second_bitmap_data.data(), second_bitmap->header_.size_pixels.x, second_bitmap->header_.size_pixels.y,
-                            QImage::Format_RGBA8888);
-
-                        QImage mask_bitmap_alpha_image = mask_bitmap_image.createAlphaMask().convertToFormat(QImage::Format_Mono);
-                        mask_bitmap_alpha_image.invertPixels();
-                        QBitmap mask_bitmap_pixmap = QBitmap::fromImage(mask_bitmap_alpha_image);
-
-                        final_pixmap = QPixmap(QSize(main_bitmap->header_.size_pixels.x, main_bitmap->header_.size_pixels.y));
-                        final_pixmap.fill(Qt::transparent);
-
-                        QPainter final_pixmap_painter(&final_pixmap);
-                        final_pixmap_painter.setClipRegion(QRegion(mask_bitmap_pixmap));
-                        final_pixmap_painter.drawImage(QPoint(0, 0), main_bitmap_image);
-
-                        icon_pair_rendered = true;
-                    }
-                }
-
-                if (!icon_pair_rendered) {
-                    final_pixmap = QPixmap::fromImage(main_bitmap_image);
-                    icon_pair_rendered = true;
-                }
-            }
-        }
+    if (image) {
+        QImage rgba(image->pixels.data(), image->size.x, image->size.y,
+            QImage::Format_RGBA8888_Premultiplied);
+        final_pixmap = QPixmap::fromImage(rgba.copy());
     }
 
     QIcon final_icon;
@@ -699,11 +570,16 @@ void applist_widget::add_registeration_item_native(eka2l1::apa_app_registry &reg
         final_icon = QIcon(":/assets/duck_tank.png");
     } else {
         if ((final_pixmap.size().width() < ICON_GRID_SIZE.width()) && (final_pixmap.size().height() < ICON_GRID_SIZE.height())) {
-            QRect position_to_draw = QRect(0, 0, ICON_GRID_SIZE.width(), ICON_GRID_SIZE.height());
+            // Centered aspect fit: S60 AIF list icons are 42x29, and stretching them
+            // over the square grid cell squashes every legacy icon.
+            QSize scaled_size = final_pixmap.size().scaled(ICON_GRID_SIZE, Qt::KeepAspectRatio);
+            QRect position_to_draw = QRect(QPoint((ICON_GRID_SIZE.width() - scaled_size.width()) / 2,
+                (ICON_GRID_SIZE.height() - scaled_size.height()) / 2), scaled_size);
             QPixmap another_pixmap(ICON_GRID_SIZE);
             another_pixmap.fill(Qt::transparent);
 
             QPainter another_pixmap_painter(&another_pixmap);
+            another_pixmap_painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
             another_pixmap_painter.drawPixmap(position_to_draw, final_pixmap);
 
             final_icon = QIcon(another_pixmap);

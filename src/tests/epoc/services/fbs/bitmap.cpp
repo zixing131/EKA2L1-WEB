@@ -17,14 +17,245 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/buffer.h>
 #include <services/fbs/bitmap.h>
+#include <services/fbs/palette.h>
 
 #include <catch2/catch.hpp>
 
 #include <cstdint>
+#include <tuple>
 #include <vector>
 
 using namespace eka2l1;
+
+TEST_CASE("color256_fallback_preserves_legacy_defaults", "[fbs],[palette]") {
+    const auto [version, reference] = GENERATE(
+        std::make_tuple(epocver::epoc70, false),
+        std::make_tuple(epocver::epoc80, false),
+        std::make_tuple(epocver::epoc94, false),
+        std::make_tuple(epocver::epoc95, true));
+    const auto &palette = epoc::get_suitable_palette_256(version);
+
+    REQUIRE(palette[0x01] == (reference ? 0x000033 : 0xCCFFFF));
+    REQUIRE(palette[0x24] == (reference ? 0x330000 : 0xFFFFCC));
+    REQUIRE(palette[0x6C] == (reference ? 0x111111 : 0xFFFF66));
+    REQUIRE(palette[0xE1] == (reference ? 0xFF00FF : 0x111111));
+    REQUIRE(palette[0x00] == 0x000000);
+    REQUIRE(palette[0xFF] == 0xFFFFFF);
+}
+
+TEST_CASE("ROM palette follows the immutable DynamicPalette export", "[fbs],[palette]") {
+    const bool thumb = GENERATE(true, false);
+    constexpr std::uint32_t base = 0x5063a170;
+    constexpr std::uint32_t table = base + 64;
+    std::vector<std::uint8_t> code(64 + sizeof(epoc::palette_256));
+    const auto put = [&](std::size_t offset, std::uint32_t value) {
+        std::memcpy(code.data() + offset, &value, sizeof(value));
+    };
+    if (thumb) {
+        // 7710's DefaultColor256Util is LDR r0,[pc,#0]; BX lr.
+        put(0, 0x47704800);
+        put(4, table);
+        put(16, 0x4770);
+    } else {
+        put(0, 0xe59f0000);
+        put(4, 0xe12fff1e);
+        put(8, table);
+        put(16, 0xe12fff1e);
+    }
+    auto expected = epoc::color_256_palette_new;
+    expected[7] = 0x123456;
+    std::memcpy(code.data() + 64, expected.data(), sizeof(expected));
+    const auto read = [&] {
+        return epoc::read_rom_palette_256(code.data(), code.size(), base, base | thumb, (base + 16) | thumb);
+    };
+
+    SECTION("uses all ROM entries, including manufacturer-defined colours") {
+        const auto palette = read();
+        REQUIRE(palette);
+        REQUIRE(*palette == expected);
+    }
+    SECTION("does not cache a dynamic palette") {
+        put(16, 0);
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a getter that dereferences mutable state") {
+        put(0, 0);
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a table outside the image") {
+        put(thumb ? 4 : 8, base - 4);
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a truncated table") {
+        code.pop_back();
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects missing exports") {
+        REQUIRE_FALSE(epoc::read_rom_palette_256(code.data(), code.size(), base, 0, 0));
+    }
+}
+
+TEST_CASE("ROM palette follows the default scheme of a switching DynamicPalette", "[fbs],[palette]") {
+    constexpr std::uint32_t base = 0x50540bd8;
+    std::vector<std::uint8_t> code(64 + sizeof(epoc::palette_256));
+    const auto put16 = [&](std::size_t offset, std::uint16_t value) {
+        std::memcpy(code.data() + offset, &value, sizeof(value));
+    };
+    const auto put = [&](std::size_t offset, std::uint32_t value) {
+        std::memcpy(code.data() + offset, &value, sizeof(value));
+    };
+    // N-Gage DefaultColor256Util: LSL r0,#2; LDR r1,=jt; ADD r0,r1; LDR r0,[r0]; MOV pc,r0.
+    put16(0, 0x0080);
+    put16(2, 0x4902);
+    put16(4, 0x1840);
+    put16(6, 0x6800);
+    put16(8, 0x4687);
+    put(12, base + 16);
+    put(16, base + 24);
+    put(20, base + 32);
+    put16(24, 0x4800);
+    put(28, base + 64);
+    put16(40, 0x602e);
+    auto expected = epoc::color_256_palette_old;
+    expected[237] = 0x7b9484;
+    std::memcpy(code.data() + 64, expected.data(), sizeof(expected));
+    const auto read = [&] {
+        return epoc::read_rom_palette_256(code.data(), code.size(), base, base | 1, (base + 40) | 1);
+    };
+
+    SECTION("uses scheme 0") {
+        const auto palette = read();
+        REQUIRE(palette);
+        REQUIRE(*palette == expected);
+    }
+    SECTION("rejects a scheme entry that does not load a table") {
+        put16(24, 0);
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a jump table outside the image") {
+        put(12, base + static_cast<std::uint32_t>(code.size()));
+        REQUIRE_FALSE(read());
+    }
+}
+
+TEST_CASE("ROM GDI palette follows the indexed colour lookup", "[fbs],[palette]") {
+    constexpr std::uint32_t base = 0x5018975c;
+    std::vector<std::uint32_t> code{0xe59f300c, 0xe1a00100, 0xe2000fff, 0xe7930000, 0xe12fff1e, base + 24};
+    auto expected = epoc::color_256_palette_new;
+    expected[7] = 0x123456;
+    code.insert(code.end(), expected.begin(), expected.end());
+    const auto read = [&] {
+        return epoc::read_rom_gdi_palette_256(reinterpret_cast<const std::uint8_t *>(code.data()),
+            code.size() * sizeof(code[0]), base, base);
+    };
+    SECTION("P800/P900 ARM lookup returns the ROM's exact entries") {
+        const auto palette = read();
+        REQUIRE(palette);
+        REQUIRE(*palette == expected);
+    }
+    SECTION("rejects a different lookup implementation") {
+        code[3] = 0xe5930000;
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a truncated table") {
+        code.pop_back();
+        REQUIRE_FALSE(read());
+    }
+    SECTION("rejects a literal outside the image") {
+        code[0] = 0xe59f3fff;
+        REQUIRE_FALSE(read());
+    }
+}
+
+TEST_CASE("gray4_decode_preserves_packed_pixels_and_stencil_masks", "[fbs],[palette]") {
+    const bool as_mask = GENERATE(false, true);
+    // Symbian's two-bit scanlines start at the low bits and align to 32 bits.
+    std::uint8_t samples[] = {0xE4, 0xE4, 0xE4, 0xE4, 0xFC, 0xFF, 0xFF, 0xFF,
+        0x1B, 0x1B, 0x1B, 0x1B, 0x03, 0, 0, 0};
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(17, 2);
+    header.bit_per_pixels = 2;
+    common::ro_buf_stream source(samples, sizeof(samples));
+    std::vector<std::uint8_t> rgba(17 * 2 * 4);
+    common::wo_buf_stream destination(rgba.data(), rgba.size());
+
+    REQUIRE(epoc::convert_to_rgba8888(nullptr, source, destination, header, -1,
+        epoc::bitmap_file_no_compression, as_mask));
+
+    for (std::size_t y = 0; y < 2; y++) {
+        for (std::size_t x = 0; x < 17; x++) {
+            const std::size_t offset = (y * 17 + x) * 4;
+            const std::uint8_t level = (y == 0 ? x % 4 : 3 - x % 4) * 85;
+            REQUIRE(rgba[offset] == level);
+            REQUIRE(rgba[offset + 1] == level);
+            REQUIRE(rgba[offset + 2] == level);
+            REQUIRE(rgba[offset + 3] == (as_mask ? (level == 255 ? 255 : 0) : 255));
+        }
+    }
+
+    if (as_mask) {
+        std::vector<std::uint8_t> icon(rgba.size(), 255);
+        epoc::apply_icon_mask_alpha(icon.data(), rgba.data(), 17, 2, epoc::display_mode::gray4);
+        REQUIRE(icon[3] == 255);
+        REQUIRE(icon[7] == 255);
+        REQUIRE(icon[11] == 255);
+        REQUIRE(icon[15] == 0);
+    }
+}
+
+TEST_CASE("gray4_decode_rejects_truncated_pixel_data", "[fbs],[palette]") {
+    std::uint8_t samples[] = {0xE4};
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(5, 1);
+    header.bit_per_pixels = 2;
+    common::ro_buf_stream source(samples, sizeof(samples));
+    std::vector<std::uint8_t> rgba(5 * 4);
+    common::wo_buf_stream destination(rgba.data(), rgba.size());
+
+    REQUIRE_FALSE(epoc::convert_to_rgba8888(nullptr, source, destination, header, -1,
+        epoc::bitmap_file_no_compression, false));
+}
+
+TEST_CASE("gray256_decode_distinguishes_colour_from_mask_opacity", "icon_mask") {
+    // TRgb::Gray256() uses the opaque RGB constructor; BITGDI alone treats
+    // EGray256 mask samples as opacity (RGB.CPP, GDI.INL, BITBLT.CPP).
+    const bool as_mask = GENERATE(false, true);
+    std::uint8_t samples[] = {0, 17, 128, 250, 255, 0, 0, 0,
+        255, 250, 128, 17, 0, 0, 0, 0};
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(5, 2);
+    header.bit_per_pixels = epoc::get_bpp_from_display_mode(epoc::display_mode::gray256);
+    header.color = epoc::get_bitmap_color_from_display_mode(epoc::display_mode::gray256);
+    common::ro_buf_stream source(samples, sizeof(samples));
+    std::vector<std::uint8_t> rgba(5 * 2 * 4);
+    common::wo_buf_stream destination(rgba.data(), rgba.size());
+
+    REQUIRE(epoc::convert_to_rgba8888(nullptr, source, destination, header, -1,
+        epoc::bitmap_file_no_compression, as_mask));
+
+    for (std::size_t y = 0; y < 2; y++) {
+        for (std::size_t x = 0; x < 5; x++) {
+            const std::size_t offset = (y * 5 + x) * 4;
+            const std::uint8_t level = samples[y * 8 + x];
+            REQUIRE(rgba[offset] == level);
+            REQUIRE(rgba[offset + 1] == level);
+            REQUIRE(rgba[offset + 2] == level);
+            REQUIRE(rgba[offset + 3] == (as_mask ? level : 255));
+        }
+    }
+
+    if (as_mask) {
+        std::vector<std::uint8_t> icon(rgba.size(), 255);
+        epoc::apply_icon_mask_alpha(icon.data(), rgba.data(), 5, 2, epoc::display_mode::gray256);
+        for (std::size_t y = 0; y < 2; y++) {
+            for (std::size_t x = 0; x < 5; x++) {
+                REQUIRE(icon[(y * 5 + x) * 4 + 3] == samples[y * 8 + x]);
+            }
+        }
+    }
+}
 
 namespace {
     constexpr std::size_t ICON_SIDE = 4;
@@ -56,9 +287,9 @@ namespace {
     }
 }
 
-TEST_CASE("icon_mask_soft_maps_grey_to_alpha", "icon_mask") {
-    // Three levels, no solid white border: a real alpha ramp, so the mask reads
-    // as a soft mask and its grey level becomes the icon's alpha directly.
+TEST_CASE("icon_mask_gray256_is_alpha", "icon_mask") {
+    // BITGDI alpha blends only when the mask is EGray256, and then aInvertMask is
+    // ignored: the mask's luminance is the icon's alpha, white opaque.
     std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 128);
     levels[0] = 0;
     levels[1] = 255;
@@ -66,7 +297,8 @@ TEST_CASE("icon_mask_soft_maps_grey_to_alpha", "icon_mask") {
     std::vector<std::uint8_t> icon = make_icon();
     const std::vector<std::uint8_t> mask = make_mask(levels);
 
-    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE, 8);
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE,
+        epoc::display_mode::gray256);
 
     REQUIRE(alpha_at(icon, 0) == 0);
     REQUIRE(alpha_at(icon, 1) == 255);
@@ -74,52 +306,66 @@ TEST_CASE("icon_mask_soft_maps_grey_to_alpha", "icon_mask") {
 }
 
 TEST_CASE("icon_mask_colour_key_inverts_the_white_backdrop", "icon_mask") {
-    // A colour-key mask is stored at a colour depth, and make_standard_mask has
-    // put "this pixel is the white backdrop" in the alpha channel. Transparency
-    // is therefore the inverse of that.
+    // Any other display mode is a stencil. make_standard_mask has put "this pixel
+    // is pure white" in the alpha channel, and Avkon's aInvertMask=ETrue makes
+    // white keep the destination, so transparency is the inverse of that test.
     std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 0);
     levels[0] = 255;
 
     std::vector<std::uint8_t> icon = make_icon();
     const std::vector<std::uint8_t> mask = make_mask(levels);
 
-    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE, 16);
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE,
+        epoc::display_mode::color64k);
 
     REQUIRE(alpha_at(icon, 0) == 0);
     REQUIRE(alpha_at(icon, 1) == 255);
 }
 
-TEST_CASE("icon_mask_binary_stencil_at_low_depth_is_not_soft", "icon_mask") {
-    // The S60v2 case this exists for: a *binary* stencil stored at 8bpp, in the
-    // colour-key polarity. Reading it as a soft mask turns the icon inside out --
-    // the artwork goes transparent and the backdrop stays opaque. A mask with only
-    // white plus one other level, a solid white border and a non-white interior
-    // cannot be anything but colour-key.
+TEST_CASE("icon_mask_mono_stencil_keeps_its_white_backdrop_transparent", "icon_mask") {
+    // The common legacy AIF case: an EGray2 mask framing the artwork in white.
     std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 255);
     levels[ICON_SIDE + 1] = 0;
-    levels[ICON_SIDE + 2] = 0;
-    levels[2 * ICON_SIDE + 1] = 0;
-    levels[2 * ICON_SIDE + 2] = 0;
 
     std::vector<std::uint8_t> icon = make_icon();
     const std::vector<std::uint8_t> mask = make_mask(levels);
 
-    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE, 8);
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE,
+        epoc::display_mode::gray2);
 
-    // The white border is the backdrop: transparent. The interior is the artwork.
     REQUIRE(alpha_at(icon, 0) == 0);
     REQUIRE(alpha_at(icon, ICON_SIDE + 1) == 255);
 }
 
-TEST_CASE("icon_mask_full_bleed_mask_stays_soft", "icon_mask") {
-    // An entirely white mask is a full-bleed icon, not a stencil: every pixel is
-    // opaque. Classifying it as colour-key would erase the icon.
+TEST_CASE("icon_mask_colour256_is_a_stencil_not_an_alpha_ramp", "icon_mask") {
+    // EColor256 is 8bpp like EGray256 but is not an alpha mask. The N-Gage ROM's
+    // fmradio icon stores its stencil this way - white backdrop, artwork at
+    // palette index 0xE1, which is 0x111111. Read as alpha that artwork would be
+    // 93% transparent while the backdrop stayed opaque: an inside-out icon.
+    std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 255);
+    levels[ICON_SIDE + 1] = 0x11;
+    levels[ICON_SIDE + 2] = 0x00;
+
+    std::vector<std::uint8_t> icon = make_icon();
+    const std::vector<std::uint8_t> mask = make_mask(levels);
+
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE,
+        epoc::display_mode::color256);
+
+    REQUIRE(alpha_at(icon, 0) == 0);
+    REQUIRE(alpha_at(icon, ICON_SIDE + 1) == 255);
+    REQUIRE(alpha_at(icon, ICON_SIDE + 2) == 255);
+}
+
+TEST_CASE("icon_mask_full_bleed_gray256_mask_stays_opaque", "icon_mask") {
+    // An entirely white EGray256 mask is a full-bleed icon: every pixel opaque.
     const std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 255);
 
     std::vector<std::uint8_t> icon = make_icon();
     const std::vector<std::uint8_t> mask = make_mask(levels);
 
-    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE, 8);
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE,
+        epoc::display_mode::gray256);
 
     for (std::size_t i = 0; i < ICON_SIDE * ICON_SIDE; i++) {
         REQUIRE(alpha_at(icon, i) == 255);
@@ -130,8 +376,134 @@ TEST_CASE("icon_mask_ignores_missing_buffers", "icon_mask") {
     std::vector<std::uint8_t> icon = make_icon();
     const std::vector<std::uint8_t> mask = make_mask(std::vector<std::uint8_t>(ICON_SIDE * ICON_SIDE, 128));
 
-    epoc::apply_icon_mask_alpha(nullptr, mask.data(), ICON_SIDE, ICON_SIDE, 8);
-    epoc::apply_icon_mask_alpha(icon.data(), nullptr, ICON_SIDE, ICON_SIDE, 8);
+    epoc::apply_icon_mask_alpha(nullptr, mask.data(), ICON_SIDE, ICON_SIDE, epoc::display_mode::gray256);
+    epoc::apply_icon_mask_alpha(icon.data(), nullptr, ICON_SIDE, ICON_SIDE, epoc::display_mode::gray256);
 
     REQUIRE(alpha_at(icon, 0) == 255);
+}
+
+TEST_CASE("bitwise_bitmap_reports_the_mode_it_was_built_with", "icon_mask") {
+    epoc::bitwise_bitmap bmp{};
+    bmp.settings_.initial_display_mode(epoc::display_mode::gray256);
+    bmp.settings_.current_display_mode(epoc::display_mode::gray256);
+
+    REQUIRE(bmp.current_display_mode() == epoc::display_mode::gray256);
+
+    // EKA1 ROM bitmaps carry the initial mode only; the current byte reads ENone.
+    epoc::bitwise_bitmap rom{};
+    rom.settings_.initial_display_mode(epoc::display_mode::color256);
+
+    REQUIRE(rom.settings_.current_display_mode() == epoc::display_mode::none);
+    REQUIRE(rom.current_display_mode() == epoc::display_mode::color256);
+}
+
+TEST_CASE("bitmap_header_colour_field_round_trips_the_display_mode", "bitmap_header") {
+    // get_display_mode_from_bpp() and get_bitmap_color_from_display_mode() are how a
+    // mode survives the header, so they have to be inverses. bmconv's own table
+    // (PBMCOMP.CPP) is what both follow: 8bpp splits into EGray256 / EColor256 on the
+    // colour field alone, 4bpp into EGray16 / EColor16, and every other depth pins
+    // exactly one mode.
+    const epoc::display_mode modes[] = {
+        epoc::display_mode::gray2, epoc::display_mode::gray4, epoc::display_mode::gray16,
+        epoc::display_mode::gray256, epoc::display_mode::color16, epoc::display_mode::color256,
+        epoc::display_mode::color4k, epoc::display_mode::color64k, epoc::display_mode::color16m,
+        epoc::display_mode::color16ma
+    };
+
+    for (const epoc::display_mode mode : modes) {
+        const epoc::bitmap_color color = epoc::get_bitmap_color_from_display_mode(mode);
+        const int bpp = epoc::get_bpp_from_display_mode(mode);
+
+        REQUIRE(epoc::get_display_mode_from_bpp(bpp, color != epoc::monochrome_bitmap) == mode);
+    }
+
+    REQUIRE(epoc::get_bitmap_color_from_display_mode(epoc::display_mode::gray256) == epoc::monochrome_bitmap);
+    REQUIRE(epoc::get_bitmap_color_from_display_mode(epoc::display_mode::color256) == epoc::color_bitmap);
+    REQUIRE(epoc::get_bitmap_color_from_display_mode(epoc::display_mode::color16ma) == epoc::color_bitmap_with_alpha);
+    REQUIRE(epoc::get_bitmap_color_from_display_mode(epoc::display_mode::color16map) == epoc::color_bitmap_with_alpha_pm);
+}
+
+TEST_CASE("ALF Canvas icon masks convert RGB to Gray256 alpha without inspecting their shape", "icon_mask") {
+    const std::vector<std::uint8_t> bgr{
+        0, 0, 0, 64, 64, 64, 255, 255, 255, 0, 0, 0,
+        0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 0, 0
+    };
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(3, 2);
+    header.bit_per_pixels = 24;
+    header.color = 1;
+    auto source = bgr;
+    common::ro_buf_stream input(source.data(), source.size());
+    std::vector<std::uint8_t> rgba(3 * 2 * 4);
+    common::wo_buf_stream output(rgba.data(), rgba.size());
+    REQUIRE(epoc::convert_to_rgba8888(nullptr, input, output, header, -1,
+        epoc::bitmap_file_no_compression, true));
+    const std::vector<std::uint8_t> expected{ 0, 64, 255, 63, 159, 31 };
+    auto icon = make_icon();
+    epoc::apply_icon_mask_alpha(icon.data(), rgba.data(), 3, 2, epoc::display_mode::color16m,
+        epoc::icon_mask_composition::alf_canvas);
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        REQUIRE(alpha_at(icon, i) == expected[i]);
+    }
+}
+
+TEST_CASE("Symbian3 MBM monochrome masks retain inverted stencil polarity", "icon_mask") {
+    std::vector<std::uint8_t> packed{ 0xF8, 0xAA, 0, 0, 0, 0x55, 0, 0, 0 };
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(8, 2);
+    header.header_len = sizeof(loader::sbm_header);
+    header.bitmap_size = header.header_len + packed.size();
+    header.bit_per_pixels = 1;
+    header.color = 0;
+    common::ro_buf_stream input(packed.data(), packed.size());
+    std::vector<std::uint8_t> mask(8 * 2 * 4);
+    common::wo_buf_stream output(mask.data(), mask.size());
+    REQUIRE(epoc::convert_to_rgba8888(nullptr, input, output, header, -1,
+        epoc::bitmap_file_byte_rle_compression, true));
+    auto icon = make_icon();
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), 8, 2,
+        epoc::get_display_mode_from_bpp(header.bit_per_pixels, header.color),
+        epoc::icon_mask_composition::alf_canvas);
+    for (std::size_t pixel = 0; pixel < 16; ++pixel) {
+        const bool white = ((pixel % 8) % 2) != (pixel / 8);
+        REQUIRE(alpha_at(icon, pixel) == (white ? 0 : 255));
+    }
+}
+
+TEST_CASE("Symbian3 MBM Gray256 masks retain soft opacity", "icon_mask") {
+    std::vector<std::uint8_t> samples{ 0, 64, 128, 255 };
+    loader::sbm_header header{};
+    header.size_pixels = eka2l1::vec2(4, 1);
+    header.bit_per_pixels = 8;
+    header.color = 0;
+    common::ro_buf_stream input(samples.data(), samples.size());
+    std::vector<std::uint8_t> mask(4 * 4);
+    common::wo_buf_stream output(mask.data(), mask.size());
+    REQUIRE(epoc::convert_to_rgba8888(nullptr, input, output, header, -1,
+        epoc::bitmap_file_no_compression, true));
+    auto icon = make_icon();
+    epoc::apply_icon_mask_alpha(icon.data(), mask.data(), 4, 1,
+        epoc::get_display_mode_from_bpp(header.bit_per_pixels, header.color),
+        epoc::icon_mask_composition::alf_canvas);
+    for (std::size_t pixel = 0; pixel < samples.size(); ++pixel) {
+        REQUIRE(alpha_at(icon, pixel) == samples[pixel]);
+    }
+}
+
+TEST_CASE("ALF Canvas preserves opacity polarity for non-monochrome masks", "icon_mask") {
+    std::vector<std::uint8_t> levels(ICON_SIDE * ICON_SIDE, 0);
+    levels[1] = 255;
+    const auto mask = make_mask(levels);
+    for (const auto mode : { epoc::display_mode::gray4, epoc::display_mode::gray16, epoc::display_mode::gray256,
+             epoc::display_mode::color16, epoc::display_mode::color256,
+             epoc::display_mode::color4k, epoc::display_mode::color64k,
+             epoc::display_mode::color16m, epoc::display_mode::color16mu,
+             epoc::display_mode::color16ma, epoc::display_mode::color16map }) {
+        CAPTURE(mode);
+        auto icon = make_icon();
+        epoc::apply_icon_mask_alpha(icon.data(), mask.data(), ICON_SIDE, ICON_SIDE, mode,
+            epoc::icon_mask_composition::alf_canvas);
+        REQUIRE(alpha_at(icon, 0) == 0);
+        REQUIRE(alpha_at(icon, 1) == 255);
+    }
 }

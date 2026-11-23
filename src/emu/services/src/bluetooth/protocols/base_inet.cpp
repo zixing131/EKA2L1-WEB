@@ -63,7 +63,7 @@ namespace eka2l1::epoc::bt {
                 uv_tcp_getpeername(reinterpret_cast<uv_tcp_t*>(opaque_handle), reinterpret_cast<sockaddr*>(&addr), &addr_structlen);                
                 uv_tcp_nodelay(reinterpret_cast<uv_tcp_t*>(opaque_handle), 1);
 
-                if (mid->uses_bonjour_discovery()) return;
+                if (mid->uses_mdns_discovery()) return;
 
                 epoc::internet::host_sockaddr_to_guest_saddress(reinterpret_cast<const sockaddr*>(&addr), addr_dest);
 
@@ -311,6 +311,12 @@ namespace eka2l1::epoc::bt {
     }
 
     void btinet_socket::shutdown(epoc::notify_info &complete_info, int reason) {
+        // Link-manager control sockets carry no host socket at all.
+        if (!inet_socket_) {
+            complete_info.complete(epoc::error_not_supported);
+            return;
+        }
+
         inet_socket_->shutdown(complete_info, reason);
     }
 

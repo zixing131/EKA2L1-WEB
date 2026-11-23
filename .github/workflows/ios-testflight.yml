@@ -1,0 +1,234 @@
+# Builds a distribution-signed iOS archive from ios-next and uploads it to
+# TestFlight, on every push to that branch.
+#
+# This is the only place anything is signed. build.yml -- which is shared with
+# upstream -- builds the device slice unsigned and stops there, because signing
+# on a shared CI means minting a development certificate against Apple's
+# per-account cap on every merge, and uploading to one account's App Store
+# Connect record.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   APPLE_TEAM_ID           Apple Developer team id (e.g. L6JP27B8YR)
+#   APPSTORE_ISSUER_ID      App Store Connect API key issuer id (UUID)
+#   APPSTORE_KEY_ID         App Store Connect API key id
+#   APPSTORE_PRIVATE_KEY    Full contents of the AuthKey_<KEY_ID>.p8 file
+#
+# Strongly recommended secrets:
+#   IOS_DEV_SIGNING_KEY             base64-encoded .p12 (Apple Development
+#                                   certificate + private key)
+#   IOS_DEV_SIGNING_KEY_PASSWORD    password of that .p12
+#   Without a persisted Development certificate, every run mints a brand-new
+#   one via -allowProvisioningUpdates (the previous ephemeral runner's private
+#   key is gone), piling up "Created via API" certificates until the account
+#   hits Apple's cap and archives fail with "Your account has reached the
+#   maximum number of certificates". Easiest setup: run the manual
+#   "iOS Provision Dev Certificate" workflow, which creates the certificate
+#   via the App Store Connect API on the runner and writes both secrets
+#   (needs a GH_SECRETS_ADMIN_TOKEN PAT, see that workflow's header).
+#   Alternatively export the .p12 from Keychain Access on a Mac that has the
+#   certificate, then:
+#     base64 -i dev.p12 | gh secret set IOS_DEV_SIGNING_KEY
+#     gh secret set IOS_DEV_SIGNING_KEY_PASSWORD
+#   Stale API-created certificates can be listed/revoked with the manual
+#   "iOS Signing Maintenance" workflow.
+#
+# Optional secrets (only needed if the team does not use Xcode cloud-managed
+# distribution certificates; when set, the certificate is imported into a
+# throwaway keychain and used for signing instead):
+#   IOS_DIST_SIGNING_KEY            base64-encoded .p12 (Apple Distribution
+#                                   certificate + private key)
+#   IOS_DIST_SIGNING_KEY_PASSWORD   password of that .p12
+#
+# Notes:
+# - The API key needs the Admin role the first time cloud signing creates a
+#   distribution certificate; App Manager is enough afterwards.
+# - The bundle id (com.eka2l1.emulator) must already exist as an app record
+#   in App Store Connect.
+# - CFBundleVersion uses the workflow run number; export preserves it.
+#   CFBundleShortVersionString stays at the version declared in Info.plist.
+# - When the secrets are not configured (e.g. forks), the job logs a warning
+#   and skips instead of failing.
+
+name: iOS TestFlight
+
+# One mode: whatever is on ios-next. Upstream's master reaches TestFlight by
+# being merged into ios-next, which is a deliberate act with a person behind
+# it, rather than by a poller building a tree nobody asked about.
+
+on:
+  push:
+    branches:
+      - ios-next
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes a build still running for an older one; nobody wants
+# a superseded commit on TestFlight.
+concurrency:
+  group: ios-testflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upload:
+    name: Build and upload to TestFlight
+    runs-on: xcode-27
+    env:
+      EKA2L1_IOS_CONFIGURATION: Release
+      ARCHIVE_PATH: build/ios-device/EKA2L1.xcarchive
+
+    steps:
+      - name: Check TestFlight secrets
+        id: guard
+        env:
+          CONFIGURED: ${{ secrets.APPLE_TEAM_ID != '' && secrets.APPSTORE_ISSUER_ID != '' && secrets.APPSTORE_KEY_ID != '' && secrets.APPSTORE_PRIVATE_KEY != '' }}
+        run: |
+          if [ "${CONFIGURED}" != "true" ]; then
+            echo "::warning::TestFlight secrets missing (APPLE_TEAM_ID / APPSTORE_ISSUER_ID / APPSTORE_KEY_ID / APPSTORE_PRIVATE_KEY); skipping upload."
+          fi
+          echo "configured=${CONFIGURED}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout
+        if: steps.guard.outputs.configured == 'true'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Names the build for the ffmpeg cache key and the dSYM artifact.
+      - name: Identify the commit being built
+        if: steps.guard.outputs.configured == 'true'
+        id: target
+        run: |
+          set -euo pipefail
+          echo "Building ${GITHUB_REF_NAME} at $(git rev-parse --short HEAD)"
+          {
+            echo "short_sha=$(git rev-parse --short HEAD)"
+            echo "ffmpeg=$(git -C src/external/ffmpeg rev-parse HEAD)"
+            echo "image=$ImageVersion"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Cache iOS ffmpeg
+        if: steps.guard.outputs.configured == 'true'
+        uses: actions/cache@v4
+        with:
+          path: build/ffmpeg-cache
+          key: ffmpeg-ios-device-${{ steps.target.outputs.image }}-${{ steps.target.outputs.ffmpeg }}-${{ hashFiles('scripts/build_ios.sh', 'cmake/ios.toolchain.cmake', '.github/workflows/ios-testflight.yml') }}
+
+      - name: Select Xcode
+        if: steps.guard.outputs.configured == 'true'
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Write App Store Connect API key
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${APPSTORE_PRIVATE_KEY}" > "${RUNNER_TEMP}/asc_key.p8"
+          chmod 600 "${RUNNER_TEMP}/asc_key.p8"
+
+      - name: Import signing certificates
+        if: steps.guard.outputs.configured == 'true' && (env.HAS_DEV_CERT == 'true' || env.HAS_DIST_CERT == 'true')
+        env:
+          HAS_DEV_CERT: ${{ secrets.IOS_DEV_SIGNING_KEY != '' }}
+          HAS_DIST_CERT: ${{ secrets.IOS_DIST_SIGNING_KEY != '' }}
+          IOS_DEV_SIGNING_KEY: ${{ secrets.IOS_DEV_SIGNING_KEY }}
+          IOS_DEV_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_DEV_SIGNING_KEY_PASSWORD }}
+          IOS_DIST_SIGNING_KEY: ${{ secrets.IOS_DIST_SIGNING_KEY }}
+          IOS_DIST_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_DIST_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="${RUNNER_TEMP}/eka2l1-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          if [ "${HAS_DEV_CERT}" = "true" ]; then
+            printf '%s' "${IOS_DEV_SIGNING_KEY}" | base64 --decode > "${RUNNER_TEMP}/dev_cert.p12"
+            security import "${RUNNER_TEMP}/dev_cert.p12" \
+              -P "${IOS_DEV_SIGNING_KEY_PASSWORD}" \
+              -A -t cert -f pkcs12 -k "${KEYCHAIN}"
+          fi
+          if [ "${HAS_DIST_CERT}" = "true" ]; then
+            printf '%s' "${IOS_DIST_SIGNING_KEY}" | base64 --decode > "${RUNNER_TEMP}/dist_cert.p12"
+            security import "${RUNNER_TEMP}/dist_cert.p12" \
+              -P "${IOS_DIST_SIGNING_KEY_PASSWORD}" \
+              -A -t cert -f pkcs12 -k "${KEYCHAIN}"
+          fi
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" > /dev/null
+          security list-keychains -d user -s "${KEYCHAIN}" login.keychain-db
+
+      - name: Build signed archive
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          EKA2L1_IOS_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          EKA2L1_ASC_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          EKA2L1_ASC_KEY_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          export EKA2L1_ASC_KEY_PATH="${RUNNER_TEMP}/asc_key.p8"
+          export EKA2L1_IOS_ARCHIVE_PATH="${ARCHIVE_PATH}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" \
+            src/emu/ios/Resources/Info.plist
+          scripts/build_ios.sh archive
+
+      - name: Upload to TestFlight
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          EXPORT_PLIST="${RUNNER_TEMP}/ExportOptions.plist"
+          cat > "${EXPORT_PLIST}" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store-connect</string>
+              <key>destination</key>
+              <string>upload</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>teamID</key>
+              <string>${APPLE_TEAM_ID}</string>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>manageAppVersionAndBuildNumber</key>
+              <false/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "${ARCHIVE_PATH}" \
+            -exportOptionsPlist "${EXPORT_PLIST}" \
+            -exportPath "${RUNNER_TEMP}/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "${RUNNER_TEMP}/asc_key.p8" \
+            -authenticationKeyID "${APPSTORE_KEY_ID}" \
+            -authenticationKeyIssuerID "${APPSTORE_ISSUER_ID}"
+
+      - name: Upload dSYM artifact
+        if: steps.guard.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EKA2L1-testflight-dSYM-${{ steps.target.outputs.short_sha }}
+          path: ${{ env.ARCHIVE_PATH }}/dSYMs
+          if-no-files-found: warn
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/asc_key.p8" "${RUNNER_TEMP}/dev_cert.p12" "${RUNNER_TEMP}/dist_cert.p12"
+          if [ -f "${RUNNER_TEMP}/eka2l1-signing.keychain-db" ]; then
+            security delete-keychain "${RUNNER_TEMP}/eka2l1-signing.keychain-db" || true
+            security list-keychains -d user -s login.keychain-db
+          fi

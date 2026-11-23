@@ -1018,7 +1018,7 @@ static bool init_emulator() {
     // All persistent data lives under the IDBFS mount point.
     // Override the storage path BEFORE creating the system so that device_manager,
     // package manager, etc. all use the same persisted location.
-    const std::string storage_path = "/eka2l1";
+    const host_path storage_path("/eka2l1");
     g_state.conf.storage = storage_path;
 
     // Load config (may return early if config.yml doesn't exist yet – that's fine).
@@ -1357,7 +1357,7 @@ static void main_loop() {
                 } else {
                     epoc::lib_info image_info{};
                     const std::u16string image_name = name->to_std_string(requester);
-                    if (!epoc::get_image_info(g_state.symsys->get_lib_manager(), image_name, image_info)) {
+                    if (!epoc::get_image_info(g_state.symsys->get_lib_manager(), guest_path(image_name), image_info)) {
                         result = epoc::error_not_found;
                     } else if (info_out->get_max_length(requester) < sizeof(epoc::ldr_info)
                         || image_out->get_max_length(requester) < sizeof(epoc::lib_info)) {
@@ -1532,7 +1532,7 @@ extern "C" {
  */
 static std::unique_ptr<eka2l1::loader::rpkg_stream_installer> g_rpkg_stream;
 static std::vector<std::uint8_t> g_rpkg_stream_buf;
-static std::string g_rpkg_stream_rom_target;
+static host_path g_rpkg_stream_rom_target;
 
 static std::string json_escape(const std::string &in) {
     std::string out;
@@ -1609,9 +1609,9 @@ int wasm_rpkg_stream_begin() {
     // Multi-ROM: installing while devices exist is fine — the installer
     // itself rejects a true duplicate (same firmware code) in finalize.
 
-    const std::string &storage = g_state.conf.storage;
+    const host_path &storage = g_state.conf.storage;
     eka2l1::common::create_directories(eka2l1::add_path(storage, "roms/"));
-    const std::string drives_z_path = eka2l1::add_path(storage, "drives/z/");
+    const host_path drives_z_path = eka2l1::add_path(storage, "drives/z/");
     eka2l1::common::create_directories(drives_z_path);
 
     g_rpkg_stream = std::make_unique<eka2l1::loader::rpkg_stream_installer>(dvcmngr, drives_z_path);
@@ -1650,7 +1650,7 @@ int wasm_rpkg_stream_finish() {
         return -(1000 + static_cast<int>(err));
     }
 
-    const std::string rom_dir = eka2l1::add_path(
+    const host_path rom_dir = eka2l1::add_path(
         eka2l1::add_path(g_state.conf.storage, "roms/"), firmware_code + "/");
     eka2l1::common::create_directories(rom_dir);
     g_rpkg_stream_rom_target = eka2l1::add_path(rom_dir, "SYM.ROM");
@@ -1731,16 +1731,16 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
     if (want_install) {
         // Validate ROM file exists and is readable.
         {
-            common::ro_std_file_stream check_stream(std::string(rom_path), true);
+            common::ro_std_file_stream check_stream(host_path(rom_path), true);
             if (!check_stream.valid()) {
                 LOG_ERROR(FRONTEND_CMDLINE, "ROM file not found or not readable: {}", rom_path);
                 return -3;
             }
         }
 
-        const std::string &storage = g_state.conf.storage;
-        const std::string rom_resident  = eka2l1::add_path(storage, "roms/");
-        const std::string drives_z_path = eka2l1::add_path(storage, "drives/z/");
+        const host_path &storage = g_state.conf.storage;
+        const host_path rom_resident = eka2l1::add_path(storage, "roms/");
+        const host_path drives_z_path = eka2l1::add_path(storage, "drives/z/");
 
         eka2l1::common::create_directories(rom_resident);
         eka2l1::common::create_directories(drives_z_path);
@@ -1750,7 +1750,7 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
         if (has_rpkg) {
             // ---- EKA2 path: RPKG contains Z-drive content, ROM is just the kernel image ----
             {
-                common::ro_std_file_stream rpkg_check(std::string(rpkg_path), true);
+                common::ro_std_file_stream rpkg_check(host_path(rpkg_path), true);
                 if (!rpkg_check.valid()) {
                     LOG_ERROR(FRONTEND_CMDLINE, "RPKG file not found or not readable: {}", rpkg_path);
                     return -3;
@@ -1761,7 +1761,7 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
             LOG_INFO(FRONTEND_CMDLINE, "EKA2 install: RPKG={} ROM={}", rpkg_path, rom_path);
 
             install_err = eka2l1::loader::install_rpkg(
-                dvcmngr, std::string(rpkg_path), drives_z_path, firmware_code, nullptr, nullptr);
+                dvcmngr, host_path(rpkg_path), drives_z_path, firmware_code, false, nullptr, nullptr);
 
             if (install_err != eka2l1::device_installation_none) {
                 LOG_ERROR(FRONTEND_CMDLINE, "RPKG installation failed, error={}",
@@ -1770,9 +1770,9 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
             }
 
             // Copy ROM image to roms/<firmcode>/SYM.ROM
-            const std::string rom_dir = eka2l1::add_path(rom_resident, firmware_code + "/");
+            const host_path rom_dir = eka2l1::add_path(rom_resident, firmware_code + "/");
             eka2l1::common::create_directories(rom_dir);
-            if (!eka2l1::common::copy_file(std::string(rom_path),
+            if (!eka2l1::common::copy_file(host_path(rom_path),
                     eka2l1::add_path(rom_dir, "SYM.ROM"), true)) {
                 LOG_ERROR(FRONTEND_CMDLINE, "Failed to copy ROM to {}", rom_dir);
                 return -5;
@@ -1784,7 +1784,7 @@ int wasm_init_with_rom(const char *rom_path, const char *rpkg_path) {
             LOG_INFO(FRONTEND_CMDLINE, "EKA1 install: ROM={}", rom_path);
 
             install_err = eka2l1::loader::install_rom(
-                dvcmngr, std::string(rom_path), rom_resident, drives_z_path, nullptr, nullptr);
+                dvcmngr, host_path(rom_path), rom_resident, drives_z_path, false, nullptr, nullptr);
 
             if (install_err != eka2l1::device_installation_none) {
                 LOG_ERROR(FRONTEND_CMDLINE, "ROM installation failed, error={}",
@@ -1873,8 +1873,7 @@ int wasm_install_package(const char *pkg_path) {
 
     if (!g_state.symsys) return -2;
 
-    const std::u16string path_u16 = eka2l1::common::utf8_to_ucs2(std::string(pkg_path));
-    const int result = g_state.symsys->install_package(path_u16, drive_e);
+    const int result = g_state.symsys->install_package(host_path(pkg_path), drive_e);
 
     if (result == 0) {
         LOG_INFO(FRONTEND_CMDLINE, "Package installed successfully");
@@ -1949,7 +1948,7 @@ int wasm_install_midlet(const char *jar_path) {
     });
     const char *keypad_modes[] = {"", "no", "gameactions", "navigationkeys"};
     const eka2l1::j2me::install_error result = eka2l1::j2me::install(
-        g_state.symsys.get(), jar_path, entry, [generation](eka2l1::kernel::process *installer) {
+        g_state.symsys.get(), host_path(jar_path), entry, [generation](eka2l1::kernel::process *installer) {
             if (generation != g_state.midlet_install_generation
                 || g_state.midlet_install_state.load(std::memory_order_acquire) == 2) return;
             // nullptr means no guest process was started (ROM lacks the MIDP2
@@ -2146,14 +2145,14 @@ const char *wasm_probe_java_inventory() {
             return;
         }
         while (auto e = d->get_next_entry()) {
-            std::string low = e->name;
+            std::string low = e->name.utf8();
             std::transform(low.begin(), low.end(), low.begin(), ::tolower);
             if ((low.find("java") != std::string::npos) || (low.find("midp") != std::string::npos)
                 || (low.find("midlet") != std::string::npos) || (low.find("jvm") != std::string::npos)
                 || (low.find("ams") != std::string::npos) || (low.find("cldc") != std::string::npos)
                 || (low.find("jsr") != std::string::npos) || (low.find("j9") != std::string::npos)
                 || (low.find("cvm") != std::string::npos)) {
-                g_java_inventory += eka2l1::common::ucs2_to_utf8(dir) + e->name + "\n";
+                g_java_inventory += eka2l1::common::ucs2_to_utf8(dir) + e->name.utf8() + "\n";
             }
         }
     };
@@ -2315,7 +2314,7 @@ const char *wasm_probe_ls(const char *utf8_dir) {
         return g_java_inventory.c_str();
     }
     while (auto e = d->get_next_entry()) {
-        g_java_inventory += e->name;
+        g_java_inventory += e->name.utf8();
         if (e->type == eka2l1::io_component_type::dir) {
             g_java_inventory += "\\";
         }
@@ -2609,7 +2608,7 @@ static bool start_phone_boot_component(eka2l1::kernel_system *kern, const std::u
     for (const auto &process_obj : kern->get_process_list()) {
         const auto *process = reinterpret_cast<const eka2l1::kernel::process *>(process_obj.get());
         if ((process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending)
-            && (eka2l1::common::compare_ignore_case(process->get_exe_path(), path) == 0)) {
+            && (process->get_exe_path() == path)) {
             return true;
         }
     }
@@ -2805,8 +2804,7 @@ int wasm_boot_phone() {
         const eka2l1::kernel::process *process =
             reinterpret_cast<const eka2l1::kernel::process *>(process_obj.get());
         if ((process->get_exit_type() == eka2l1::kernel::entity_exit_type::pending)
-            && (eka2l1::common::compare_ignore_case(
-                    eka2l1::filename(process->get_exe_path(), true), u"estart.exe") == 0)) {
+            && (process->get_exe_path().filename() == u"estart.exe")) {
             LOG_INFO(FRONTEND_CMDLINE, "[phone] ROM startup process is already running");
             return 1;
         }
@@ -3063,7 +3061,7 @@ int wasm_delete_device(int index) {
 
     // Remove the firmware payload. Both the EKA1 (install_rom) and EKA2
     // (install_rpkg / streaming) installers lay files out the same way.
-    const std::string &storage = g_state.conf.storage;
+    const host_path &storage = g_state.conf.storage;
     eka2l1::common::delete_folder(eka2l1::add_path(storage, "roms/" + firmcode_low + "/"));
     eka2l1::common::delete_folder(eka2l1::add_path(storage, "drives/z/" + firmcode_low + "/"));
 
@@ -3435,8 +3433,7 @@ const char *wasm_get_app_icon(int uid) {
 
             // Path 1: pre-extracted host icon.
             if (entry && !entry->icon_path_.empty()) {
-                const std::string full_path = eka2l1::add_path(
-                    g_state.symsys->get_config()->storage, entry->icon_path_);
+                const host_path full_path = g_state.symsys->get_config()->storage / entry->icon_path_;
                 FILE *f = eka2l1::common::open_c_file(full_path, "rb");
                 if (f) {
                     fseek(f, 0, SEEK_END);
@@ -3485,8 +3482,7 @@ const char *wasm_get_app_icon(int uid) {
     }
 
     eka2l1::io_system *io = g_state.symsys->get_io_system();
-    const std::u16string path_ext = eka2l1::common::lowercase_ucs2_string(
-        eka2l1::path_extension(reg->icon_file_path));
+    const guest_path path_ext = reg->icon_file_path.extension();
 
     auto make_rgba_json = [](const std::uint8_t *data, const int w, const int h) {
         return "{\"type\":\"rgba\",\"w\":" + std::to_string(w) + ",\"h\":" + std::to_string(h)
@@ -3523,7 +3519,7 @@ const char *wasm_get_app_icon(int uid) {
         // MEMFS path outside /eka2l1 so it never gets persisted to IndexedDB.
         // (wo_growable_buf_stream is ostringstream-based, which traps on WASM
         // due to the missing locale database — file round-trip instead.)
-        static const char *TMP_SVG = "/icon_tmp.svg";
+        static const host_path TMP_SVG("/icon_tmp.svg");
         bool svg_ok = false;
         {
             eka2l1::common::wo_std_file_stream out_stream(TMP_SVG, true);
@@ -4252,7 +4248,7 @@ static bool launch_phone_log() {
     // without waiting for its registry mutex during native phone startup.
     epoc::apa::command_line command;
     command.launch_cmd_ = epoc::apa::command_run;
-    command.executable_path_ = LOG_EXECUTABLE;
+    command.executable_path_ = guest_path(LOG_EXECUTABLE);
     command.default_screen_number_ = 0;
     std::string environment = command.to_buffer();
     process->set_arg_slot(1, reinterpret_cast<std::uint8_t *>(environment.data()), environment.size());
@@ -4943,7 +4939,7 @@ void wasm_ls(const char *guest_path) {
     while (auto entry = dir->get_next_entry()) {
         std::printf("[ls]   %s %s size=%llu\n",
             (entry->type == eka2l1::io_component_type::dir) ? "<dir>" : "     ",
-            entry->name.c_str(), static_cast<unsigned long long>(entry->size));
+            entry->name.utf8().c_str(), static_cast<unsigned long long>(entry->size));
     }
     std::printf("[ls] end\n");
     std::fflush(stdout);

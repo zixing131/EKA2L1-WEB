@@ -81,6 +81,7 @@ namespace eka2l1::epoc {
 
         bool resize_needed;
         bool clear_color_enable;
+        bool surface_transparent_ = false;
 
         common::roundabout attached_contexts;
 
@@ -93,6 +94,8 @@ namespace eka2l1::epoc {
         common::region shape_region;
 
         int shadow_height;
+
+        std::int32_t pointer_capture_priority_ = 0;
 
         std::uint32_t max_pointer_buffer_;
         std::vector<epoc::event> pointer_buffer_;
@@ -163,6 +166,7 @@ namespace eka2l1::epoc {
         void report_visiblity_change(const bool forced = false);
 
         bool is_visible() const;
+        bool is_translucent() const;
         bool can_be_physically_seen() const;
 
         bool is_faded() const {
@@ -199,6 +203,12 @@ namespace eka2l1::epoc {
          * @returns Usually the time in microseconds until next screen update.
          */
         virtual std::uint64_t try_update(kernel::thread *drawer);
+
+        /**
+         * @param recomposite_if_occluded Recomposite the whole screen when occluded, so this
+         *                                window's client draws cannot bleed over the windows above.
+         */
+        std::uint64_t schedule_update(kernel::thread *drawer, const bool recomposite_if_occluded);
 
         void queue_event(const epoc::event &evt) override;
 
@@ -285,12 +295,15 @@ namespace eka2l1::epoc {
 
         gdi_store_command_collection redraw_segments_;
         std::vector<fbsfont*> using_fonts_;
+        std::size_t pending_commands_before_redraw_ = 0;
 
         explicit redraw_msg_canvas(window_server_client_ptr client, screen *scr, window *parent,
             const epoc::display_mode dmode, const std::uint32_t client_handle);
         ~redraw_msg_canvas() override;
         void update_surface_ui(drivers::graphics_command_builder &builder);
         bool draw_surface_window(drivers::graphics_command_builder &builder);
+        std::unique_ptr<gdi_store_command_segment> flatten_segments(const std::unique_ptr<gdi_store_command_segment> *segments,
+            const std::size_t count);
 
         void invalidate(const eka2l1::rect &irect);
         void on_activate() override;

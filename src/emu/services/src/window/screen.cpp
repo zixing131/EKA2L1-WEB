@@ -28,11 +28,13 @@
 #include <common/rgb.h>
 #include <common/time.h>
 #include <config/app_settings.h>
+#include <config/config.h>
 #include <drivers/itc.h>
 
 #include <kernel/kernel.h>
 #include <kernel/timing.h>
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 // Debug probe defined in kernel/svc.cpp.
@@ -43,6 +45,7 @@ namespace eka2l1::epoc {
         drivers::graphics_command_builder &builder_;
         std::uint32_t total_redrawed_;
         canvas_base *streaming_window_ = nullptr;
+        bitmap_cache *bitmap_cache_ = nullptr;
 
         explicit window_drawer_walker(drivers::graphics_command_builder &builder)
             : builder_(builder)
@@ -55,6 +58,11 @@ namespace eka2l1::epoc {
             }
 
             epoc::canvas_base *cv = reinterpret_cast<epoc::canvas_base*>(win);
+            bitmap_cache_ = cv->client->get_ws().get_bitmap_cache();
+
+            if (cv->can_be_physically_seen() && cv->surface_streaming()) {
+                streaming_window_ = cv;
+            }
 
             if (cv->can_be_physically_seen() && cv->surface_streaming()) {
                 streaming_window_ = cv;
@@ -93,6 +101,21 @@ namespace eka2l1::epoc {
         }
     };
 
+    struct window_dsa_region_walker : public window_tree_walker {
+        common::region region_;
+
+        bool do_it(window *win) override {
+            if (win->type == window_kind::client) {
+                canvas_base *user = reinterpret_cast<canvas_base *>(win);
+                if (user->is_dsa_active()) {
+                    region_.add_region(user->visible_region);
+                }
+            }
+
+            return false;
+        }
+    };
+
     bool focus_callback_free_check_func(screen::focus_change_callback &data) {
         return !data.second;
     }
@@ -117,7 +140,7 @@ namespace eka2l1::epoc {
         data.second = nullptr;
     }
 
-    screen::screen(const int number, epoc::config::screen &scr_conf)
+    screen::screen(const int number, epoc::config::screen &scr_conf, bool reserve_host_focus)
         : number(number)
         , ui_rotation(0)
         , refresh_rate(60)
@@ -130,13 +153,14 @@ namespace eka2l1::epoc {
         , disp_mode(display_mode::color16ma)
         , dsa_disp_mode(display_mode::color16ma)
         , dsa_disp_mode_initial(display_mode::color16ma)
-        , last_vsync(0)
         , last_fps_check(0)
         , last_fps(0)
         , frame_passed_per_sec(0)
         , scr_config(scr_conf)
         , crr_mode(0)
+        , physical_mode(0)
         , focus(nullptr)
+        , default_owning_group(nullptr)
         , next(nullptr)
         , screen_buffer_chunk(nullptr)
         , flags_(FLAG_ORIENTATION_LOCK)
@@ -144,18 +168,35 @@ namespace eka2l1::epoc {
         , screen_redraw_callbacks(screen_redraw_callback_free_check_func, screen_redraw_callback_free_func)
         , screen_mode_change_callbacks(screen_mode_change_callback_free_check_func, screen_mode_change_callback_free_func) {
         root = std::make_unique<epoc::window>(nullptr, this, nullptr);
-        disp_mode = scr_conf.disp_mode;
-        dsa_disp_mode = scr_conf.dsa_disp_mode;
-        dsa_disp_mode_initial = scr_conf.dsa_disp_mode;
-
+        if (reserve_host_focus) {
+            // The host launcher replaces the guest shell at normal priority. A group
+            // sent to the back must stay behind it until the app brings itself forward.
+            auto launcher = std::make_unique<window_group>(nullptr, this, root.get(), 0);
+            launcher->set_receive_focus(true);
+            host_launcher_group = std::move(launcher);
+        }
         for (std::size_t i = 0; i < scr_config.modes.size(); i++) {
-            if (scr_config.modes[i].rotation == 0) {
+            if (scr_config.modes[i].defined) {
+                crr_mode = static_cast<std::uint8_t>(i);
+                break;
+            }
+        }
+
+        disp_mode = current_mode().disp_mode;
+        dsa_disp_mode = current_mode().dsa_disp_mode;
+        dsa_disp_mode_initial = current_mode().dsa_disp_mode;
+
+        // A wsini can list several unrotated modes (P900 has 208x320 and 208x208); the
+        // first one is the physical panel, the rest are alternative layouts.
+        for (std::size_t i = 0; i < scr_config.modes.size(); i++) {
+            if (scr_config.modes[i].defined && (scr_config.modes[i].rotation == 0)) {
                 physical_mode = static_cast<std::uint8_t>(i);
+                break;
             }
         }
 
         if (scr_conf.auto_clear) {
-            flags_ = FLAG_AUTO_CLEAR_BACKGROUND;
+            flags_ |= FLAG_AUTO_CLEAR_BACKGROUND;
         }
     }
 
@@ -171,63 +212,205 @@ namespace eka2l1::epoc {
         delete pitcher;
     }
 
-    void screen::reset_dsa_depth_guess() {
+    void screen::reset_framebuffer_tracking() {
         dsa_disp_mode = dsa_disp_mode_initial;
-
-        if (!screen_buffer_chunk || (dsa_disp_mode == disp_mode)) {
+        if (!screen_buffer_chunk) {
             return;
         }
 
-        // Repaint the untouched marker so the next client is judged on its own writes.
-        const eka2l1::vec2 buffer_size = current_mode().size;
-        const std::size_t narrow_bytes = epoc::get_byte_width(buffer_size.x,
-            epoc::get_bpp_from_display_mode(dsa_disp_mode)) * buffer_size.y;
-        const std::size_t wide_bytes = epoc::get_byte_width(buffer_size.x,
-            epoc::get_bpp_from_display_mode(disp_mode)) * buffer_size.y;
-
-        if (wide_bytes > narrow_bytes) {
-            std::fill(screen_buffer_ptr() + narrow_bytes, screen_buffer_ptr() + wide_bytes,
-                SCREEN_BUFFER_UNTOUCHED_FILL);
+        const std::size_t narrow_bytes = screen_buffer_byte_width(dsa_disp_mode_initial) * current_mode().size.y;
+        const std::size_t wide_bytes = screen_buffer_byte_width(disp_mode) * current_mode().size.y;
+        framebuffer_depth.reset(screen_buffer_ptr() + narrow_bytes,
+            wide_bytes > narrow_bytes ? wide_bytes - narrow_bytes : 0);
+        if (direct_framebuffer_mapped) {
+            direct_framebuffer.reset(screen_buffer_ptr(), screen_buffer_byte_width(dsa_disp_mode), current_mode().size.y);
         }
     }
 
-    bool screen::promote_dsa_depth_if_deep_pixels_written() {
-        if (dsa_disp_mode == disp_mode) {
-            return false;
+    void screen::mark_direct_framebuffer_mapped() {
+        if (direct_framebuffer_mapped || !screen_buffer_chunk) {
+            return;
         }
 
+        direct_framebuffer_mapped = true;
+
+        direct_framebuffer.reset(screen_buffer_ptr(), screen_buffer_byte_width(dsa_disp_mode), current_mode().size.y);
+    }
+
+    bool screen::update_direct_framebuffer(framebuffer_update_source source) {
         if (!screen_buffer_chunk) {
             return false;
         }
 
-        // The buffer is always allocated for the composed mode, so a guest writing at the
-        // narrower depth leaves the tail of every frame untouched. Anything in there can
-        // only have come from the guest: the WSERV write-back honours dsa_disp_mode too.
-        const eka2l1::vec2 buffer_size = current_mode().size;
-        const std::size_t narrow_bytes = epoc::get_byte_width(buffer_size.x,
-            epoc::get_bpp_from_display_mode(dsa_disp_mode)) * buffer_size.y;
-        const std::size_t wide_bytes = epoc::get_byte_width(buffer_size.x,
-            epoc::get_bpp_from_display_mode(disp_mode)) * buffer_size.y;
-
-        if (wide_bytes <= narrow_bytes) {
-            dsa_disp_mode = disp_mode;
-            return true;
+        const display_mode previous_mode = dsa_disp_mode;
+        if (dsa_disp_mode_initial != disp_mode) {
+            const std::size_t narrow_bytes = screen_buffer_byte_width(dsa_disp_mode_initial) * current_mode().size.y;
+            dsa_disp_mode = framebuffer_depth.update(source, screen_buffer_ptr() + narrow_bytes)
+                ? disp_mode : dsa_disp_mode_initial;
         }
 
-        const std::uint8_t *tail = screen_buffer_ptr() + narrow_bytes;
-        const std::size_t tail_size = wide_bytes - narrow_bytes;
+        if (!direct_framebuffer_mapped) {
+            return false;
+        }
+        const bool pixels_changed = direct_framebuffer.update(screen_buffer_ptr(),
+            screen_buffer_byte_width(dsa_disp_mode), current_mode().size.y);
+        const bool format_changed = previous_mode != dsa_disp_mode;
+        if (format_changed) {
+            direct_framebuffer.invalidate();
+        }
+        return pixels_changed || format_changed;
+    }
 
-        for (std::size_t i = 0; i < tail_size; i++) {
-            if (tail[i] != SCREEN_BUFFER_UNTOUCHED_FILL) {
-                LOG_INFO(SERVICE_WINDOW, "Direct screen access writes {} bit pixels, switching the framebuffer format",
-                    epoc::get_bpp_from_display_mode(disp_mode));
+    void screen::present_framebuffer(drivers::graphics_driver *driver, kernel_system *kern,
+        const eka2l1::rect *symbian_rects, const std::uint32_t rect_count) {
+        if (!driver) {
+            return;
+        }
 
-                dsa_disp_mode = disp_mode;
-                return true;
+        // Update the DSA screen texture
+        const epoc::config::screen_mode &mode_info = current_mode();
+        const eka2l1::vec2 screen_size = mode_info.size;
+
+        const char *data_ptr = reinterpret_cast<const char *>(screen_buffer_ptr());
+
+        const display_mode framebuffer_mode = dsa_disp_mode;
+        const bool texture_format_changed = dsa_texture_mode != framebuffer_mode;
+
+        // Use the selected layout consistently for the upload and its texture.
+        const std::uint32_t bits_per_pixel = epoc::get_bpp_from_display_mode(framebuffer_mode);
+        const std::size_t tight_screen_pitch = mode_info.size.x * sizeof(std::uint32_t);
+        const std::size_t framebuffer_pitch = screen_buffer_byte_width(framebuffer_mode);
+        const std::size_t screen_pitch = common::max(framebuffer_pitch, tight_screen_pitch);
+        const std::size_t buffer_size = screen_pitch * mode_info.size.y;
+        const std::size_t pixels_per_line = (screen_pitch != tight_screen_pitch)
+            ? screen_pitch / sizeof(std::uint32_t)
+            : 0;
+
+        std::unique_lock<std::mutex> guard(screen_mutex);
+
+        if (texture_format_changed && dsa_texture) {
+            // The transfer texture was made for the old depth; drop it and let the
+            // block below build one that matches.
+            drivers::graphics_command_builder discard_builder;
+            discard_builder.destroy_bitmap(dsa_texture);
+
+            drivers::command_list discard_list = discard_builder.retrieve_command_list();
+            driver->submit_command_list(discard_list);
+
+            dsa_texture = 0;
+        }
+
+        if (!dsa_texture) {
+            const int max_square_width = common::max<int>(screen_size.x, screen_size.y);
+
+            kern->unlock();
+            guard.unlock();
+
+            drivers::handle bitmap_handle = drivers::create_bitmap(driver, eka2l1::vec2(max_square_width, max_square_width), bits_per_pixel);
+
+            kern->lock();
+            guard.lock();
+
+            dsa_texture = bitmap_handle;
+            dsa_texture_mode = framebuffer_mode;
+        }
+
+        if (!screen_texture) {
+            set_screen_mode(nullptr, driver, crr_mode);
+        }
+
+        eka2l1::drivers::filter_option filter = (kern->get_config()->nearest_neighbor_filtering ? eka2l1::drivers::filter_option::nearest : eka2l1::drivers::filter_option::linear);
+        drivers::graphics_command_builder builder;
+
+        // Only one rectangle for now!
+        builder.update_bitmap(dsa_texture, data_ptr, buffer_size, { 0, 0 }, screen_size,
+            pixels_per_line);
+
+        // NOTE: This is a hack for some apps that dont fill alpha
+        // TODO: Figure out why or better solution (maybe the display mode is not really correct?)
+        switch (framebuffer_mode) {
+        case epoc::display_mode::color16m:
+        case epoc::display_mode::color16mu:
+        case epoc::display_mode::color16ma:
+            builder.set_swizzle(dsa_texture, drivers::channel_swizzle::red, drivers::channel_swizzle::green,
+                drivers::channel_swizzle::blue, drivers::channel_swizzle::one);
+
+            break;
+
+        default:
+            break;
+        }
+
+        const float rotation_draw = is_framebuffer_upside_down() ? 180.0f : 0.0f;
+        dsa_content_size = screen_size;
+        dsa_content_rotation = rotation_draw;
+
+        builder.bind_bitmap(screen_texture);
+        builder.set_feature(drivers::graphics_feature::clipping, false);
+        builder.set_texture_filter(dsa_texture, true, filter);
+        builder.set_texture_filter(dsa_texture, false, filter);
+
+        auto draw_area = [&](const eka2l1::rect &source_rect) {
+            eka2l1::rect dest_rect = source_rect;
+            if (rotation_draw != 0.0f) {
+                dest_rect.top = screen_size - source_rect.top;
+            }
+            dest_rect.scale(display_scale_factor);
+            builder.draw_bitmap(dsa_texture, 0, dest_rect, source_rect, eka2l1::vec2(0, 0), rotation_draw, 0);
+        };
+
+        auto draw_rows = [&](int first, int end) {
+            draw_area(eka2l1::rect(eka2l1::vec2(0, first), eka2l1::vec2(screen_size.x, end - first)));
+        };
+
+        if (direct_framebuffer_mapped && !(symbian_rects && rect_count)) {
+            const auto &rows = direct_framebuffer.written_rows();
+            for (int y = 0; y < static_cast<int>(rows.size());) {
+                if (!rows[y]) {
+                    ++y;
+                    continue;
+                }
+                const int first = y++;
+                while (y < static_cast<int>(rows.size()) && rows[y]) {
+                    ++y;
+                }
+                draw_rows(first, y);
+            }
+        } else if (symbian_rects && rect_count) {
+            common::region visible_region;
+            if (active_dsa_count_ > 0) {
+                window_dsa_region_walker dsa_walker;
+                root->walk_tree(&dsa_walker, epoc::window_tree_walk_style::bonjour_children);
+                visible_region = std::move(dsa_walker.region_);
+            } else {
+                visible_region.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), screen_size));
+            }
+
+            const common::region update_region = explicit_framebuffer_update_region(symbian_rects, rect_count,
+                visible_region, direct_framebuffer_mapped && active_dsa_count_ > 0);
+            for (const eka2l1::rect &area : update_region.rects_) {
+                draw_area(area);
+            }
+        } else {
+            draw_rows(0, screen_size.y);
+        }
+        builder.bind_bitmap(0);
+
+        drivers::command_list retrieved = builder.retrieve_command_list();
+        driver->submit_command_list(retrieved);
+
+        if (((flags_ & epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK) == 0) && sync_screen_buffer) {
+            // The app/game updates normally, try to avoid upscaling it
+            // Sometimes UI are mixed in, and these syncs need to sync UI's data too!
+            // Automatically flag and save this settings
+            if (focus) {
+                focus->saved_setting.screen_upscale_method = 1;
+                restore_from_config(driver, focus->saved_setting, nullptr);
+                try_change_display_rescale(driver, display_scale_factor);
             }
         }
 
-        return false;
+        fire_screen_redraw_callbacks(true);
     }
 
     void screen::sync_screen_buffer_data(drivers::graphics_driver *driver) {
@@ -241,8 +424,11 @@ namespace eka2l1::epoc {
             drivers::read_bitmap(driver, screen_texture, eka2l1::point(0, 0), eka2l1::object_size(crrmode.size),
                 bits_per_pixel, buffer_ptr);
 
-            if ((crrmode.rotation == 90) || (crrmode.rotation == 180)) {
+            if (is_framebuffer_upside_down()) {
                 flip_screen_image(buffer_ptr, tight_pitch, crrmode.size.y);
+            }
+            if (direct_framebuffer_mapped) {
+                direct_framebuffer.acknowledge(buffer_ptr);
             }
             return;
         }
@@ -251,8 +437,15 @@ namespace eka2l1::epoc {
         drivers::read_bitmap(driver, screen_texture, eka2l1::point(0, 0), eka2l1::object_size(crrmode.size),
             bits_per_pixel, tight_buffer.data());
 
-        if ((crrmode.rotation == 90) || (crrmode.rotation == 180)) {
+        if (is_framebuffer_upside_down()) {
             flip_screen_image(tight_buffer.data(), tight_pitch, crrmode.size.y);
+        }
+
+        for (std::int32_t y = 0; y < crrmode.size.y; y++) {
+            std::memcpy(buffer_ptr + y * framebuffer_pitch, tight_buffer.data() + y * tight_pitch, tight_pitch);
+        }
+        if (direct_framebuffer_mapped) {
+            direct_framebuffer.acknowledge(buffer_ptr);
         }
 
         for (std::int32_t y = 0; y < crrmode.size.y; y++) {
@@ -303,8 +496,15 @@ namespace eka2l1::epoc {
         builder.set_feature(eka2l1::drivers::graphics_feature::clipping, false);
         builder.set_feature(eka2l1::drivers::graphics_feature::stencil_test, false);
 
+        const bool full_redraw = flags_ & FLAG_SERVER_REDRAW_PENDING;
+        region_redraw_active_ = !full_redraw && !server_redraw_region_.empty();
+        if (region_redraw_active_) {
+            // Windows replay their stores over what is on screen, clipped to the region.
+            flags_ |= FLAG_SERVER_REDRAW_PENDING;
+        }
+
         builder.clear(eka2l1::vecx<float, 6>({ 0.0, 0.0, 0.0, 0.0, 1.0, 0.0 }), drivers::draw_buffer_bit_depth_buffer
-            | drivers::draw_buffer_bit_stencil_buffer | ((flags_ & FLAG_SERVER_REDRAW_PENDING) ? drivers::draw_buffer_bit_color_buffer : 0));
+            | drivers::draw_buffer_bit_stencil_buffer | (full_redraw ? drivers::draw_buffer_bit_color_buffer : 0));
 
         builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
             drivers::blend_factor::frag_out_alpha, drivers::blend_factor::one_minus_frag_out_alpha,
@@ -316,11 +516,22 @@ namespace eka2l1::epoc {
         window_drawer_walker adrawwalker(builder);
         root->walk_tree_back_to_front(&adrawwalker);
 
+        if (adrawwalker.bitmap_cache_) {
+            adrawwalker.bitmap_cache_->flush_retired(builder);
+        }
+
         // Done! Unbind and submit this to the driver
         builder.bind_bitmap(0);
 
         // Remove pending draw flags...
         flags_ &= ~(FLAG_SERVER_REDRAW_PENDING | FLAG_CLIENT_REDRAW_PENDING);
+        server_redraw_region_.make_empty();
+        region_redraw_active_ = false;
+
+        // Keep consuming visible decoder mailboxes at display boundaries.
+        if (adrawwalker.streaming_window_) {
+            adrawwalker.streaming_window_->canvas_base::try_update(nullptr);
+        }
 
         // Keep consuming visible decoder mailboxes at display boundaries.
         if (adrawwalker.streaming_window_) {
@@ -340,6 +551,10 @@ namespace eka2l1::epoc {
                 redraw_probe_count, number, screen_texture);
         }
 #endif
+        if (!driver) {
+            return;
+        }
+
         if (!screen_texture) {
             set_screen_mode(nullptr, driver, crr_mode);
         }
@@ -386,6 +601,10 @@ namespace eka2l1::epoc {
     }
 
     void screen::resize(drivers::graphics_driver *driver, const eka2l1::vec2 &new_size) {
+        if (!driver) {
+            return;
+        }
+
         // Make command list first, and bind our screen bitmap
         drivers::graphics_command_builder builder;
         bool need_bind = true;
@@ -426,7 +645,7 @@ namespace eka2l1::epoc {
             next_to_focus = reinterpret_cast<epoc::window_group *>(next_to_focus->sibling);
         }
 
-        return next_to_focus;
+        return next_to_focus && next_to_focus->client ? next_to_focus : nullptr;
     }
 
     void screen::restore_from_config(drivers::graphics_driver *driver,
@@ -441,13 +660,19 @@ namespace eka2l1::epoc {
 
         if (setting.screen_upscale_method != 0) {
             flags_ |= FLAG_SCREEN_UPSCALE_FACTOR_LOCK;
-            display_scale_factor = 1.0f;
+
+            // Assigning the factor alone would leave the screen bitmap at the old size, uncomposited.
+            if (driver) {
+                try_change_display_rescale(driver, 1.0f);
+            } else {
+                display_scale_factor = 1.0f;
+            }
         }
 
         requested_ui_scale_factor = setting.screen_upscale;
 
         if (driver) {
-            driver->set_upscale_shader(setting.filter_shader_path);
+            driver->set_upscale_shader(setting.filter_shader_name);
         }
     }
 
@@ -464,7 +689,7 @@ namespace eka2l1::epoc {
         setting.screen_upscale = requested_ui_scale_factor;
 
         if (driver) {
-            setting.filter_shader_path = driver->get_active_upscale_shader();
+            setting.filter_shader_name = driver->get_active_upscale_shader();
         }
     }
 
@@ -513,22 +738,24 @@ namespace eka2l1::epoc {
                 flags_ &= ~FLAG_SCREEN_UPSCALE_FACTOR_LOCK;
             }
 
+            // Restore the group's saved settings before the callbacks, so the orientation its app asks for wins
             if (new_focus_screen) {
                 serv->set_focus_screen(new_focus_screen);
 
                 alternative_focus->gain_focus();
 
+                new_focus_screen->restore_from_config(serv->get_graphics_driver(),
+                    alternative_focus->saved_setting, serv);
+
                 serv->send_focus_group_change_events(new_focus_screen);
                 new_focus_screen->fire_focus_change_callbacks(focus_change_target);
-
-                new_focus_screen->restore_from_config(serv->get_graphics_driver(), alternative_focus->saved_setting, serv);
             } else if (focus && is_me_currently_focus) {
                 focus->gain_focus();
 
+                restore_from_config(serv->get_graphics_driver(), focus->saved_setting, serv);
+
                 serv->send_focus_group_change_events(this);
                 fire_focus_change_callbacks(focus_change_target);
-
-                restore_from_config(serv->get_graphics_driver(), focus->saved_setting, serv);
             }
         }
 
@@ -550,6 +777,19 @@ namespace eka2l1::epoc {
 
     void screen::fire_screen_redraw_callbacks(const bool is_dsa) {
         const std::lock_guard<std::mutex> guard(screen_redraw_callback_mutex);
+        if (is_dsa) {
+            const auto now = std::chrono::steady_clock::now().time_since_epoch();
+            const auto tnow = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+            const std::uint64_t delta_fps = tnow - last_fps_check;
+            if (delta_fps >= common::microsecs_per_sec) {
+                last_fps = frame_passed_per_sec;
+                last_fps_check = tnow;
+
+                frame_passed_per_sec = 0;
+            }
+
+            frame_passed_per_sec++;
+        }
 
         for (auto &callback : screen_redraw_callbacks) {
             if (callback.second)
@@ -608,7 +848,13 @@ namespace eka2l1::epoc {
     }
 
     void screen::set_screen_mode(window_server *winserv, drivers::graphics_driver *drv, const int mode) {
+        const auto *new_mode = mode_info(mode);
+        if (!new_mode || !new_mode->defined) {
+            return;
+        }
+
         const int old_mode = crr_mode;
+        const bool display_mode_changed = disp_mode != new_mode->disp_mode;
         bool really_changed = false;
 
         if (crr_mode != mode) {
@@ -622,8 +868,26 @@ namespace eka2l1::epoc {
                 old_mode, mode, mode_info(mode)->size.x, mode_info(mode)->size.y);
         }
 
+        if (display_mode_changed) {
+            abort_all_dsas(dsa_terminate_screen_display_mode_change);
+        }
+
         crr_mode = mode;
-        resize(drv, mode_info(mode)->size);
+        if (really_changed) {
+            disp_mode = new_mode->disp_mode;
+            dsa_disp_mode_initial = new_mode->dsa_disp_mode;
+            reset_framebuffer_tracking();
+
+            if (drv && dsa_texture) {
+                drivers::graphics_command_builder builder;
+                builder.destroy_bitmap(dsa_texture);
+                auto commands = builder.retrieve_command_list();
+                drv->submit_command_list(commands);
+                dsa_texture = 0;
+            }
+        }
+
+        resize(drv, new_mode->size);
 
         if (really_changed) {
             fire_screen_mode_change_callbacks(old_mode);
@@ -635,8 +899,10 @@ namespace eka2l1::epoc {
             const epoc::config::screen_mode *modeinfo_n = mode_info(crr_mode);
 
             if (modeinfo_o && modeinfo_n) {
-                if (modeinfo_o->size != modeinfo_n->size) {
-                    abort_all_dsas(dsa_terminate_rotation_change);
+                if ((modeinfo_o->size != modeinfo_n->size) || display_mode_changed) {
+                    if (!display_mode_changed) {
+                        abort_all_dsas(dsa_terminate_rotation_change);
+                    }
                     
                     // Do it right now (when are we gonna redraw again to calculate the visible region clueless)
                     need_update_visible_regions(true);
@@ -646,31 +912,9 @@ namespace eka2l1::epoc {
         }
     }
 
-    void screen::vsync(ntimer *timing, std::uint64_t &next_vsync_us) {
-        const std::uint64_t tnow = common::get_current_utc_time_in_microseconds_since_epoch();
-
-        std::uint64_t delta = tnow - last_vsync;
-
-        const std::uint64_t microsecs_a_frame = 1000000 / refresh_rate;
-
-        if (delta < microsecs_a_frame) {
-            next_vsync_us = microsecs_a_frame - delta;
-        } else {
-            next_vsync_us = 0;
-        }
-
-        // Skip last vsync to next frame
-        last_vsync = ((tnow + microsecs_a_frame - 1) / microsecs_a_frame) * microsecs_a_frame;
-
-        const std::uint64_t delta_fps = tnow - last_fps_check;
-        if (delta_fps >= common::microsecs_per_sec) {
-            last_fps = frame_passed_per_sec;
-            last_fps_check = tnow;
-
-            frame_passed_per_sec = 0;
-        }
-
-        frame_passed_per_sec++;
+    std::uint64_t screen::vsync_delay_us() {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        return vsync_clock.wait_us(std::chrono::duration_cast<std::chrono::microseconds>(now).count(), refresh_rate);
     }
 
     const epoc::config::screen_mode *screen::mode_info(const int number) const {
@@ -700,10 +944,11 @@ namespace eka2l1::epoc {
         } else {
             // We need to confirm this rotation exists
             for (std::size_t i = 0; i < scr_config.modes.size(); i++) {
-                if (scr_config.modes[i].rotation == rot) {
+                if (scr_config.modes[i].defined && (scr_config.modes[i].rotation == rot)) {
                     // Reset the UI rotation
                     ui_rotation = 0;
                     set_screen_mode(winserv, drv, static_cast<int>(i));
+                    break;
                 }
             }
         }
@@ -729,6 +974,17 @@ namespace eka2l1::epoc {
         return reinterpret_cast<std::uint8_t *>(screen_buffer_chunk->host_base()) + sizeof(std::uint16_t) * WORD_PALETTE_ENTRIES_COUNT;
     }
 
+    bool screen::is_framebuffer_upside_down() const {
+        // A panel framebuffer reads 270 as the standard landscape, so 90 and 180 arrive flipped.
+        // A ScreenPlay framebuffer is a surface already turned to the device orientation.
+        if (is_screenplay_architecture()) {
+            return false;
+        }
+
+        const int rotation = current_mode().rotation;
+        return (rotation == 90) || (rotation == 180);
+    }
+
     std::uint32_t screen::screen_buffer_byte_width() const {
         return screen_buffer_byte_width(disp_mode);
     }
@@ -738,7 +994,8 @@ namespace eka2l1::epoc {
 
         // The buffer is laid out for the mode currently displayed, not for the panel's
         // native orientation, so a rotated mode gets its own row length.
-        const std::uint32_t tight_pitch = epoc::get_byte_width(current_mode().size.x, bits_per_pixel);
+        const std::uint32_t row_pixels = common::max<std::uint32_t>(current_mode().size.x, min_row_pixels_);
+        const std::uint32_t tight_pitch = epoc::get_byte_width(row_pixels, bits_per_pixel);
 
         // ScreenPlay phones expose their 32-bit display framebuffer with a
         // 64-byte-aligned pitch. Keep older bitmap-screen architectures on
@@ -777,7 +1034,9 @@ namespace eka2l1::epoc {
                         // The region that window can render is the region intersects with the current available left region
                         // Eliminating the intersected region that is reserved for this window, we got the next region left to go on.
                         winuser->visible_region = winuser->visible_region.intersect(visible_left_region_);
-                        visible_left_region_.eliminate(winuser->visible_region);
+                        if (!winuser->is_translucent()) {
+                            visible_left_region_.eliminate(winuser->visible_region);
+                        }
                     }
                 }
 
@@ -815,7 +1074,7 @@ namespace eka2l1::epoc {
 
     void screen::ref_dsa_usage() {
         if (active_dsa_count_ == 0) {
-            reset_dsa_depth_guess();
+            reset_framebuffer_tracking();
         }
 
         active_dsa_count_++;

@@ -33,6 +33,7 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
@@ -58,7 +59,6 @@ import com.github.eka2l1.R;
 import com.github.eka2l1.applist.AppItem;
 import com.github.eka2l1.settings.AppDataStore;
 import com.github.eka2l1.util.FileUtils;
-import com.github.eka2l1.util.BitmapUtils;
 
 import java.io.File;
 import java.io.IOException;
@@ -112,9 +112,11 @@ public class Emulator {
     private static Context context;
     private static boolean vibrationEnabled;
     private static Vibrator vibrator;
+    private static WifiManager.MulticastLock multicastLock;
     private static AlertDialog inputDialog;
 
     private static AlertDialog questionDialog;
+    private static long questionDialogId;
 
     private static String emulatorDir;
     private static String persistentDataDir;
@@ -124,6 +126,54 @@ public class Emulator {
     private static String scriptsDir;
     private static String screenshotDir;
     private static boolean init;
+    private static int debugControlPort;
+    private static java.lang.ref.WeakReference<android.app.Activity> debugHost = new java.lang.ref.WeakReference<>(null);
+    private static java.lang.ref.WeakReference<android.app.Activity> debugScreen = new java.lang.ref.WeakReference<>(null);
+
+    public static void configureDebugControl(android.app.Activity activity, Intent intent) {
+        if (intent.hasExtra("debug_control_port")) {
+            int port = intent.getIntExtra("debug_control_port", 0);
+            if (port < 1 || port > 65535) throw new IllegalArgumentException("debug_control_port must be 1..65535");
+            if (init && port != debugControlPort) throw new IllegalStateException("Restart the app to change the control port");
+            debugControlPort = port;
+        }
+        if (activity instanceof EmulatorActivity) debugScreen = new java.lang.ref.WeakReference<>(activity);
+        else debugHost = new java.lang.ref.WeakReference<>(activity);
+    }
+
+    public static boolean isDebugControlEnabled() { return debugControlPort != 0; }
+
+    @SuppressLint("unused")
+    public static void debugLaunchApp(long uid) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            android.app.Activity host = debugHost.get();
+            if (host == null) host = debugScreen.get();
+            if (host == null) return;
+            Intent intent = new Intent(host, EmulatorActivity.class);
+            intent.putExtra(Constants.KEY_APP_UID, uid);
+            intent.putExtra(Constants.KEY_APP_NAME, String.format("0x%08X", uid));
+            intent.putExtra("debug_control_port", debugControlPort);
+            host.startActivity(intent);
+        });
+    }
+
+    @SuppressLint("unused")
+    public static void debugCloseApp() {
+        android.app.Activity screen = debugScreen.get();
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (debugScreen.get() == screen) debugScreen.clear();
+            if (screen != null) screen.finish();
+        });
+    }
+
+    @SuppressLint("unused")
+    public static void debugContentChanged() {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            android.app.Activity host = debugHost.get();
+            if (host != null && debugScreen.get() == null) host.recreate();
+        });
+    }
+
     private static boolean load;
 
     static {
@@ -133,16 +183,18 @@ public class Emulator {
     public static void initializePath(Context context) {
         Emulator.context = context;
 
-        if (FileUtils.isExternalStorageLegacy()) {
-            String defaultEmulatorDir = Environment.getExternalStorageDirectory() + "/EKA2L1/";
+        final String defaultEmulatorDir = FileUtils.isExternalStorageLegacy()
+                ? Environment.getExternalStorageDirectory() + "/EKA2L1/"
+                : context.getExternalFilesDir(null).getPath() + "/";
 
-            // Order is important :)
-            persistentDataDir = defaultEmulatorDir;
-            emulatorDir = AppDataStore.getAndroidStore().getString(PREF_EMULATOR_DIR, defaultEmulatorDir);
-        } else {
-            emulatorDir = context.getExternalFilesDir(null).getPath() + "/";
-            persistentDataDir = emulatorDir;
-        }
+        // Order is important :) The settings store holds the working directory
+        // override, so it stays in the default directory, which is always reachable.
+        persistentDataDir = defaultEmulatorDir;
+
+        final String customDir = AppDataStore.getAndroidStore().getString(PREF_EMULATOR_DIR, null);
+        emulatorDir = FileUtils.isUsableWorkingDir(customDir)
+                ? FileUtils.ensureTrailingSeparator(customDir)
+                : defaultEmulatorDir;
 
         compatDir = emulatorDir + "compat/";
         configsDir = emulatorDir + "android/configs/";
@@ -187,11 +239,6 @@ public class Emulator {
         boolean shouldUpdate = checkUpdate();
         updateFolder("resources", shouldUpdate);
         updateFolder("patch", shouldUpdate);
-        // Glyph-fallback fonts (CJK). The native fbs loads them from the host-side
-        // "fonts/" folder relative to the working dir (see fbs load_fallback_host_fonts).
-        // Without this, western-firmware ROMs that lack CJK glyphs render Chinese as
-        // empty boxes (e.g. X-plore). Mirrors how the WASM build preloads assets/fonts.
-        updateFolder("fonts", shouldUpdate);
         copyFolder("compat", shouldUpdate);
         copyFolder("scripts", shouldUpdate);
 
@@ -253,19 +300,7 @@ public class Emulator {
             ArrayList<AppItem> items = new ArrayList<>();
             for (int i = 0; i < apps.length; i += 2) {
                 long appUid = Long.parseLong(apps[i]);
-                Bitmap[] iconAndMask = getAppIcon(appUid);
-
-                Bitmap finalIcon = null;
-                if (iconAndMask != null) {
-                    if ((iconAndMask.length == 1) || (iconAndMask[1] == null)) {
-                        finalIcon = iconAndMask[0];
-                    } else {
-                        finalIcon = BitmapUtils.SourceWithMergedSymbianMask(iconAndMask[0], iconAndMask[1]);
-
-                        iconAndMask[0].recycle();
-                        iconAndMask[1].recycle();
-                    }
-                }
+                Bitmap finalIcon = getAppIcon(appUid);
 
                 AppItem item = new AppItem(appUid, 0, apps[i + 1], finalIcon);
                 items.add(item);
@@ -284,9 +319,10 @@ public class Emulator {
         return items;
     }
 
-    public static Completable subscribeInstallDevice(String rpkgPath, String romPath, boolean installRPKG) {
+    public static Completable subscribeInstallDevice(String rpkgPath, String romPath, boolean installRPKG,
+                                                     boolean isolateDrives) {
         return Completable.create(emitter -> {
-            int installResult = installDevice(rpkgPath, romPath, installRPKG);
+            int installResult = installDevice(rpkgPath, romPath, installRPKG, isolateDrives);
 
             if (installResult == 0) {
                 emitter.onComplete();
@@ -313,7 +349,7 @@ public class Emulator {
             throw new IllegalStateException("Emulator is not initialized");
         }
         if (!init) {
-            init = startNative();
+            init = startNative(debugControlPort);
             load = true;
             if (!init) {
                 throw new IllegalStateException("Emulator is not initialized");
@@ -355,6 +391,26 @@ public class Emulator {
     public static void stopVibrate() {
         if (vibrator != null) {
             vibrator.cancel();
+        }
+    }
+
+    @SuppressLint("unused")
+    public static synchronized void setMulticastLock(boolean held) {
+        if (multicastLock == null) {
+            if (context == null) {
+                return;
+            }
+            WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager == null) {
+                return;
+            }
+            multicastLock = wifiManager.createMulticastLock("EKA2L1 netplay");
+            multicastLock.setReferenceCounted(false);
+        }
+        if (held) {
+            multicastLock.acquire();
+        } else if (multicastLock.isHeld()) {
+            multicastLock.release();
         }
     }
 
@@ -621,7 +677,14 @@ public class Emulator {
         });
     }
 
-    public static void showQuestionDialog(String text, String yesText, String noText) {
+    private static void finishQuestionDialog(long id, int result) {
+        if (questionDialog != null && questionDialogId == id) {
+            questionDialog = null;
+            submitQuestionDialogResponse(id, result);
+        }
+    }
+
+    public static void showQuestionDialog(long id, String text, String yesText, String noText) {
         new Handler(Looper.getMainLooper()).post(() -> {
             if (questionDialog == null) {
                 LinearLayout linearLayout = new LinearLayout(context);
@@ -643,30 +706,33 @@ public class Emulator {
 
                 if ((yesText == null) || (yesText.length() == 0)) {
                     builder = builder.setPositiveButton(android.R.string.ok, (dialogInterface, i) -> {
-                        Emulator.submitQuestionDialogResponse(1);
-                        questionDialog = null;
+                        finishQuestionDialog(id, 0);
                     });
                 } else {
                     builder = builder.setPositiveButton(yesText, (dialogInterface, i) -> {
-                        Emulator.submitQuestionDialogResponse(1);
-                        questionDialog = null;
+                        finishQuestionDialog(id, 0);
                     });
                 }
 
-                if ((noText == null) || (noText.length() == 0)) {
-                    builder = builder.setNegativeButton(android.R.string.cancel, (dialogInterface, i) -> {
-                        Emulator.submitQuestionDialogResponse(0);
-                        questionDialog = null;
-                    });
-                } else {
+                if (noText != null && !noText.isEmpty()) {
                     builder = builder.setNegativeButton(noText, (dialogInterface, i) -> {
-                        Emulator.submitQuestionDialogResponse(0);
-                        questionDialog = null;
+                        finishQuestionDialog(id, 1);
                     });
                 }
 
                 questionDialog = builder.create();
+                questionDialogId = id;
+                questionDialog.setOnCancelListener(dialog -> finishQuestionDialog(id, -1));
                 questionDialog.show();
+            }
+        });
+    }
+
+    public static void closeQuestionDialog(long id) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (questionDialog != null && questionDialogId == id) {
+                questionDialog.dismiss();
+                questionDialog = null;
             }
         });
     }
@@ -681,7 +747,10 @@ public class Emulator {
         });
     }
 
+    private static native void debugCloseNative();
+
     public static void exitInstance() {
+        if (isDebugControlEnabled()) { debugCloseNative(); debugCloseApp(); return; }
         Process.killProcess(Process.myPid());
     }
 
@@ -714,7 +783,7 @@ public class Emulator {
 
     private static native void setDirectory(String path);
 
-    private static native boolean startNative();
+    private static native boolean startNative(int debugControlPort);
 
     private static native String[] getApps();
 
@@ -742,9 +811,14 @@ public class Emulator {
 
     public static native void rescanDevices();
 
+    public static native boolean deleteDevice(int id);
+
     public static native int getCurrentDevice();
 
-    public static native int installDevice(String rpkgPath, String romPath, boolean installRPKG);
+    // Falls back to the current device when the code is null or unknown.
+    public static native boolean isTouchScreenDevice(String firmwareCode);
+
+    public static native int installDevice(String rpkgPath, String romPath, boolean installRPKG, boolean isolateDrives);
 
     public static native boolean doesRomNeedRPKG(String romPath);
 
@@ -758,9 +832,7 @@ public class Emulator {
 
     public static native void loadConfig();
 
-    public static native float getFps();
-
-    public static native boolean isFpsCounterEnabled();
+    public static native boolean validHostMapping(String hostname, String target);
 
     public static native void setLanguage(int languageId);
 
@@ -768,7 +840,9 @@ public class Emulator {
 
     public static native void updateAppSetting(int uid);
 
-    public static native Bitmap[] getAppIcon(long uid);
+    public static native int[] getScreenModeSizes();
+
+    public static native Bitmap getAppIcon(long uid);
 
     public static native String[] getLanguageIds();
 
@@ -781,7 +855,7 @@ public class Emulator {
     public static native void submitInput(String text);
 
 
-    public static native void submitQuestionDialogResponse(int value);
+    public static native void submitQuestionDialogResponse(long id, int value);
 
     public static native String[] getSuccessInstalledLicenseGames();
     public static native String[] getFailedInstalledLicenseGames();

@@ -21,6 +21,7 @@ add_library(native-lib SHARED
 target_link_libraries(native-lib PRIVATE
         android
         Catch2
+        control_native
         common
         cpu
         drivers
@@ -47,7 +48,15 @@ add_dependencies(native-lib
         vibractrl
         backlightctrl
         postingsurfacefactory
-        goommonitor)
+        goommonitor
+        ssl
+        commdb)
+
+set_property(TARGET native-lib APPEND PROPERTY LINK_DEPENDS
+        "${PROJECT_SOURCE_DIR}/src/patch/ssl/group/ssl_general.dll"
+        "${PROJECT_SOURCE_DIR}/src/patch/ssl/group/ssl.dll.map"
+        "${PROJECT_SOURCE_DIR}/src/patch/commdb/group/commdb_v6.dll"
+        "${PROJECT_SOURCE_DIR}/src/patch/commdb/group/commdb.dll.map")
 
 set(ASSETS_DIR "${PROJECT_SOURCE_DIR}/src/emu/android/app/src/main/assets")
 

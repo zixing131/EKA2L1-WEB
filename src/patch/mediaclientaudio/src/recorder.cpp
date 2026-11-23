@@ -28,12 +28,30 @@
 #include "impl.h"
 
 #include <e32std.h>
+#include <f32file.h>
+
+// A missing file is created by the recorder, so it opens like an empty one.
+static TInt ClipSize(const TDesC &aFileName) {
+    RFs fs;
+    TInt size = 0;
+
+    if (fs.Connect() == KErrNone) {
+        TEntry entry;
+        if (fs.Entry(aFileName, entry) == KErrNone) {
+            size = entry.iSize;
+        }
+
+        fs.Close();
+    }
+
+    return size;
+}
 
 ///============ RECORDER MAIN =================
 EXPORT_C CMdaAudioRecorderUtility *CMdaAudioRecorderUtility::NewL(MMdaObjectStateChangeObserver &aObserver, CMdaServer *aServer, TInt aPriority, TMdaPriorityPreference aPref) {
     CMdaAudioRecorderUtility *util = new (ELeave) CMdaAudioRecorderUtility();
     CleanupStack::PushL(util);
-    util->iProperties = CMMFMdaAudioRecorderUtility::NewL(aObserver, aPriority, aPref);
+    util->iProperties = CMMFMdaAudioRecorderUtility::NewL(*util, aObserver, aPriority, aPref);
     CleanupStack::Pop(util);
 
     return util;
@@ -44,7 +62,7 @@ CMdaAudioRecorderUtility::~CMdaAudioRecorderUtility() {
 }
 
 void CMdaAudioRecorderUtility::OpenFileL(const TDesC &aFileName) {
-    iProperties->SupplyUrlL(aFileName);
+    iProperties->OpenClip(aFileName, ClipSize(aFileName));
 }
 
 void CMdaAudioRecorderUtility::OpenDesL(const TDesC8 &aDescriptor) {
@@ -83,7 +101,7 @@ void CMdaAudioRecorderUtility::OpenL(TMdaClipLocation *aLocation, TMdaClipFormat
 
     if (supplyUrl) {
         TMdaFileClipLocation *urlLocation = reinterpret_cast<TMdaFileClipLocation *>(aLocation);
-        iProperties->SupplyUrlL(urlLocation->iName); // TODO mimetype tap
+        iProperties->OpenClip(urlLocation->iName, ClipSize(urlLocation->iName));
     } else {
         TMdaDesClipLocation *desLocation = reinterpret_cast<TMdaDesClipLocation *>(aLocation);
         iProperties->SupplyDataL(*desLocation->iDes);
@@ -118,6 +136,10 @@ void CMdaAudioRecorderUtility::OpenL(TMdaClipLocation *aLocation, TMdaClipFormat
 
         case KUidMdaWavImaAdpcmCodecDefine:
             auEncodingCC = KMMFFourCCCodeIMAD;
+            break;
+
+        case KUidMdaRawAmrCodecDefine:
+            auEncodingCC = KMMFFourCCCodeAMR;
             break;
 
         case KUidMdaWavPcmCodecDefine: {
@@ -212,16 +234,22 @@ CMdaAudioClipUtility::TState CMdaAudioRecorderUtility::State() {
 }
 
 void CMdaAudioRecorderUtility::Close() {
-    Stop();
+    iProperties->Close();
 }
 
 void CMdaAudioRecorderUtility::PlayL() {
     LogOut(KMcaCat, _L("Try to play bzzz bzzz"));
+
+    // Without an opened clip there is no playback controller, which MMF reports by leaving.
+    if (iProperties->State() == EMdaStateIdle) {
+        User::Leave(KErrNotSupported);
+    }
+
     iProperties->Play();
 }
 
 void CMdaAudioRecorderUtility::RecordL() {
-    LogOut(KMcaCat, _L("Unimplemented feature recording!"));
+    iProperties->Record();
 }
 
 void CMdaAudioRecorderUtility::Stop() {
@@ -241,14 +269,7 @@ const TTimeIntervalMicroSeconds &CMdaAudioRecorderUtility::Position() {
 }
 
 const TTimeIntervalMicroSeconds &CMdaAudioRecorderUtility::RecordTimeAvailable() {
-    LogOut(KMcaCat, _L("Unimplemented feature get available record time"));
-
-#ifdef EKA2
-    return 0;
-#else
-    TInt64 returnVal(0);
-    return TTimeIntervalMicroSeconds(returnVal);
-#endif
+    return iProperties->RecordTimeAvailable();
 }
 
 const TTimeIntervalMicroSeconds &CMdaAudioRecorderUtility::Duration() {
@@ -283,9 +304,12 @@ void CMdaAudioRecorderUtility::CropFromBeginningL() {
 #if (MCA_NEW >= 3)
 EXPORT_C void CMdaAudioRecorderUtility::OpenFileL(const RFile &aFile) {
     TFullName filePath;
-    aFile.FullName(filePath);
+    User::LeaveIfError(aFile.FullName(filePath));
 
-    iProperties->SupplyUrlL(filePath);
+    TInt size = 0;
+    User::LeaveIfError(aFile.Size(size));
+
+    iProperties->OpenClip(filePath, size);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::OpenFileL(const TMMSource &aSource) {
@@ -346,6 +370,13 @@ EXPORT_C void CMdaAudioRecorderUtility::UseSharedHeap() {
 #if (MCA_NEW >= 2)
 EXPORT_C void CMdaAudioRecorderUtility::OpenFileL(const TDesC &aFileName, TUid aRecordControllerUid,
     TUid aPlaybackControllerUid, TUid aDestinationFormatUid, TFourCC aDestinationDataType) {
+#ifdef EKA2
+    if (aRecordControllerUid == KNullUid) {
+        iProperties->OpenPlaybackFileL(aFileName, aPlaybackControllerUid, aDestinationFormatUid);
+        return;
+    }
+#endif
+
     LogOut(KMcaCat, _L("Unimplemented function to open recorder utility with file name to play/record!"));
 }
 
@@ -424,25 +455,39 @@ EXPORT_C void CMdaAudioRecorderUtility::SetPriority(TInt aPriority, TMdaPriority
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::GetSupportedDestinationDataTypesL(RArray<TFourCC> &aSupportedDataTypes) {
-    LogOut(KMcaCat, _L("Get supported destination data types unimplemented!"));
+    RArray<TUint> dataTypes;
+    CleanupClosePushL(dataTypes);
+
+    iProperties->GetSupportedDestValuesL(EAudioPlayerDestinationDataTypes, dataTypes);
+    aSupportedDataTypes.Reset();
+
+    for (TInt i = 0; i < dataTypes.Count(); i++) {
+        User::LeaveIfError(aSupportedDataTypes.Append(TFourCC(dataTypes[i])));
+    }
+
+    CleanupStack::PopAndDestroy(&dataTypes);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::SetDestinationDataTypeL(TFourCC aDataType) {
-    LogOut(KMcaCat, _L("Set destination data type unimplemented!"));
+    User::LeaveIfError(iProperties->SetDestCodec(aDataType));
 }
 
 EXPORT_C TFourCC CMdaAudioRecorderUtility::DestinationDataTypeL() {
-    LogOut(KMcaCat, _L("Get destination data type unimplemented!"));
-    return TFourCC(0, 0, 0, 0);
+    TFourCC dataType;
+    User::LeaveIfError(iProperties->GetDestCodec(dataType));
+
+    return dataType;
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::SetDestinationBitRateL(TUint aBitRate) {
-    LogOut(KMcaCat, _L("Set destination bitrate unimplemented!"));
+    User::LeaveIfError(iProperties->SetDestBitRate(aBitRate));
 }
 
 EXPORT_C TUint CMdaAudioRecorderUtility::DestinationBitRateL() {
-    LogOut(KMcaCat, _L("Destination bitrate unimplemented!"));
-    return 0;
+    const TInt result = iProperties->GetDestBitRate();
+    User::LeaveIfError(result);
+
+    return static_cast<TUint>(result);
 }
 
 #if (MCA_NEW >= 3)
@@ -460,7 +505,7 @@ EXPORT_C TUint CMdaAudioRecorderUtility::SourceBitRateL() {
 #endif
 
 EXPORT_C void CMdaAudioRecorderUtility::GetSupportedBitRatesL(RArray<TUint> &aSupportedBitRates) {
-    LogOut(KMcaCat, _L("Get supported bitrate unimplemented!"));
+    iProperties->GetSupportedDestValuesL(EAudioPlayerDestinationBitRates, aSupportedBitRates);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::SetDestinationSampleRateL(TUint aSampleRate) {
@@ -478,7 +523,7 @@ EXPORT_C TUint CMdaAudioRecorderUtility::DestinationSampleRateL() {
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::GetSupportedSampleRatesL(RArray<TUint> &aSupportedSampleRates) {
-    LogOut(KMcaCat, _L("Get supported sample rate unimplemented!"));
+    iProperties->GetSupportedDestValuesL(EAudioPlayerDestinationSampleRates, aSupportedSampleRates);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::SetDestinationFormatL(TUid aFormatUid) {
@@ -496,16 +541,18 @@ EXPORT_C TUid CMdaAudioRecorderUtility::DestinationFormatL() {
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::SetDestinationNumberOfChannelsL(TUint aNumberOfChannels) {
-    LogOut(KMcaCat, _L("Set destination number of channels unimplemented!"));
+    User::LeaveIfError(iProperties->SetDestChannelCount(aNumberOfChannels));
 }
 
 EXPORT_C TUint CMdaAudioRecorderUtility::DestinationNumberOfChannelsL() {
-    LogOut(KMcaCat, _L("Get destination number of channels unimplemented!"));
-    return 0;
+    const TInt result = iProperties->GetDestChannelCount();
+    User::LeaveIfError(result);
+
+    return static_cast<TUint>(result);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::GetSupportedNumberOfChannelsL(RArray<TUint> &aSupportedNumChannels) {
-    LogOut(KMcaCat, _L("Get supported number of channels unimplemented!"));
+    iProperties->GetSupportedDestValuesL(EAudioPlayerDestinationChannelCounts, aSupportedNumChannels);
 }
 
 EXPORT_C void CMdaAudioRecorderUtility::RegisterForAudioLoadingNotification(MAudioLoadingObserver &aCallback) {

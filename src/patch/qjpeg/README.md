@@ -4,11 +4,10 @@ A replacement for Qt's JPEG image format plugin that decodes on the host instead
 of running libjpeg under emulation. Qt applications reach it through the normal
 `QImageReader` plugin lookup.
 
-It is installed onto the guest's C drive (`C:\sys\bin\qjpeg.dll` plus the
-`imageformats` stub), not over the ROM copy, so Qt falls back to the ROM plugin
-on any ROM that refuses ours. There is deliberately no `.map` file: the patch-map
-mechanism resolves a patch DLL's imports during boot, when `qtcore.dll` is not
-attached to a process, and every Qt import would resolve to zero.
+`qjpeg.dll.map` makes the loader load this plugin in place of the ROM's
+`qjpeg.dll`, but only when the ROM's Qt would accept it (see the `qt-plugin`
+requirement in `lib_manager`). It carries the ROM plugin's UID3 and
+capabilities.
 
 See `docs/qt-jpeg-host-decode.md`.
 

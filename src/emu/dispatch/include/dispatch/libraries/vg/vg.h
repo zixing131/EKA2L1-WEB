@@ -4,8 +4,11 @@
 #include <dispatch/def.h>
 
 namespace eka2l1::dispatch {
+    BRIDGE_FUNC_LIBRARY(void, vg_flush_emu);
     BRIDGE_FUNC_LIBRARY(void, vg_gaussian_blur_emu, VGImage dst, VGImage src, VGfloat stdDeviationX, VGfloat stdDeviationY, VGTilingMode tilingMode);
-	BRIDGE_FUNC_LIBRARY(VGErrorCode, vg_get_error_emu);
+	BRIDGE_FUNC_LIBRARY(VGint, vg_get_error_emu);
+	BRIDGE_FUNC_LIBRARY(void, vg_finish_emu);
+	BRIDGE_FUNC_LIBRARY(VGint, vg_hardware_query_emu, VGHardwareQueryType key, VGint setting);
 	BRIDGE_FUNC_LIBRARY(void, vg_setf_emu, VGParamType type, VGfloat value);
 	BRIDGE_FUNC_LIBRARY(void, vg_seti_emu, VGParamType type, VGint value);
     BRIDGE_FUNC_LIBRARY(void, vg_setfv_emu, VGParamType type, VGint count, const VGfloat * values);
@@ -74,8 +77,8 @@ namespace eka2l1::dispatch {
 		VGint sx, VGint sy, VGint width, VGint height);
 	BRIDGE_FUNC_LIBRARY(void, vg_mask_emu, VGHandle mask, VGMaskOperation operation, VGint x, VGint y,
 		VGint width, VGint height);
-	/*BRIDGE_FUNC_LIBRARY(void, vg_render_to_mask_emu, VGPath path, VGbitfield paintModes,
-		VGMaskOperation operation);*/
+	BRIDGE_FUNC_LIBRARY(void, vg_render_to_mask_emu, VGPath path, VGbitfield paintModes,
+		VGMaskOperation operation);
 	BRIDGE_FUNC_LIBRARY(VGPath, vg_create_path_emu, VGint pathFormat, VGPathDatatype datatype,
 		VGfloat scale, VGfloat bias, VGint segmentCapacityHint, VGint coordCapacityHint,
 		VGbitfield capabilities);

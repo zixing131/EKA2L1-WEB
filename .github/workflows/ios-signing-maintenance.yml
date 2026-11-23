@@ -1,0 +1,112 @@
+# Manual maintenance for the Apple Developer account's signing certificates.
+#
+# Why this exists: the TestFlight workflow archives with automatic signing on
+# ephemeral runners. Without a persisted certificate secret, every run used to
+# mint a brand-new Apple Development certificate (the previous runner's private
+# key is gone), and the account eventually hits Apple's certificate cap:
+#   "Your account has reached the maximum number of certificates."
+# This workflow lists the account's certificates and can revoke the stale
+# CI-created ones, using the same App Store Connect API key secrets as the
+# TestFlight workflow (the key needs the Admin role to revoke).
+#
+# Usage (Actions tab -> iOS Signing Maintenance -> Run workflow):
+#   1. Run with action=list to print every certificate (id, type, name,
+#      expiration). Identify the stale Development certificates — keep the one
+#      matching your own Mac (check its serial in Keychain Access) if in doubt.
+#   2. Run with action=revoke and certificate_ids=<id1>,<id2>,... to revoke.
+#
+# Revoking a Development certificate only invalidates that certificate; apps
+# already installed keep running. A developer whose certificate was revoked
+# simply lets Xcode create a new one on next build.
+
+name: iOS Signing Maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "list = print all certificates; revoke = revoke certificate_ids"
+        required: true
+        default: list
+        type: choice
+        options:
+          - list
+          - revoke
+      certificate_ids:
+        description: "Comma-separated certificate ids to revoke (from a previous list run)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  maintain:
+    name: ${{ inputs.action }} certificates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check secrets
+        env:
+          CONFIGURED: ${{ secrets.APPSTORE_ISSUER_ID != '' && secrets.APPSTORE_KEY_ID != '' && secrets.APPSTORE_PRIVATE_KEY != '' }}
+        run: |
+          if [ "${CONFIGURED}" != "true" ]; then
+            echo "::error::APPSTORE_ISSUER_ID / APPSTORE_KEY_ID / APPSTORE_PRIVATE_KEY secrets are required."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pip3 install --quiet pyjwt cryptography requests
+
+      - name: ${{ inputs.action }} certificates
+        env:
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+          ACTION: ${{ inputs.action }}
+          CERTIFICATE_IDS: ${{ inputs.certificate_ids }}
+        run: |
+          python3 - <<'EOF'
+          import os, sys, time, jwt, requests
+
+          issuer = os.environ["APPSTORE_ISSUER_ID"]
+          key_id = os.environ["APPSTORE_KEY_ID"]
+          private_key = os.environ["APPSTORE_PRIVATE_KEY"]
+          action = os.environ["ACTION"]
+          ids = [i.strip() for i in os.environ.get("CERTIFICATE_IDS", "").split(",") if i.strip()]
+
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": issuer, "iat": now, "exp": now + 1200, "aud": "appstoreconnect-v1"},
+              private_key, algorithm="ES256", headers={"kid": key_id})
+          headers = {"Authorization": f"Bearer {token}"}
+          base = "https://api.appstoreconnect.apple.com/v1/certificates"
+
+          resp = requests.get(base, headers=headers, params={"limit": 200})
+          resp.raise_for_status()
+          certs = resp.json().get("data", [])
+
+          print(f"{'ID':<12} {'TYPE':<22} {'EXPIRES':<12} NAME")
+          for c in certs:
+              a = c["attributes"]
+              exp = (a.get("expirationDate") or "")[:10]
+              print(f"{c['id']:<12} {a.get('certificateType', ''):<22} {exp:<12} {a.get('displayName') or a.get('name') or ''}")
+          print(f"\ntotal: {len(certs)}")
+
+          if action == "revoke":
+              if not ids:
+                  print("::error::action=revoke requires certificate_ids")
+                  sys.exit(1)
+              known = {c["id"] for c in certs}
+              unknown = [i for i in ids if i not in known]
+              if unknown:
+                  print(f"::error::unknown certificate ids: {', '.join(unknown)}")
+                  sys.exit(1)
+              for cid in ids:
+                  r = requests.delete(f"{base}/{cid}", headers=headers)
+                  if r.status_code == 204:
+                      print(f"revoked {cid}")
+                  else:
+                      print(f"::error::failed to revoke {cid}: HTTP {r.status_code} {r.text}")
+                      sys.exit(1)
+          EOF

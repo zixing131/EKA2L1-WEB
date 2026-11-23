@@ -57,6 +57,7 @@ public class MainActivity extends BaseActivity {
     @SuppressLint("NewApi")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Emulator.configureDebugControl(this, getIntent());
         Emulator.initializePath(this);
 
         super.onCreate(savedInstanceState);
@@ -94,8 +95,12 @@ public class MainActivity extends BaseActivity {
     private void showAppList() {
         Emulator.initializeFolders();
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
-        AppsListFragment appsListFragment = new AppsListFragment();
         FragmentManager fragmentManager = getSupportFragmentManager();
+        // Keep the restored page and back stack together after activity recreation.
+        if (fragmentManager.findFragmentById(R.id.container) != null) {
+            return;
+        }
+        AppsListFragment appsListFragment = new AppsListFragment();
         fragmentManager.beginTransaction()
                 .replace(R.id.container, appsListFragment).commitNowAllowingStateLoss();
     }
@@ -110,7 +115,8 @@ public class MainActivity extends BaseActivity {
     }
 
     private void showScopedStorageDialog() {
-        String message = getString(R.string.scoped_storage_warning) + Emulator.getEmulatorDir();
+        String message = getString(R.string.scoped_storage_warning) + Emulator.getEmulatorDir()
+                + getString(R.string.scoped_storage_move_hint);
         new AlertDialog.Builder(this)
                 .setTitle(R.string.warning)
                 .setCancelable(false)

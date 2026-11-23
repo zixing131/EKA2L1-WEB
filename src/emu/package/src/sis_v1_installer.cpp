@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <loader/sis.h>
 #include <loader/sis_old.h>
 
@@ -71,7 +72,7 @@ namespace eka2l1::loader {
                 break;
             }
 
-            return io->exist(static_cast<sis_old_string_expression&>(*exist_expr.target_expression).value);
+            return io->exist(eka2l1::guest_path{static_cast<sis_old_string_expression&>(*exist_expr.target_expression).value});
         }
 
         case sis_old_file_expression_type_devcap:
@@ -166,12 +167,12 @@ namespace eka2l1::loader {
         for (std::size_t i = 0; i < record_to_iterate->size(); i++) {
             switch (record_to_iterate->at(i)->file_record_type) {
             case file_record_type_block:
-                sis_old_evaluate_block(*reinterpret_cast<sis_old_block*>(record_to_iterate->at(i).get()), files, io, resolver_cb, choosen_lang);
+                sis_old_evaluate_block(*static_cast<sis_old_block*>(record_to_iterate->at(i).get()), files, io, resolver_cb, choosen_lang);
                 break;
 
             case file_record_type_simple_file:
             case file_record_type_multiple_lang_file:
-                files.push_back(reinterpret_cast<sis_old_file*>(record_to_iterate->at(i).get()));
+                files.push_back(static_cast<sis_old_file*>(record_to_iterate->at(i).get()));
                 break;
 
             default:
@@ -180,15 +181,15 @@ namespace eka2l1::loader {
         }
     }
 
-    bool install_sis_old(const std::u16string &path, io_system *io, drive_number drive,
+    bool install_sis_old(const host_path &path, io_system *io, drive_number drive,
         package::object &info, choose_lang_func choose_lang_cb, var_value_resolver_func resolver_cb,
         progress_changed_callback progress_cb, cancel_requested_callback cancel_cb, const bool stub) {
-        std::optional<sis_old> res = *loader::parse_sis_old(common::ucs2_to_utf8(path));
-        if (!res.has_value()) {
+        std::optional<sis_old> res = loader::parse_sis_old(path);
+        if (!res.has_value() || res->comp_names.empty()) {
             return false;
         }
 
-        std::vector<std::u16string> more_sis;
+        std::vector<host_path> more_sis;
 
         info.drives = 1 << (drive - drive_a);
         info.uid = res->header.uid1;
@@ -257,20 +258,33 @@ namespace eka2l1::loader {
                 continue;
             }
 
-            std::u16string dest = file->dest;
+            // ROM stubs describe files already in the image and contain no payload.
+            if (stub) {
+                package::file_description desc;
+                desc.operation = static_cast<std::int32_t>(loader::ss_op::install);
+                desc.target = guest_path(file->dest);
+                desc.operation_options = 0;
+                desc.index = static_cast<std::uint32_t>(info.file_descriptions.size());
+                desc.sid = 0;
+                desc.uncompressed_length = file->file_infos[0].original_length;
+                info.file_descriptions.push_back(std::move(desc));
+                continue;
+            }
+
+            guest_path dest(file->dest);
             if (file->file_type == 2) {
                 static const char16_t *TEMP_SIS_FOLDER_PATH = u"E:\\system\\install\\temp\\";
-                dest = std::u16string(TEMP_SIS_FOLDER_PATH) + eka2l1::filename(file->name);
-                io->create_directories(TEMP_SIS_FOLDER_PATH);
+                dest = guest_path(std::u16string(TEMP_SIS_FOLDER_PATH) + eka2l1::filename(file->name));
+                io->create_directories(eka2l1::guest_path{TEMP_SIS_FOLDER_PATH});
             }
 
             if (dest.find(u"!") != std::u16string::npos) {
-                dest[0] = drive_to_char16(drive);
+                dest.replace(0, 1, std::u16string(1, drive_to_char16(drive)));
             }
 
             if ((file->file_type != 1) && dest != u"") {
-                std::string rp = eka2l1::file_directory(common::ucs2_to_utf8(dest));
-                io->create_directories(common::utf8_to_ucs2(rp));
+                guest_path rp = dest.parent();
+                io->create_directories(rp);
             } else {
                 continue;
             }
@@ -280,6 +294,9 @@ namespace eka2l1::loader {
             desc.target = dest;
 
             symfile f = io->open_file(dest, WRITE_MODE | BIN_MODE);
+            if (!f) {
+                return false;
+            }
 
             LOG_TRACE(PACKAGE, "Installing file {}", common::ucs2_to_utf8(dest));
 
@@ -300,7 +317,7 @@ namespace eka2l1::loader {
             std::vector<char> inflated;
             inflated.resize(0x100000);
 
-            common::ro_std_file_stream sis_file(common::ucs2_to_utf8(path), true);
+            common::ro_std_file_stream sis_file(eka2l1::host_path{common::ucs2_to_utf8(path)}, true);
             sis_file.seek(data_info->position, common::seek_where::beg);
 
             z_stream stream;
@@ -363,10 +380,10 @@ namespace eka2l1::loader {
             if (!(res->header.op & 0x8))
                 inflateEnd(&stream);
 
-            std::optional<std::u16string> raw_path_dest = io->get_raw_path(dest);
+            std::optional<host_path> raw_path_dest = io->get_raw_path(dest);
             if (raw_path_dest.has_value()) {
                 if (canceled) {
-                    common::remove(common::ucs2_to_utf8(raw_path_dest.value()));
+                    common::remove(eka2l1::host_path{common::ucs2_to_utf8(raw_path_dest.value())});
                 } else {
                     if (file->file_type == 2) {
                         more_sis.push_back(raw_path_dest.value());
@@ -383,18 +400,18 @@ namespace eka2l1::loader {
 
         if (canceled) {
             for (std::size_t i = 0; i < processed; i++) {
-                common::remove(common::ucs2_to_utf8(info.file_descriptions[i].target));
+                io->delete_entry(guest_path(info.file_descriptions[i].target));
             }
 
             return false;
         }
 
-        for (const std::u16string &path_more_sis: more_sis) {
+        for (const host_path &path_more_sis: more_sis) {
             if (!install_sis_old(path_more_sis, io, drive, info, choose_lang_cb, resolver_cb, progress_cb, cancel_cb, stub)) {
                 return false;
             }
 
-            common::remove(common::ucs2_to_utf8(path_more_sis));
+            common::remove(eka2l1::host_path{common::ucs2_to_utf8(path_more_sis)});
         }
 
         return true;

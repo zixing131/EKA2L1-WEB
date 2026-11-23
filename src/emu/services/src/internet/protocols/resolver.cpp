@@ -19,6 +19,8 @@
 
 #include <common/log.h>
 #include <common/platform.h>
+#include <config/config.h>
+#include <kernel/kernel.h>
 #include <services/internet/protocols/inet.h>
 
 #if EKA2L1_PLATFORM(WIN32)
@@ -27,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <unistd.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -41,7 +44,8 @@ namespace eka2l1::epoc::internet {
         , addr_family_(address_family)
         , protocol_id_(protocol_id)
         , prev_info_(nullptr)
-        , iterating_info_(nullptr) {
+        , iterating_info_(nullptr)
+        , mapped_port_(std::nullopt) {
     }
 
     inet_host_resolver::~inet_host_resolver() {
@@ -51,8 +55,11 @@ namespace eka2l1::epoc::internet {
     }
 
     std::u16string inet_host_resolver::host_name() const {
-        // I don't think this has much meaning
-        return u"";
+        char name[256]{};
+        if (gethostname(name, sizeof(name) - 1) != 0 || name[0] == '\0') {
+            return u"localhost";
+        }
+        return common::utf8_to_ucs2(name);
     }
 
     bool inet_host_resolver::host_name(const std::u16string &name) {
@@ -108,11 +115,8 @@ namespace eka2l1::epoc::internet {
     }
 
     void addrinfo_to_name_entry(epoc::socket::name_entry &supply_and_result, addrinfo *result_info) {
-        if (result_info->ai_family == AF_INET6) {
-            host_sockaddr_v6_to_guest_saddress(result_info->ai_addr, supply_and_result.addr_);
-        } else {
-            host_sockaddr_v4_to_guest_saddress(result_info->ai_addr, supply_and_result.addr_);
-        }
+        host_sockaddr_to_guest_saddress(result_info->ai_addr, supply_and_result.addr_, &supply_and_result.length_, true);
+        supply_and_result.flags_ = 0;
     }
 
     void inet_host_resolver::next(epoc::socket::name_entry *result, epoc::notify_info &complete_info) {
@@ -122,6 +126,9 @@ namespace eka2l1::epoc::internet {
         }
 
         addrinfo_to_name_entry(*result, iterating_info_);
+        if (mapped_port_) {
+            papa_->map_host_port(iterating_info_->ai_addr, *mapped_port_, result->addr_);
+        }
         iterating_info_ = iterating_info_->ai_next;
 
         complete_info.complete(epoc::error_none);
@@ -133,11 +140,18 @@ namespace eka2l1::epoc::internet {
     }
 
     void inet_host_resolver::get_by_name(epoc::socket::name_entry *supply_and_result, epoc::notify_info &complete_info) {
-        const std::string name_utf8 = common::ucs2_to_utf8(supply_and_result->name_.to_std_string(nullptr));
+        std::string name_utf8 = common::ucs2_to_utf8(supply_and_result->name_.to_std_string(nullptr));
+        const auto overridden = papa_->get_kernel_system()->get_config()->host_override(name_utf8);
+        mapped_port_ = overridden ? overridden->port : std::nullopt;
+        if (overridden) {
+            name_utf8 = overridden->hostname;
+        }
     
         if (prev_info_) {
             freeaddrinfo(prev_info_);
+            prev_info_ = nullptr;
         }
+        iterating_info_ = nullptr;
 
         // Set hint
         addrinfo hint_info;
@@ -146,6 +160,7 @@ namespace eka2l1::epoc::internet {
         hint_info.ai_family = (addr_family_ == INET6_ADDRESS_FAMILY) ? AF_INET6 : AF_INET;
         hint_info.ai_socktype = (protocol_id_ == INET_UDP_PROTOCOL_ID) ? SOCK_DGRAM : SOCK_STREAM; 
         hint_info.ai_protocol = (protocol_id_ == INET_UDP_PROTOCOL_ID) ? IPPROTO_UDP : IPPROTO_TCP;
+        hint_info.ai_flags = config::numeric_host_address(name_utf8) ? AI_NUMERICHOST : 0;
 
         addrinfo *result_info = nullptr;
         const int result_code = getaddrinfo(name_utf8.c_str(), nullptr, &hint_info, &result_info);
@@ -165,6 +180,9 @@ namespace eka2l1::epoc::internet {
         }
 
         addrinfo_to_name_entry(*supply_and_result, result_info);
+        if (overridden && overridden->port) {
+            papa_->map_host_port(result_info->ai_addr, *overridden->port, supply_and_result->addr_);
+        }
 
         prev_info_ = result_info;
         iterating_info_ = result_info->ai_next;

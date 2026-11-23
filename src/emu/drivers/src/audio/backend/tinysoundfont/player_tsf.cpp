@@ -32,6 +32,7 @@
  * copies or substantial portions of the Software.
  */
 
+#include <common/path_types.h>
 #include <drivers/audio/backend/tinysoundfont/player_tsf.h>
 #include <drivers/audio/audio.h>
 
@@ -63,19 +64,23 @@ namespace eka2l1::drivers {
             return this->data_callback(data, fc);
         });
 
-        std::string bank_path = "resources/defaultbank.sf2";
-        std::optional<std::string> bank_path_stored = driver->get_bank_path(drivers::MIDI_BANK_TYPE_SF2);
+        host_path bank_path("resources/defaultbank.sf2");
+        std::optional<host_path> bank_path_stored = driver->get_bank_path(drivers::MIDI_BANK_TYPE_SF2);
 
         if (bank_path_stored.has_value()) {
             bank_path = bank_path_stored.value();
         }
 
         synth_ = load_bank_from_file(bank_path);
+        if (!synth_) {
+            LOG_ERROR(DRIVER_AUD, "Failed to load SF2 bank: {}", bank_path);
+            return;
+        }
 
         tsf_channel_set_bank_preset(synth_, 9, 128, 0);
         tsf_set_output(synth_, (TSF_CHANNEL_COUNT == 1) ? TSF_MONO : TSF_STEREO_INTERLEAVED, TSF_SAMPLE_RATE, 0.0f);
 
-        bank_change_callback_ = driver->add_bank_change_callback([&](const midi_bank_type type, const std::string &new_path) {
+        bank_change_callback_ = driver->add_bank_change_callback([&](const midi_bank_type type, const host_path &new_path) {
             return call_bank_change(type, new_path);
         });
     }
@@ -106,7 +111,7 @@ namespace eka2l1::drivers {
         std::size_t frame_count_org = frame_count;
         std::size_t block_frame_count = TSF_RENDER_EFFECTSAMPLEBLOCK;
 
-        if (!playing_message_) {
+        if (!synth_ || !playing_message_) {
             memset(buffer, 0, frame_count * TSF_CHANNEL_COUNT * sizeof(std::int16_t));
             return frame_count;
         }
@@ -185,7 +190,7 @@ namespace eka2l1::drivers {
             callback_(userdata_.data());
     }
 
-    tsf *player_tsf::load_bank_from_file(const std::string &path) {
+    tsf *player_tsf::load_bank_from_file(const host_path &path) {
         common::ro_std_file_stream stream(path, true);
         if (!stream.valid()) {
             return nullptr;
@@ -207,7 +212,7 @@ namespace eka2l1::drivers {
         return tsf_load(&tstream);
     }
 
-    void player_tsf::call_bank_change(const midi_bank_type type, const std::string &new_path) {
+    void player_tsf::call_bank_change(const midi_bank_type type, const host_path &new_path) {
         if (type == MIDI_BANK_TYPE_SF2) {
             const std::lock_guard<std::mutex> guard(lock_);
             
@@ -230,7 +235,7 @@ namespace eka2l1::drivers {
             return true;
         }
 
-        if (!begin_msg_) {
+        if (!synth_ || !begin_msg_) {
             return false;
         }
 
@@ -280,8 +285,12 @@ namespace eka2l1::drivers {
     }
 
     bool player_tsf::open_url(const std::string &url) {
+        if (!synth_) {
+            return false;
+        }
+
         // Roundabout cause fopen can't read UTF8 url (which is what TML uses)
-        common::ro_std_file_stream stream(url, true);
+        common::ro_std_file_stream stream(eka2l1::host_path{url}, true);
         if (!stream.valid()) {
             return false;
         }
@@ -318,6 +327,10 @@ namespace eka2l1::drivers {
     }
 
     bool player_tsf::open_custom(common::rw_stream *stream) {
+        if (!synth_) {
+            return false;
+        }
+
         tsf_stream tstream;
         tstream.data = stream;
         tstream.read = [](void *data, void *ptr, unsigned int size) -> int {
@@ -358,10 +371,10 @@ namespace eka2l1::drivers {
 
         repeat_count_ = repeat_times;
         repeat_left_ = repeat_count_;
-        silence_intervals_us_ = silence_intervals_us_;
-
-        if (silence_intervals_us_ < 0) {
+        if (silence_intervals_micros < 0) {
             silence_intervals_us_ = 0;
+        } else {
+            silence_intervals_us_ = static_cast<std::uint32_t>(silence_intervals_micros);
         }
     }
 

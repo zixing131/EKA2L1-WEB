@@ -33,6 +33,7 @@
 #include <kernel/common.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <map>
 #include <stack>
@@ -61,6 +62,7 @@ namespace eka2l1::dispatch {
         EGL_PBUFFER_BIT_EMU = 1,
         EGL_PIXMAP_BIT_EMU = 2,
         EGL_WINDOW_BIT_EMU = 4,
+        EGL_CORE_NATIVE_ENGINE_EMU = 0x305B,
         EGL_MAJOR_VERSION_EMU = 1,
         EGL_MINOR_VERSION_EMU = 4,
         EGL_SUCCESS = 0x3000,
@@ -69,6 +71,7 @@ namespace eka2l1::dispatch {
         EGL_BAD_CONFIG = 0x3005,
         EGL_BAD_CONTEXT_EMU = 0x3006,
         EGL_BAD_DISPLAY_EMU = 0x3008,
+        EGL_BAD_MATCH_EMU = 0x3009,
         EGL_BAD_NATIVE_PIXMAP_EMU = 0x300A,
         EGL_BAD_NATIVE_WINDOW_EMU = 0x300B,
         EGL_BAD_PARAMETER_EMU = 0x300C,
@@ -81,14 +84,33 @@ namespace eka2l1::dispatch {
         EGL_DEPTH_SIZE_EMU = 0x3025,
         EGL_STENCIL_SIZE_EMU = 0x3026,
         EGL_CONFIG_CAVEAT_EMU = 0x3027,
+        EGL_CONFIG_ID_EMU = 0x3028,
+        EGL_LEVEL_EMU = 0x3029,
         EGL_MAX_PBUFFER_HEIGHT_EMU = 0x302A,
+        EGL_MAX_PBUFFER_PIXELS_EMU = 0x302B,
         EGL_MAX_PBUFFER_WIDTH_EMU = 0x302C,
+        EGL_NATIVE_RENDERABLE_EMU = 0x302D,
+        EGL_NATIVE_VISUAL_ID_EMU = 0x302E,
+        EGL_NATIVE_VISUAL_TYPE_EMU = 0x302F,
+        EGL_SAMPLES_EMU = 0x3031,
         EGL_SAMPLE_BUFFERS_EMU = 0x3032,
         EGL_SURFACE_TYPE_EMU = 0x3033,
+        EGL_TRANSPARENT_TYPE_EMU = 0x3034,
+        EGL_TRANSPARENT_BLUE_VALUE_EMU = 0x3035,
+        EGL_TRANSPARENT_GREEN_VALUE_EMU = 0x3036,
+        EGL_TRANSPARENT_RED_VALUE_EMU = 0x3037,
         EGL_NONE_EMU = 0x3038,
         EGL_BIND_TO_TEXTURE_RGB_EMU = 0x3039,
         EGL_BIND_TO_TEXTURE_RGBA_EMU = 0x303A,
+        EGL_MIN_SWAP_INTERVAL_EMU = 0x303B,
+        EGL_MAX_SWAP_INTERVAL_EMU = 0x303C,
+        EGL_LUMINANCE_SIZE_EMU = 0x303D,
+        EGL_ALPHA_MASK_SIZE_EMU = 0x303E,
+        EGL_COLOR_BUFFER_TYPE_EMU = 0x303F,
         EGL_RENDERABLE_TYPE_EMU = 0x3040,
+        EGL_CONFORMANT_EMU = 0x3042,
+        EGL_CLIENT_APIS_EMU = 0x308D,
+        EGL_RGB_BUFFER_EMU = 0x308E,
         EGL_VENDOR_EMU = 0x3053,
         EGL_VERSION_EMU = 0x3054,
         EGL_EXTENSIONS_EMU = 0x3055,
@@ -96,6 +118,13 @@ namespace eka2l1::dispatch {
         EGL_WIDTH_EMU = 0x3057,
         EGL_DRAW_EMU = 0x3059,
         EGL_READ_EMU = 0x305A,
+        EGL_NO_TEXTURE_EMU = 0x305C,
+        EGL_TEXTURE_RGB_EMU = 0x305D,
+        EGL_TEXTURE_RGBA_EMU = 0x305E,
+        EGL_TEXTURE_2D_EMU = 0x305F,
+        EGL_TEXTURE_FORMAT_EMU = 0x3080,
+        EGL_TEXTURE_TARGET_EMU = 0x3081,
+        EGL_BACK_BUFFER_EMU = 0x3084,
         EGL_SWAP_BEHAVIOUR = 0x3093,
         EGL_SWAP_BUFFER_PRESERVED = 0x3094,
         EGL_SWAP_BUFFER_DESTROYED = 0x3095,
@@ -124,6 +153,7 @@ namespace eka2l1::dispatch {
         GL_FRONT_EMU = 0x0404,
         GL_BACK_EMU = 0x0405,
         GL_FRONT_AND_BACK_EMU = 0x0408,
+        GL_OUT_OF_MEMORY = 0x0505,
         GL_INVALID_ENUM = 0x0500,
         GL_INVALID_VALUE = 0x0501,
         GL_INVALID_OPERATION = 0x0502,
@@ -307,8 +337,19 @@ namespace eka2l1::dispatch {
         GL_TEXTURE_MIN_FILTER_EMU = 0x2801,
         GL_TEXTURE_WRAP_S_EMU = 0x2802,
         GL_TEXTURE_WRAP_T_EMU = 0x2803,
+        GL_POINT_SIZE_EMU = 0x0B11,
+        GL_POINT_SPRITE_OES = 0x8861,
+        GL_COORD_REPLACE_OES = 0x8862,
+        GL_POINT_SIZE_ARRAY_OES = 0x8B9C,
+        GL_POINT_SIZE_ARRAY_TYPE_OES = 0x898A,
+        GL_POINT_SIZE_ARRAY_STRIDE_OES = 0x898B,
+        GL_POINT_SIZE_ARRAY_POINTER_OES = 0x898C,
+        GL_POINT_SIZE_ARRAY_BUFFER_BINDING_OES = 0x8B9F,
         GL_POINT_SIZE_MIN_EMU = 0x8126,
         GL_POINT_SIZE_MAX_EMU = 0x8127,
+        GL_POINT_FADE_THRESHOLD_SIZE_EMU = 0x8128,
+        GL_POINT_DISTANCE_ATTENUATION_EMU = 0x8129,
+        GL_ALIASED_POINT_SIZE_RANGE_EMU = 0x846D,
         GL_GENERATE_MIPMAP_EMU = 0x8191,
         GL_REPEAT_EMU = 0x2901,
         GL_CLAMP_TO_EDGE_EMU = 0x812F,
@@ -369,6 +410,13 @@ namespace eka2l1::dispatch {
         GL_CURRENT_NORMAL_EMU = 0x0B02,
         GL_CURRENT_TEXTURE_COORDS_EMU = 0x0B03,
         GL_DEPTH_WRITEMASK_EMU = 0x0B72,
+        GL_DEPTH_RANGE_EMU = 0x0B70,
+        GL_DEPTH_FUNC_EMU = 0x0B74,
+        GL_FRONT_FACE_EMU = 0x0B46,
+        GL_SHADE_MODEL_EMU = 0x0B54,
+        GL_SCISSOR_BOX_EMU = 0x0C10,
+        GL_POLYGON_OFFSET_FACTOR_EMU = 0x8038,
+        GL_POLYGON_OFFSET_UNITS_EMU = 0x2A00,
         GL_DEPTH_CLEAR_EMU = 0x0B73,
         GL_MATRIX_MODE_EMU = 0x0BA0,
         GL_VIEWPORT_EMU = 0x0BA2,
@@ -463,6 +511,7 @@ namespace eka2l1::dispatch {
     static constexpr const char *EGL_STATIC_STRING_VENDOR = "EKA2L1";
     static constexpr const char *EGL_STATIC_STRING_VERSION = "1.4";
     static constexpr const char *EGL_STATIC_STRING_EXTENSION = "EGL_KHR_create_context EGL_NOK_resource_profiling2";
+    static constexpr const char *EGL_STATIC_STRING_CLIENT_APIS = "OpenGL_ES OpenVG";
     static constexpr std::uint32_t EGL_PROF_QUERY_GLOBAL_BIT_NOK_EMU = 0x0001;
     static constexpr std::uint32_t EGL_PROF_QUERY_MEMORY_USAGE_BIT_NOK_EMU = 0x0002;
     static constexpr std::int32_t EGL_PROF_TOTAL_MEMORY_NOK_EMU = 0x3070;
@@ -499,6 +548,8 @@ namespace eka2l1::dispatch {
         std::uint8_t green_bits() const;
         std::uint8_t blue_bits() const;
         std::uint8_t alpha_bits() const;
+        std::uint8_t depth_bits() const { return (config_ & 0x20) ? 16 : 24; }
+        std::uint8_t stencil_bits() const { return (config_ & 0x20) ? 0 : 8; }
 
         target_context_version get_target_context_version();
         void set_target_context_version(const target_context_version ver);
@@ -529,6 +580,10 @@ namespace eka2l1::dispatch {
 
         float current_scale_;
         egl_context *bounded_context_;
+        bool is_pbuffer_ = false;
+        std::uint32_t texture_format_ = EGL_NO_TEXTURE_EMU;
+        std::shared_ptr<std::function<void()>> pixmap_readback_;
+        std::function<void()> pixmap_upload_;
 
         explicit egl_surface(epoc::canvas_base *backed_window, epoc::screen *screen, eka2l1::vec2 dim,
             drivers::handle h, egl_config config);
@@ -564,6 +619,9 @@ namespace eka2l1::dispatch {
         virtual egl_context_type context_type() const = 0;
         virtual void init_context_state() = 0;
         virtual void on_surface_changed(drivers::graphics_driver *driver, egl_surface *prev_read, egl_surface *prev_draw) {}
+
+        // The current draw surface was reallocated at a new size (window resize or display rescale).
+        virtual void on_draw_surface_resized(drivers::graphics_driver *driver) {}
         virtual void on_being_set_current() {}
     };
 

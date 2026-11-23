@@ -165,6 +165,10 @@ namespace eka2l1::epoc {
     }
 
     void animation_scheduler::scan_for_redraw(drivers::graphics_driver *driver, const int screen_number, const bool force_redraw) {
+        if (!driver) {
+            return;
+        }
+
         anim_schedule *sched = get_scheduled_screen_update(screen_number);
 
         if (sched) {
@@ -224,6 +228,10 @@ namespace eka2l1::epoc {
     }
 
     void animation_scheduler::invoke_due_animation(drivers::graphics_driver *driver, const int screen_number) {
+        if (!driver) {
+            return;
+        }
+
         lock_.lock();
 
         anim_schedule *sched = get_scheduled_screen_update(screen_number);

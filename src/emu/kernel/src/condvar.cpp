@@ -52,11 +52,13 @@ namespace eka2l1::kernel {
             thread *thr = waits.top();
             waits.pop();
 
+            thr->wait_obj = nullptr;
             thr->get_scheduler()->dewait(thr);
         }
 
         while (!suspended.empty()) {
             thread *thr = E_LOFF(suspended.first()->deque(), thread, suspend_link);
+            thr->wait_obj = nullptr;
             thr->get_scheduler()->dewait(thr);
         }
 
@@ -133,6 +135,12 @@ namespace eka2l1::kernel {
             return;
         }
 
+        // Already woken or stopped while this event was in flight
+        if (thr->wait_obj != this) {
+            kern->unlock();
+            return;
+        }
+
         if (thr->state == thread_state::wait_condvar_suspend) {
             thr->suspend_link.deque();
         } else {
@@ -143,6 +151,21 @@ namespace eka2l1::kernel {
         thr->ctx.cpu_registers[0] = epoc::error_timed_out;
         unblock_thread(thr);
 
+    }
+
+    void condvar::cancel_wait(thread *thr) {
+        if (thr->state == thread_state::wait_condvar_suspend) {
+            thr->suspend_link.deque();
+        } else {
+            waits.remove(thr);
+        }
+
+        thr->wait_obj = nullptr;
+
+        if (timing_out_thrs_.erase(thr)) {
+            timing_->unschedule_event(timeout_event_, thr->unique_id());
+            thr->decrease_access_count();
+        }
     }
 
     void condvar::unblock_thread(thread *thr) {

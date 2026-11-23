@@ -101,3 +101,38 @@ On both the RM-409 and RM-320 simulators, 7Days remained on its first screen
 after repeated left-soft-key presses with no guest panic, fatal error, or access
 violation. Calculator still opened its populated Options menu with the left soft
 key and closed it with the right soft key.
+
+## N80: empty menus interrupt direct screen access
+
+The RM-92 Avkon build has a second empty-menu problem. It constructs and
+activates the menu's CBA before initializing the menu contents. With Massive
+Snowboarding, that temporary softkey window covers the bottom 40 screen rows,
+so WSERV correctly aborts the game's direct screen access. The empty menu then
+closes, but the game's `MDirectScreenAccess::Restart` callback does nothing.
+Rendering stops; a later window redraw replaces the last frame with black.
+The guest still handles events, so this is not a kernel or graphics deadlock.
+
+Changing DSA cancellation or ignoring the temporary occlusion would violate
+the screen-access contract. The later public Avkon implementation instead
+creates the CBA only after restoring and validating the menu titles, and delays
+its activation until the menu is displayed. Its empty-title and empty-pane
+paths return without exposing a softkey window.
+
+The RM-92 compatibility hooks move its existing CBA construction to the
+populated-menu branch. The original empty-pane cleanup and populated-menu
+display code remain in use. The menu resource is preserved in a stack scratch
+slot that the positioning code uses only after validation. The empty-title
+guard also uses the existing null-safe cleanup, as on RM-409 and RM-320.
+The export-70 span fingerprint is `0x5903C871`; hooks at offsets `0x116`,
+`0x16C`, `0x23C` and `0x128` defer construction, guard the title index, invoke
+construction for a populated pane and resume display respectively. Native
+and Lua implementations share these offsets, with no application UID checks.
+
+Validated on the Release iOS Simulator at `475e957a3` plus this patch: the
+default regression suite passed 12/12. On RM-92, repeated left-soft-key presses
+in Massive's language, main, player and peak menus no longer stop rendering.
+Single Run reaches the slope, the left soft key opens the game's pause menu,
+and resuming restores skiing and steering. App. manager's populated Options
+menu still opens, navigates and closes. Screenshots were reviewed and the
+affected game log contained no guest panics, access violations, graphics halts
+or temporary diagnostics. The matching Lua script passed a LuaJIT syntax check.

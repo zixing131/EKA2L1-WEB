@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <dispatch/audio.h>
 #include <dispatch/dispatcher.h>
 #include <vfs/vfs.h>
@@ -28,6 +29,7 @@
 
 #include <kernel/kernel.h>
 #include <kernel/process.h>
+#include <kernel/timing.h>
 #include <utils/err.h>
 #include <utils/reqsts.h>
 
@@ -39,8 +41,9 @@
 
 #include <utils/des.h>
 
-#include <thread>
+#include <algorithm>
 #include <chrono>
+#include <thread>
 
 using namespace std::literals::chrono_literals;
 
@@ -119,6 +122,8 @@ namespace eka2l1::dispatch {
         // default member destruction leaves a window where the callback reads
         // a null impl_. Stop the hardware stream (waits out any callback in
         // flight) and destroy the player while the rest of us is still alive.
+        stop_recording();
+
         if (impl_) {
             impl_->stop();
             impl_.reset();
@@ -216,6 +221,97 @@ namespace eka2l1::dispatch {
         eaudio_player_custom_async(sys, func_num, destination, function, data1, data2, nullptr, status);
     }
 
+    bool dsp_epoc_player::open_record_clip(const eka2l1::host_path &file_path) {
+        if (is_recording()) {
+            return false;
+        }
+
+        record_clip_ = drivers::new_clip_writer(eka2l1::host_path{file_path});
+        record_clip_path_ = file_path;
+
+        return record_clip_ != nullptr;
+    }
+
+    bool dsp_epoc_player::start_recording(drivers::audio_driver *driver, const eka2l1::host_path &file_path) {
+        if (record_stream_ || !driver) {
+            return false;
+        }
+
+        if ((!record_clip_ || (record_clip_path_ != file_path)) && !open_record_clip(file_path)) {
+            LOG_ERROR(HLE_AUD, "Unable to record into {}: its format cannot be written or appended to", file_path);
+            return false;
+        }
+
+        if (!record_clip_->begin()) {
+            LOG_ERROR(HLE_AUD, "Unable to open {} for recording", file_path);
+            return false;
+        }
+
+        const drivers::clip_record_format format = record_clip_->format();
+
+        {
+            const std::lock_guard<std::mutex> guard(record_lock_);
+            pending_samples_.clear();
+            recorded_frame_count_ = record_clip_->total_frames();
+        }
+
+        record_stream_ = driver->new_input_stream(format.sample_rate, static_cast<std::uint8_t>(format.channels),
+            [this, channels = format.channels](std::int16_t *buffer, std::size_t frames) {
+                const std::lock_guard<std::mutex> guard(record_lock_);
+                pending_samples_.insert(pending_samples_.end(), buffer, buffer + frames * channels);
+                recorded_frame_count_ += frames;
+
+                return frames;
+            });
+
+        if (!record_stream_ || !record_stream_->start()) {
+            LOG_ERROR(HLE_AUD, "Unable to start the audio input stream for recording");
+            record_stream_.reset();
+            record_clip_->end();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    bool dsp_epoc_player::flush_recording() {
+        if (!record_stream_) {
+            return false;
+        }
+
+        std::vector<std::int16_t> pending;
+
+        {
+            const std::lock_guard<std::mutex> guard(record_lock_);
+            pending.swap(pending_samples_);
+        }
+
+        if (pending.empty()) {
+            return true;
+        }
+
+        return record_clip_->write(pending.data(), pending.size() / record_clip_->format().channels);
+    }
+
+    bool dsp_epoc_player::stop_recording() {
+        if (!record_stream_) {
+            return false;
+        }
+
+        record_stream_->stop();
+
+        const bool written = flush_recording();
+        record_stream_.reset();
+
+        return record_clip_->end() && written;
+    }
+
+    std::uint64_t dsp_epoc_player::recorded_duration_us() {
+        const std::lock_guard<std::mutex> guard(record_lock_);
+        return recorded_frame_count_ * 1000000ULL / record_clip_->format().sample_rate;
+    }
+
     BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, eaudio_player_inst, const std::uint32_t init_flags) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         drivers::audio_driver *aud_driver = sys->get_audio_driver();
@@ -253,21 +349,40 @@ namespace eka2l1::dispatch {
         return epoc::error_none;
     }
 
-    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_supply_url, eka2l1::ptr<void> handle,
-        const std::uint16_t *url, const std::uint32_t url_length, std::uint64_t *duration_us) {
+    static bool is_local_audio_url(const std::u16string &url) {
+        const std::u16string root = eka2l1::root_path(url, true);
+        return (root.length() >= 2) && (root[1] == u':');
+    }
+
+    static std::u16string resolve_audio_url(system *sys, const std::uint16_t *url, const std::uint32_t url_length) {
         std::u16string url_str(reinterpret_cast<const char16_t *>(url), url_length);
 
-        // Check if the URL references to a local path (drive)
-        const std::u16string root = eka2l1::root_path(url_str, true);
-
-        if ((root.length() >= 2) && (root[1] == u':')) {
+        if (is_local_audio_url(url_str)) {
             // It should be a local path. Transform it to host path
-            std::optional<std::u16string> host_path = sys->get_io_system()->get_raw_path(url_str);
+            std::optional<eka2l1::host_path> native_path = sys->get_io_system()->get_raw_path(eka2l1::guest_path{url_str});
 
-            if (host_path.has_value()) {
-                url_str = std::move(host_path.value());
+            if (native_path.has_value()) {
+                url_str = native_path->utf16();
             }
         }
+
+        return url_str;
+    }
+
+    static std::optional<host_path> resolve_audio_file(system *sys, const std::uint16_t *url, const std::uint32_t length) {
+        std::u16string text(reinterpret_cast<const char16_t *>(url), length);
+        if (text.find(u'\0') != text.npos) return std::nullopt;
+        return sys->get_io_system()->get_raw_path(guest_path(std::move(text)));
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_supply_url, eka2l1::ptr<void> handle,
+        const std::uint16_t *url, const std::uint32_t url_length, std::uint64_t *duration_us) {
+        const std::u16string guest_url(reinterpret_cast<const char16_t *>(url), url_length);
+        if (is_local_audio_url(guest_url) && !sys->get_io_system()->exist(eka2l1::guest_path{guest_url})) {
+            return epoc::error_not_found;
+        }
+
+        std::u16string url_str = resolve_audio_url(sys, url, url_length);
 
         // Proceed with the current URL
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
@@ -338,13 +453,14 @@ namespace eka2l1::dispatch {
         bool supplied = eplayer->impl_ && eplayer->impl_->open_custom(custom_good_stream);
         if (!supplied) {
             drivers::audio_driver *driver = sys->get_audio_driver();
-            std::vector<drivers::player_type> types = driver->get_suitable_player_types("");
+            std::vector<drivers::player_type> types = driver->get_suitable_player_types(*custom_good_stream);
 
             for (std::size_t i = 0; i < types.size(); i++) {
                 if (eplayer->impl_ && (eplayer->impl_->get_player_type() == types[i])) {
                     continue;
                 }
                 auto new_player = drivers::new_audio_player(driver, types[i]);
+                custom_good_stream->seek(0, common::seek_where::beg);
                 if (new_player && new_player->open_custom(custom_good_stream)) {
                     eplayer->impl_ = std::move(new_player);
                     supplied = true;
@@ -402,6 +518,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (eplayer->is_recording()) {
+            return eplayer->stop_recording() ? epoc::error_none : epoc::error_general;
+        }
+
         if (eplayer->impl_) {
             if (!eplayer->impl_->stop()) {
                 return epoc::error_general;
@@ -411,6 +531,40 @@ namespace eka2l1::dispatch {
         }
 
         return (sys->get_symbian_version_use() <= epocver::eka2) ? 1 : epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_record, eka2l1::ptr<void> handle, const std::uint16_t *url,
+        const std::uint32_t url_length) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!url || (url_length == 0)) {
+            return epoc::error_argument;
+        }
+
+        if (eplayer->is_recording()) {
+            return epoc::error_in_use;
+        }
+
+        // The clip may still be open for playback from the previous take; release it before recording into it.
+        if (eplayer->impl_) {
+            eplayer->impl_->stop();
+            eplayer->impl_.reset();
+        }
+
+        const auto file_path = resolve_audio_file(sys, url, url_length);
+        if (!file_path) return epoc::error_not_found;
+
+        if (!eplayer->start_recording(sys->get_audio_driver(), *file_path)) {
+            return epoc::error_not_supported;
+        }
+
+        return epoc::error_none;
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_pause, eka2l1::ptr<void> handle) {
@@ -467,6 +621,34 @@ namespace eka2l1::dispatch {
 
         eplayer->volume(volume);
         return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_set_balance, eka2l1::ptr<void> handle, const std::int32_t balance) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->impl_) {
+            return epoc::error_not_ready;
+        }
+
+        return eplayer->impl_->set_balance(balance) ? epoc::error_none : epoc::error_argument;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_get_balance, eka2l1::ptr<void> handle) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        return eplayer->impl_ ? eplayer->impl_->balance() : 0;
     }
 
     // The audio/DSP driver fires buffer-ready notifications on its own render thread,
@@ -588,6 +770,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (eplayer->record_clip_) {
+            return static_cast<std::int32_t>(eplayer->record_clip_->format().sample_rate);
+        }
+
         if (!eplayer->impl_) {
             return epoc::error_not_ready;
         }
@@ -604,8 +790,17 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (eplayer->record_clip_) {
+            return eplayer->record_clip_->set_sample_rate(sample_rate) ? epoc::error_none : epoc::error_not_supported;
+        }
+
         if (!eplayer->impl_) {
             return epoc::error_not_ready;
+        }
+
+        // Keeping the current format needs no encoder.
+        if (static_cast<std::uint32_t>(sample_rate) == eplayer->impl_->get_dest_freq()) {
+            return epoc::error_none;
         }
 
         if (!eplayer->impl_->set_dest_freq(sample_rate)) {
@@ -624,6 +819,10 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (eplayer->record_clip_) {
+            return static_cast<std::int32_t>(eplayer->record_clip_->format().channels);
+        }
+
         if (!eplayer->impl_) {
             return epoc::error_not_ready;
         }
@@ -640,8 +839,16 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
+        if (eplayer->record_clip_) {
+            return eplayer->record_clip_->set_channel_count(channel_count) ? epoc::error_none : epoc::error_not_supported;
+        }
+
         if (!eplayer->impl_) {
             return epoc::error_not_ready;
+        }
+
+        if (static_cast<std::uint32_t>(channel_count) == eplayer->impl_->get_dest_channel_count()) {
+            return epoc::error_none;
         }
 
         if (!eplayer->impl_->set_dest_channel_count(channel_count)) {
@@ -664,11 +871,14 @@ namespace eka2l1::dispatch {
             return epoc::error_argument;
         }
 
-        if (!eplayer->impl_) {
+        if (eplayer->record_clip_) {
+            *encoding = eplayer->record_clip_->codec_four_cc();
+        } else if (eplayer->impl_) {
+            *encoding = eplayer->impl_->get_dest_encoding();
+        } else {
             return epoc::error_not_ready;
         }
 
-        *encoding = eplayer->impl_->get_dest_encoding();
         return epoc::error_none;
     }
 
@@ -679,6 +889,11 @@ namespace eka2l1::dispatch {
 
         if (!eplayer) {
             return epoc::error_bad_handle;
+        }
+
+        // A recorder's data type follows from the clip format.
+        if (eplayer->record_clip_) {
+            return (encoding == eplayer->record_clip_->codec_four_cc()) ? epoc::error_none : epoc::error_not_supported;
         }
 
         if (!eplayer->impl_) {
@@ -701,12 +916,128 @@ namespace eka2l1::dispatch {
             return epoc::error_bad_handle;
         }
 
-        if (!eplayer->impl_) {
+        if (eplayer->impl_) {
+            eplayer->impl_->set_dest_container_format(container_format);
+        }
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_open_record_clip, eka2l1::ptr<void> handle, const std::uint16_t *url,
+        const std::uint32_t url_length) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!url || (url_length == 0)) {
+            return epoc::error_argument;
+        }
+
+        if (eplayer->is_recording()) {
+            return epoc::error_in_use;
+        }
+
+        const auto file_path = resolve_audio_file(sys, url, url_length);
+        if (!file_path) return epoc::error_not_found;
+        if (!eplayer->open_record_clip(*file_path)) {
+            return epoc::error_not_supported;
+        }
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_get_dest_bit_rate, eka2l1::ptr<void> handle) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->record_clip_) {
             return epoc::error_not_ready;
         }
 
-        eplayer->impl_->set_dest_container_format(container_format);
-        return epoc::error_none;
+        return static_cast<std::int32_t>(eplayer->record_clip_->format().bit_rate);
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_set_dest_bit_rate, eka2l1::ptr<void> handle, const std::uint32_t bit_rate) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->record_clip_) {
+            return epoc::error_not_ready;
+        }
+
+        if (eplayer->is_recording()) {
+            return epoc::error_in_use;
+        }
+
+        return eplayer->record_clip_->set_bit_rate(bit_rate) ? epoc::error_none : epoc::error_not_supported;
+    }
+
+    enum dest_value_kind {
+        DEST_VALUE_SAMPLE_RATE = 0,
+        DEST_VALUE_CHANNEL_COUNT = 1,
+        DEST_VALUE_BIT_RATE = 2,
+        DEST_VALUE_DATA_TYPE = 3
+    };
+
+    // Fills up to max_count values and returns how many there are in total.
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_get_supported_dest_values, eka2l1::ptr<void> handle, const std::int32_t kind,
+        std::uint32_t *values, const std::int32_t max_count) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::dsp_manager &manager = dispatcher->get_dsp_manager();
+        dsp_epoc_player *eplayer = manager.get_object<dsp_epoc_player>(handle.ptr_address());
+
+        if (!eplayer) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!eplayer->record_clip_) {
+            return epoc::error_not_ready;
+        }
+
+        if ((max_count < 0) || (!values && (max_count != 0))) {
+            return epoc::error_argument;
+        }
+
+        std::vector<std::uint32_t> supported;
+
+        switch (kind) {
+        case DEST_VALUE_SAMPLE_RATE:
+            supported = eplayer->record_clip_->supported_sample_rates();
+            break;
+
+        case DEST_VALUE_CHANNEL_COUNT:
+            supported = eplayer->record_clip_->supported_channel_counts();
+            break;
+
+        case DEST_VALUE_BIT_RATE:
+            supported = eplayer->record_clip_->supported_bit_rates();
+            break;
+
+        case DEST_VALUE_DATA_TYPE:
+            supported = { eplayer->record_clip_->codec_four_cc() };
+            break;
+
+        default:
+            return epoc::error_argument;
+        }
+
+        const std::size_t copied = std::min<std::size_t>(supported.size(), static_cast<std::size_t>(max_count));
+        std::copy(supported.begin(), supported.begin() + copied, values);
+
+        return static_cast<std::int32_t>(supported.size());
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_player_set_position, eka2l1::ptr<void> handle, std::uint64_t pos_in_micros) {
@@ -737,11 +1068,26 @@ namespace eka2l1::dispatch {
             return epoc::error_argument;
         }
 
-        if (!eplayer->impl_) {
-            return epoc::error_not_ready;
+        if (eplayer->is_recording()) {
+            eplayer->flush_recording();
+            *pos_get = eplayer->recorded_duration_us();
+        } else {
+            *pos_get = eplayer->impl_ ? eplayer->impl_->position() : 0;
         }
 
-        *pos_get = eplayer->impl_->position();
+        // On a device this is a round trip to the MMF controller. Answering a tight poll instantly
+        // lets Qt spin its event loop fast enough for its 8-bit iteration count to strand timers.
+        static constexpr std::uint64_t MIN_POSITION_POLL_INTERVAL_US = 2000;
+
+        const std::uint64_t now = sys->get_ntimer()->microseconds();
+        const std::uint64_t next_poll = eplayer->last_position_query_us_ + MIN_POSITION_POLL_INTERVAL_US;
+
+        if ((eplayer->last_position_query_us_ != 0) && (now < next_poll)) {
+            sys->get_kernel_system()->crr_thread()->sleep(static_cast<std::uint32_t>(next_poll - now));
+            eplayer->last_position_query_us_ = next_poll;
+        } else {
+            eplayer->last_position_query_us_ = now;
+        }
         return epoc::error_none;
     }
 
@@ -874,14 +1220,11 @@ namespace eka2l1::dispatch {
             return epoc::error_general;
         }
 
-        // Return value >= 0 indicates the behaviour of calling MaoscPlayComplete. 0 means call.
-        // See the impl.cpp file for a more detailed explaination on why
-        if (sys->get_symbian_version_use() <= epocver::epoc6) {
-            return 1;
-        }
-
         manager.audio_renderer_semaphore()->release(stream);
-        return epoc::error_none;
+
+        // Preserve the input-stream completion selector. Output streams choose
+        // legacy MDA or MMF callback semantics in their guest factory instead.
+        return (sys->get_symbian_version_use() <= epocver::epoc6) ? 1 : epoc::error_none;
     }
 
     BRIDGE_FUNC_DISPATCHER(std::int32_t, eaudio_dsp_out_stream_write, eka2l1::ptr<void> handle, const std::uint8_t *data, const std::uint32_t data_size) {
@@ -1067,5 +1410,357 @@ namespace eka2l1::dispatch {
         // Stub for now
         // TODO: Implement
         return epoc::error_none;
+    }
+
+    dsp_epoc_tone::dsp_epoc_tone(dsp_manager *manager)
+        : dsp_medium(manager, DSP_MEDIUM_TYPE_EPOC_TONE) {
+    }
+
+    dsp_epoc_tone::~dsp_epoc_tone() {
+        stop();
+    }
+
+    void dsp_epoc_tone::play(drivers::audio_driver *driver) {
+        stop();
+
+        if (!driver || !driver->native_sample_rate()) {
+            return;
+        }
+
+        const std::uint32_t sample_rate = driver->native_sample_rate();
+        generator_ = std::make_unique<tone_generator>(program_, sample_rate, repeats_, trailing_silence_us_);
+
+        tone_generator *generator = generator_.get();
+        stream_ = driver->new_output_stream(sample_rate, 1, [generator](std::int16_t *samples, std::size_t frames) {
+            return generator->generate(samples, frames);
+        });
+
+        if (stream_) {
+            stream_->set_volume(static_cast<float>(volume()) / static_cast<float>(max_volume()));
+        }
+
+        if (!stream_ || !stream_->start()) {
+            LOG_ERROR(HLE_AUD, "Unable to start the audio output stream for a tone");
+
+            stream_.reset();
+            generator_.reset();
+        }
+    }
+
+    void dsp_epoc_tone::stop() {
+        if (stream_) {
+            stream_->stop();
+            stream_.reset();
+        }
+
+        generator_.reset();
+    }
+
+    void dsp_epoc_tone::volume(const std::uint32_t volume) {
+        logical_volume_ = volume;
+
+        if (stream_) {
+            stream_->set_volume(static_cast<float>(volume) / static_cast<float>(max_volume()));
+        }
+    }
+
+    static dsp_epoc_tone *get_tone(system *sys, const std::uint32_t handle) {
+        return sys->get_dispatcher()->get_dsp_manager().get_object<dsp_epoc_tone>(handle);
+    }
+
+    static void complete_tone(system *sys, dsp_epoc_tone *tone, const int code) {
+        if (!tone->done_info_.empty() && sys->get_kernel_system()->is_thread_alive(tone->done_info_.requester)) {
+            tone->done_info_.complete(code);
+        }
+
+        tone->done_info_ = epoc::notify_info();
+    }
+
+    static std::uint64_t make_tone_done_userdata(const std::uint32_t handle, const std::uint32_t generation) {
+        return handle | (static_cast<std::uint64_t>(generation) << 32);
+    }
+
+    // Completion follows the emulator clock rather than the host stream, so it does not depend on
+    // the audio backend being present or on its latency.
+    static int get_tone_done_event(system *sys) {
+        ntimer *timing = sys->get_ntimer();
+        int event = timing->get_register_event("ToneDoneEvent");
+
+        if (event == -1) {
+            event = timing->register_event("ToneDoneEvent", [sys](const std::uint64_t userdata, const int) {
+                kernel_system *kern = sys->get_kernel_system();
+                kern->lock();
+
+                // The tone may have been stopped, replayed or destroyed while this event was in flight.
+                dsp_epoc_tone *tone = get_tone(sys, static_cast<std::uint32_t>(userdata));
+                if (tone && (tone->play_generation_ == static_cast<std::uint32_t>(userdata >> 32))) {
+                    complete_tone(sys, tone, epoc::error_none);
+                }
+
+                kern->unlock();
+            });
+        }
+
+        return event;
+    }
+
+    static void cancel_tone_done(system *sys, const std::uint32_t handle, dsp_epoc_tone *tone) {
+        sys->get_ntimer()->unschedule_event(get_tone_done_event(sys), make_tone_done_userdata(handle, tone->play_generation_));
+        tone->play_generation_++;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(eka2l1::ptr<void>, etone_player_inst) {
+        dispatch::dsp_manager &manager = sys->get_dispatcher()->get_dsp_manager();
+        std::unique_ptr<dsp_medium> tone = std::make_unique<dsp_epoc_tone>(&manager);
+
+        kernel::process *pr = sys->get_kernel_system()->crr_process();
+        if (pr) {
+            tone->owner_process_id(pr->unique_id());
+        }
+
+        return manager.add_object(tone);
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_destroy, eka2l1::ptr<void> handle) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        cancel_tone_done(sys, handle.ptr_address(), tone);
+
+        if (!sys->get_dispatcher()->get_dsp_manager().remove_object(handle.ptr_address())) {
+            return epoc::error_general;
+        }
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_notify_any_done, eka2l1::ptr<void> handle, eka2l1::ptr<epoc::request_status> sts) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        tone->done_info_.requester = sys->get_kernel_system()->crr_thread();
+        tone->done_info_.sts = sts;
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_get_fixed_sequence_count, eka2l1::ptr<void> handle) {
+        return get_tone(sys, handle.ptr_address()) ? 0 : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_volume, eka2l1::ptr<void> handle, const std::int32_t volume) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        // DevSound clamps the volume to its range rather than rejecting it.
+        tone->volume(static_cast<std::uint32_t>(std::clamp<std::int32_t>(volume, 0, tone->max_volume())));
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_get_volume, eka2l1::ptr<void> handle) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        return tone ? static_cast<std::int32_t>(tone->volume()) : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_max_volume, eka2l1::ptr<void> handle) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        return tone ? static_cast<std::int32_t>(tone->max_volume()) : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_repeats, eka2l1::ptr<void> handle, const std::int32_t times,
+        const std::uint32_t silence_micros_low, const std::int32_t silence_micros_high) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        const std::int64_t silence_us = silence_micros_low | (static_cast<std::int64_t>(silence_micros_high) << 32);
+
+        tone->repeats_ = times;
+        tone->trailing_silence_us_ = static_cast<std::uint64_t>(std::max<std::int64_t>(silence_us, 0));
+
+        return epoc::error_none;
+    }
+
+    static void set_tone_sequence(dsp_epoc_tone *tone, const std::uint8_t *data, const std::size_t size) {
+        if (!parse_nokia_tone_sequence(data, size, tone->program_)
+            && !parse_smart_messaging_ringtone(data, size, tone->program_)) {
+            // Kept playable for the guest's sake: it completes at once, silently.
+            LOG_WARN(HLE_AUD, "Tone sequence format not supported ({} bytes), it will play as silence", size);
+            tone->program_.clear();
+        }
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_buffer_sequence, eka2l1::ptr<void> handle, epoc::desc8 *sequence) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!sequence) {
+            return epoc::error_argument;
+        }
+
+        const std::string data = sequence->to_std_string(sys->get_kernel_system()->crr_process());
+        set_tone_sequence(tone, reinterpret_cast<const std::uint8_t *>(data.data()), data.size());
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_file_sequence, eka2l1::ptr<void> handle, epoc::desc16 *filename) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!filename) {
+            return epoc::error_argument;
+        }
+
+        const std::u16string path = filename->to_std_string(sys->get_kernel_system()->crr_process());
+        symfile file = sys->get_io_system()->open_file(eka2l1::guest_path{path}, READ_MODE | BIN_MODE);
+
+        if (!file) {
+            return epoc::error_not_found;
+        }
+
+        std::vector<std::uint8_t> data(static_cast<std::size_t>(file->size()));
+        const std::size_t read = data.empty() ? 0 : file->read_file(data.data(), 1, static_cast<std::uint32_t>(data.size()));
+        file->close();
+
+        if (read != data.size()) {
+            return epoc::error_corrupt;
+        }
+
+        set_tone_sequence(tone, data.data(), data.size());
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_fixed_sequence, eka2l1::ptr<void> handle, const std::int32_t index) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        // No fixed sequences are offered (the count is zero); kept playable as silence like an unknown sequence.
+        tone->program_.clear();
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_single_tone, eka2l1::ptr<void> handle, const std::int32_t frequency,
+        const std::uint32_t duration_micros_low, const std::int32_t duration_micros_high) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        const std::int64_t duration_us = duration_micros_low | (static_cast<std::int64_t>(duration_micros_high) << 32);
+
+        tone->program_ = make_tone_program(static_cast<std::uint32_t>(std::max<std::int32_t>(frequency, 0)), 0,
+            static_cast<std::uint64_t>(std::max<std::int64_t>(duration_us, 0)));
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_dual_tone, eka2l1::ptr<void> handle, const std::int32_t frequency_one,
+        const std::int32_t frequency_two, const std::uint32_t duration_micros_low, const std::int32_t duration_micros_high) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        const std::int64_t duration_us = duration_micros_low | (static_cast<std::int64_t>(duration_micros_high) << 32);
+
+        tone->program_ = make_tone_program(static_cast<std::uint32_t>(std::max<std::int32_t>(frequency_one, 0)),
+            static_cast<std::uint32_t>(std::max<std::int32_t>(frequency_two, 0)),
+            static_cast<std::uint64_t>(std::max<std::int64_t>(duration_us, 0)));
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_dtmf_string, eka2l1::ptr<void> handle, epoc::desc16 *digits) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        if (!digits) {
+            return epoc::error_argument;
+        }
+
+        const std::u16string digit_string = digits->to_std_string(sys->get_kernel_system()->crr_process());
+
+        if (!make_dtmf_tone_program(digit_string, tone->dtmf_tone_on_us_, tone->dtmf_tone_off_us_, tone->dtmf_pause_us_, tone->program_)) {
+            return epoc::error_corrupt;
+        }
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_dtmf_lengths, eka2l1::ptr<void> handle, const std::int32_t tone_on_us,
+        const std::int32_t tone_off_us, const std::int32_t pause_us) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        // Clamped as CMMFDevSoundSvrImp::SetDTMFLengths does; -1 keeps meaning "until stopped".
+        tone->dtmf_tone_on_us_ = (tone_on_us < -1) ? 0 : tone_on_us;
+        tone->dtmf_tone_off_us_ = static_cast<std::uint32_t>(std::max<std::int32_t>(tone_off_us, 0));
+        tone->dtmf_pause_us_ = static_cast<std::uint32_t>(std::max<std::int32_t>(pause_us, 0));
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_set_balance, eka2l1::ptr<void> handle) {
+        return get_tone(sys, handle.ptr_address()) ? epoc::error_none : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_play, eka2l1::ptr<void> handle) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        cancel_tone_done(sys, handle.ptr_address(), tone);
+        tone->play(sys->get_audio_driver());
+
+        const std::optional<std::uint64_t> duration_us = tone_program_duration_us(tone->program_, tone->repeats_,
+            tone->trailing_silence_us_);
+
+        if (duration_us.has_value()) {
+            sys->get_ntimer()->schedule_event(static_cast<std::int64_t>(duration_us.value()), get_tone_done_event(sys),
+                make_tone_done_userdata(handle.ptr_address(), tone->play_generation_));
+        }
+
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_stop, eka2l1::ptr<void> handle) {
+        dsp_epoc_tone *tone = get_tone(sys, handle.ptr_address());
+        if (!tone) {
+            return epoc::error_bad_handle;
+        }
+
+        cancel_tone_done(sys, handle.ptr_address(), tone);
+        tone->stop();
+
+        // The guest cancels by waiting on its request, so a pending notification must complete here.
+        complete_tone(sys, tone, epoc::error_cancel);
+        return epoc::error_none;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_get_balance, eka2l1::ptr<void> handle) {
+        return get_tone(sys, handle.ptr_address()) ? 0 : epoc::error_bad_handle;
+    }
+
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, etone_player_get_fixed_sequence_name) {
+        return epoc::error_not_supported;
     }
 }

@@ -101,6 +101,8 @@ namespace eka2l1 {
         void deref_audio_buffer_chunk();
         bool prepare_audio_buffer_chunk();
         void send_event_to_msg_queue(const epoc::mmf_dev_sound_queue_item &item);
+        void set_event_msg_queue(kernel::msg_queue *queue);
+        bool open_event_msg_queue(service::ipc_context *ctx);
         void stop();
 
         bool is_recording_stream() const {
@@ -117,8 +119,8 @@ namespace eka2l1 {
 
         void fetch(service::ipc_context *ctx) override;
 
-        void init0(service::ipc_context *ctx);
-        void init3(service::ipc_context *ctx);
+        void init0(service::ipc_context *ctx, bool uses_event_queue);
+        void init3(service::ipc_context *ctx, bool uses_event_queue);
         void set_volume(service::ipc_context *ctx);
         void volume(service::ipc_context *ctx);
         void max_volume(service::ipc_context *ctx);
@@ -133,6 +135,7 @@ namespace eka2l1 {
         void copy_fourcc_array(service::ipc_context *ctx);
         void set_config(service::ipc_context *ctx);
         void get_config(service::ipc_context *ctx);
+        void samples_recorded(service::ipc_context *ctx);
         void samples_played(service::ipc_context *ctx);
         void stop(service::ipc_context *ctx);
         void play_init(service::ipc_context *ctx);

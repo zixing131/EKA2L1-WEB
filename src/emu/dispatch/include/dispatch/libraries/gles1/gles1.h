@@ -24,6 +24,7 @@
 #include <cstdint>
 
 namespace eka2l1::dispatch {
+    BRIDGE_FUNC_LIBRARY(void, gl_logic_op_emu, std::uint32_t op);
     BRIDGE_FUNC_LIBRARY(void, gl_matrix_mode_emu, std::uint32_t mode);
     BRIDGE_FUNC_LIBRARY(void, gl_push_matrix_emu);
     BRIDGE_FUNC_LIBRARY(void, gl_pop_matrix_emu);
@@ -59,6 +60,7 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_normal_pointer_emu, std::uint32_t type, std::int32_t stride, std::uint32_t offset);
     BRIDGE_FUNC_LIBRARY(void, gl_vertex_pointer_emu, std::int32_t size, std::uint32_t type, std::int32_t stride, std::uint32_t offset);
     BRIDGE_FUNC_LIBRARY(void, gl_texcoord_pointer_emu, std::int32_t size, std::uint32_t type, std::int32_t stride, std::uint32_t offset);
+    BRIDGE_FUNC_LIBRARY(void, gl_point_size_pointer_oes_emu, std::uint32_t type, std::int32_t stride, std::uint32_t offset);
     BRIDGE_FUNC_LIBRARY(void, gl_material_f_emu, std::uint32_t target, std::uint32_t pname, const float pvalue);
     BRIDGE_FUNC_LIBRARY(void, gl_material_x_emu, std::uint32_t target, std::uint32_t pname, const gl_fixed pvalue);
     BRIDGE_FUNC_LIBRARY(void, gl_material_fv_emu, std::uint32_t target, std::uint32_t pname, const float *pvalue);
@@ -73,6 +75,9 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_tex_enviv_emu, std::uint32_t target, std::uint32_t name, const std::int32_t *param);
     BRIDGE_FUNC_LIBRARY(void, gl_tex_envfv_emu, std::uint32_t target, std::uint32_t name, const float *param);
     BRIDGE_FUNC_LIBRARY(void, gl_tex_envxv_emu, std::uint32_t target, std::uint32_t name, const gl_fixed *param);
+    BRIDGE_FUNC_LIBRARY(void, gl_get_tex_env_fv_emu, std::uint32_t target, std::uint32_t pname, float *params);
+    BRIDGE_FUNC_LIBRARY(void, gl_get_tex_env_iv_emu, std::uint32_t target, std::uint32_t pname, std::int32_t *params);
+    BRIDGE_FUNC_LIBRARY(void, gl_get_tex_env_xv_emu, std::uint32_t target, std::uint32_t pname, gl_fixed *params);
     BRIDGE_FUNC_LIBRARY(void, gl_get_pointerv_emu, std::uint32_t target, std::uint32_t *off);
     BRIDGE_FUNC_LIBRARY(void, gl_light_f_emu, std::uint32_t light, std::uint32_t pname, float param);
     BRIDGE_FUNC_LIBRARY(void, gl_light_x_emu, std::uint32_t light, std::uint32_t pname, gl_fixed param);
@@ -82,6 +87,10 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_light_model_x_emu, std::uint32_t pname, gl_fixed param);
     BRIDGE_FUNC_LIBRARY(void, gl_light_model_fv_emu, std::uint32_t pname, float *param);
     BRIDGE_FUNC_LIBRARY(void, gl_light_model_xv_emu, std::uint32_t pname, gl_fixed *param);
+    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_f_emu, std::uint32_t pname, float param);
+    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_fv_emu, std::uint32_t pname, const float *params);
+    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_x_emu, std::uint32_t pname, gl_fixed param);
+    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_xv_emu, std::uint32_t pname, const gl_fixed *params);
     BRIDGE_FUNC_LIBRARY(void, gl_hint_emu);
     BRIDGE_FUNC_LIBRARY(void, gl_load_palette_from_model_view_matrix_oes_emu);
     BRIDGE_FUNC_LIBRARY(void, gl_current_palette_matrix_oes_emu, std::uint32_t index);

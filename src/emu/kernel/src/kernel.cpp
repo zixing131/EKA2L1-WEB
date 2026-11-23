@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -50,6 +51,7 @@
 #include <mem/control.h>
 #include <mem/mem.h>
 #include <mem/ptr.h>
+#include <utils/err.h>
 #include <vfs/vfs.h>
 
 #include <loader/e32img.h>
@@ -106,6 +108,9 @@ namespace eka2l1 {
 
     void kernel_system::wipeout() {
         wiping_ = true;
+        queued_boot_servers_.clear();
+        starting_boot_server_ = 0;
+        processes_awaiting_boot_.clear();
         timing_->remove_event(realtime_ipc_signal_evt_);
 
 #define OBJECT_CONTAINER_CLEANUP(container) \
@@ -438,7 +443,7 @@ namespace eka2l1 {
         static constexpr std::size_t SPACE_RESERVED_START_OFFSET = 0x2000000;
 
         // Create kernel process. This process will be forever queued
-        nanokern_pr_ = create<kernel::process>(mem_, KERN_PROCESS_NAME, KERN_EXE_NAME, u"");
+        nanokern_pr_ = create<kernel::process>(mem_, KERN_PROCESS_NAME, guest_path(KERN_EXE_NAME), u"");
         if (nanokern_pr_) {
             nanokern_pr_->set_is_kernel_process(true);
 
@@ -916,8 +921,12 @@ namespace eka2l1 {
     }
 
     // We can support also ELF!
-    process_ptr kernel_system::spawn_new_process(const std::u16string &path, const std::u16string &cmd_arg, const kernel::uid promised_uid3,
-        const std::uint32_t stack_size) {
+    process_ptr kernel_system::spawn_new_process(const guest_path &path, const std::u16string &cmd_arg, const kernel::uid promised_uid3,
+        const std::uint32_t stack_size, int *error) {
+        if (error) {
+            *error = epoc::error_not_found;
+        }
+
         if (path == kernel::BRIDAGED_EXECUTABLE_NAME) {
             // Spawn a fake process that's linked to a real process
             return create<kernel::guomen_process>(mem_, cmd_arg);
@@ -925,17 +934,17 @@ namespace eka2l1 {
 
         // NOTE: Workaround for launching game on S^3 or more with keeping the path same for both applist and system calls
         // For ID3works games
-        std::u16string corrected_path = path;
+        guest_path corrected_path(path);
 
         if (get_epoc_version() >= epocver::epoc95) {
             auto root_path = eka2l1::root_path(corrected_path, true);
             auto rel_path = eka2l1::file_directory(corrected_path, true);
             if (!root_path.empty() && (root_path == rel_path)) {
-                corrected_path.erase(corrected_path.begin() + 2);
+                corrected_path.erase(2, 1);
             }
         }
 
-        std::u16string full_path;
+        guest_path full_path;
         auto imgs = lib_mngr_->try_search_and_parse(corrected_path, &full_path);
 
         if (!imgs.first && !imgs.second) {
@@ -1013,6 +1022,13 @@ namespace eka2l1 {
         // idempotent, signature-matched J2ME compatibility hook here so the
         // silent installer is patched before its entry point executes.
         hle::apply_j2me_compat_patches(cs, process_name);
+        if (cs->fixed_data_owner()) {
+            if (error) {
+                *error = epoc::error_already_exists;
+            }
+            destroy(pr);
+            return nullptr;
+        }
 
         LOG_TRACE(KERNEL, "Spawned process: {}, entry point = 0x{:X}", process_name, cs->get_code_run_addr(&(*pr)));
         
@@ -1023,6 +1039,61 @@ namespace eka2l1 {
         pr->construct_with_codeseg(cs, new_stack_size, heap_min, heap_max, pri);
 
         return pr;
+    }
+
+    bool kernel_system::start_boot_server(const guest_path &path, const bool wait_for_start) {
+        if (starting_boot_server_) {
+            queued_boot_servers_.emplace_back(path, wait_for_start);
+            return true;
+        }
+
+        process_ptr server_process = spawn_new_process(path);
+        if (!server_process) {
+            return false;
+        }
+
+        if (wait_for_start) {
+            starting_boot_server_ = server_process->unique_id();
+        }
+
+        if (!server_process->run()) {
+            starting_boot_server_ = 0;
+            return false;
+        }
+        return true;
+    }
+
+    bool kernel_system::run_after_boot_servers(process_ptr pr) {
+        if (!starting_boot_server_) {
+            return pr->run();
+        }
+
+        processes_awaiting_boot_.push_back(pr->unique_id());
+        return true;
+    }
+
+    void kernel_system::boot_server_settled(kernel::process *server_process) {
+        if (!starting_boot_server_ || (server_process->unique_id() != starting_boot_server_)) {
+            return;
+        }
+
+        starting_boot_server_ = 0;
+
+        while (!starting_boot_server_ && !queued_boot_servers_.empty()) {
+            const auto [next, wait_for_start] = std::move(queued_boot_servers_.front());
+            queued_boot_servers_.erase(queued_boot_servers_.begin());
+            start_boot_server(next, wait_for_start);
+        }
+
+        if (starting_boot_server_) {
+            return;
+        }
+
+        for (const kernel::uid waiting : std::exchange(processes_awaiting_boot_, {})) {
+            if (kernel::process *pr = get_by_id<kernel::process>(waiting)) {
+                pr->run();
+            }
+        }
     }
 
     int kernel_system::close(std::uint32_t handle) {
@@ -1397,7 +1468,7 @@ namespace eka2l1 {
         return thr_sch_->should_terminate();
     }
 
-    bool kernel_system::map_rom(const mem::vm_address addr, const std::string &path) {
+    bool kernel_system::map_rom(const mem::vm_address addr, const host_path &path) {
         const std::size_t rom_size = common::file_size(path);
         if (rom_size == 0 || rom_size > std::numeric_limits<address>::max() - addr) {
             return false;
@@ -1407,7 +1478,7 @@ namespace eka2l1 {
         mem::vm_address chunk_base = addr;
         std::size_t rebase_offset = 0;
 
-        if ((kern_ver_ == epocver::epoc91) && (mem_->get_model_type() == mem::mem_model_type::multiple)) {
+        if (mem_->get_model_type() == mem::mem_model_type::multiple) {
             chunk_base = addr & ~mem_->get_control()->chunk_mask_;
             rebase_offset = addr - chunk_base;
         }

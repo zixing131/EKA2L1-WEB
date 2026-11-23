@@ -52,6 +52,52 @@ namespace eka2l1::epoc {
         return server_bmp->bitmap_;
     }
 
+    void graphic_context::set_origin(service::ipc_context &context, ws_cmd &cmd) {
+        origin = *reinterpret_cast<const eka2l1::vec2 *>(cmd.data_ptr);
+        context.complete(epoc::error_none);
+    }
+
+    void graphic_context::apply_origin(gdi_store_command &cmd) const {
+        switch (cmd.opcode_) {
+        case gdi_store_command_draw_rect:
+        case gdi_store_command_xor_rect:
+        case gdi_store_command_blend_rect:
+            cmd.get_data_struct<gdi_store_command_draw_rect_data>().rect_.top += origin;
+            break;
+        case gdi_store_command_draw_line: {
+            auto &data = cmd.get_data_struct<gdi_store_command_draw_line_data>();
+            data.start_ += origin;
+            data.end_ += origin;
+            break;
+        }
+        case gdi_store_command_draw_polygon: {
+            auto &data = cmd.get_data_struct<gdi_store_command_draw_polygon_data>();
+            for (std::uint32_t i = 0; i < data.point_count_; ++i) {
+                data.points_[i] += origin;
+            }
+            break;
+        }
+        case gdi_store_command_draw_bitmap:
+            cmd.get_data_struct<gdi_store_command_draw_bitmap_data>().dest_rect_.top += origin;
+            break;
+        case gdi_store_command_draw_text:
+            cmd.get_data_struct<gdi_store_command_draw_text_data>().text_box_.top += origin;
+            break;
+        default:
+            break;
+        }
+    }
+
+    void graphic_context::add_draw_command(gdi_store_command &cmd) {
+        // EDrawModePEN blends a translucent colour over the target (CDrawBitmap::WriteRgbMulti).
+        if ((cmd.opcode_ == gdi_store_command_draw_rect) && (drawing_mode == draw_mode::pen)
+            && (cmd.get_data_struct<gdi_store_command_draw_rect_data>().color_.w < 255)) {
+            cmd.opcode_ = gdi_store_command_blend_rect;
+        }
+        apply_origin(cmd);
+        attached_window->add_draw_command(cmd);
+    }
+
     bool graphic_context::no_building() const {
         return !attached_window || (attached_window->abs_rect.size == eka2l1::vec2(0, 0));
     }
@@ -63,9 +109,14 @@ namespace eka2l1::epoc {
         // Attach context with window
         attached_window->attached_contexts.push(&context_attach_link);
 
-        // Afaik that the pointer to CWsScreenDevice is internal, so not so scared of general users touching
-        // this.
-        context.complete(attached_window->scr->number);
+        origin = { 0, 0 };
+        clipping_rect.make_empty();
+        clipping_region.make_empty();
+        brush_color = attached_window->clear_color;
+
+        // The client stores the reply as the GC's device (CWindowGc::Device()).
+        epoc::window_group *group = attached_window->get_group();
+        context.complete(group ? static_cast<int>(group->client_device_pointer) : 0);
 
         if (no_building()) {
             return;
@@ -88,14 +139,6 @@ namespace eka2l1::epoc {
             cv->sync_from_bitmap();
         }
 
-        // Reset clipping. This is not mentioned in doc but is in official source code.
-        // See gc.cpp file. Opcode EWsGcOpActivate
-        clipping_rect.make_empty();
-        clipping_region.make_empty();
-
-        // In source code brush is also resetted
-        brush_color = attached_window->clear_color;
-
         do_submit_clipping();
     }
 
@@ -112,7 +155,7 @@ namespace eka2l1::epoc {
         draw_data.main_drv_ = 0;
         draw_data.mask_drv_ = 0;
 
-        attached_window->add_draw_command(draw_cmd);
+        add_draw_command(draw_cmd);
         ctx.complete(epoc::error_none);
     }
 
@@ -123,21 +166,9 @@ namespace eka2l1::epoc {
         ctx.complete(epoc::error_none);
 
         eka2l1::rect area(top_left, bottom_right - top_left);
-        eka2l1::vec4 color_brush;
-
         epoc::gdi_store_command submit_cmd;
-        
-        if (fill_surrounding) {
-            // The effective box colour depends on the drawing mode. As the document says
-            if (get_brush_color(color_brush)) {
-                epoc::gdi_store_command_draw_rect_data &text_box_clear_data = submit_cmd.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
-
-                text_box_clear_data.rect_ = area;
-                text_box_clear_data.color_ = color_brush;
-                submit_cmd.opcode_ = epoc::gdi_store_command_draw_rect;
-
-                attached_window->add_draw_command(submit_cmd);
-            }
+        if (fill_surrounding && make_brush_fill_command(area, submit_cmd)) {
+            add_draw_command(submit_cmd);
         }
 
         // Add the baseline offset. Where text will sit on.
@@ -165,7 +196,7 @@ namespace eka2l1::epoc {
         draw_text_data.color_ = common::rgba_to_vec(pen_color);
         draw_text_data.color_.w = 255;
 
-        attached_window->add_draw_command(draw_text_cmd);
+        add_draw_command(draw_text_cmd);
     }
 
     bool graphic_context::get_brush_color(eka2l1::vec4 &color_result) {
@@ -174,6 +205,7 @@ namespace eka2l1::epoc {
         // Don't bother even sending any draw command
         switch (fill_mode) {
         case brush_style::null:
+        case brush_style::pattern:
             return false;
 
         case brush_style::solid:
@@ -194,6 +226,88 @@ namespace eka2l1::epoc {
         }
 
         return true;
+    }
+
+    bool graphic_context::make_brush_fill_command(const eka2l1::rect &area, gdi_store_command &cmd) {
+        if (area.empty()) {
+            return false;
+        }
+        if (fill_mode == brush_style::pattern) {
+            if (!brush_pattern) {
+                return false;
+            }
+            const auto size = brush_pattern->final_clean()->bitmap_->header_.size_pixels;
+            if (size.x <= 0 || size.y <= 0) {
+                return false;
+            }
+            const auto phase = [](const int position, const int origin, const int period) {
+                const auto offset = (static_cast<std::int64_t>(position) - origin) % period;
+                return static_cast<int>(offset < 0 ? offset + period : offset);
+            };
+            cmd.opcode_ = gdi_store_command_draw_bitmap;
+            auto &data = cmd.get_data_struct<gdi_store_command_draw_bitmap_data>();
+            data.main_fbs_bitmap_ = brush_pattern;
+            data.mask_fbs_bitmap_ = nullptr;
+            data.main_drv_ = data.mask_drv_ = 0;
+            data.dest_rect_ = area;
+            // GC origin moves both the shape and brush field; only their relative offset matters.
+            data.source_rect_ = rect({ phase(area.top.x, brush_origin.x, size.x),
+                phase(area.top.y, brush_origin.y, size.y) }, area.size);
+            data.gdi_flags_ = GDI_STORE_COMMAND_BRUSH_PATTERN;
+            return true;
+        }
+
+        eka2l1::vec4 color;
+        if (!get_brush_color(color)) {
+            return false;
+        }
+        cmd.opcode_ = resolve_xor_color(color) ? gdi_store_command_xor_rect : gdi_store_command_draw_rect;
+        auto &data = cmd.get_data_struct<gdi_store_command_draw_rect_data>();
+        data.rect_ = area;
+        data.color_ = color;
+        return true;
+    }
+
+    bool graphic_context::resolve_xor_color(eka2l1::vec4 &color) const {
+        if (drawing_mode == draw_mode::invert_screen) {
+            color = { 255, 255, 255, 255 };
+            return true;
+        }
+
+        // Blending implements bitwise XOR exactly only for all-zero/all-one colour channels.
+        const auto binary = [](int channel) { return channel == 0 || channel == 255; };
+        return (drawing_mode == draw_mode::exclusive_or) && binary(color.x) && binary(color.y) && binary(color.z);
+    }
+
+    void graphic_context::set_brush_pattern(fbsbitmap *bitmap) {
+        if (bitmap) {
+            bitmap->ref();
+        }
+        if (brush_pattern) {
+            brush_pattern->deref();
+        }
+        brush_pattern = bitmap;
+    }
+
+    void graphic_context::set_brush_origin(service::ipc_context &context, ws_cmd &cmd) {
+        brush_origin = *reinterpret_cast<const eka2l1::vec2 *>(cmd.data_ptr);
+        context.complete(epoc::error_none);
+    }
+
+    void graphic_context::use_brush_pattern(service::ipc_context &context, ws_cmd &cmd) {
+        const auto handle = *reinterpret_cast<const std::uint32_t *>(cmd.data_ptr);
+        auto *bitmap = client->get_ws().get_raw_fbsbitmap(handle);
+        if (!bitmap) {
+            context.complete(epoc::error_bad_handle);
+            return;
+        }
+        set_brush_pattern(bitmap);
+        context.complete(epoc::error_none);
+    }
+
+    void graphic_context::discard_brush_pattern(service::ipc_context &context, ws_cmd &cmd) {
+        set_brush_pattern(nullptr);
+        context.complete(epoc::error_none);
     }
 
     bool graphic_context::get_pen_color_and_style(eka2l1::vec4 &pen_color_result, drivers::pen_style &style) {
@@ -252,7 +366,7 @@ namespace eka2l1::epoc {
                 // But so far, I have not been able to see any open source code points to that being true. Even simple test can prove that's false.
                 // So for now, we let drawing happens on the window with no restrictions. Invalid region will still be invalidated.
                 cmd.opcode_ = gdi_store_command_disable_clip;
-                attached_window->add_draw_command(cmd);
+                add_draw_command(cmd);
 
                 return;
             }
@@ -280,13 +394,7 @@ namespace eka2l1::epoc {
             *clip_region_temp = clip_region_temp->intersect(personal_clipping);
 
             if (clip_region_temp->rects_.size() <= 1) {
-                if (clip_region_temp->empty()) {
-                    cmd.opcode_ = gdi_store_command_disable_clip;
-                    attached_window->add_draw_command(cmd);
-
-                    return;
-                }
-                // We can use clipping directly
+                // An empty intersection leaves nothing drawable, not the whole window.
                 use_clipping = true;
                 the_clip = clip_region_temp->empty() ? eka2l1::rect({ 0, 0 }, { 0, 0 }) : clip_region_temp->rects_[0];
             } else {
@@ -312,7 +420,7 @@ namespace eka2l1::epoc {
             std::memcpy(data.rects_, the_region->rects_.data(), data.rect_count_ * sizeof(eka2l1::rect));
         }
 
-        attached_window->add_draw_command(cmd);
+        add_draw_command(cmd);
     }
 
     void graphic_context::set_brush_color(service::ipc_context &context, ws_cmd &cmd) {
@@ -367,6 +475,9 @@ namespace eka2l1::epoc {
 
         attached_window = nullptr;
         recording = false;
+
+        // The client drops its cached state here too, so it will not resend what it believes is default.
+        reset_internal_status();
 
         context.complete(epoc::error_none);
     }
@@ -440,7 +551,7 @@ namespace eka2l1::epoc {
         draw_data.mask_drv_ = 0;
         draw_data.gdi_flags_ = extra_flags;
 
-        attached_window->add_draw_command(draw_bmp_cmd);
+        add_draw_command(draw_bmp_cmd);
     }
 
     void graphic_context::ws_draw_bitmap_masked(service::ipc_context &context, ws_cmd &cmd) {
@@ -503,7 +614,8 @@ namespace eka2l1::epoc {
         context.complete(epoc::error_none);
     }
 
-    void graphic_context::fill_polygon_impl(const eka2l1::point *points, const std::size_t count, const bool winding, const eka2l1::vec4 &color) {
+    void graphic_context::fill_polygon_impl(const eka2l1::point *points, const std::size_t count, const bool winding, const eka2l1::vec4 &color,
+        span_map *spans) {
         if (count < 3) {
             return;
         }
@@ -517,8 +629,13 @@ namespace eka2l1::epoc {
         }
 
         // Nothing outside the window can show; this also bounds the span count for huge polygons.
-        min_y = std::max(min_y, 0);
-        max_y = std::min(max_y, attached_window->size().y);
+        const std::int64_t window_top = -static_cast<std::int64_t>(origin.y);
+        const std::int64_t window_bottom = window_top + attached_window->size().y;
+        if (window_top > max_y || window_bottom < min_y) {
+            return;
+        }
+        min_y = static_cast<int>(std::max<std::int64_t>(min_y, window_top));
+        max_y = static_cast<int>(std::min<std::int64_t>(max_y, window_bottom));
 
         struct crossing {
             float x;
@@ -564,9 +681,15 @@ namespace eka2l1::epoc {
                 const int x_start = static_cast<int>(std::lround(crossings[i].x));
                 const int x_end = static_cast<int>(std::lround(crossings[i + 1].x));
 
-                if (x_end > x_start) {
+                if (x_end <= x_start) {
+                    continue;
+                }
+
+                if (spans) {
+                    (*spans)[y].emplace_back(x_start, x_end);
+                } else {
                     rect_data.rect_ = eka2l1::rect({ x_start, y }, { x_end - x_start, 1 });
-                    attached_window->add_draw_command(gdi_cmd);
+                    add_draw_command(gdi_cmd);
                 }
             }
         }
@@ -593,12 +716,14 @@ namespace eka2l1::epoc {
             cmd_data.points_ = reinterpret_cast<eka2l1::point *>(gdi_cmd.allocate_dynamic_data(count * sizeof(eka2l1::point)));
 
             std::memcpy(cmd_data.points_, points, count * sizeof(eka2l1::point));
-            attached_window->add_draw_command(gdi_cmd);
+            add_draw_command(gdi_cmd);
             return;
         }
 
-        // The line primitive is one pixel wide, so thick segments are filled as quads.
+        // The line primitive is one pixel wide, so thick segments are filled as quads. Their spans are
+        // merged first so a translucent pen covers each pixel once, even where segments overlap.
         const float half = static_cast<float>(width) / 2.0f;
+        span_map spans;
 
         for (std::size_t i = 0; i + 1 < count; i++) {
             const float dx = static_cast<float>(points[i + 1].x - points[i].x);
@@ -621,7 +746,31 @@ namespace eka2l1::epoc {
                 { static_cast<int>(std::lround(points[i].x - ex - nx)), static_cast<int>(std::lround(points[i].y - ey - ny)) }
             };
 
-            fill_polygon_impl(quad, 4, true, color);
+            fill_polygon_impl(quad, 4, true, color, &spans);
+        }
+
+        epoc::gdi_store_command gdi_cmd;
+        epoc::gdi_store_command_draw_rect_data &rect_data = gdi_cmd.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
+        gdi_cmd.opcode_ = epoc::gdi_store_command_draw_rect;
+        rect_data.color_ = color;
+
+        for (auto &[y, row] : spans) {
+            std::sort(row.begin(), row.end());
+
+            std::pair<int, int> current = row[0];
+            for (std::size_t i = 1; i <= row.size(); i++) {
+                if ((i < row.size()) && (row[i].first <= current.second)) {
+                    current.second = std::max(current.second, row[i].second);
+                    continue;
+                }
+
+                rect_data.rect_ = eka2l1::rect({ current.first, y }, { current.second - current.first, 1 });
+                add_draw_command(gdi_cmd);
+
+                if (i < row.size()) {
+                    current = row[i];
+                }
+            }
         }
     }
 
@@ -866,7 +1015,7 @@ namespace eka2l1::epoc {
             draw_line_data.end_ = area.size;
             draw_line_data.pen_size_ = pen_size;
 
-            attached_window->add_draw_command(cmd);
+            add_draw_command(cmd);
         }
 
         context.complete(epoc::error_none);
@@ -886,8 +1035,42 @@ namespace eka2l1::epoc {
         drivers::pen_style pen_style;
         eka2l1::vec4 pen_color;
         epoc::gdi_store_command gdi_cmd;
+        eka2l1::rect fill_area = area;
 
-        if (get_pen_color_and_style(pen_color, pen_style)) {
+        const bool has_pen = get_pen_color_and_style(pen_color, pen_style);
+        eka2l1::vec4 xor_color = pen_color;
+
+        // Wider pens draw their outline in EDrawModePEN on Symbian too.
+        const bool xor_outline = has_pen && (pen_style == drivers::pen_style_solid) && (pen_size == eka2l1::vec2(1, 1))
+            && resolve_xor_color(xor_color);
+
+        if (xor_outline) {
+            // CFbsBitGc::DrawRect: one-pixel edges inside the rectangle that never overlap, so a second XOR erases them.
+            const eka2l1::vec2 &tl = area.top;
+            const int width = area.size.x;
+            const int height = area.size.y;
+            const eka2l1::rect edges[4] = {
+                eka2l1::rect(tl, { width, 1 }),
+                (height > 2 && width > 1) ? eka2l1::rect({ tl.x + width - 1, tl.y + 1 }, { 1, height - 2 }) : eka2l1::rect(),
+                (height > 1) ? eka2l1::rect({ tl.x, tl.y + height - 1 }, { width, 1 }) : eka2l1::rect(),
+                (height > 2) ? eka2l1::rect({ tl.x, tl.y + 1 }, { 1, height - 2 }) : eka2l1::rect()
+            };
+
+            for (const eka2l1::rect &edge : edges) {
+                if (edge.empty()) {
+                    continue;
+                }
+
+                epoc::gdi_store_command edge_cmd;
+                edge_cmd.opcode_ = epoc::gdi_store_command_xor_rect;
+                auto &edge_data = edge_cmd.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
+                edge_data.rect_ = edge;
+                edge_data.color_ = xor_color;
+                add_draw_command(edge_cmd);
+            }
+
+            fill_area = (width < 3 || height < 3) ? eka2l1::rect() : eka2l1::rect({ tl.x + 1, tl.y + 1 }, { width - 2, height - 2 });
+        } else if (has_pen) {
             eka2l1::vec2 point_list[5] =  {
                 area.top,
                 area.top + eka2l1::vec2(area.size.x, 0),
@@ -906,25 +1089,18 @@ namespace eka2l1::epoc {
 
             std::memcpy(cmd_data.points_, point_list, 5 * sizeof(eka2l1::point));
 
-            attached_window->add_draw_command(gdi_cmd);
+            add_draw_command(gdi_cmd);
         }
 
-        // Draw the real rectangle! Hurray!
-        if (get_brush_color(pen_color)) {
-            epoc::gdi_store_command_draw_rect_data &rect_draw_data = gdi_cmd.get_data_struct<epoc::gdi_store_command_draw_rect_data>();
-
-            rect_draw_data.rect_ = area;
-            rect_draw_data.color_ = pen_color;
-            gdi_cmd.opcode_ = epoc::gdi_store_command_draw_rect;
-
-            attached_window->add_draw_command(gdi_cmd);
+        if (make_brush_fill_command(fill_area, gdi_cmd)) {
+            add_draw_command(gdi_cmd);
         }
 
         context.complete(epoc::error_none);
     }
 
     void graphic_context::clear(service::ipc_context &context, ws_cmd &cmd) {
-        eka2l1::rect area(attached_window->pos, attached_window->size());
+        eka2l1::rect area = attached_window->bounding_rect();
 
         if (!area.valid()) {
             context.complete(epoc::error_none);
@@ -942,7 +1118,7 @@ namespace eka2l1::epoc {
             rect_draw_data.color_.w = 255;
         }
 
-        attached_window->add_draw_command(gdi_cmd);
+        add_draw_command(gdi_cmd);
 
         // Draw rectangle
         context.complete(epoc::error_none);
@@ -970,7 +1146,7 @@ namespace eka2l1::epoc {
             rect_draw_data.color_.w = 255;
         }
         
-        attached_window->add_draw_command(gdi_cmd);
+        add_draw_command(gdi_cmd);
 
         // Draw rectangle
         context.complete(epoc::error_none);
@@ -991,14 +1167,16 @@ namespace eka2l1::epoc {
             rect_draw_data.color_.w = 255;
         }
         
-        attached_window->add_draw_command(gdi_cmd);
+        add_draw_command(gdi_cmd);
         context.complete(epoc::error_none);
     }
 
-    void graphic_context::reset_context() {
-        if (text_font) {
-            text_font = nullptr;
-        }
+    void graphic_context::reset_internal_status() {
+        text_font = nullptr;
+        origin = { 0, 0 };
+        brush_origin = { 0, 0 };
+        drawing_mode = draw_mode::pen;
+        set_brush_pattern(nullptr);
 
         fill_mode = brush_style::null;
         line_mode = pen_style::solid;
@@ -1009,7 +1187,10 @@ namespace eka2l1::epoc {
 
         clipping_rect.make_empty();
         clipping_region.make_empty();
+    }
 
+    void graphic_context::reset_context() {
+        reset_internal_status();
         do_submit_clipping();
     }
 
@@ -1050,7 +1231,7 @@ namespace eka2l1::epoc {
     }
     
     void graphic_context::set_draw_mode(service::ipc_context &context, ws_cmd &cmd) {
-        // Not easy to implement under hardware acceleration, ignore for now
+        drawing_mode = *reinterpret_cast<const draw_mode *>(cmd.data_ptr);
         context.complete(epoc::error_none);
     }
 
@@ -1082,6 +1263,7 @@ namespace eka2l1::epoc {
         eka2l1::rect the_clip = *reinterpret_cast<eka2l1::rect *>(cmd.data_ptr);
         the_clip.transform_from_symbian_rectangle();
 
+        the_clip.top += origin;
         clipping_rect = the_clip;
         do_submit_clipping();
 
@@ -1096,6 +1278,7 @@ namespace eka2l1::epoc {
         }
 
         clipping_region = region.value();
+        clipping_region.advance(origin);
         do_submit_clipping();
 
         context.complete(epoc::error_none);
@@ -1126,7 +1309,6 @@ namespace eka2l1::epoc {
     }
 
     bool graphic_context::execute_command(service::ipc_context &ctx, ws_cmd &cmd) {
-        //LOG_TRACE(SERVICE_WINDOW, "Graphics context opcode {}", cmd.header.op);
         ws_graphics_context_opcode op = static_cast<decltype(op)>(cmd.header.op);
 
         using ws_graphics_context_op_handler = std::function<void(graphic_context *,
@@ -1139,6 +1321,7 @@ namespace eka2l1::epoc {
         // If the function pointer to implementation is nullptr, it's silently ignored! However, if the function
         // is not presented in this list at all, a warning will be issued.
         static const ws_graphics_context_table_op v139u_opcode_handlers = {
+            { ws_gc_u139_set_origin, { &graphic_context::set_origin, false, false } },
             { ws_gc_u139_active, { &graphic_context::active, false, false } },
             { ws_gc_u139_set_clipping_rect, { &graphic_context::set_clipping_rect, false, false } },
             { ws_gc_u139_cancel_clipping_rect, { &graphic_context::cancel_clipping_rect, false, false } },
@@ -1146,6 +1329,9 @@ namespace eka2l1::epoc {
             { ws_gc_u139_cancel_clipping_region, { &graphic_context::cancel_clipping_region, false, false } },
             { ws_gc_u139_set_brush_color, { &graphic_context::set_brush_color, false, false } },
             { ws_gc_u139_set_brush_style, { &graphic_context::set_brush_style, false, false } },
+            { ws_gc_u139_set_brush_origin, { &graphic_context::set_brush_origin, false, false } },
+            { ws_gc_u139_use_brush_pattern, { &graphic_context::use_brush_pattern, false, false } },
+            { ws_gc_u139_discard_brush_pattern, { &graphic_context::discard_brush_pattern, false, false } },
             { ws_gc_u139_set_pen_color, { &graphic_context::set_pen_color, false, false } },
             { ws_gc_u139_set_pen_style, { &graphic_context::set_pen_style, false, false } },
             { ws_gc_u139_set_pen_size, { &graphic_context::set_pen_size, false, false } },
@@ -1186,6 +1372,9 @@ namespace eka2l1::epoc {
             { ws_gc_u151m1_cancel_clipping_region, { &graphic_context::cancel_clipping_region, false, false } },
             { ws_gc_u151m1_set_brush_color, { &graphic_context::set_brush_color, false, false } },
             { ws_gc_u151m1_set_brush_style, { &graphic_context::set_brush_style, false, false } },
+            { ws_gc_u151m1_set_brush_origin, { &graphic_context::set_brush_origin, false, false } },
+            { ws_gc_u151m1_use_brush_pattern, { &graphic_context::use_brush_pattern, false, false } },
+            { ws_gc_u151m1_discard_brush_pattern, { &graphic_context::discard_brush_pattern, false, false } },
             { ws_gc_u151m1_set_pen_color, { &graphic_context::set_pen_color, false, false } },
             { ws_gc_u151m1_set_pen_style, { &graphic_context::set_pen_style, false, false } },
             { ws_gc_u151m1_set_pen_size, { &graphic_context::set_pen_size, false, false } },
@@ -1216,6 +1405,7 @@ namespace eka2l1::epoc {
         };
 
         static const ws_graphics_context_table_op v151u_m2_opcode_handlers = {
+            { ws_gc_u151m2_set_origin, { &graphic_context::set_origin, false, false } },
             { ws_gc_u151m2_active, { &graphic_context::active, false, false } },
             { ws_gc_u151m2_set_clipping_rect, { &graphic_context::set_clipping_rect, false, false } },
             { ws_gc_u151m2_cancel_clipping_rect, { &graphic_context::cancel_clipping_rect, false, false } },
@@ -1223,6 +1413,9 @@ namespace eka2l1::epoc {
             { ws_gc_u151m2_cancel_clipping_region, { &graphic_context::cancel_clipping_region, false, false } },
             { ws_gc_u151m2_set_brush_color, { &graphic_context::set_brush_color, false, false } },
             { ws_gc_u151m2_set_brush_style, { &graphic_context::set_brush_style, false, false } },
+            { ws_gc_u151m2_set_brush_origin, { &graphic_context::set_brush_origin, false, false } },
+            { ws_gc_u151m2_use_brush_pattern, { &graphic_context::use_brush_pattern, false, false } },
+            { ws_gc_u151m2_discard_brush_pattern, { &graphic_context::discard_brush_pattern, false, false } },
             { ws_gc_u151m2_set_pen_color, { &graphic_context::set_pen_color, false, false } },
             { ws_gc_u151m2_set_pen_style, { &graphic_context::set_pen_style, false, false } },
             { ws_gc_u151m2_set_pen_size, { &graphic_context::set_pen_size, false, false } },
@@ -1263,6 +1456,7 @@ namespace eka2l1::epoc {
         };
 
         static const ws_graphics_context_table_op curr_opcode_handlers = {
+            { ws_gc_curr_set_origin, { &graphic_context::set_origin, false, false } },
             { ws_gc_curr_active, { &graphic_context::active, false, false } },
             { ws_gc_curr_set_clipping_rect, { &graphic_context::set_clipping_rect, false, false } },
             { ws_gc_curr_cancel_clipping_rect, { &graphic_context::cancel_clipping_rect, false, false } },
@@ -1270,6 +1464,9 @@ namespace eka2l1::epoc {
             { ws_gc_curr_cancel_clipping_region, { &graphic_context::cancel_clipping_region, false, false } },
             { ws_gc_curr_set_brush_color, { &graphic_context::set_brush_color, false, false } },
             { ws_gc_curr_set_brush_style, { &graphic_context::set_brush_style, false, false } },
+            { ws_gc_curr_set_brush_origin, { &graphic_context::set_brush_origin, false, false } },
+            { ws_gc_curr_use_brush_pattern, { &graphic_context::use_brush_pattern, false, false } },
+            { ws_gc_curr_discard_brush_pattern, { &graphic_context::discard_brush_pattern, false, false } },
             { ws_gc_curr_set_pen_color, { &graphic_context::set_pen_color, false, false } },
             { ws_gc_curr_set_pen_style, { &graphic_context::set_pen_style, false, false } },
             { ws_gc_curr_set_pen_size, { &graphic_context::set_pen_size, false, false } },
@@ -1365,10 +1562,13 @@ namespace eka2l1::epoc {
         , line_mode(pen_style::solid)
         , brush_color(0xFFFFFFFF)
         , pen_color(0)
-        , pen_size(1, 1) {
+        , brush_origin(0, 0)
+        , pen_size(1, 1)
+        , origin(0, 0) {
     }
     
     graphic_context::~graphic_context() {
+        set_brush_pattern(nullptr);
         context_attach_link.deque();
     }
 }

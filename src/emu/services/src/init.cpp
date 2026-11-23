@@ -22,7 +22,10 @@
 #include <common/path.h>
 #include <common/platform.h>
 
+#include <initializer_list>
 #include <memory>
+#include <string_view>
+#include <vector>
 #include <unordered_map>
 
 #include <services/accessory/accessory.h>
@@ -48,7 +51,9 @@
 #include <services/featmgr/featmgr.h>
 #include <services/fs/fs.h>
 #include <services/goommonitor/goommonitor.h>
+#include <services/hwrm/haptics/haptics.h>
 #include <services/hwrm/hwrm.h>
+#include <services/internet/accesspoints.h>
 #include <services/internet/connmonitor.h>
 #include <services/internet/nifman.h>
 #include <services/loader/loader.h>
@@ -57,7 +62,10 @@
 #include <services/posix/posix.h>
 #include <services/redir/redir.h>
 #include <services/remcon/remcon.h>
+#include <services/lbs/lbs.h>
 #include <services/sensor/sensor.h>
+#include <services/memorymanager/memorymanager.h>
+#include <services/linnea/linnea.h>
 #include <services/shutdown/shutdown.h>
 #include <services/sisregistry/sisregistry.h>
 #include <services/sms/settings.h>
@@ -66,6 +74,7 @@
 #include <services/socket/server.h>
 #include <services/sysagt/sysagt.h>
 #include <services/timezone/timezone.h>
+#include <services/ui/cap/coestorage.h>
 #include <services/ui/cap/oom_app.h>
 #include <services/ui/eikappui.h>
 #include <services/ui/icon/icon.h>
@@ -353,8 +362,7 @@ namespace eka2l1 {
                         // EKA1 GUI applications run inside AppRun.exe. Once its .app image is
                         // attached, that image determines the POSIX current drive rather than
                         // AppRun's Z: drive.
-                        if (common::lowercase_ucs2_string(eka2l1::path_extension(code_segment->get_full_path()))
-                            == u".app") {
+                        if (code_segment->get_full_path().has_extension(u".app")) {
                             existing_server->second->update_executable_path(code_segment->get_full_path());
                         }
                         return;
@@ -388,6 +396,12 @@ namespace eka2l1 {
             CREATE_SERVER(sys, loader_server);
             CREATE_SERVER(sys, shutdown_server);
 
+            if (sys->get_symbian_version_use() == epocver::epoc70) {
+                // Platform services UIQ applications block on; the ROM starts them at boot.
+                CREATE_SERVER(sys, memory_manager_server);
+                CREATE_SERVER(sys, linnea_server);
+            }
+
             if (sys->get_kernel_system()->is_eka1()) {
                 CREATE_SERVER(sys, camera_server);
             }
@@ -396,7 +410,10 @@ namespace eka2l1 {
 
             CREATE_SERVER(sys, fbs_server);
             CREATE_SERVER(sys, window_server);
-            CREATE_SERVER(sys, central_repo_server);
+            CREATE_SERVER(sys, central_repo_server, [sys](central_repo &repo) {
+                provide_host_access_point(repo, sys->get_symbian_version_use());
+                epoc::initialize_input_language(repo, static_cast<std::uint32_t>(sys->get_system_language()));
+            });
             CREATE_SERVER(sys, featmgr_server);
 
             if (cfg->enable_srv_rights)
@@ -452,6 +469,11 @@ namespace eka2l1 {
             CREATE_SERVER(sys, msv_server);
 
             CREATE_SERVER(sys, sensor_server);
+
+            if (!sys->get_kernel_system()->is_eka1()) {
+                CREATE_SERVER(sys, lbs_server);
+            }
+
             CREATE_SERVER(sys, connmonitor_server);
             CREATE_SERVER(sys, nifman_server);
             CREATE_SERVER(sys, drm_notifier_server);
@@ -535,8 +557,44 @@ namespace eka2l1 {
             init_symbian_app_launch_to_host_launch(sys);
         }
         
+        // Processes the UIQ 3 startup sequence launches before any application, in its order.
+        // Their clients only connect and never start them.
+        static void start_rom_boot_servers(system *sys) {
+            struct boot_process {
+                const char16_t *path;
+                bool wait_for_start;
+            };
+
+            static const boot_process BOOT_PROCESSES[] = {
+                // The shell owns the priority 0 window group the memory manager expects.
+                { u"z:\\sys\\bin\\thmsrv.exe", true },
+                { u"z:\\sys\\bin\\memorymanagerserver.exe", true },
+                { u"z:\\sys\\bin\\linshell.exe", false },
+                { u"z:\\sys\\bin\\tisrvs.exe", true }
+            };
+
+            if (!sys->is_uiq_3_device_active()) {
+                return;
+            }
+
+            kernel_system *kern = sys->get_kernel_system();
+            for (const boot_process &process : BOOT_PROCESSES) {
+                if (sys->get_io_system()->exist(eka2l1::guest_path{process.path})) {
+                    kern->start_boot_server(guest_path(process.path), process.wait_for_start);
+                }
+            }
+        }
+
         void init_services_post_bootup(system *sys) {
+            // ROM libraries only become loadable once the frontend has mounted drive Z.
+            if (auto fbss = reinterpret_cast<fbs_server *>(sys->get_kernel_system()->get_by_name<service::server>(
+                    epoc::get_fbs_server_name_by_epocver(sys->get_symbian_version_use())))) {
+                fbss->initialize_palette();
+            }
+
             epoc::sms::supply_sim_settings(sys);
+            supply_plpvariant_machine_id(sys);
+            start_rom_boot_servers(sys);
         }
     }
 }

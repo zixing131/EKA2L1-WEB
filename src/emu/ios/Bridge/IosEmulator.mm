@@ -1,0 +1,3275 @@
+// Copyright (c) 2026 EKA2L1 Team.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#import "IosEmulator.h"
+#include "DeviceInstallation.h"
+
+#import <AVFoundation/AVFoundation.h>
+#import <UIKit/UIKit.h>
+
+
+#include <array>
+#include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <vector>
+
+#include <sys/stat.h>
+#include <arpa/inet.h>
+
+#include <common/algorithm.h>
+#include <common/buffer.h>
+#include <common/crypt.h>
+#include <common/cvt.h>
+#include <common/fileutils.h>
+#include <common/language.h>
+#include <common/log.h>
+#include <common/path.h>
+#include <common/thread.h>
+#include <common/version.h>
+#include <config/app_settings.h>
+#include <config/config.h>
+#include <control/ngage.h>
+#include <cpu/arm_factory.h>
+#include <dispatch/dispatcher.h>
+#include <drivers/audio/audio.h>
+#include <drivers/audio/dsp.h>
+#include <drivers/audio/player.h>
+#include <drivers/graphics/backend/emu_window_ios.h>
+#include <drivers/graphics/graphics.h>
+#include <drivers/input/common.h>
+#include <drivers/ui/input_dialog.h>
+#include <drivers/ui/input_dialog_ios.h>
+#include <drivers/itc.h>
+#include <drivers/hwrm/vibration.h>
+#include <drivers/hwrm/backend/vibration_ios.h>
+#include <drivers/camera/camera_collection.h>
+#include <drivers/sensor/sensor.h>
+#include <drivers/sensor/backend/ios/controller_motion.h>
+#include <drivers/sensor/backend/ios/motion_override.h>
+#include <services/window/screen.h>
+#include <kernel/kernel.h>
+#include <kernel/process.h>
+#include <kernel/thread.h>
+#include <package/manager.h>
+#include <services/applist/applist.h>
+#include <services/bluetooth/btman.h>
+#include <services/etel/etel.h>
+#include <services/fbs/bitmap.h>
+#include <services/fbs/fbs.h>
+#include <services/window/window.h>
+#include <system/devices.h>
+#include <system/epoc.h>
+#include <system/installation/archive.h>
+#include <system/installation/common.h>
+#include <system/installation/firmware.h>
+#include <system/installation/rpkg.h>
+#include <system/software.h>
+#include <utils/apacmd.h>
+#include <utils/locale.h>
+#include <utils/panic.h>
+#include <utils/system.h>
+#include <vfs/vfs.h>
+
+
+@implementation EKA2L1AppEntry
+@end
+
+@implementation EKA2L1DeviceEntry
+@end
+
+@implementation EKA2L1NGageInstallReport
+@end
+
+@implementation EKA2L1MountReport
+@end
+
+@implementation EKA2L1LanguageEntry
+@end
+
+namespace eka2l1::ios {
+    static dispatch_queue_t emulator_control_queue() {
+        static dispatch_queue_t queue;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            queue = dispatch_queue_create("com.eka2l1.emulator.control", DISPATCH_QUEUE_SERIAL);
+        });
+        return queue;
+    }
+
+    static EKA2L1InstallResult map_install_result(eka2l1::device_installation_error err) {
+        switch (err) {
+            case eka2l1::device_installation_none: return EKA2L1InstallResultSuccess;
+            case eka2l1::device_installation_not_exist: return EKA2L1InstallResultNotExist;
+            case eka2l1::device_installation_insufficent: return EKA2L1InstallResultInsufficient;
+            case eka2l1::device_installation_rpkg_corrupt: return EKA2L1InstallResultRpkgCorrupt;
+            case eka2l1::device_installation_determine_product_failure: return EKA2L1InstallResultDetermineProductFailure;
+            case eka2l1::device_installation_already_exist: return EKA2L1InstallResultAlreadyExist;
+            case eka2l1::device_installation_general_failure: return EKA2L1InstallResultGeneralFailure;
+            case eka2l1::device_installation_rom_fail_to_copy: return EKA2L1InstallResultRomFailToCopy;
+            case eka2l1::device_installation_vpl_file_invalid: return EKA2L1InstallResultVplInvalid;
+            case eka2l1::device_installation_rofs_corrupt: return EKA2L1InstallResultRofsCorrupt;
+            case eka2l1::device_installation_rom_file_corrupt: return EKA2L1InstallResultRomCorrupt;
+            case eka2l1::device_installation_fpsx_corrupt: return EKA2L1InstallResultFpsxCorrupt;
+            case eka2l1::device_installation_rpkg_missing: return EKA2L1InstallResultNeedRpkg;
+            case eka2l1::device_installation_archive_corrupt: return EKA2L1InstallResultArchiveCorrupt;
+            case eka2l1::device_installation_archive_no_device: return EKA2L1InstallResultArchiveNoDevice;
+            default: return EKA2L1InstallResultGeneralFailure;
+        }
+    }
+}
+
+namespace eka2l1::ios {
+    static NSString *guest_fatal_detail(kernel::process *pr) {
+        if (!pr) {
+            return nil;
+        }
+
+        const auto exit_type = pr->get_exit_type();
+        const std::int32_t reason = pr->get_exit_reason();
+        if (exit_type != kernel::entity_exit_type::panic
+            && !(exit_type == kernel::entity_exit_type::terminate && reason != 0)) {
+            return nil;
+        }
+
+        const std::string process_name = pr->raw_name();
+        const std::string category = common::ucs2_to_utf8(pr->get_exit_category());
+        const std::optional<std::string> description = epoc::get_panic_description(category, reason);
+
+        const char *exit_type_name = "unknown";
+        switch (exit_type) {
+            case kernel::entity_exit_type::panic: exit_type_name = "panic"; break;
+            case kernel::entity_exit_type::terminate: exit_type_name = "terminate"; break;
+            case kernel::entity_exit_type::kill: exit_type_name = "kill"; break;
+            case kernel::entity_exit_type::pending: exit_type_name = "pending"; break;
+        }
+
+        std::ostringstream detail;
+        detail << "Process: " << (process_name.empty() ? "<unknown>" : process_name) << "\n"
+               << "Exit type: " << exit_type_name << "\n"
+               << "Category: " << (category.empty() ? "<none>" : category) << "\n"
+               << "Reason: " << reason;
+        if (description && !description->empty()) {
+            detail << "\nDescription: " << *description;
+        }
+
+        const std::string message = detail.str();
+        return [NSString stringWithUTF8String:message.c_str()];
+    }
+
+    static NSData *encode_rgba_to_png(const std::uint8_t *pixels,
+                                      std::size_t width, std::size_t height,
+                                      std::size_t requested_side) {
+        if (!pixels || width == 0 || height == 0) {
+            return nil;
+        }
+        CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+        CGBitmapInfo bitmap_info = kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast;
+        const std::size_t bpr = width * 4;
+        CGContextRef src_ctx = CGBitmapContextCreate(const_cast<std::uint8_t *>(pixels),
+            width, height, 8, bpr, color_space, bitmap_info);
+        if (!src_ctx) {
+            CGColorSpaceRelease(color_space);
+            return nil;
+        }
+        CGImageRef src_image = CGBitmapContextCreateImage(src_ctx);
+        CGContextRelease(src_ctx);
+        if (!src_image) {
+            CGColorSpaceRelease(color_space);
+            return nil;
+        }
+
+        // Rescale into a square `requested_side` × `requested_side` so the
+        // SwiftUI list cells get a predictable canvas; lunasvg renders at the
+        // SVG's intrinsic size (often 88×88 or 176×176) and MBM dimensions
+        // vary by app. Skip rescale if it already matches to save one draw.
+        // The source aspect ratio must be kept: S60 AIF list icons are 42×29,
+        // and filling the square would squash every legacy icon.
+        UIImage *image = nil;
+        if (requested_side == width && requested_side == height) {
+            image = [UIImage imageWithCGImage:src_image];
+        } else {
+            CGContextRef dst_ctx = CGBitmapContextCreate(nullptr,
+                requested_side, requested_side, 8, requested_side * 4,
+                color_space, bitmap_info);
+            if (dst_ctx) {
+                const double scale = std::min(static_cast<double>(requested_side) / width,
+                    static_cast<double>(requested_side) / height);
+                const double draw_w = width * scale;
+                const double draw_h = height * scale;
+                CGContextSetInterpolationQuality(dst_ctx, kCGInterpolationHigh);
+                CGContextDrawImage(dst_ctx, CGRectMake((requested_side - draw_w) / 2.0,
+                    (requested_side - draw_h) / 2.0, draw_w, draw_h), src_image);
+                CGImageRef dst_image = CGBitmapContextCreateImage(dst_ctx);
+                CGContextRelease(dst_ctx);
+                if (dst_image) {
+                    image = [UIImage imageWithCGImage:dst_image];
+                    CGImageRelease(dst_image);
+                }
+            }
+        }
+        CGImageRelease(src_image);
+        CGColorSpaceRelease(color_space);
+        if (!image) {
+            return nil;
+        }
+        return UIImagePNGRepresentation(image);
+    }
+
+}
+
+namespace eka2l1::ios {
+    // C++ side of the iOS emulator state. Lives behind the Obj-C facade
+    // EKA2L1Emulator so SwiftUI never sees the C++ types directly.
+    //
+    // Owns everything the app needs for one emulator instance: the system, its
+    // drivers, and the two threads behind the frame loop.
+    struct emulator {
+        std::unique_ptr<eka2l1::system> symsys;
+        std::unique_ptr<config::app_settings> settings;
+        std::unique_ptr<drivers::emu_window_ios> window;
+        drivers::graphics_driver_ptr graphics_driver;
+        std::unique_ptr<drivers::audio_driver> audio_driver;
+        std::unique_ptr<drivers::sensor_driver> sensor_driver;
+
+        config::state conf;
+        window_server *winserv = nullptr;
+        eka2l1::host_path documents_root;
+        eka2l1::host_path caches_root;
+
+        std::atomic<bool> running{false};
+        std::atomic<bool> paused{false};
+        // symsys->loop() must not run before bootDeviceAtIndex: completes —
+        // kernel_system::crr_thread() dereferences a null thread_scheduler
+        // otherwise. The os_thread idles until this flips true.
+        std::atomic<bool> mounted{false};
+
+        // Frame loop / lifecycle. Two threads sit behind the
+        // singleton — one feeds drivers::graphics_driver::run() (must own
+        // the EAGL context), the other ticks symsys->loop().
+        std::unique_ptr<std::thread> os_thread;
+        std::unique_ptr<std::thread> graphics_thread;
+
+        // Held by os_thread around each symsys->loop() tick. Device install /
+        // switch rebuilds symsys (or mutates device_manager) and must not race
+        // a loop in flight, so those paths grab this between ticks.
+        std::mutex loop_mutex;
+
+        // Serialises bridge entry points that walk symsys internals from
+        // arbitrary threads (app rescan spins up the applist worker pool)
+        // against the paths that rebuild or destroy symsys (boot / install /
+        // shutdown). loop_mutex only covers the os_thread tick, not these.
+        // Recursive because launch -> reboot nests two writer sections.
+        // Main-thread readers must try_lock only: while a boot holds this
+        // lock the graphics thread dispatch_syncs onto the main queue, so a
+        // blocked main thread would deadlock the boot.
+        std::recursive_mutex &session_mutex;
+
+        explicit emulator(std::recursive_mutex &session_mutex)
+            : session_mutex(session_mutex) {
+        }
+
+        std::mutex layer_mutex;
+        std::mutex display_geometry_mutex;
+        eka2l1::rect display_rect;
+        std::condition_variable layer_cv;
+        bool layer_dirty = false;
+        void *pending_layer = nullptr;
+        std::uint32_t pending_width = 0;
+        std::uint32_t pending_height = 0;
+        float pending_scale = 1.0f;
+
+        std::mutex icon_mutex;
+        std::vector<std::size_t> screen_redraw_handles;
+        // Double-buffered present fences. Each frame uses one slot and only
+        // blocks on the slot it reused two frames ago, so the guest CPU can run
+        // one frame ahead while the graphics thread is still doing the (vsync-
+        // gated) swap of the previous frame instead of serialising against it.
+        // present_mutex serialises submit_screen_frame itself: besides the os
+        // thread's redraw callback, the launch/resize paths kick presents from
+        // dispatch queues, and two concurrent submits would race the slot
+        // fences (both waiting on the same in-flight slot — a deadlock).
+        std::mutex present_mutex;
+        int present_status[2] = { 0, 0 };
+        int present_slot = 0;
+        std::atomic<std::uint64_t> rendered_frame_count{0};
+
+        // Picture behind the guest screen (config background-image). The
+        // texture belongs to submit_screen_frame under present_mutex; writes to
+        // conf.background_image take background_mutex instead, since a present
+        // can hold present_mutex across a GPU fence wait.
+        std::mutex background_mutex;
+        std::atomic<bool> background_dirty{true};
+        eka2l1::drivers::handle background_texture = 0;
+        eka2l1::vec2 background_size{ 0, 0 };
+
+        // Where the guest picture is placed on the render surface, in surface
+        // pixels. Guarded by display_geometry_mutex.
+        struct display_layout {
+            // Area the picture is fitted into; an empty size means the whole
+            // surface.
+            eka2l1::rect content;
+            // Multiplies the fitted size, so the user can shrink the picture
+            // clear of the keypad or blow it past the surface edges.
+            float scale = 1.0f;
+            // 0 left, 1 top, 2 centre, 3 right, 4 bottom — the alignment the
+            // frontend's picker offers, matching the Android frontend's order.
+            int gravity = 2;
+            eka2l1::vec2 offset{ 0, 0 };
+        };
+
+        display_layout display_layout_;
+
+        // Set while a re-present scheduled by a layout change is still queued,
+        // so dragging the picture around coalesces into one pending frame.
+        std::atomic<bool> display_layout_represent_pending{false};
+
+        // Set when a queued layout change also resizes the screen texture, so
+        // the coalesced frame knows it must ask the window server to repaint.
+        std::atomic<bool> display_layout_repaint_pending{false};
+
+        // CCW rotation of on-screen content relative to the iPhone's natural
+        // (portrait) orientation: 0 portrait, 90 landscapeLeft, 180 upside
+        // down, 270 landscapeRight. Combined with the guest screen mode's
+        // rotation on every present to orient accelerometer samples.
+        std::atomic<int> host_interface_rotation_deg{0};
+
+        // Whether the booted device has a touch screen, published by
+        // bootDeviceAtIndex:. The emulator screen asks for this while it
+        // appears — on the main thread, without the session lock — and the
+        // launch path may be rebuilding symsys on the control queue at that
+        // very moment, so the answer must not come from walking symsys.
+        std::atomic<bool> device_is_touch_screen{false};
+
+        // Read by the main thread while a boot may be rebuilding symsys.
+        std::atomic<bool> device_is_eka1{false};
+
+        // conf.ios_performance_mode latched at device boot; the emulator
+        // threads pick it up through sync_thread_qos().
+        std::atomic<int> thread_priority{ eka2l1::common::thread_priority_normal };
+
+        // Guarded by session_mutex; firmware identity survives device-list reordering.
+        eka2l1::host_path mounted_card_path;
+        std::string mounted_card_firmware;
+        std::string mounted_card_mmc_id;
+        std::uint32_t mounted_card_attrib{0};
+        // Nonblocking mount status for the main thread.
+        std::atomic<bool> card_mounted{false};
+
+        // Primary-thread id of the app launched by launchAppWithUID:. Used to
+        // kill that process when the frontend closes the emulator screen, and
+        // cleared once the process exits (so closeRunningApp no-ops afterwards).
+        eka2l1::kernel::uid running_thread_id = 0;
+        eka2l1::control::ngage_controller ngage;
+
+        // Set once an app has exited / been killed in this booted session. The
+        // window + view servers don't fully reset between app instances (the
+        // guest logs "Can't remove active view!" on exit), so relaunching into
+        // the same session renders a blank screen. Mirror the desktop frontend,
+        // which reboots the device on app exit: the next launchAppWithUID:
+        // rebuilds the system first. Cleared by that rebuild.
+        bool needs_reboot_before_launch = false;
+
+        // Bumped on every launch. The process exit logon is registered with the
+        // generation it belongs to; a stale logon (e.g. the previous app's
+        // callback re-fired while its process is torn down during the reboot of
+        // the next launch — logon_requests_emu isn't cleared after firing) is
+        // then ignored instead of closing the freshly-launched screen.
+        std::uint64_t launch_generation = 0;
+
+        // Firmware code of the device a previous run of the app was still
+        // bringing up when the process died (see the boot-attempt marker
+        // below). Read once at start, handed to the frontend, and used to keep
+        // the auto-boot away from that device.
+        std::string failed_boot_firmware;
+
+        // Firmware code of the device the current boot attempt is on, empty
+        // once the boot is confirmed good. Mirrors the on-disk marker.
+        std::string pending_boot_firmware;
+
+        // Set while a boot that owns the marker above is still running, so a
+        // confirmation arriving from the frontend in the meantime (an app-list
+        // rescan racing a device switch) doesn't clear a marker the boot still
+        // needs.
+        std::atomic<bool> boot_in_flight{false};
+    };
+
+    // A ROM or RPKG dump that is damaged in a way the installer doesn't catch
+    // only fails once the device is actually brought up — and it fails hard
+    // (guest memory is mapped straight from the image, so a bad one takes the
+    // host process down rather than returning an error). Persisting the device
+    // selection before that point is what turns a one-off crash into a
+    // permanent one: every later launch auto-boots the same broken device and
+    // dies again before the UI can offer a way out.
+    //
+    // So the selection is written to config.yml only after a boot has proven
+    // itself, and the attempt itself is recorded in this marker file
+    // beforehand. Finding the marker at start means the previous run died
+    // mid-boot; that device is then skipped by the auto-boot and reported to
+    // the frontend, leaving the user with a working app they can delete or
+    // reinstall the bad dump from.
+    static eka2l1::host_path boot_attempt_marker_path(emulator *state) {
+        return eka2l1::add_path(state->conf.storage, "boot_attempt.txt");
+    }
+
+    static void mark_boot_attempt(emulator *state, const std::string &firmware_code) {
+        state->pending_boot_firmware = firmware_code;
+        state->boot_in_flight = true;
+        FILE *f = common::open_c_file(eka2l1::host_path{boot_attempt_marker_path(state)}, "wb");
+        if (!f) {
+            LOG_WARN(eka2l1::FRONTEND_CMDLINE, "Unable to record the device boot attempt marker");
+            return;
+        }
+        fwrite(firmware_code.data(), 1, firmware_code.length(), f);
+        fflush(f);
+        fclose(f);
+    }
+
+    static void clear_boot_attempt(emulator *state) {
+        state->boot_in_flight = false;
+        if (state->pending_boot_firmware.empty()) {
+            return;
+        }
+        state->pending_boot_firmware.clear();
+        common::remove(eka2l1::host_path{boot_attempt_marker_path(state)});
+    }
+
+    // Read the marker left by a previous run and delete it, so a device is only
+    // ever held against one launch: the user can still boot it by hand, and a
+    // dump that works again (reinstalled, or the crash was unrelated) is not
+    // locked out.
+    static std::string take_boot_attempt(emulator *state) {
+        const eka2l1::host_path marker(boot_attempt_marker_path(state));
+        std::string firmware_code;
+        if (FILE *f = common::open_c_file(marker, "rb")) {
+            char buf[128] = { 0 };
+            const std::size_t read = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            firmware_code.assign(buf, read);
+        }
+        common::remove(marker);
+        return firmware_code;
+    }
+
+    // Typed service-server accessors. The window / applist / fbs servers are
+    // all looked up by their epoc-version-specific name, so wrap the verbose
+    // get_by_name<server>(name_by_epocver(...)) + reinterpret_cast that would
+    // otherwise be repeated at every call site. All return nullptr for a null
+    // kernel so callers can chain without a separate guard.
+    static eka2l1::window_server *get_window_server(eka2l1::kernel_system *kern) {
+        if (!kern) {
+            return nullptr;
+        }
+        return reinterpret_cast<eka2l1::window_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_winserv_name_by_epocver(kern->get_epoc_version())));
+    }
+
+    static eka2l1::applist_server *get_applist_server(eka2l1::kernel_system *kern) {
+        if (!kern) {
+            return nullptr;
+        }
+        return reinterpret_cast<eka2l1::applist_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+    }
+
+    static eka2l1::fbs_server *get_fbs_server(eka2l1::kernel_system *kern) {
+        if (!kern) {
+            return nullptr;
+        }
+        return reinterpret_cast<eka2l1::fbs_server *>(
+            kern->get_by_name<eka2l1::service::server>(
+                eka2l1::epoc::get_fbs_server_name_by_epocver(kern->get_epoc_version())));
+    }
+
+    // The component bundle handed to each new eka2l1::system. iOS never feeds a
+    // graphics driver through here (it is bound later, once the EAGL context is
+    // live); audio / conf / settings live for the emulator's whole lifetime.
+    static eka2l1::system_create_components make_system_components(emulator *state) {
+        eka2l1::system_create_components comp;
+        comp.audio_ = state->audio_driver.get();
+        comp.graphics_ = nullptr;
+        comp.conf_ = &state->conf;
+        comp.settings_ = state->settings.get();
+        comp.cache_root_ = state->caches_root;
+        return comp;
+    }
+
+    // Match Qt/Android's CID convention for dumps keyed to their original card.
+    static std::string mmc_id_from_card_path(const eka2l1::host_path &path) {
+        const std::string name = path.filename().utf8();
+        if (name.empty()) {
+            return std::string();
+        }
+
+        static const std::regex cid_regex("[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+");
+        std::smatch matches;
+
+        if (std::regex_search(name, matches, cid_regex)) {
+            return matches[0];
+        }
+        return std::string();
+    }
+
+    // Call under session_mutex to keep the main-thread snapshot in sync.
+    static void set_mounted_card(emulator *state, eka2l1::host_path path, const std::uint32_t attrib,
+        std::string mmc_id = {}) {
+        state->mounted_card_mmc_id = std::move(mmc_id);
+        state->mounted_card_path = std::move(path);
+        state->mounted_card_attrib = attrib;
+        const auto *device = state->mounted_card_path.empty() ? nullptr
+            : state->symsys->get_device_manager()->get_current();
+        state->mounted_card_firmware = device ? device->firmware_code : std::string();
+        state->card_mounted.store(!state->mounted_card_path.empty(), std::memory_order_relaxed);
+    }
+
+    static eka2l1::common::thread_priority performance_mode_priority(const std::string &mode) {
+        return (mode == "high-performance") ? eka2l1::common::thread_priority_high
+                                            : eka2l1::common::thread_priority_normal;
+    }
+
+    // QoS can only be set by the thread itself. `applied` is the caller's last
+    // applied priority, -1 before the first call.
+    static void sync_thread_qos(const emulator *state, int &applied) {
+        const int wanted = state->thread_priority.load(std::memory_order_relaxed);
+        if (wanted != applied) {
+            eka2l1::common::set_thread_priority(static_cast<eka2l1::common::thread_priority>(wanted));
+            applied = wanted;
+        }
+    }
+
+    static bool wait_for_graphics_driver(emulator *state, const std::chrono::milliseconds timeout) {
+        if (!state) {
+            return false;
+        }
+        std::unique_lock<std::mutex> lock(state->layer_mutex);
+        return state->layer_cv.wait_for(lock, timeout, [state]() {
+            return !state->running || state->graphics_driver != nullptr;
+        }) && state->graphics_driver != nullptr;
+    }
+
+    // With cpu_load_save enabled the scheduler parks the os_thread inside
+    // symsys->loop() (idle_event.wait) whenever no guest thread is ready, so it
+    // stops burning a host core when the guest is idle. The flip side is that a
+    // parked loop still holds loop_mutex and won't observe running/paused/mounted
+    // flips until the next timer wakes it. Mirror Qt's kill_emulator: poke the
+    // scheduler awake so the in-flight tick returns promptly. Safe to call when
+    // idle is disabled (stop_cores_idling is a no-op then) or before boot.
+    static void break_core_idling(emulator *state) {
+        if (!state || !state->symsys) {
+            return;
+        }
+        if (auto *kern = state->symsys->get_kernel_system()) {
+            kern->stop_cores_idling();
+        }
+    }
+
+    // Stop the os_thread from ticking symsys->loop() and wait out any tick in
+    // flight, returning the held loop lock so the caller can mutate symsys /
+    // kernel state exclusively. Mirrors the prologue used by device install,
+    // boot and app-close. The caller owns `mounted` afterwards: boot flips it
+    // back true, a failed install restores the previous value, app-close leaves
+    // it false.
+    [[nodiscard]] static std::unique_lock<std::mutex> pause_loop_and_lock(emulator *state) {
+        state->mounted = false;
+        break_core_idling(state);
+        return std::unique_lock<std::mutex>(state->loop_mutex);
+    }
+
+    static bool bind_graphics_driver(emulator *state) {
+        if (!state || !state->symsys || !state->graphics_driver) {
+            return false;
+        }
+
+        state->symsys->set_graphics_driver(state->graphics_driver.get());
+        auto *kern = state->symsys->get_kernel_system();
+        if (!state->winserv) {
+            state->winserv = get_window_server(kern);
+        }
+        if (state->winserv) {
+            for (eka2l1::epoc::screen *scr = state->winserv->get_screens(); scr; scr = scr->next) {
+                if (!scr->screen_texture) {
+                    scr->set_screen_mode(state->winserv, state->graphics_driver.get(), scr->crr_mode);
+                }
+            }
+        }
+        return true;
+    }
+
+    // Decodes into RGBA rows, top row first, capped so a camera photo
+    // does not cost more texture memory than a phone screen can show.
+    static std::vector<std::uint8_t> decode_background_image(const eka2l1::host_path &path, eka2l1::vec2 &size) {
+        @autoreleasepool {
+            UIImage *image = [UIImage imageWithContentsOfFile:[NSString stringWithUTF8String:path.c_str()]];
+            CGImageRef cg_image = image.CGImage;
+            if (!cg_image) {
+                return {};
+            }
+
+            constexpr double max_edge = 3072.0;
+            const double source_w = static_cast<double>(CGImageGetWidth(cg_image));
+            const double source_h = static_cast<double>(CGImageGetHeight(cg_image));
+            const double fit = std::min(1.0, max_edge / std::max(source_w, source_h));
+            const int width = std::max(1, static_cast<int>(std::lround(source_w * fit)));
+            const int height = std::max(1, static_cast<int>(std::lround(source_h * fit)));
+
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+            CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+            const CGBitmapInfo bitmap_info = static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedLast)
+                | kCGBitmapByteOrder32Big;
+            CGContextRef context = CGBitmapContextCreate(pixels.data(), width, height, 8, width * 4,
+                color_space, bitmap_info);
+            CGColorSpaceRelease(color_space);
+            if (!context) {
+                return {};
+            }
+            CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+            CGContextDrawImage(context, CGRectMake(0, 0, width, height), cg_image);
+            CGContextRelease(context);
+
+            size = eka2l1::vec2(width, height);
+            return pixels;
+        }
+    }
+
+    // Caller holds present_mutex.
+    static void refresh_background_texture(emulator *state, eka2l1::drivers::graphics_command_builder &builder) {
+        if (!state->background_dirty.exchange(false)) {
+            return;
+        }
+
+        eka2l1::host_path path;
+        {
+            std::lock_guard<std::mutex> background_lock(state->background_mutex);
+            path = state->conf.background_image;
+        }
+        eka2l1::vec2 size{ 0, 0 };
+        std::vector<std::uint8_t> pixels;
+        if (!path.empty()) {
+            if (path.front() != '/') {
+                path = eka2l1::add_path(state->conf.storage, path);
+            }
+            pixels = decode_background_image(path, size);
+            if (pixels.empty()) {
+                LOG_ERROR(eka2l1::FRONTEND_UI, "Unable to load background image {}", path);
+            }
+        }
+
+        if (pixels.empty()) {
+            if (state->background_texture) {
+                builder.destroy(state->background_texture);
+                state->background_texture = 0;
+            }
+            return;
+        }
+
+        if (!state->background_texture) {
+            state->background_texture = eka2l1::drivers::create_texture(state->graphics_driver.get(), 2, 0,
+                eka2l1::drivers::texture_format::rgba, eka2l1::drivers::texture_format::rgba,
+                eka2l1::drivers::texture_data_type::ubyte, pixels.data(), pixels.size(),
+                eka2l1::vec3(size.x, size.y, 0));
+            if (!state->background_texture) {
+                return;
+            }
+        } else {
+            builder.recreate_texture(state->background_texture, 2, 0, eka2l1::drivers::texture_format::rgba,
+                eka2l1::drivers::texture_format::rgba, eka2l1::drivers::texture_data_type::ubyte,
+                pixels.data(), pixels.size(), eka2l1::vec3(size.x, size.y, 0));
+        }
+        builder.set_texture_filter(state->background_texture, true, eka2l1::drivers::filter_option::linear);
+        builder.set_texture_filter(state->background_texture, false, eka2l1::drivers::filter_option::linear);
+        state->background_size = size;
+    }
+
+    // Aspect-fill: crop the image's centre to the surface's aspect ratio.
+    static void draw_background(emulator *state, eka2l1::drivers::graphics_command_builder &builder,
+        const eka2l1::vec2 &swapchain_size) {
+        const eka2l1::vec2 image_size = state->background_size;
+        if (!state->background_texture || (image_size.x <= 0) || (image_size.y <= 0)
+            || (swapchain_size.x <= 0) || (swapchain_size.y <= 0)) {
+            return;
+        }
+
+        const float fill = std::max(static_cast<float>(swapchain_size.x) / image_size.x,
+            static_cast<float>(swapchain_size.y) / image_size.y);
+        eka2l1::rect source;
+        source.size.x = std::min(image_size.x, static_cast<int>(std::lround(swapchain_size.x / fill)));
+        source.size.y = std::min(image_size.y, static_cast<int>(std::lround(swapchain_size.y / fill)));
+        source.top = (image_size - source.size) / 2;
+
+        eka2l1::rect dest;
+        dest.size = swapchain_size;
+
+        builder.set_feature(eka2l1::drivers::graphics_feature::blend, true);
+        builder.blend_formula(eka2l1::drivers::blend_equation::add, eka2l1::drivers::blend_equation::add,
+            eka2l1::drivers::blend_factor::frag_out_alpha, eka2l1::drivers::blend_factor::one_minus_frag_out_alpha,
+            eka2l1::drivers::blend_factor::one, eka2l1::drivers::blend_factor::one_minus_frag_out_alpha);
+        builder.set_brush_color_detail(eka2l1::vec4(255, 255, 255,
+            std::clamp(state->conf.background_image_opacity, 0, 255)));
+        builder.draw_bitmap(state->background_texture, 0, dest, source, eka2l1::vec2(0, 0), 0.0f,
+            eka2l1::drivers::bitmap_draw_flag_use_brush);
+        builder.set_feature(eka2l1::drivers::graphics_feature::blend, false);
+    }
+
+    static void submit_screen_frame(emulator *state, eka2l1::epoc::screen *scr) {
+        if (!state || !state->graphics_driver || !state->window) {
+            return;
+        }
+        if (!scr || !scr->screen_texture) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> present_lock(state->present_mutex);
+
+        // wait_for blocks while the slot is -100 (in-flight) and returns
+        // immediately once the driver thread has called finish() (or for the
+        // initial 0). With two ping-ponging slots this blocks on the present
+        // from two frames ago, so at most two frames are ever in flight: the
+        // guest computes the next frame while the graphics thread does the
+        // (synchronous, vsync-gated) swap of the previous one.
+        const int slot = state->present_slot;
+        state->graphics_driver->wait_for(&state->present_status[slot]);
+
+        eka2l1::drivers::graphics_command_builder builder;
+        const eka2l1::vec2 swapchain_size = state->window->window_fb_size();
+        builder.set_swapchain_size(swapchain_size);
+        builder.backup_state();
+        builder.bind_bitmap(0);
+        builder.set_feature(eka2l1::drivers::graphics_feature::cull, false);
+        builder.set_feature(eka2l1::drivers::graphics_feature::depth_test, false);
+        builder.set_feature(eka2l1::drivers::graphics_feature::blend, false);
+        builder.set_feature(eka2l1::drivers::graphics_feature::clipping, false);
+        builder.set_feature(eka2l1::drivers::graphics_feature::stencil_test, false);
+
+        eka2l1::rect viewport;
+        viewport.size = swapchain_size;
+        builder.set_viewport(viewport);
+        builder.clear({ 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f },
+            eka2l1::drivers::draw_buffer_bit_color_buffer);
+        refresh_background_texture(state, builder);
+        draw_background(state, builder, swapchain_size);
+
+        // The guest's own orientation.
+        const int rotation = scr->ui_rotation % 360;
+
+        auto &mode = scr->current_mode();
+
+        // Keep accelerometer samples aligned with what the player sees: the
+        // emulated device's natural orientation sits (mode.rotation -
+        // natural_mode.rotation) CCW from the guest picture, and the picture
+        // sits host_interface_rotation_deg CCW from the iPhone's natural
+        // orientation. wsini SCR_ROTATION is framebuffer-to-panel, so the
+        // first mode (the orientation the device is normally held in, where
+        // Symbian defines the sensor axes) must be subtracted as the panel
+        // mount angle: S60v5 nHD panels are landscape-native (portrait mode
+        // rot=270), unlike Symbian^3 (rot=0). Refreshing here tracks both
+        // guest screen-mode switches and host rotations (a host rotation
+        // re-attaches the surface, which re-presents even a static screen).
+        {
+            const eka2l1::epoc::config::screen_mode *natural_mode = scr->mode_info(0);
+            const int panel_mount = natural_mode ? natural_mode->rotation : 0;
+            const int picture_rotation = mode.rotation - panel_mount
+                + state->host_interface_rotation_deg.load(std::memory_order_relaxed);
+
+            if (state->sensor_driver) {
+                state->sensor_driver->set_motion_rotation(picture_rotation);
+                eka2l1::drivers::set_controller_motion_rotation(state->sensor_driver.get(),
+                    mode.rotation - panel_mount);
+            }
+
+            // A camera is bolted to the device body, so it needs the mirror of the
+            // accelerometer's angle for the host term: turning the phone counter-
+            // clockwise spins the scene clockwise inside the sensor buffer, while
+            // the interface counter-rotates the picture to stay upright for the
+            // viewer. The guest term keeps its sign -- an app that composes for a
+            // rotated panel already lays the frame out for it.
+            eka2l1::drivers::camera::set_frame_rotation(mode.rotation - panel_mount
+                - state->host_interface_rotation_deg.load(std::memory_order_relaxed));
+        }
+        eka2l1::rect src;
+        src.size = mode.size;
+
+        eka2l1::vec2 display_size = mode.size;
+        if (rotation % 180 != 0) {
+            std::swap(display_size.x, display_size.y);
+        }
+
+        emulator::display_layout layout;
+        {
+            std::lock_guard<std::mutex> geometry_lock(state->display_geometry_mutex);
+            layout = state->display_layout_;
+        }
+
+        eka2l1::rect content = layout.content;
+        if ((content.size.x <= 0) || (content.size.y <= 0)) {
+            content.top = eka2l1::vec2(0, 0);
+            content.size = swapchain_size;
+        }
+
+        float scale = std::min(
+            static_cast<float>(content.size.x) / static_cast<float>(display_size.x),
+            static_cast<float>(content.size.y) / static_cast<float>(display_size.y));
+        scale *= std::max(0.05f, layout.scale);
+        if (scale <= 0.0f) {
+            return;
+        }
+        const float width = display_size.x * scale;
+        const float height = display_size.y * scale;
+
+        const float center_x = content.top.x + (content.size.x - width) / 2.0f;
+        const float center_y = content.top.y + (content.size.y - height) / 2.0f;
+
+        eka2l1::rect dest;
+        dest.size.x = static_cast<int>(width);
+        dest.size.y = static_cast<int>(height);
+        dest.top.x = static_cast<int>(center_x);
+        dest.top.y = static_cast<int>(center_y);
+
+        switch (layout.gravity) {
+        case 0:
+            dest.top.x = content.top.x;
+            break;
+        case 1:
+            dest.top.y = content.top.y;
+            break;
+        case 3:
+            dest.top.x = content.top.x + content.size.x - dest.size.x;
+            break;
+        case 4:
+            dest.top.y = content.top.y + content.size.y - dest.size.y;
+            break;
+        default:
+            break;
+        }
+
+        dest.top += layout.offset;
+
+        // Keep at least the picture's centre on the surface, so a stored offset
+        // can never leave the user with a blank screen and no way back.
+        dest.top.x = std::min(std::max(dest.top.x, -dest.size.x / 2),
+            swapchain_size.x - dest.size.x / 2);
+        dest.top.y = std::min(std::max(dest.top.y, -dest.size.y / 2),
+            swapchain_size.y - dest.size.y / 2);
+
+        const eka2l1::rect external_crop = dest;
+        {
+            std::lock_guard<std::mutex> geometry_lock(state->display_geometry_mutex);
+            state->display_rect = external_crop;
+        }
+
+        scr->set_native_scale_factor(state->graphics_driver.get(), scale, scale);
+        scr->absolute_pos = dest.top;
+
+        eka2l1::drivers::advance_draw_pos_around_origin(dest, rotation);
+        if (rotation % 180 != 0) {
+            std::swap(dest.size.x, dest.size.y);
+        }
+        src.size *= scr->display_scale_factor;
+
+        std::uint32_t flags = 0;
+        if (scr->flags_ & eka2l1::epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK) {
+            flags |= eka2l1::drivers::bitmap_draw_flag_use_upscale_shader;
+        }
+
+        builder.set_texture_filter(scr->screen_texture, true, eka2l1::drivers::filter_option::linear);
+        builder.set_texture_filter(scr->screen_texture, false, eka2l1::drivers::filter_option::linear);
+        builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
+            static_cast<float>(rotation), flags);
+
+        builder.load_backup_state();
+        state->present_status[slot] = -100;
+        state->window->external_display.enqueue_frame(external_crop, swapchain_size);
+        builder.present(&state->present_status[slot]);
+        eka2l1::drivers::command_list commands = builder.retrieve_command_list();
+        state->graphics_driver->submit_command_list(commands);
+        state->present_slot ^= 1;
+        state->rendered_frame_count.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Re-present the primary screen's current texture without touching guest
+    // window-server state — safe to call while the guest loop is running. Used
+    // after a surface resize so a static screen re-composes at the new size.
+    static void re_present_screen(emulator *state) {
+        eka2l1::epoc::screen *scr = state->winserv ? state->winserv->get_screens() : nullptr;
+        submit_screen_frame(state, scr);
+    }
+
+    // Force the primary screen to (re)create its texture and present a frame.
+    // The first frames after launch can land before the guest has drawn, so the
+    // launch path schedules a couple of these to kick a stale/black screen.
+    static void kick_screen_redraw(emulator *state) {
+        eka2l1::epoc::screen *scr = state->winserv ? state->winserv->get_screens() : nullptr;
+        if (scr && state->graphics_driver && state->symsys) {
+            // scr->redraw() walks the guest window tree and rasterises text
+            // through the (non-reentrant) FreeType font atlas. The window
+            // server's own animation_scheduler drives the same redraw from the
+            // ntimer thread under kern->lock() + screen_mutex, so this launch
+            // kick — dispatched onto a global queue — must take the identical
+            // locks in the same order, or the two redraws race inside FreeType
+            // and corrupt the shared glyph cache (SIGSEGV in get_glyph_atlas).
+            if (auto *kern = state->symsys->get_kernel_system()) {
+                kern->lock();
+                {
+                    const std::lock_guard<std::mutex> guard(scr->screen_mutex);
+                    if (!scr->screen_texture) {
+                        scr->set_screen_mode(state->winserv, state->graphics_driver.get(), scr->crr_mode);
+                    }
+                    scr->redraw(state->graphics_driver.get());
+                }
+                kern->unlock();
+            }
+        }
+        submit_screen_frame(state, scr);
+    }
+
+    static void install_required_rom_patches(emulator *state) {
+        if (!state || !state->symsys) {
+            return;
+        }
+
+        auto *io = state->symsys->get_io_system();
+        drivers::ui::set_automatic_input_view(false);
+        // Same folder lib_manager::load_patch_libraries scans, which the
+        // frontend redirects into the read-only app bundle at startup.
+        const eka2l1::host_path patch_dir(eka2l1::runtime_resource_path(eka2l1::host_path{"patch"}));
+        const std::vector<std::tuple<eka2l1::guest_path, eka2l1::host_path, epocver>> dlls_need_to_copy = {
+            { eka2l1::guest_path(u"Z:\\sys\\bin\\goommonitor.dll"), eka2l1::host_path("goommonitor_general.dll"), epocver::epoc94 },
+            { eka2l1::guest_path(u"Z:\\sys\\bin\\avkonfep.dll"), eka2l1::host_path("avkonfep_general.dll"), epocver::epoc93fp1 }
+        };
+
+        for (const auto &entry : dlls_need_to_copy) {
+            if (state->symsys->get_symbian_version_use() < std::get<2>(entry)) {
+                continue;
+            }
+
+            auto destination = io->get_raw_path(eka2l1::guest_path{std::get<0>(entry)});
+            if (!destination.has_value()) {
+                continue;
+            }
+
+            const eka2l1::host_path source(eka2l1::add_path(patch_dir, std::get<1>(entry)));
+            const eka2l1::host_path dest(destination.value());
+            if (!common::exists(source)) {
+                continue;
+            }
+
+            const eka2l1::host_path backup(dest + ".bak");
+            if (common::exists(dest) && !common::exists(backup)) {
+                common::move_file(dest, backup);
+            }
+            common::copy_file(source, dest, true);
+        }
+    }
+}
+
+@interface EKA2L1Emulator ()
+// Main-queue bounce target for the launched process' exit logon. `generation`
+// identifies the launch the logon belonged to, so a stale re-fire is dropped.
+- (void)handleRunningAppExitedForGeneration:(std::uint64_t)generation
+                               fatalDetails:(nullable NSString *)fatalDetails;
+// Synchronous launch body, run off the main thread by launchAppWithUID:completion:.
+- (BOOL)runLaunchAppWithUID:(uint32_t)uid;
+- (void)applyNetworkingSuspended:(BOOL)suspended;
+// Uninstall path for apps with no package registry (N-Gage game cards).
+- (BOOL)removeUnpackagedAppWithUID:(uint32_t)uid;
+// Post-uninstall cleanup for a registration the package did not own.
+- (void)dropLeftoverRegistrationOf:(eka2l1::apa_app_registry *)reg;
+@end
+
+@implementation EKA2L1Emulator {
+    std::atomic<NSInteger> _lastInstalledDeviceIndex;
+    // Queued work must be able to lock before reading a possibly torn-down state.
+    std::recursive_mutex _sessionMutex;
+    std::unique_ptr<eka2l1::ios::emulator> _state;
+    std::atomic<bool> _networkingSuspended;
+    // Host pointer identity (UITouch address) → guest pointer number. The guest
+    // event's ptr_num is a uint8_t indexed pointer slot on Symbian^3 (advanced
+    // pointers), so raw UITouch identities must be mapped to small stable
+    // indices with down/up pairing — mirrors Qt's map_mouse_id_to_touch_index.
+    std::array<uintptr_t, 8> _touchSlots;
+    std::mutex _touchSlotsLock;
+    // Last successful rescanApps result, returned as-is when a system rebuild
+    // holds session_mutex (rescanApps must not block the main thread).
+    NSArray<EKA2L1AppEntry *> *_lastAppList;
+}
+
++ (instancetype)shared {
+    static EKA2L1Emulator *instance;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        instance = [[EKA2L1Emulator alloc] init];
+    });
+    return instance;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _networkingSuspended = false;
+        _lastInstalledDeviceIndex = -1;
+    }
+    return self;
+}
+
+- (BOOL)startWithDocumentsPath:(NSString *)documentsPath {
+    if (_state && _state->running) {
+        return YES;
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> session_lock(_sessionMutex);
+        _state = std::make_unique<eka2l1::ios::emulator>(_sessionMutex);
+    }
+    _state->documents_root = eka2l1::host_path(documentsPath.UTF8String);
+
+    // Build the sandbox layout up front so later steps can rely on it.
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *cachesURL = [fm URLForDirectory:NSCachesDirectory
+                                  inDomain:NSUserDomainMask
+                         appropriateForURL:nil
+                                    create:YES
+                                     error:nil];
+    if (cachesURL) {
+        _state->caches_root = eka2l1::host_path(cachesURL.path.UTF8String);
+    }
+    // Drive letters mirror Symbian's uppercase convention. iOS app data
+    // containers are case-sensitive (despite the host APFS volume being
+    // case-insensitive), so rescan_devices()'s "drives/Z/" probe and the
+    // mount() calls below have to find these exact names on disk.
+    // Use lowercase drive letters and firmcode dir names throughout. The
+    // system code paths that read the ROM / Z drive build their paths via
+    // common::lowercase_string(firmcode) and lowercase drive letters, and
+    // the iOS sim's runtime presents the app with a case-sensitive view of
+    // the host APFS volume (which itself is case-insensitive, so we can
+    // only ever have one entry per case-insensitive name on disk). Naming
+    // everything lowercase ensures both views agree.
+    // Only the emulator's own tree is created here. roms/ is made on demand by
+    // the device install, and ROM/RPKG/SIS files are all read straight from the
+    // picked URL, so nothing else needs to sit empty in the user-visible
+    // Documents root.
+    NSArray<NSString *> *subdirs = @[@"data",
+                                      @"data/drives/c", @"data/drives/d",
+                                      @"data/drives/e", @"data/drives/z",
+                                      @"data/compat"];
+    for (NSString *sub in subdirs) {
+        NSString *path = [documentsPath stringByAppendingPathComponent:sub];
+        [fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    // Run the emulator with cwd = Documents/data so the config / drive paths
+    // resolve into the sandbox rather than the (read-only) bundle.
+    NSString *dataRoot = [documentsPath stringByAppendingPathComponent:@"data"];
+
+    // The emulator opens its shipped resources through cwd-relative paths:
+    // "resources/*.vert|frag" plus "resources/upscale/*.frag" (ogl_shader_module),
+    // "resources/defaultbank.sf2" (player_tsf), and ".//patch//" scanned by
+    // lib_manager::load_patch_libraries. All of those readers are read-only, so
+    // point them at the app bundle instead of staging a copy into the sandbox:
+    // the working directory below stays the writable data tree (config, drives,
+    // logs), and set_runtime_resource_root redirects just the shipped ones.
+    // Documents is user-visible through the Files app, so keeping the resources
+    // out of it also keeps them out of reach of an accidental edit or delete.
+    //
+    // The bundle subfolder is "emures", not "resources": a top-level "resources"
+    // would collide with the reserved "Resources" bundle dir on the
+    // case-insensitive build host and break codesign, so the names the emulator
+    // expects live one level down (see src/emu/ios/CMakeLists.txt).
+    NSString *bundleResourceRoot = [NSBundle.mainBundle.resourcePath
+        stringByAppendingPathComponent:@"emures"];
+    eka2l1::set_runtime_resource_root(eka2l1::host_path{bundleResourceRoot.UTF8String});
+
+    // Earlier builds copied those resources into the sandbox instead of reading
+    // them from the bundle. Nothing reads the copies anymore, so drop them rather
+    // than leaving ~1MB of dead weight in the user's backed-up Documents.
+    for (NSString *stale in @[@"resources", @"patch"]) {
+        [fm removeItemAtPath:[dataRoot stringByAppendingPathComponent:stale] error:nil];
+    }
+    // Cache contents are disposable and belong under Library/Caches. Remove
+    // the complete cache tree left in Documents/data by older builds.
+    [fm removeItemAtPath:[dataRoot stringByAppendingPathComponent:@"cache"] error:nil];
+
+    chdir(dataRoot.UTF8String);
+
+    eka2l1::log::setup_log(nullptr);
+    LOG_INFO(eka2l1::FRONTEND_CMDLINE, "EKA2L1 iOS v26.7.0 ({}-{})", GIT_BRANCH, GIT_COMMIT_HASH);
+
+    // A bundle missing this folder means the copy-files build phases did not
+    // run: no shaders (null FILE* in the ogl driver) and an unpatched guest.
+    // Say so once here instead of leaving a pile of confusing follow-up errors.
+    if (![fm fileExistsAtPath:bundleResourceRoot]) {
+        LOG_ERROR(eka2l1::FRONTEND_CMDLINE, "Bundle resource folder {} is missing!",
+            bundleResourceRoot.UTF8String);
+    }
+
+
+    _state->conf.deserialize();
+    _state->conf.storage = eka2l1::host_path(dataRoot.UTF8String);
+
+    // Pick up (and clear) the marker a previous run left behind if it died
+    // while bringing a device up — a damaged ROM/RPKG only shows itself there,
+    // and it takes the process down instead of failing gracefully. The device
+    // it names is kept out of the auto-boot below and reported to the frontend.
+    _state->failed_boot_firmware = eka2l1::ios::take_boot_attempt(_state.get());
+    if (!_state->failed_boot_firmware.empty()) {
+        LOG_ERROR(eka2l1::FRONTEND_CMDLINE, "Previous run did not survive booting device {}; skipping it",
+            _state->failed_boot_firmware);
+    }
+    // Force cpu_load_save on, matching desktop/Android's default: when the guest
+    // has no ready thread the scheduler parks the os_thread on idle_event instead
+    // of spinning symsys->loop(), so an idle screen (e.g. the N97 home screen)
+    // stops pinning a host core at 100%. We override here rather than just
+    // trusting the default because earlier builds hard-set this false (a leftover
+    // from launch-path debugging) and saveSettings persisted that into config.yml;
+    // deserialize() above would otherwise keep loading the stale false. There is
+    // no iOS UI toggle for this, so the default must always win.
+    // shutdown/pause/boot call break_core_idling() so a parked loop still tears
+    // down promptly.
+    _state->conf.cpu_load_save = true;
+
+    // Apply the configured log filter, the way Qt does it in state.cpp — the iOS
+    // frontend used to skip this step, leaving the log_filterings ctor's
+    // every-class-at-trace default in place. The filter string is taken as
+    // written: an earlier version here rewrote it whenever it equalled the
+    // "*:trace" debug preset, which made a filter the user had set explicitly
+    // indistinguishable from an unconfigured one (that preset is also this
+    // build's default, since the app is not a BUILD_FOR_USER build). What that
+    // rewrite really guarded against was dyncom's per-op VFP trace on the
+    // interpreter's hot path, and those sites are now compiled out unless
+    // EKA2L1_DYNCOM_VFP_TRACE is turned on (see src/emu/cpu/CMakeLists.txt).
+    if (eka2l1::log::filterings && !_state->conf.log_filter.empty()) {
+        eka2l1::log::filterings->parse_filter_string(_state->conf.log_filter);
+    }
+
+    _state->settings = std::make_unique<eka2l1::config::app_settings>(&_state->conf);
+
+    // Instantiate the audio driver up front, so services that fan out
+    // audio_driver at startup (KeySound, MediaClient, DSP shared streams) get a
+    // real instance rather than a null one. On iOS the cubeb backend selector
+    // resolves to the native AURemoteIO driver, which configures AVAudioSession
+    // (Playback category, mix-with-others) on the first call.
+    eka2l1::drivers::player_type midi_be = eka2l1::drivers::player_type_tsf;
+    _state->audio_driver = eka2l1::drivers::make_audio_driver(
+        eka2l1::drivers::audio_driver_backend::cubeb,
+        _state->conf.audio_master_volume,
+        midi_be);
+    if (_state->audio_driver) {
+        // The configured paths are the shared "resources/defaultbank.*"
+        // defaults unless the user pointed them somewhere else, so resolve them
+        // against the bundle; an absolute user path passes through untouched.
+        _state->audio_driver->set_bank_path(eka2l1::drivers::MIDI_BANK_TYPE_HSB,
+            eka2l1::host_path{eka2l1::runtime_resource_path(eka2l1::host_path{_state->conf.hsb_bank_path})});
+        _state->audio_driver->set_bank_path(eka2l1::drivers::MIDI_BANK_TYPE_SF2,
+            eka2l1::host_path{eka2l1::runtime_resource_path(eka2l1::host_path{_state->conf.sf2_bank_path})});
+    } else {
+        LOG_WARN(eka2l1::FRONTEND_CMDLINE,
+            "iOS audio: cubeb_audio_driver instance is null; services will fall back to silence");
+    }
+
+    // CoreMotion-backed accelerometer for the guest Sensor Framework, same
+    // wiring as the Qt/Android frontends. Bound to each booted system in
+    // bootDeviceAtIndex: alongside the audio driver.
+    _state->sensor_driver = eka2l1::drivers::sensor_driver::instantiate();
+    if (!_state->sensor_driver) {
+        LOG_WARN(eka2l1::FRONTEND_CMDLINE, "Failed to create sensor driver");
+    }
+
+    auto comp = eka2l1::ios::make_system_components(_state.get());
+    _state->ngage.clear();
+    _state->symsys = std::make_unique<eka2l1::system>(comp);
+    _state->window = std::make_unique<eka2l1::drivers::emu_window_ios>();
+
+    _state->running = true;
+
+    auto *state = _state.get();
+    _state->graphics_thread = std::make_unique<std::thread>([state]() {
+        eka2l1::common::set_thread_name("Graphics thread");
+        int qos_applied = -1;
+        eka2l1::ios::sync_thread_qos(state, qos_applied);
+
+        // Wait for the EAGLView to publish its CAEAGLLayer; the EAGL context
+        // can't be created without a drawable. attachLayer:pixelSize:scale:
+        // flips layer_dirty under layer_mutex.
+        std::unique_lock<std::mutex> lock(state->layer_mutex);
+        state->layer_cv.wait(lock, [state]() {
+            return !state->running || state->pending_layer != nullptr;
+        });
+        if (!state->running) {
+            return;
+        }
+        state->window->surface_changed(state->pending_layer, state->pending_width,
+            state->pending_height, state->pending_scale);
+        state->layer_dirty = false;
+        lock.unlock();
+
+        // Build the graphics driver on this thread so the EAGL context is
+        // current here. The OGL driver's run() loop owns the thread until
+        // the symsys / driver tear down.
+        auto graphics_driver = eka2l1::drivers::create_graphics_driver(
+            eka2l1::drivers::graphic_api::opengl,
+            state->window->get_window_system_info());
+        if (!graphics_driver) {
+            LOG_ERROR(eka2l1::DRIVER_GRAPHICS, "iOS graphics driver creation failed");
+            state->layer_cv.notify_all();
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> publish_lock(state->layer_mutex);
+            // Install the surface hook before publishing the driver, under the
+            // same lock. attachLayer: treats a visible driver as "the hook is
+            // ready" and then calls it without holding this lock, so assigning
+            // the std::function afterwards let the main thread observe a
+            // half-constructed callable and jump through its vptr.
+            state->window->surface_change_hook = [state](void *new_surface) {
+                state->graphics_driver->update_surface(new_surface);
+            };
+            state->graphics_driver = std::move(graphics_driver);
+        }
+        state->layer_cv.notify_all();
+
+        // Runs on this thread after every present; CAEAGLLayer presentation
+        // itself is implicit in gl_context_eagl::swap_buffers.
+        state->graphics_driver->set_display_hook([state, qos_applied]() mutable {
+            eka2l1::ios::sync_thread_qos(state, qos_applied);
+        });
+
+        state->graphics_driver->run();
+    });
+
+    _state->os_thread = std::make_unique<std::thread>([state]() {
+        eka2l1::common::set_thread_name("Symbian OS thread");
+        int qos_applied = -1;
+
+        while (state->running) {
+            eka2l1::ios::sync_thread_qos(state, qos_applied);
+            if (state->paused || !state->mounted.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                continue;
+            }
+            try {
+                std::lock_guard<std::mutex> loop_lock(state->loop_mutex);
+                if (!state->paused && state->mounted && state->symsys->get_graphics_driver()) {
+                    state->symsys->loop();
+                    continue;
+                }
+            } catch (std::exception &exc) {
+                LOG_ERROR(eka2l1::FRONTEND_CMDLINE, "Emu loop exception: {}", exc.what());
+                state->running = false;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+    });
+
+    // If a device was previously installed, boot straight into it (restoring
+    // the last-selected one from conf.device) so the frontend lands on the
+    // app list rather than the empty-state import prompt.
+    auto *dvc = _state->symsys->get_device_manager();
+    if (dvc && dvc->total() > 0) {
+        std::size_t want = static_cast<std::size_t>(std::max(0, _state->conf.device));
+        if (want >= dvc->total()) {
+            want = 0;
+        }
+        // A device the previous run died on must not be auto-booted again, or
+        // a broken dump crashes the app on every launch with no chance to
+        // reach the UI and remove it. Fall back to the first device that isn't
+        // the suspect one; if it is the only one, come up device-less and let
+        // the frontend report it.
+        if (!_state->failed_boot_firmware.empty()) {
+            std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+            auto &devices = dvc->get_devices();
+            const auto is_suspect = [&](const std::size_t idx) {
+                return eka2l1::common::compare_ignore_case(devices[idx].firmware_code.c_str(),
+                    _state->failed_boot_firmware.c_str()) == 0;
+            };
+            if (is_suspect(want)) {
+                want = devices.size();
+                for (std::size_t i = 0; i < devices.size(); i++) {
+                    if (!is_suspect(i)) {
+                        want = i;
+                        break;
+                    }
+                }
+            }
+        }
+        if (want < dvc->total()) {
+            [self bootDeviceAtIndex:want];
+        }
+    }
+
+    return YES;
+}
+
+- (NSString *)takeFailedBootDeviceCode {
+    if (!_state || _state->failed_boot_firmware.empty()) {
+        return nil;
+    }
+    NSString *code = [NSString stringWithUTF8String:_state->failed_boot_firmware.c_str()];
+    _state->failed_boot_firmware.clear();
+    return code;
+}
+
+- (void)shutdown {
+    eka2l1::drivers::ui::reset_input_view();
+    std::lock_guard<std::recursive_mutex> session_lock(_sessionMutex);
+    if (!_state) {
+        return;
+    }
+    // Quiesce sensor callbacks (pause doubles as an in-flight barrier) before
+    // the kernel they complete into goes away below.
+    if (_state->sensor_driver) {
+        _state->sensor_driver->pause();
+    }
+    _state->running = false;
+    // Wake the os_thread if it's parked in the scheduler's idle wait, otherwise
+    // the join below blocks until the next guest timer happens to fire.
+    break_core_idling(_state.get());
+    {
+        std::lock_guard<std::mutex> lk(_state->layer_mutex);
+        _state->layer_cv.notify_all();
+    }
+    if (_state->graphics_driver) {
+        _state->graphics_driver->abort();
+    }
+    if (_state->os_thread && _state->os_thread->joinable()) {
+        _state->os_thread->join();
+    }
+    if (_state->graphics_thread && _state->graphics_thread->joinable()) {
+        _state->graphics_thread->join();
+    }
+    _state->graphics_driver.reset();
+    _state->background_texture = 0;
+    _state->background_dirty = true;
+    _state->ngage.clear();
+    _state->symsys.reset();
+    _state->audio_driver.reset();
+    _state->sensor_driver.reset();
+    _state->window.reset();
+    _state->settings.reset();
+    _state.reset();
+}
+
+- (NSArray<EKA2L1DeviceEntry *> *)installedDevices {
+    NSMutableArray<EKA2L1DeviceEntry *> *out = [NSMutableArray array];
+    if (!_state || !_state->symsys) {
+        return out;
+    }
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        return out;
+    }
+    std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+    auto &devices = dvc->get_devices();
+    for (std::size_t i = 0; i < devices.size(); i++) {
+        EKA2L1DeviceEntry *entry = [[EKA2L1DeviceEntry alloc] init];
+        entry.index = i;
+        entry.firmwareCode = [NSString stringWithUTF8String:devices[i].firmware_code.c_str()];
+        entry.manufacturer = [NSString stringWithUTF8String:devices[i].manufacturer.c_str()];
+        entry.model = [NSString stringWithUTF8String:devices[i].model.c_str()];
+        [out addObject:entry];
+    }
+    return out;
+}
+
+- (NSInteger)currentDeviceIndex {
+    if (!_state || !_state->mounted || !_state->symsys) {
+        return -1;
+    }
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        return -1;
+    }
+    return static_cast<NSInteger>(dvc->get_current_index());
+}
+
+- (NSInteger)lastInstalledDeviceIndex {
+    return _lastInstalledDeviceIndex.load();
+}
+
+- (NSString *)currentDeviceDriveEPath {
+    return [self currentDeviceDrivePath:'e'];
+}
+
+- (NSString *)currentDeviceDrivePath:(unichar)driveLetter {
+    const unichar letter = static_cast<unichar>(tolower(driveLetter));
+    // Not gated on `mounted`: the os loop stays parked after an app closes, but
+    // the device and its drive folders are unchanged.
+    if (!_state || !_state->symsys || (letter < 'c') || (letter > 'e')) {
+        return nil;
+    }
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        return nil;
+    }
+    std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+    const eka2l1::host_path path = _state->symsys->get_device_drive_path(
+        static_cast<drive_number>(drive_c + (letter - 'c')));
+    if (path.empty()) {
+        return nil;
+    }
+    return [NSString stringWithUTF8String:path.c_str()];
+}
+
+- (NSString *)resolveDeviceStoragePath:(NSString *)guestPath {
+    NSData *bytes = [guestPath dataUsingEncoding:NSUTF8StringEncoding];
+    if (!bytes || bytes.length == 0) return nil;
+    const std::string_view text(static_cast<const char *>(bytes.bytes), bytes.length);
+    if (text.find('\0') != text.npos) return nil;
+    const auto path = eka2l1::guest_path::from_utf8(text);
+    if (path.root_name().size() != 2) return nil;
+    const auto letter = path.lookup_key().front();
+    if (letter < u'c' || letter > u'e') return nil;
+    NSString *root = [self currentDeviceDrivePath:letter];
+    if (!root) return nil;
+    const auto resolved = eka2l1::host_path(root.UTF8String).resolve_guest(path.relative());
+    return [NSString stringWithUTF8String:resolved.c_str()];
+}
+
+// Shared body of the two install entry points below. `installer` is handed the
+// device manager plus the two storage folders every installer writes into, and
+// does the format-specific work; everything around it (freezing the emulator,
+// progress plumbing, persisting devices.yml) is the same either way.
+- (EKA2L1InstallResult)runDeviceInstall:(eka2l1::device_installation_error (^)(eka2l1::device_manager *dvc,
+                                            const eka2l1::host_path &romResidentPath, const eka2l1::host_path &rootZPath,
+                                            progress_changed_callback progressCb,
+                                            cancel_requested_callback cancelCb))installer
+                               progress:(void (^)(double))progress
+                            cancelCheck:(BOOL (^)(void))cancelCheck {
+    _lastInstalledDeviceIndex = -1;
+    if (!_state || !_state->symsys) {
+        return EKA2L1InstallResultGeneralFailure;
+    }
+
+    // Installing mutates device_manager + the sandbox storage tree; stop the
+    // os_thread from ticking symsys->loop() while we work, then wait out any
+    // in-flight tick before touching shared state. On a failed install the
+    // installers revert their own changes, so restore the previous run state
+    // (a device may already be booted) and let it keep ticking. On success the
+    // frontend boots the new device, which rebuilds the system and remounts.
+    const bool was_mounted = _state->mounted;
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+
+    auto *sys = _state->symsys.get();
+    auto *dvc = sys->get_device_manager();
+    if (!dvc) {
+        _state->mounted = was_mounted;
+        return EKA2L1InstallResultGeneralFailure;
+    }
+
+    const eka2l1::host_path storage(_state->conf.storage);
+    const eka2l1::host_path staging = eka2l1::add_path(storage,
+        std::string("device-import-") + NSUUID.UUID.UUIDString.UTF8String + "/");
+    struct staging_cleanup {
+        eka2l1::host_path path;
+        bool discard = true;
+        ~staging_cleanup() {
+            if (discard) {
+                eka2l1::common::delete_folder(eka2l1::host_path{path});
+            }
+        }
+    } cleanup{staging};
+    eka2l1::config::state staging_conf;
+    staging_conf.storage = staging;
+    eka2l1::device_manager staging_devices(&staging_conf);
+    const eka2l1::host_path root_z_path(eka2l1::add_path(staging, "drives/z/"));
+    const eka2l1::host_path rom_resident_path(eka2l1::add_path(staging, "roms/"));
+    eka2l1::common::create_directories(rom_resident_path);
+
+    // The installers report (done, total) pairs whose scale changes between
+    // phases but whose ratio stays monotonic, so hand the frontend the ratio.
+    // The last reported value is kept so a per-chunk callback doesn't wake the
+    // frontend thousands of times for sub-percent moves.
+    auto last_reported = std::make_shared<std::atomic<double>>(-1.0);
+    progress_changed_callback progress_cb = nullptr;
+    if (progress) {
+        progress_cb = [progress, last_reported](const std::size_t done, const std::size_t total) {
+            if (!total) {
+                return;
+            }
+            const double fraction = std::clamp(static_cast<double>(done) / static_cast<double>(total), 0.0, 1.0);
+            if ((fraction < last_reported->load() + 0.005) && (fraction < 1.0)) {
+                return;
+            }
+            last_reported->store(fraction);
+            progress(fraction);
+        };
+    }
+
+    cancel_requested_callback cancel_cb = nullptr;
+    if (cancelCheck) {
+        cancel_cb = [cancelCheck]() -> bool { return cancelCheck() == YES; };
+    }
+
+    eka2l1::device_installation_error result = installer(&staging_devices, rom_resident_path, root_z_path,
+        progress_cb, cancel_cb);
+    if (result == eka2l1::device_installation_none) {
+        if (cancel_cb && cancel_cb()) {
+            result = eka2l1::device_installation_general_failure;
+        } else if (staging_devices.total() != 1
+            || !eka2l1::ios::commit_device_install(*dvc, *staging_devices.lastest(),
+                staging, storage, cleanup.discard)) {
+            result = eka2l1::device_installation_general_failure;
+        }
+    }
+
+    if (result != eka2l1::device_installation_none) {
+        _state->mounted = was_mounted;
+        // A cancel surfaces as whatever error the aborted step happened to
+        // return (install_rom turns it into "ROM file corrupt"), so answer from
+        // the flag the user actually set instead of from the error code.
+        if (cancel_cb && cancel_cb()) {
+            return EKA2L1InstallResultCancelled;
+        }
+        return eka2l1::ios::map_install_result(result);
+    }
+
+    _lastInstalledDeviceIndex = dvc->get_current_index();
+    if (progress) {
+        progress(1.0);
+    }
+    return EKA2L1InstallResultSuccess;
+}
+
+- (EKA2L1InstallResult)installDeviceWithRomPath:(NSString *)romPath
+                                       rpkgPath:(NSString *)rpkgPath
+                                  isolateDrives:(BOOL)isolateDrives
+                                       progress:(void (^)(double))progress
+                                    cancelCheck:(BOOL (^)(void))cancelCheck {
+    if (![NSFileManager.defaultManager fileExistsAtPath:romPath]) {
+        return EKA2L1InstallResultNotExist;
+    }
+
+    const eka2l1::host_path rom_std(romPath.UTF8String);
+    const eka2l1::host_path rpkg_std(rpkgPath ? std::string(rpkgPath.UTF8String) : std::string());
+
+    return [self runDeviceInstall:^(eka2l1::device_manager *dvc, const eka2l1::host_path &rom_resident_path,
+                                     const eka2l1::host_path &root_z_path, progress_changed_callback progress_cb,
+                                     cancel_requested_callback cancel_cb) {
+        return eka2l1::loader::install_rom_with_optional_rpkg(dvc, rom_std, rpkg_std, rom_resident_path,
+            root_z_path, isolateDrives == YES, progress_cb, cancel_cb);
+    } progress:progress cancelCheck:cancelCheck];
+}
+
+- (EKA2L1InstallResult)installDeviceWithArchivePath:(NSString *)archivePath
+                                      isolateDrives:(BOOL)isolateDrives
+                                           progress:(void (^)(double))progress
+                                        cancelCheck:(BOOL (^)(void))cancelCheck {
+    if (![NSFileManager.defaultManager fileExistsAtPath:archivePath]) {
+        return EKA2L1InstallResultNotExist;
+    }
+
+    const eka2l1::host_path archive_std(archivePath.UTF8String);
+
+    return [self runDeviceInstall:^(eka2l1::device_manager *dvc, const eka2l1::host_path &rom_resident_path,
+                                     const eka2l1::host_path &root_z_path, progress_changed_callback progress_cb,
+                                     cancel_requested_callback cancel_cb) {
+        return eka2l1::loader::install_archive(dvc, archive_std, rom_resident_path, root_z_path,
+            isolateDrives == YES, progress_cb, cancel_cb);
+    } progress:progress cancelCheck:cancelCheck];
+}
+
+- (BOOL)bootDeviceAtIndex:(NSUInteger)index {
+    return [self bootDeviceAtIndex:index trackAttempt:YES];
+}
+
+// trackAttempt drops the boot-attempt marker that guards against a dump which
+// only turns out to be broken at boot time. Only user-driven boots need it: the
+// relaunch reboot re-runs a device that already came up in this session, and
+// leaving a marker behind there would quarantine a healthy device on the next
+// launch (nothing rescans the app list afterwards to clear it).
+- (BOOL)bootDeviceAtIndex:(NSUInteger)index trackAttempt:(BOOL)trackAttempt {
+    if (!_state) {
+        return NO;
+    }
+    const eka2l1::host_path storage(_state->conf.storage);
+
+    // Rebuild the system so device_manager reloads devices.yml fresh and the
+    // kernel comes up clean for the selected device. device_manager only
+    // reads devices.yml on construction. Take the session lock so an app
+    // rescan (worker pool inside the old symsys) finishes before the rebuild
+    // frees the state under it, then stop + drain the os_thread so the symsys
+    // reset below doesn't race a loop in flight.
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+    // Quiesce the sensor pump before the old system goes away: its data
+    // callbacks complete guest IPC and must not land in a dying kernel.
+    // pause() doubles as a barrier for a callback already in flight. Only
+    // resume below if this pause flipped the state — a lifecycle pause
+    // (backgrounded app) must stay paused.
+    const bool sensor_paused_for_reboot = _state->sensor_driver && _state->sensor_driver->pause();
+    struct sensor_resume_guard {
+        eka2l1::drivers::sensor_driver *drv_;
+        ~sensor_resume_guard() {
+            if (drv_) {
+                drv_->resume();
+            }
+        }
+    } sensor_resume{ sensor_paused_for_reboot ? _state->sensor_driver.get() : nullptr };
+    _state->winserv = nullptr;
+    _state->screen_redraw_handles.clear();
+    _state->rendered_frame_count.store(0, std::memory_order_relaxed);
+    // Drop any present fences left in-flight by the previous session so the
+    // first frame of the new one doesn't block waiting on a finish() that the
+    // torn-down graphics driver will never deliver.
+    _state->present_status[0] = 0;
+    _state->present_status[1] = 0;
+    _state->present_slot = 0;
+
+    const eka2l1::host_path card_path(_state->mounted_card_path);
+    const std::string card_firmware = _state->mounted_card_firmware;
+    const std::uint32_t card_attrib = _state->mounted_card_attrib;
+    const std::string card_mmc_id = _state->mounted_card_mmc_id;
+    eka2l1::ios::set_mounted_card(_state.get(), {}, 0);
+    _state->conf.current_mmc_id = _state->conf.mmc_id;
+
+    auto comp = eka2l1::ios::make_system_components(_state.get());
+    _state->ngage.clear();
+    _state->symsys = std::make_unique<eka2l1::system>(comp);
+    auto *sys = _state->symsys.get();
+
+    sys->startup();
+    auto *dvc = sys->get_device_manager();
+    if (!dvc || index >= dvc->total()) {
+        return NO;
+    }
+    if (!sys->set_device(static_cast<std::uint8_t>(index))) {
+        return NO;
+    }
+    _state->conf.device = static_cast<int>(index);
+    // Publish for the main thread, which must not touch symsys itself. Only
+    // update it once the device is known good, so a failed boot keeps the last
+    // answer instead of flipping the emulator screen to the wrong input model.
+    _state->device_is_touch_screen.store(sys->get_symbian_version_use() >= epocver::epoc94,
+        std::memory_order_relaxed);
+    _state->device_is_eka1.store(is_epocver_eka1(sys->get_symbian_version_use()),
+        std::memory_order_relaxed);
+
+    // Mirror the Android frontend's device-switch behavior: when the
+    // configured system language isn't shipped by this device's ROM (or was
+    // never set), fall back to the device's default language. Services boot
+    // below (setup_outsider) reads conf.language, so fix it up first.
+    std::string firmware_code;
+    {
+        std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+        const auto &device = dvc->get_devices()[index];
+        firmware_code = device.firmware_code;
+        const auto &device_langs = device.languages;
+        if (std::find(device_langs.begin(), device_langs.end(), _state->conf.language) == device_langs.end()) {
+            _state->conf.language = device.default_language_code;
+        }
+    }
+
+    // Everything below reads the device's own image. conf keeps the new
+    // selection in memory from here on, but it is only written to disk once the
+    // frontend reaches the app list on the other side of this boot
+    // (confirmDeviceBoot) — the point at which the device has proven it can
+    // carry the process.
+    if (trackAttempt) {
+        eka2l1::ios::mark_boot_attempt(_state.get(), firmware_code);
+    }
+
+    sys->mount_device_drive(drive_c);
+    sys->mount_device_drive(drive_d);
+    // Guest relaunches reboot the same device; retain its card, attributes and CID.
+    if (!card_path.empty() && card_firmware == firmware_code
+        && eka2l1::common::is_dir(card_path)
+        && sys->get_io_system()->mount_physical_path(drive_e, drive_media::physical,
+            card_attrib, card_path)) {
+        eka2l1::ios::set_mounted_card(_state.get(), card_path, card_attrib, card_mmc_id);
+        _state->conf.current_mmc_id = card_mmc_id.empty() ? _state->conf.mmc_id : card_mmc_id;
+    } else {
+        sys->mount_device_drive(drive_e);
+    }
+    sys->mount(drive_z, drive_media::rom, eka2l1::add_path(storage, "/drives/z/"),
+        io_attrib_internal | io_attrib_write_protected);
+
+    // Bind the drivers before initialize_user_parties so the services it
+    // boots (window server, key sound, ...) come up against a live driver.
+    // The graphics driver is re-bound via bind_graphics_driver() below once
+    // the device is mounted, so it does not need setting again here.
+    if (_state->graphics_driver) {
+        sys->set_graphics_driver(_state->graphics_driver.get());
+    }
+    if (_state->audio_driver) {
+        sys->set_audio_driver(_state->audio_driver.get());
+    }
+    if (_state->sensor_driver) {
+        sys->set_sensor_driver(_state->sensor_driver.get());
+    }
+    sys->initialize_user_parties();
+    eka2l1::ios::install_required_rom_patches(_state.get());
+    sys->get_packages()->load_registries();
+    sys->get_packages()->migrate_legacy_registries();
+
+    _state->winserv = eka2l1::ios::get_window_server(sys->get_kernel_system());
+
+    _state->thread_priority.store(eka2l1::ios::performance_mode_priority(_state->conf.ios_performance_mode),
+        std::memory_order_relaxed);
+    _state->mounted = true;
+    [self applyNetworkingSuspended:_networkingSuspended.load()];
+    eka2l1::ios::bind_graphics_driver(_state.get());
+
+    // Register a per-screen redraw callback so each frame produced by the
+    // Symbian window server triggers a swap on the EAGL context.
+    if (_state->winserv) {
+        auto *state = _state.get();
+        eka2l1::epoc::screen *screens = _state->winserv->get_screens();
+        while (screens) {
+            std::size_t handle = screens->add_screen_redraw_callback(state,
+                [](void *userdata, eka2l1::epoc::screen *scr, const bool /*is_dsa*/) {
+                    auto *st = reinterpret_cast<eka2l1::ios::emulator *>(userdata);
+                    if (!st->graphics_driver) {
+                        return;
+                    }
+                    eka2l1::ios::submit_screen_frame(st, scr);
+                });
+            _state->screen_redraw_handles.push_back(handle);
+            screens->add_screen_mode_change_callback(nullptr,
+                [](void * /*userdata*/, eka2l1::epoc::screen *scr, const int /*old_mode*/) {
+                    const NSInteger mode = scr->crr_mode;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [[NSNotificationCenter defaultCenter] postNotificationName:@"eka2l1GuestScreenModeChanged"
+                                                                            object:nil
+                                                                          userInfo:@{ @"mode": @(mode) }];
+                    });
+                });
+            screens = screens->next;
+        }
+    }
+
+    // The device is up; the marker stays until the frontend confirms, but the
+    // boot itself is no longer in flight, so that confirmation may now land.
+    _state->boot_in_flight = false;
+    return YES;
+}
+
+- (BOOL)deleteDeviceAtIndex:(NSUInteger)index {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+    // Mutating device_manager + deleting the sandbox storage tree must not race
+    // the os loop or an app rescan. Mirror the install/boot prologue: take the
+    // session lock, then stop and drain the loop. The caller reboots afterwards
+    // (or drops to the empty state), so preserve the prior mounted flag.
+    const bool was_mounted = _state->mounted;
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        _state->mounted = was_mounted;
+        return NO;
+    }
+
+    std::string firmcode;
+    {
+        std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+        auto &devices = dvc->get_devices();
+        if (index >= devices.size()) {
+            _state->mounted = was_mounted;
+            return NO;
+        }
+        firmcode = devices[index].firmware_code;
+    }
+
+    // delete_device takes dvc->lock itself, so it must be called without the
+    // scoped lock above held.
+    const bool removed = dvc->delete_device(firmcode);
+
+    eka2l1::delete_device_storage(_state->conf.storage, firmcode);
+
+    // The debinarized-SVG icon cache is keyed by firmware code as well (the same app
+    // UID ships different art per device), so it would otherwise feed stale icons to
+    // a reinstalled device.
+    if (!_state->caches_root.empty()) {
+        eka2l1::common::delete_folder(eka2l1::host_path{eka2l1::add_path(_state->caches_root, "icons/" + eka2l1::common::lowercase_string(firmcode) + "/")});
+    }
+
+    // Keep conf.device in step with device_manager's adjusted current index so
+    // a later boot (or a fresh launch) targets the surviving device.
+    _state->conf.device = dvc->get_current_index();
+    _state->conf.serialize();
+
+    _state->mounted = was_mounted;
+    return removed ? YES : NO;
+}
+
+- (BOOL)renameDeviceAtIndex:(NSUInteger)index toName:(NSString *)name {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        return NO;
+    }
+    // A rename only rewrites the in-memory model string and serialises
+    // devices.yml — it touches neither symsys memory nor the drive tree, so
+    // (like installedDevices) the device_manager lock alone guards it against a
+    // concurrent list read. save_devices() does not take the lock itself.
+    std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+    auto &devices = dvc->get_devices();
+    if (index >= devices.size()) {
+        return NO;
+    }
+    devices[index].model = name.UTF8String ? name.UTF8String : "";
+    dvc->save_devices();
+    return YES;
+}
+
+- (BOOL)rescanDevices {
+    if (!_state) {
+        return NO;
+    }
+    // Mirrors the Android/Qt launcher's rescan_devices call. It clears +
+    // repopulates device_manager from what's found on drive Z, then (if
+    // anything was found) resets the current symsys to index 0 as a side
+    // effect via set_device()/reset() — that call chain reaches down into
+    // kernel_system::install_memory(), which on iOS is only ever exercised
+    // right after bootDeviceAtIndex:'s fresh symsys + startup() prologue.
+    // Calling it on the long-lived _state->symsys (which may have never been
+    // through set_device if no device was booted yet) crashes there. Run the
+    // same rebuild prologue bootDeviceAtIndex: uses so rescan_devices() always
+    // sees a freshly-started system, exactly like a real boot would. The
+    // caller must not treat the device as booted afterward — call
+    // bootDeviceAtIndex: next (like the install flow), which rebuilds symsys
+    // again and rereads the devices.yml this call just saved.
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+    const bool sensor_paused_for_reboot = _state->sensor_driver && _state->sensor_driver->pause();
+    struct sensor_resume_guard {
+        eka2l1::drivers::sensor_driver *drv_;
+        ~sensor_resume_guard() {
+            if (drv_) {
+                drv_->resume();
+            }
+        }
+    } sensor_resume{ sensor_paused_for_reboot ? _state->sensor_driver.get() : nullptr };
+    _state->winserv = nullptr;
+    _state->screen_redraw_handles.clear();
+    _state->present_status[0] = 0;
+    _state->present_status[1] = 0;
+    _state->present_slot = 0;
+
+    auto comp = eka2l1::ios::make_system_components(_state.get());
+    _state->ngage.clear();
+    _state->symsys = std::make_unique<eka2l1::system>(comp);
+    _state->symsys->startup();
+
+    const bool found = _state->symsys->rescan_devices(drive_z);
+    if (!found) {
+        eka2l1::ios::set_mounted_card(_state.get(), {}, 0);
+        _state->conf.current_mmc_id = _state->conf.mmc_id;
+    }
+    return found ? YES : NO;
+}
+
+- (NSArray<EKA2L1AppEntry *> *)rescanApps {
+    NSMutableArray<EKA2L1AppEntry *> *out = [NSMutableArray array];
+    if (!_state || !_state->symsys) {
+        return out;
+    }
+    // The rescan fans registry/icon loading out to the applist worker pool,
+    // which pokes fbs/io state — it must never overlap a system rebuild.
+    // try_lock only: this is called from the main thread, and blocking main
+    // while a boot is in flight deadlocks (boot -> graphics thread ->
+    // dispatch_sync(main)). Hand back the previous list instead.
+    std::unique_lock<std::recursive_mutex> session_lock(_state->session_mutex, std::try_to_lock);
+    if (!session_lock.owns_lock()) {
+        return _lastAppList ?: out;
+    }
+    if (!_state->symsys) {
+        return _lastAppList ?: out;
+    }
+    auto *alserv = eka2l1::ios::get_applist_server(_state->symsys->get_kernel_system());
+    if (!alserv) {
+        return out;
+    }
+    // applist_server binds its FBS/FS dependencies lazily from
+    // get_registerations().  EKA2 registry scans happened not to need FBS,
+    // but EKA1 AIF icon loading creates bitmaps during the scan and crashes if
+    // rescan_registries() is called before that lazy initialization.
+    auto &registrations = alserv->get_registerations();
+    alserv->rescan_registries(_state->symsys->get_io_system());
+    for (auto &reg : registrations) {
+        if (reg.caps.is_hidden) {
+            continue;
+        }
+        EKA2L1AppEntry *entry = [[EKA2L1AppEntry alloc] init];
+        entry.uid = reg.mandatory_info.uid;
+        std::string name = eka2l1::common::ucs2_to_utf8(reg.mandatory_info.long_caption.to_std_string(nullptr));
+        entry.name = [NSString stringWithUTF8String:name.c_str()];
+        // Anything staged on the ROM drive (Z) ships with the firmware, so it is
+        // a built-in/system app. User-installed packages land on a writable
+        // drive (C/E). The iOS home screen hides system apps by default and only
+        // offers uninstall for user apps, so treat the land drive as the sole
+        // signal — the Qt UID-range check let ROM apps with high UIDs slip
+        // through the "hide system apps" filter.
+        entry.system = (reg.land_drive == drive_z);
+        [out addObject:entry];
+    }
+    _lastAppList = out;
+    return out;
+}
+
+- (void)ngageControl:(NSString *)command completion:(void (^)(NSData *, NSInteger))completion {
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        eka2l1::control::response response;
+        try {
+            if (!_state->symsys) {
+                response = eka2l1::control::response::error(409, "no_device", "no device is booted");
+            } else {
+                if ([command hasPrefix:@"cancel "]) {
+                    _state->ngage.cancel(*_state->symsys);
+                    response = eka2l1::control::response::from_json(eka2l1::control::json::object{});
+                } else {
+                    const bool poll = [command hasPrefix:@"poll "];
+                    NSString *operation = poll ? [command substringFromIndex:5] : command;
+                    response = _state->ngage.request(*_state->symsys, operation.UTF8String, poll);
+                }
+            }
+        } catch (const eka2l1::control::api_error &error) {
+            response = eka2l1::control::response::error(error.status, error.code, error.what());
+        } catch (const std::exception &error) {
+            response = eka2l1::control::response::error(500, "internal", error.what());
+        }
+        NSData *data = [NSData dataWithBytes:response.body.data() length:response.body.size()];
+        const NSInteger status = response.status;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(data, status); });
+    });
+}
+
+- (void)confirmDeviceBoot {
+    // The frontend reached the app list, so the device it just booted brought
+    // the system up and kept it up: retire the crash marker and only now write
+    // the selection to config.yml. Skipped while a boot is still running, so a
+    // rescan that overlaps one doesn't sign off on a device that hasn't
+    // finished coming up yet.
+    if (!_state || _state->boot_in_flight.load() || _state->pending_boot_firmware.empty()) {
+        return;
+    }
+    eka2l1::ios::clear_boot_attempt(_state.get());
+    _state->conf.serialize();
+}
+
+- (void)launchAppWithUID:(uint32_t)uid completion:(void (^)(BOOL))completion {
+    // Serialize launches and keep them off the main thread. The launch path
+    // issues synchronous graphics commands (bind_graphics_driver ->
+    // set_screen_mode -> create_bitmap) while the graphics worker thread bounces
+    // the CAEAGLLayer attach back onto the main queue via dispatch_sync. If the
+    // launch ran on the main thread the two would deadlock: main blocks on the
+    // graphics thread, which blocks on a main queue that will never drain. Off
+    // the main thread the main run loop stays free to service that bounce.
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        BOOL ok = [self runLaunchAppWithUID:uid];
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(ok);
+            });
+        }
+    });
+}
+
+- (BOOL)runLaunchAppWithUID:(uint32_t)uid {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+    // Runs on the control queue (never main), so a blocking lock is safe. This
+    // keeps a main-thread rescan's applist worker pool from overlapping both
+    // the reboot below and launch_app's registration lookups.
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    if (!eka2l1::ios::wait_for_graphics_driver(_state.get(), std::chrono::seconds(5))) {
+        LOG_ERROR(eka2l1::DRIVER_GRAPHICS, "iOS graphics driver was not ready before app launch");
+        return NO;
+    }
+
+    // A prior app left the booted session dirty (the window/view servers don't
+    // reset cleanly between app instances). Rebuild the system for a clean
+    // launch, mirroring the desktop frontend's reboot-on-exit. Only the second
+    // and later launches pay this; the screen is black during launch anyway.
+    if (_state->needs_reboot_before_launch) {
+        _state->needs_reboot_before_launch = false;
+        NSInteger reboot_index = [self currentDeviceIndex];
+        if (reboot_index < 0) {
+            reboot_index = std::max(0, _state->conf.device);
+        }
+        if (![self bootDeviceAtIndex:static_cast<NSUInteger>(reboot_index) trackAttempt:NO]) {
+            LOG_ERROR(eka2l1::FRONTEND_CMDLINE, "iOS device reboot before relaunch failed");
+            return NO;
+        }
+    }
+
+    if (!_state->symsys->get_graphics_driver()) {
+        const std::lock_guard<std::mutex> loop_lock(_state->loop_mutex);
+        if (!eka2l1::ios::bind_graphics_driver(_state.get())) {
+            return NO;
+        }
+    }
+
+    auto *kern = _state->symsys->get_kernel_system();
+    auto *alserv = eka2l1::ios::get_applist_server(kern);
+    if (!alserv) {
+        return NO;
+    }
+    auto *reg = alserv->get_registration(uid);
+    if (!reg) {
+        return NO;
+    }
+    eka2l1::epoc::apa::command_line cmdline;
+
+    eka2l1::kernel::uid launched_thread_id = 0;
+    const std::uint64_t generation = ++_state->launch_generation;
+    kern->lock();
+    // The exit callback fires from the kernel loop thread (process logon) when
+    // the app leaves — normal exit, Exit soft key, kill or panic. Bounce to the
+    // main queue so the SwiftUI frontend can close the emulator screen. self is
+    // a singleton so a weak capture is just defensive. The generation guards
+    // against a stale logon from a superseded launch closing this screen.
+    __weak EKA2L1Emulator *weakSelf = self;
+    bool launched = alserv->launch_app(*reg, cmdline, &launched_thread_id,
+        [weakSelf, generation](eka2l1::kernel::process *pr) {
+            NSString *fatalDetails = eka2l1::ios::guest_fatal_detail(pr);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf handleRunningAppExitedForGeneration:generation
+                                                 fatalDetails:fatalDetails];
+            });
+        });
+    if (launched) {
+        _state->running_thread_id = launched_thread_id;
+        kern->stop_cores_idling();
+    }
+    kern->unlock();
+    if (!_state->winserv) {
+        _state->winserv = eka2l1::ios::get_window_server(kern);
+    }
+    if (launched && _state->winserv) {
+        auto *state = _state.get();
+        eka2l1::epoc::screen *immediate_scr = state->winserv ? state->winserv->get_screens() : nullptr;
+        if (immediate_scr && !immediate_scr->screen_texture && state->graphics_driver) {
+            immediate_scr->set_screen_mode(state->winserv, state->graphics_driver.get(), immediate_scr->crr_mode);
+        }
+        eka2l1::ios::submit_screen_frame(state, immediate_scr);
+        // The first guest frame can lag the launch, so re-kick the screen a
+        // couple of times to flush any leftover black frame from the swapchain.
+        for (double delay : { 0.5, 1.5 }) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(delay * NSEC_PER_SEC)),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    eka2l1::ios::kick_screen_redraw(state);
+                });
+        }
+    }
+    return launched ? YES : NO;
+}
+
+- (void)handleRunningAppExitedForGeneration:(std::uint64_t)generation
+                               fatalDetails:(NSString *)fatalDetails {
+    // Ignore a logon that belongs to a superseded launch: a previous app's
+    // callback can re-fire while its process is torn down during the next
+    // launch's reboot, and must not close the screen that just opened.
+    if (!_state || generation != _state->launch_generation) {
+        return;
+    }
+    // The tracked process is gone; drop its id so a later closeRunningApp from
+    // the screen-teardown path doesn't try to kill a stale (or recycled) id,
+    // and flag the session for a rebuild before the next launch.
+    _state->running_thread_id = 0;
+    _state->needs_reboot_before_launch = true;
+    if (self.appExitHandler) {
+        self.appExitHandler(fatalDetails);
+    }
+}
+
+- (void)presentTextInput {
+    eka2l1::drivers::ui::request_input_view([self] { [self tapRawKey:eka2l1::epoc::std_key_f20]; });
+}
+
+- (void)setTextInputAvailabilityHandler:(void (^)(BOOL available))handler {
+    if (handler) {
+        void (^callback)(BOOL) = [handler copy];
+        eka2l1::drivers::ui::set_input_available_callback([callback](bool available) { callback(available); });
+    } else {
+        eka2l1::drivers::ui::set_input_available_callback({});
+    }
+}
+
+- (void)closeRunningApp {
+    eka2l1::drivers::ui::reset_input_view();
+    if (!_state || !_state->symsys) {
+        return;
+    }
+    const eka2l1::kernel::uid tid = _state->running_thread_id;
+    if (tid == 0) {
+        return;
+    }
+    _state->running_thread_id = 0;
+    // The killed app leaves the session dirty; rebuild before the next launch.
+    _state->needs_reboot_before_launch = true;
+
+    // Runs on the main thread, so only try the session lock (see rescanApps).
+    // Losing it means a system rebuild is in flight: the old session — and the
+    // guest process with it — is being torn down anyway, and the reboot flag
+    // set above already forces a clean rebuild before the next launch.
+    std::unique_lock<std::recursive_mutex> session_lock(_state->session_mutex, std::try_to_lock);
+    if (!session_lock.owns_lock()) {
+        return;
+    }
+
+    // Stop and drain the OS loop before killing the guest process. Otherwise
+    // the loop thread can still be executing this process in HLE/active
+    // scheduler code while the UI thread tears it down.
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+
+    auto *kern = _state->symsys->get_kernel_system();
+    if (!kern) {
+        return;
+    }
+
+    // Kill the process under the kernel lock, the same guard launch uses to
+    // mutate kernel state. The process logon still fires
+    // (handleRunningAppExited); callers tearing down the screen clear
+    // appExitHandler first so that bounce is a no-op.
+    _state->ngage.reset(*_state->symsys);
+    kern->lock();
+    auto *thr = kern->get_by_id<eka2l1::kernel::thread>(tid);
+    eka2l1::kernel::process *pr = thr ? thr->owning_process() : nullptr;
+    if (pr && pr->get_exit_type() == eka2l1::kernel::entity_exit_type::pending) {
+        pr->kill(eka2l1::kernel::entity_exit_type::kill, u"Closed", 0);
+    }
+    kern->stop_cores_idling();
+    kern->unlock();
+
+    // Killing the process orphans the HLE objects it owned (audio players above all), and
+    // those are destroyed by the emulation loop — which is parked for good once the app list
+    // is back, so an orphaned player would keep playing forever. Destroy them here instead,
+    // now that the kernel lock is released: an audio teardown waits out the render callback
+    // in flight, and that callback needs the kernel lock to finish guest notifications.
+    if (auto *dispatcher = _state->symsys->get_dispatcher()) {
+        dispatcher->flush_pending_teardown();
+    }
+}
+
+- (BOOL)installSisAtPath:(NSString *)sisPath {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+    eka2l1::host_path upath(sisPath.UTF8String);
+    const drive_number install_drive = _state->symsys->get_default_install_drive();
+    auto result = static_cast<eka2l1::package::installation_result>(
+        _state->symsys->install_package(upath, install_drive));
+    return result == eka2l1::package::installation_result_success ? YES : NO;
+}
+
+- (EKA2L1NGageInstallReport *)installNGageGameAtPath:(NSString *)cardPath {
+    EKA2L1NGageInstallReport *report = [[EKA2L1NGageInstallReport alloc] init];
+    report.result = eka2l1::ngage_game_card_general_error;
+    report.gameName = @"";
+
+    if (!_state || !_state->symsys) {
+        return report;
+    }
+
+    std::string gameName;
+    eka2l1::ngage_game_card_install_error result = eka2l1::ngage_game_card_general_error;
+    {
+        // symsys->loop() may be parked in the scheduler's idle wait while it
+        // still owns loop_mutex. A plain lock here can therefore wait forever.
+        // Use the same writer prologue as device install/switch: protect the
+        // symsys lifetime, stop new ticks, wake the parked one, then take the
+        // loop lock between ticks.
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        const bool was_mounted = _state->mounted;
+        auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+        result = _state->symsys->install_ngage_game_card(eka2l1::host_path{cardPath.UTF8String}, [&](std::string name) {
+            gameName = std::move(name);
+        });
+        _state->mounted = was_mounted;
+    }
+
+    report.result = result;
+    report.gameName = gameName.empty() ? @"" : [NSString stringWithUTF8String:gameName.c_str()];
+    return report;
+}
+
+- (EKA2L1MountReport *)mountGameCardAtPath:(NSString *)path {
+    EKA2L1MountReport *report = [[EKA2L1MountReport alloc] init];
+    report.result = EKA2L1MountResultFailed;
+    report.mmcId = @"";
+
+    if (!_state || !_state->symsys) {
+        return report;
+    }
+
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    report.cardMounted = !_state->mounted_card_path.empty();
+
+    eka2l1::host_path card_path(path.UTF8String);
+    while (!card_path.empty() && eka2l1::is_separator(card_path.back())) {
+        card_path.erase(card_path.size() - 1);
+    }
+
+    const bool is_folder = eka2l1::common::is_dir(card_path);
+    if (card_path.empty() || (!is_folder && !eka2l1::common::exists(card_path))) {
+        report.result = EKA2L1MountResultPathNotFound;
+        return report;
+    }
+
+    // Drive E must be rooted above the dump's System directory.
+    if (is_folder && (eka2l1::common::compare_ignore_case(eka2l1::filename(card_path).c_str(), "system") == 0)) {
+        card_path = eka2l1::file_directory(card_path);
+    }
+
+    const std::string mmc_id = eka2l1::ios::mmc_id_from_card_path(card_path);
+
+    // Drain any guest tick before replacing its drive.
+    const bool was_mounted = _state->mounted;
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+
+    eka2l1::io_system *io = _state->symsys->get_io_system();
+    io->unmount(drive_e);
+
+    const std::uint32_t attrib = io_attrib_removeable | io_attrib_write_protected;
+    if (is_folder) {
+        if (io->mount_physical_path(drive_e, drive_media::physical, attrib,
+                card_path)) {
+            eka2l1::ios::set_mounted_card(_state.get(), card_path, attrib, mmc_id);
+            report.result = EKA2L1MountResultSuccess;
+        }
+    } else {
+        const eka2l1::zip_mount_error err = _state->symsys->mount_game_zip(drive_e,
+            drive_media::physical, card_path, io_attrib_write_protected);
+        switch (err) {
+        case eka2l1::zip_mount_error_none:
+            report.result = EKA2L1MountResultSuccess;
+            break;
+        case eka2l1::zip_mount_error_not_zip:
+            report.result = EKA2L1MountResultNotArchive;
+            break;
+        case eka2l1::zip_mount_error_no_system_folder:
+            report.result = EKA2L1MountResultNoSystemFolder;
+            break;
+        default:
+            report.result = EKA2L1MountResultArchiveCorrupt;
+            break;
+        }
+
+        if (report.result == EKA2L1MountResultSuccess) {
+            std::optional<eka2l1::drive> entry = io->get_drive_entry(drive_e);
+            eka2l1::ios::set_mounted_card(_state.get(),
+                entry.has_value() ? entry->real_path : eka2l1::host_path(), attrib, mmc_id);
+        }
+    }
+
+    if (report.result != EKA2L1MountResultSuccess) {
+        // A failed replacement restores the emulator's own E storage.
+        eka2l1::ios::set_mounted_card(_state.get(), {}, 0);
+        _state->symsys->mount_device_drive(drive_e);
+    }
+
+    // Cards without a CID and failed replacements use the configured default.
+    if (report.result == EKA2L1MountResultSuccess) {
+        _state->conf.current_mmc_id = mmc_id.empty() ? _state->conf.mmc_id : mmc_id;
+        report.mmcId = mmc_id.empty() ? @"" : [NSString stringWithUTF8String:mmc_id.c_str()];
+    } else {
+        _state->conf.current_mmc_id = _state->conf.mmc_id;
+    }
+
+    report.cardMounted = !_state->mounted_card_path.empty();
+    _state->mounted = was_mounted;
+    return report;
+}
+
+- (BOOL)unmountGameCard {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    if (_state->mounted_card_path.empty()) {
+        return NO;
+    }
+
+    const bool was_mounted = _state->mounted;
+    auto loop_lock = eka2l1::ios::pause_loop_and_lock(_state.get());
+
+    _state->symsys->mount_device_drive(drive_e);
+
+    eka2l1::ios::set_mounted_card(_state.get(), {}, 0);
+    _state->conf.current_mmc_id = _state->conf.mmc_id;
+    _state->mounted = was_mounted;
+    return YES;
+}
+
+- (BOOL)uninstallAppWithUID:(uint32_t)uid {
+    if (!_state || !_state->symsys) {
+        return NO;
+    }
+    auto *manager = _state->symsys->get_packages();
+    if (!manager) {
+        return NO;
+    }
+    auto *alserv = eka2l1::ios::get_applist_server(_state->symsys->get_kernel_system());
+    eka2l1::apa_app_registry *reg = alserv ? alserv->get_registration(uid) : nullptr;
+
+    // App UID3 == package UID for most single-app SIS packages, but Symbian does
+    // not require it (Opera Mobile registers app 0x2002AA96 from package
+    // 0x2002AA97). When the UID finds nothing, ask which package owns the app's
+    // executable: by its secure ID, which is the app UID3, or — for registries
+    // written before those were resolved — by the binary's path. ROM apps belong
+    // to no package, so every lookup comes up empty for them and the unpackaged
+    // path below takes over.
+    std::uint32_t package_uid = uid;
+    if (!manager->package(uid, 0) && manager->augmentations(uid).empty()) {
+        eka2l1::package::object *owner = manager->package_owning_executable(uid);
+        if (!owner && reg) {
+            const eka2l1::guest_path app_path(reg->mandatory_info.app_path.to_std_string(nullptr));
+            owner = manager->package_owning_file(app_path);
+        }
+        if (owner) {
+            package_uid = owner->uid;
+        }
+    }
+
+    // Remove the base install (index 0) plus any augmentations sharing the UID so
+    // nothing is left dangling.
+    bool removed = false;
+    for (eka2l1::package::object *aug : manager->augmentations(package_uid)) {
+        if (aug && manager->uninstall_package(*aug)) {
+            removed = true;
+        }
+    }
+    if (eka2l1::package::object *base = manager->package(package_uid, 0)) {
+        if (manager->uninstall_package(*base)) {
+            removed = true;
+        }
+    }
+    if (removed) {
+        [self dropLeftoverRegistrationOf:reg];
+        return YES;
+    }
+    return [self removeUnpackagedAppWithUID:uid] ? YES : NO;
+}
+
+// A package installed before conditional install blocks were registered (or one
+// whose registration resource its script writes itself) can leave the app's
+// _reg.rsc on disk after uninstall, which keeps a launchable-looking entry in the
+// app list pointing at binaries that are gone. Drop that leftover, but only when
+// the package really did take the app binary away.
+- (void)dropLeftoverRegistrationOf:(eka2l1::apa_app_registry *)reg {
+    if (!reg || reg->rsc_path.empty()) {
+        return;
+    }
+    auto *io = _state->symsys->get_io_system();
+    if (!io || !io->exist(eka2l1::guest_path{reg->rsc_path})) {
+        return;
+    }
+    const eka2l1::guest_path app_path(reg->mandatory_info.app_path.to_std_string(nullptr));
+    if (app_path.empty() || io->exist(app_path)) {
+        return;
+    }
+
+    const eka2l1::guest_path rsc_path(reg->rsc_path);
+    io->delete_entry(rsc_path);
+
+    auto *alserv = eka2l1::ios::get_applist_server(_state->symsys->get_kernel_system());
+    if (alserv) {
+        alserv->delete_registry(rsc_path);
+    }
+}
+
+// Fallback for apps that were never installed through the package manager, the
+// N-Gage game card installer being the usual source: it just copies the card
+// content onto drive E, so there is no SIS registry to uninstall and the
+// package path above finds nothing. Such an app is fully described by its own
+// EKA1 registration folder (<drive>:\System\Apps\<app>\ holds the .aif, .app
+// and the game data), so deleting that folder unregisters it on the next
+// rescan. Shared drops the card makes outside of it (System\Libs,
+// System\Programs) are deliberately left alone — other games link against them.
+- (BOOL)removeUnpackagedAppWithUID:(uint32_t)uid {
+    auto *alserv = eka2l1::ios::get_applist_server(_state->symsys->get_kernel_system());
+    if (!alserv) {
+        return NO;
+    }
+    eka2l1::apa_app_registry *reg = alserv->get_registration(uid);
+    if (!reg || reg->land_drive == drive_z || reg->rsc_path.empty()) {
+        return NO;
+    }
+    const eka2l1::guest_path rsc_path(reg->rsc_path);
+    const eka2l1::guest_path app_dir(eka2l1::file_directory(rsc_path, true));
+
+    // Only ever delete a per-app folder. A registration sitting directly in the
+    // Apps root (or anywhere else) is not ours to remove wholesale.
+    const auto apps_root = u"\\system\\apps\\";
+    const std::size_t apps_root_pos = app_dir.find(apps_root);
+    if (apps_root_pos == eka2l1::guest_path::npos
+        || app_dir.find_first_not_of(u"\\/", apps_root_pos + std::char_traits<char16_t>::length(apps_root)) == eka2l1::guest_path::npos) {
+        return NO;
+    }
+
+    auto *io = _state->symsys->get_io_system();
+    std::optional<eka2l1::host_path> real_dir = io ? io->get_raw_path(app_dir) : std::nullopt;
+    if (!real_dir || real_dir->empty()) {
+        return NO;
+    }
+    const eka2l1::host_path &real_dir_utf8 = *real_dir;
+    if (!eka2l1::common::exists(real_dir_utf8) || !eka2l1::common::delete_folder(real_dir_utf8)) {
+        return NO;
+    }
+    // Drop the stale registration right away so a launch attempt between here
+    // and the frontend's rescan can't resolve to the deleted app.
+    alserv->delete_registry(rsc_path);
+    return YES;
+}
+
+- (void)attachLayer:(CAEAGLLayer *)layer
+         pixelSize:(CGSize)pixelSize
+              scale:(CGFloat)scale {
+    if (!_state) {
+        return;
+    }
+
+    // The render surface handed to the graphics driver. For EAGL it is the
+    CALayer *renderLayer = layer;
+
+    bool driver_ready = false;
+    {
+        std::lock_guard<std::mutex> lk(_state->layer_mutex);
+        _state->pending_layer = (__bridge void *)renderLayer;
+        _state->pending_width = static_cast<std::uint32_t>(pixelSize.width);
+        _state->pending_height = static_cast<std::uint32_t>(pixelSize.height);
+        _state->pending_scale = static_cast<float>(scale);
+        _state->layer_dirty = true;
+        _state->layer_cv.notify_all();
+        // Read the driver under the same lock the graphics thread publishes it
+        // (and the surface hook) under. That ordering is what makes the hook
+        // safe to call below without holding the lock.
+        driver_ready = (_state->graphics_driver != nullptr);
+    }
+    // Once the graphics thread has consumed the first layer, subsequent
+    // changes flow through surface_change_hook → driver->update_surface.
+    if (_state->window && driver_ready) {
+        _state->window->surface_changed((__bridge void *)renderLayer,
+            static_cast<int>(pixelSize.width),
+            static_cast<int>(pixelSize.height),
+            static_cast<float>(scale));
+        // update_surface alone is not enough when the layer object stays the
+        // same but its bounds changed (keypad overlay toggles, rotation): the
+        // EAGL context early-returns on an identical layer and keeps the old
+        // renderbuffer storage, which CoreAnimation then stretches to the new
+        // layer bounds — the classic distorted-frame symptom. Pushing the new
+        // size makes the context re-create its renderbuffer storage on the
+        // next swapchain bind.
+        _state->graphics_driver->update_surface_size(eka2l1::vec2(
+            static_cast<int>(pixelSize.width),
+            static_cast<int>(pixelSize.height)));
+        // A static guest screen (menus, paused games) won't produce a frame on
+        // its own, so the stale stretched frame would linger until the next
+        // guest redraw. Re-present the current texture at the new size.
+        auto *state = _state.get();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(0.1 * NSEC_PER_SEC)),
+            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                eka2l1::ios::re_present_screen(state);
+            });
+    }
+}
+
+
+- (void)setExternalDisplayLayer:(CAEAGLLayer *)layer enabled:(BOOL)enabled {
+    if (_state && _state->window) {
+        _state->window->external_display.set_surface((__bridge void *)layer, enabled);
+    }
+}
+
+- (void)detachLayer {
+    if (!_state) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_state->display_geometry_mutex);
+        _state->display_rect = {};
+    }
+    {
+        std::lock_guard<std::mutex> lk(_state->layer_mutex);
+        _state->pending_layer = nullptr;
+        _state->layer_dirty = true;
+        _state->layer_cv.notify_all();
+    }
+    if (_state->window && _state->graphics_driver) {
+        _state->window->surface_changed(nullptr, 0, 0, 0.0f);
+    }
+}
+
+- (void)pause {
+    if (!_state) return;
+    eka2l1::drivers::hwrm::set_vibration_suspended(true);
+    _state->paused = true;
+    // Break the idle wait so a parked loop returns and the os_thread settles on
+    // its paused sleep promptly instead of after the next guest timer.
+    break_core_idling(_state.get());
+    // Stop CoreMotion updates in the background (battery + no point feeding a
+    // paused guest); mirrors the Android frontend's lifecycle handling.
+    if (_state->sensor_driver) {
+        _state->sensor_driver->pause();
+    }
+    if (_state->audio_driver) {
+        _state->audio_driver->suspend();
+    }
+    // Drop the AVAudioSession activation while we're in the background so
+    // the system can route audio to whatever is actually frontmost.
+    NSError *err = nil;
+    [[AVAudioSession sharedInstance] setActive:NO
+        withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+              error:&err];
+    if (err) {
+        LOG_WARN(eka2l1::FRONTEND_CMDLINE, "iOS audio: setActive:NO failed: {}",
+            err.localizedDescription.UTF8String ?: "unknown");
+    }
+}
+
+- (void)resume {
+    if (!_state) return;
+    eka2l1::drivers::hwrm::set_vibration_suspended(false);
+    NSError *err = nil;
+    const BOOL audio_session_active =
+        [[AVAudioSession sharedInstance] setActive:YES error:&err];
+    if (err) {
+        LOG_WARN(eka2l1::FRONTEND_CMDLINE, "iOS audio: setActive:YES failed: {}",
+            err.localizedDescription.UTF8String ?: "unknown");
+    }
+    if (audio_session_active && _state->audio_driver) {
+        _state->audio_driver->resume();
+    }
+    if (_state->sensor_driver) {
+        _state->sensor_driver->resume();
+    }
+    // Resume guest execution only after host devices have been restored, so
+    // guest stream start/stop calls cannot race the AudioUnit restart above.
+    _state->paused = false;
+}
+
+// Call with session_mutex held; the kernel and midman belong to that session.
+- (void)applyNetworkingSuspended:(BOOL)suspended {
+    if (!_state || !_state->mounted || !_state->symsys) {
+        return;
+    }
+
+    auto *kern = _state->symsys->get_kernel_system();
+    if (!kern) {
+        return;
+    }
+
+    eka2l1::kernel_lock lock(kern);
+    auto *server = kern->get_by_name<eka2l1::btman_server>(
+        eka2l1::get_btman_server_name_by_epocver(kern->get_epoc_version()));
+
+    if (auto *midman = server ? server->get_midman() : nullptr) {
+        if (suspended) {
+            midman->suspend();
+        } else {
+            midman->resume();
+        }
+    }
+}
+
+- (void)suspendNetworking {
+    _networkingSuspended = true;
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        std::lock_guard<std::recursive_mutex> session_lock(self->_sessionMutex);
+        [self applyNetworkingSuspended:YES];
+    });
+}
+
+- (void)resumeNetworking {
+    _networkingSuspended = false;
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        std::lock_guard<std::recursive_mutex> session_lock(self->_sessionMutex);
+        [self applyNetworkingSuspended:NO];
+    });
+}
+
+- (CGRect)guestDisplayRect {
+    if (!_state) return CGRectZero;
+    std::lock_guard<std::mutex> lock(_state->display_geometry_mutex);
+    const auto &rect = _state->display_rect;
+    return CGRectMake(rect.top.x, rect.top.y, rect.size.x, rect.size.y);
+}
+
+- (void)setGameController:(GCController *)controller motion:(BOOL)motion vibration:(BOOL)vibration {
+    if (!_state) return;
+    eka2l1::drivers::set_controller_motion_source(_state->sensor_driver.get(),
+        motion ? (__bridge void *)controller : nullptr);
+    eka2l1::drivers::hwrm::set_controller_haptic_source(vibration ? (__bridge void *)controller : nullptr);
+}
+
+- (void)setAccelerationOverride:(NSArray<NSNumber *> *)acceleration {
+    if (!_state) return;
+    if (acceleration.count != 3) {
+        eka2l1::drivers::set_motion_acceleration_override(_state->sensor_driver.get(), nullptr);
+        return;
+    }
+    const double values[3] = { acceleration[0].doubleValue, acceleration[1].doubleValue, acceleration[2].doubleValue };
+    eka2l1::drivers::set_motion_acceleration_override(_state->sensor_driver.get(), values);
+}
+
+- (void)submitPointerEventAtX:(CGFloat)x
+                            y:(CGFloat)y
+                        phase:(EKA2L1PointerPhase)phase
+                    pointerId:(uintptr_t)pointerId {
+    if (!_state || !_state->winserv) {
+        return;
+    }
+    eka2l1::drivers::input_event evt;
+    evt.type_ = eka2l1::drivers::input_event_type::touch;
+    evt.time_ = 0;
+    evt.mouse_.pos_z_ = 0;
+    evt.mouse_.button_ = eka2l1::drivers::mouse_button_left;
+
+    // Feed swapchain/layer pixels (touch point * contentScale) and let
+    // window_server map them through the screen's absolute_pos + logic scale,
+    // matching the Qt/Android frontends. raw_screen_pos_ must be false here;
+    // feeding raw device pixels as guest coords lands every tap far outside
+    // the guest screen.
+    evt.mouse_.pos_x_ = static_cast<int>(x);
+    evt.mouse_.pos_y_ = static_cast<int>(y);
+    evt.mouse_.raw_screen_pos_ = false;
+    switch (phase) {
+        case EKA2L1PointerPhaseBegan:     evt.mouse_.action_ = eka2l1::drivers::mouse_action_press; break;
+        case EKA2L1PointerPhaseMoved:     evt.mouse_.action_ = eka2l1::drivers::mouse_action_repeat; break;
+        case EKA2L1PointerPhaseEnded:     evt.mouse_.action_ = eka2l1::drivers::mouse_action_release; break;
+        case EKA2L1PointerPhaseCancelled: evt.mouse_.action_ = eka2l1::drivers::mouse_action_release; break;
+    }
+
+    // The guest reads ptr_num as a small pointer-slot index (uint8_t, 0-based;
+    // Symbian^3 advanced pointers track per-slot down/up state). Map the
+    // host UITouch identity to the lowest free slot on press and free it on
+    // release so every guest slot sees strictly paired down/drag/up.
+    {
+        std::lock_guard<std::mutex> lk(_touchSlotsLock);
+        std::size_t slot = _touchSlots.size();
+        for (std::size_t i = 0; i < _touchSlots.size(); i++) {
+            if (_touchSlots[i] == pointerId) {
+                slot = i;
+                break;
+            }
+        }
+
+        if (slot == _touchSlots.size()) {
+            // Unknown pointer: a release with no tracked down has nothing to
+            // pair with in the guest — drop it. Press (or a move that lost its
+            // press) claims the lowest free slot.
+            if (evt.mouse_.action_ == eka2l1::drivers::mouse_action_release) {
+                return;
+            }
+            for (std::size_t i = 0; i < _touchSlots.size(); i++) {
+                if (_touchSlots[i] == 0) {
+                    slot = i;
+                    _touchSlots[i] = pointerId;
+                    break;
+                }
+            }
+            if (slot == _touchSlots.size()) {
+                return; // more concurrent touches than guest slots
+            }
+        } else if (evt.mouse_.action_ == eka2l1::drivers::mouse_action_release) {
+            _touchSlots[slot] = 0;
+        }
+
+        evt.mouse_.mouse_id = static_cast<std::uint32_t>(slot);
+    }
+    _state->winserv->queue_input_from_driver(evt);
+}
+
+- (BOOL)currentDeviceIsTouchScreen {
+    if (!_state) {
+        return NO;
+    }
+    // Cached at boot time: see emulator::device_is_touch_screen.
+    return _state->device_is_touch_screen.load(std::memory_order_relaxed) ? YES : NO;
+}
+
+- (BOOL)isGameCardMounted {
+    if (!_state) {
+        return NO;
+    }
+    return _state->card_mounted.load(std::memory_order_relaxed) ? YES : NO;
+}
+
+- (BOOL)currentDeviceIsEKA1 {
+    if (!_state) {
+        return NO;
+    }
+    return _state->device_is_eka1.load(std::memory_order_relaxed) ? YES : NO;
+}
+
+- (void)setDisplayLayoutContentRect:(CGRect)content
+                              scale:(CGFloat)scale
+                            gravity:(NSInteger)gravity
+                             offset:(CGPoint)offset {
+    if (!_state) {
+        return;
+    }
+    eka2l1::ios::emulator::display_layout layout;
+    layout.content.top = eka2l1::vec2(static_cast<int>(content.origin.x),
+        static_cast<int>(content.origin.y));
+    layout.content.size = eka2l1::vec2(static_cast<int>(content.size.width),
+        static_cast<int>(content.size.height));
+    layout.scale = static_cast<float>(scale);
+    layout.gravity = static_cast<int>(gravity);
+    layout.offset = eka2l1::vec2(static_cast<int>(offset.x), static_cast<int>(offset.y));
+
+    {
+        std::lock_guard<std::mutex> lock(_state->display_geometry_mutex);
+        if ((_state->display_layout_.content == layout.content)
+            && (_state->display_layout_.scale == layout.scale)
+            && (_state->display_layout_.gravity == layout.gravity)
+            && (_state->display_layout_.offset == layout.offset)) {
+            return;
+        }
+        // A new presented size resizes the screen texture, so the window server must repaint it.
+        if ((_state->display_layout_.content != layout.content)
+            || (_state->display_layout_.scale != layout.scale)) {
+            _state->display_layout_repaint_pending.store(true, std::memory_order_relaxed);
+        }
+        _state->display_layout_ = layout;
+    }
+
+    // A paused or menu-static guest produces no frame of its own, so the move
+    // would not show until it next draws.
+    [self scheduleRePresent];
+}
+
+- (void)scheduleRePresent {
+    if (!_state->display_layout_represent_pending.exchange(true)) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            std::lock_guard<std::recursive_mutex> session_lock(self->_sessionMutex);
+            auto *state = self->_state.get();
+            if (!state) {
+                return;
+            }
+            state->display_layout_represent_pending.store(false);
+            // This present is what hands the new scale factor to the screen,
+            // resizing its texture; the repaint has to follow it.
+            eka2l1::ios::re_present_screen(state);
+            if (state->display_layout_repaint_pending.exchange(false, std::memory_order_relaxed)) {
+                eka2l1::ios::kick_screen_redraw(state);
+            }
+        });
+    }
+}
+
+- (NSDictionary<NSString *, id> *)guestScreenModeSnapshot {
+    if (!_state) {
+        return @{ @"modes": @[], @"current": @(-1) };
+    }
+
+    NSMutableArray<NSNumber *> *modes = [NSMutableArray array];
+    NSInteger current = -1;
+    eka2l1::vec2 size;
+    std::unique_lock<std::recursive_mutex> session_lock(_state->session_mutex, std::try_to_lock);
+    if (session_lock.owns_lock() && _state->winserv) {
+        if (eka2l1::epoc::screen *screen = _state->winserv->get_current_focus_screen()) {
+            current = screen->crr_mode;
+            for (int mode = 0; mode < screen->total_screen_mode(); ++mode) {
+                if (screen->mode_info(mode)->defined) {
+                    [modes addObject:@(mode)];
+                }
+            }
+            size = screen->current_mode().size;
+            if ((screen->ui_rotation % 180) != 0) {
+                std::swap(size.x, size.y);
+            }
+        }
+    }
+    return @{ @"modes": modes, @"current": @(current), @"width": @(size.x), @"height": @(size.y) };
+}
+
+- (void)setGuestScreenModeForAppUID:(uint32_t)uid
+                               mode:(NSInteger)mode
+                         completion:(void (^)(NSInteger mode))completion {
+    if (!_state) {
+        return;
+    }
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        NSInteger selected_mode = -1;
+        {
+            std::lock_guard<std::recursive_mutex> session_lock(self->_state->session_mutex);
+            if (self->_state->winserv && self->_state->graphics_driver) {
+                eka2l1::epoc::screen *screen = self->_state->winserv->get_current_focus_screen();
+                if (screen && mode >= 0 && mode < screen->total_screen_mode()
+                    && screen->mode_info(static_cast<int>(mode))->defined) {
+                    selected_mode = mode;
+                    screen->ui_rotation = 0;
+                    screen->set_screen_mode(self->_state->winserv,
+                        self->_state->graphics_driver.get(), static_cast<int>(selected_mode));
+
+                    if (self->_state->settings) {
+                        eka2l1::config::app_setting setting;
+                        if (eka2l1::config::app_setting *existing =
+                                self->_state->settings->get_setting(uid)) {
+                            setting = *existing;
+                        }
+                        screen->store_to_config(self->_state->graphics_driver.get(), setting);
+                        setting.screen_mode = static_cast<int>(selected_mode);
+                        self->_state->settings->add_or_replace_setting(uid, setting);
+                    }
+                }
+            }
+        }
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(selected_mode);
+            });
+        }
+    });
+}
+
+- (void)setHostInterfaceRotationDegrees:(NSInteger)degrees {
+    if (!_state) {
+        return;
+    }
+    _state->host_interface_rotation_deg.store(static_cast<int>(degrees), std::memory_order_relaxed);
+}
+
+// The screen's vsync divides 1s by refresh_rate, so 0 would divide-by-zero;
+// "unlimited" is represented as a high cap the 60Hz-native guests never reach.
+static constexpr std::uint8_t k_unlimited_refresh_rate = 240;
+
+- (void)setGuestFrameLimitForAppUID:(uint32_t)uid limit:(NSInteger)limit {
+    if (!_state) {
+        return;
+    }
+    const std::uint8_t refresh_rate = (limit <= 0)
+        ? k_unlimited_refresh_rate
+        : static_cast<std::uint8_t>(std::min<NSInteger>(limit, k_unlimited_refresh_rate));
+    dispatch_async(eka2l1::ios::emulator_control_queue(), ^{
+        std::lock_guard<std::recursive_mutex> session_lock(self->_state->session_mutex);
+        eka2l1::epoc::screen *scr = nullptr;
+        if (self->_state->winserv) {
+            scr = self->_state->winserv->get_current_focus_screen();
+            if (scr) {
+                scr->refresh_rate = refresh_rate;
+            }
+        }
+        if (self->_state->settings) {
+            eka2l1::config::app_setting setting;
+            if (eka2l1::config::app_setting *existing = self->_state->settings->get_setting(uid)) {
+                setting = *existing;
+            }
+            if (scr) {
+                scr->store_to_config(self->_state->graphics_driver.get(), setting);
+            }
+            setting.fps = refresh_rate;
+            self->_state->settings->add_or_replace_setting(uid, setting);
+        }
+    });
+}
+
+- (NSInteger)guestFrameLimitForAppUID:(uint32_t)uid {
+    if (!_state) {
+        return 0;
+    }
+    std::uint8_t refresh_rate = 60;
+    std::unique_lock<std::recursive_mutex> session_lock(_state->session_mutex, std::try_to_lock);
+    if (session_lock.owns_lock() && _state->winserv) {
+        if (eka2l1::epoc::screen *scr = _state->winserv->get_current_focus_screen()) {
+            refresh_rate = scr->refresh_rate;
+        }
+    } else if (_state->settings) {
+        if (eka2l1::config::app_setting *existing = _state->settings->get_setting(uid)) {
+            refresh_rate = static_cast<std::uint8_t>(existing->fps);
+        }
+    }
+    return (refresh_rate == 0 || refresh_rate > 60) ? 0 : static_cast<NSInteger>(refresh_rate);
+}
+
+- (void)submitRawKey:(uint32_t)scanCode pressed:(BOOL)pressed {
+    if (!_state || !_state->winserv) {
+        return;
+    }
+    eka2l1::drivers::input_event evt;
+    evt.type_ = eka2l1::drivers::input_event_type::key_raw;
+    evt.time_ = 0;
+    evt.key_.code_ = static_cast<int>(scanCode);
+    evt.key_.state_ = pressed ? eka2l1::drivers::key_state::pressed : eka2l1::drivers::key_state::released;
+    _state->winserv->queue_input_from_driver(evt);
+}
+
+- (void)tapRawKey:(uint32_t)scanCode {
+    [self submitRawKey:scanCode pressed:YES];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(60 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        [self submitRawKey:scanCode pressed:NO];
+    });
+}
+
+- (NSDictionary<NSString *, id> *)currentConfigSnapshot {
+    if (!_state) {
+        return @{};
+    }
+    NSMutableArray<NSDictionary *> *friends = [NSMutableArray array];
+    for (const eka2l1::config::friend_address &address: _state->conf.friend_addresses) {
+        [friends addObject:@{
+            @"addr": [NSString stringWithUTF8String:address.addr_.c_str()],
+            @"port": @(address.port_)
+        }];
+    }
+    NSMutableDictionary<NSString *, NSString *> *hosts = [NSMutableDictionary dictionary];
+    for (const auto &[hostname, address] : _state->conf.hosts) {
+        hosts[@(hostname.c_str())] = @(address.c_str());
+    }
+    return @{
+        @"audioMasterVolume": @(_state->conf.audio_master_volume),
+        @"integerScaling": @(_state->conf.integer_scaling),
+        @"nearestNeighborFiltering": @(_state->conf.nearest_neighbor_filtering),
+        @"hideSystemApps": @(_state->conf.hide_system_apps),
+        @"extensiveLogging": @(_state->conf.extensive_logging),
+        @"cpuBackend": [NSString stringWithUTF8String:_state->conf.cpu_backend.c_str()],
+        @"jitEnabled": @(_state->conf.ios_use_jit),
+        @"performanceMode": [NSString stringWithUTF8String:_state->conf.ios_performance_mode.c_str()],
+        @"deviceDisplayName": [NSString stringWithUTF8String:_state->conf.device_display_name.c_str()],
+        @"imei": [NSString stringWithUTF8String:_state->conf.imei.c_str()],
+        @"mmcId": [NSString stringWithUTF8String:_state->conf.mmc_id.c_str()],
+        @"logFilter": [NSString stringWithUTF8String:_state->conf.log_filter.c_str()],
+        @"btnetDiscoveryMode": @(_state->conf.btnet_discovery_mode),
+        @"btnetListenPort": @(_state->conf.internet_bluetooth_port),
+        @"btnetPassword": [NSString stringWithUTF8String:_state->conf.btnet_password.c_str()],
+        @"btCentralServerUrl": [NSString stringWithUTF8String:_state->conf.bt_central_server_url.c_str()],
+        @"btnetFriendAddresses": friends,
+        @"hosts": hosts,
+        @"backgroundImage": [NSString stringWithUTF8String:_state->conf.background_image.c_str()]
+    };
+}
+
+- (BOOL)applyConfigSnapshot:(NSDictionary<NSString *, id> *)snapshot {
+    if (!_state) {
+        return NO;
+    }
+
+    std::optional<std::string> mmc_id;
+    if (id value = snapshot[@"mmcId"]) {
+        if (![value isKindOfClass:NSString.class]) {
+            return NO;
+        }
+        NSString *trimmed = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        const std::string input = trimmed.UTF8String;
+        static const std::regex cid_regex("([0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{8}){3})");
+        if (!std::regex_match(input, cid_regex)) {
+            return NO;
+        }
+        NSString *digits = [[trimmed stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString];
+        mmc_id = [NSString stringWithFormat:@"%@-%@-%@-%@", [digits substringWithRange:NSMakeRange(0, 8)],
+            [digits substringWithRange:NSMakeRange(8, 8)], [digits substringWithRange:NSMakeRange(16, 8)],
+            [digits substringWithRange:NSMakeRange(24, 8)]].UTF8String;
+    }
+
+    std::optional<eka2l1::config::host_map> hosts;
+    if (id hostEntries = snapshot[@"hosts"]) {
+        if (![hostEntries isKindOfClass:NSDictionary.class]) {
+            return NO;
+        }
+        hosts.emplace();
+        for (id key in hostEntries) {
+            id value = hostEntries[key];
+            if (![key isKindOfClass:NSString.class] || ![value isKindOfClass:NSString.class]) {
+                return NO;
+            }
+            const auto hostname = eka2l1::config::normalize_host_name([key UTF8String]);
+            const auto address = eka2l1::config::normalize_host_name([value UTF8String]);
+            if (!eka2l1::config::valid_host_pattern(hostname) || !eka2l1::config::valid_host_target(address)
+                || !hosts->emplace(hostname, address).second) {
+                return NO;
+            }
+        }
+    }
+
+    if (mmc_id) {
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        std::optional<eka2l1::kernel_lock> kernel_lock;
+        if (_state->symsys && _state->symsys->get_kernel_system()) {
+            kernel_lock.emplace(_state->symsys->get_kernel_system());
+        }
+        _state->conf.mmc_id = *mmc_id;
+        if (_state->mounted_card_mmc_id.empty()) {
+            _state->conf.current_mmc_id = *mmc_id;
+        }
+    }
+
+    NSNumber *volume = snapshot[@"audioMasterVolume"];
+    if (volume) {
+        _state->conf.audio_master_volume = std::clamp(volume.intValue, 0, 100);
+        if (_state->audio_driver) {
+            _state->audio_driver->master_volume(_state->conf.audio_master_volume);
+        }
+    }
+    NSNumber *integerScaling = snapshot[@"integerScaling"];
+    if (integerScaling) {
+        _state->conf.integer_scaling = integerScaling.boolValue;
+    }
+    NSNumber *nearest = snapshot[@"nearestNeighborFiltering"];
+    if (nearest) {
+        _state->conf.nearest_neighbor_filtering = nearest.boolValue;
+    }
+    NSNumber *hideSystemApps = snapshot[@"hideSystemApps"];
+    if (hideSystemApps) {
+        _state->conf.hide_system_apps = hideSystemApps.boolValue;
+    }
+    NSNumber *extensive = snapshot[@"extensiveLogging"];
+    if (extensive) {
+        _state->conf.extensive_logging = extensive.boolValue;
+    }
+    NSString *cpuBackend = snapshot[@"cpuBackend"];
+    if ([cpuBackend isKindOfClass:NSString.class] && _state->conf.cpu_backend != cpuBackend.UTF8String) {
+        _state->conf.cpu_backend = cpuBackend.UTF8String;
+        _state->needs_reboot_before_launch = true;
+    }
+    NSNumber *jitEnabled = snapshot[@"jitEnabled"];
+    if (jitEnabled && jitEnabled.boolValue != _state->conf.ios_use_jit) {
+        _state->conf.ios_use_jit = jitEnabled.boolValue;
+        // The CPU core is instantiated when the system is (re)built, so a
+        // backend switch takes effect on the next app launch's rebuild.
+        _state->needs_reboot_before_launch = true;
+    }
+    // Latched into the emulator threads at the next device boot.
+    NSString *performanceMode = snapshot[@"performanceMode"];
+    if ([performanceMode isKindOfClass:NSString.class]) {
+        _state->conf.ios_performance_mode = performanceMode.UTF8String;
+    }
+    NSString *deviceDisplayName = snapshot[@"deviceDisplayName"];
+    if ([deviceDisplayName isKindOfClass:NSString.class]) {
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        _state->conf.device_display_name = deviceDisplayName.UTF8String;
+        if (_state->symsys && _state->mounted) {
+            auto *kern = _state->symsys->get_kernel_system();
+            eka2l1::kernel_lock lock(kern);
+            auto *server = kern->get_by_name<eka2l1::btman_server>(
+                eka2l1::get_btman_server_name_by_epocver(kern->get_epoc_version()));
+            if (server) {
+                server->device_name(eka2l1::common::utf8_to_ucs2(_state->conf.device_display_name));
+            }
+        }
+    }
+    NSString *imei = snapshot[@"imei"];
+    if ([imei isKindOfClass:NSString.class] && (imei.length > 0)) {
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        std::optional<eka2l1::kernel_lock> kernel_lock;
+        if (_state->symsys && _state->symsys->get_kernel_system()) {
+            kernel_lock.emplace(_state->symsys->get_kernel_system());
+        }
+        _state->conf.imei = imei.UTF8String;
+        if (_state->symsys && _state->mounted) {
+            eka2l1::supply_plpvariant_machine_id(_state->symsys.get());
+        }
+    }
+    NSString *logFilter = snapshot[@"logFilter"];
+    if ([logFilter isKindOfClass:NSString.class]) {
+        _state->conf.log_filter = logFilter.UTF8String;
+        // Re-apply live so the change takes effect without a restart.
+        if (eka2l1::log::filterings && !_state->conf.log_filter.empty()) {
+            eka2l1::log::filterings->parse_filter_string(_state->conf.log_filter);
+        }
+    }
+
+    // BT netplay settings. The bluetooth midman is constructed with the
+    // config on device boot, so changes here apply from the next app launch
+    // (which rebuilds the system).
+    NSNumber *btnetDiscoveryMode = snapshot[@"btnetDiscoveryMode"];
+    if (btnetDiscoveryMode) {
+        _state->conf.btnet_discovery_mode = btnetDiscoveryMode.unsignedIntValue;
+    }
+    // The host port range the guest's virtual bluetooth ports map onto
+    // (btnet-port-offset) is not exposed: it only needs changing when several
+    // emulator instances share one machine, which iOS never does. Edit
+    // config.yml directly for that case.
+    //
+    // mDNS advertises this query port; Direct IP peers configure it explicitly.
+    NSNumber *btnetListenPort = snapshot[@"btnetListenPort"];
+    if (btnetListenPort) {
+        _state->conf.internet_bluetooth_port = std::clamp(btnetListenPort.intValue, 1, 65535);
+    }
+    NSString *btnetPassword = snapshot[@"btnetPassword"];
+    if ([btnetPassword isKindOfClass:NSString.class]) {
+        _state->conf.btnet_password = btnetPassword.UTF8String;
+    }
+    NSString *btCentralServerUrl = snapshot[@"btCentralServerUrl"];
+    if ([btCentralServerUrl isKindOfClass:NSString.class] && (btCentralServerUrl.length > 0)) {
+        _state->conf.bt_central_server_url = btCentralServerUrl.UTF8String;
+    }
+    // UPnP port forwarding (enable-upnp) is not exposed either: it defaults on
+    // and only ever runs in central server mode, where NAT traversal is the
+    // whole point of the mode.
+    NSArray *friendAddresses = snapshot[@"btnetFriendAddresses"];
+    if ([friendAddresses isKindOfClass:NSArray.class]) {
+        _state->conf.friend_addresses.clear();
+        for (NSDictionary *entry in friendAddresses) {
+            if (![entry isKindOfClass:NSDictionary.class]) {
+                continue;
+            }
+            NSString *addr = entry[@"addr"];
+            NSNumber *port = entry[@"port"];
+            if (![addr isKindOfClass:NSString.class] || (addr.length == 0) || !port) {
+                continue;
+            }
+            eka2l1::config::friend_address address;
+            address.addr_ = addr.UTF8String;
+            address.port_ = port.unsignedIntValue;
+            _state->conf.friend_addresses.push_back(address);
+        }
+    }
+
+    NSString *backgroundImage = snapshot[@"backgroundImage"];
+    if ([backgroundImage isKindOfClass:NSString.class]) {
+        {
+            std::lock_guard<std::mutex> background_lock(_state->background_mutex);
+            _state->conf.background_image = eka2l1::host_path(backgroundImage.UTF8String);
+            _state->background_dirty = true;
+        }
+        [self scheduleRePresent];
+    }
+
+    if (hosts) {
+        std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+        std::optional<eka2l1::kernel_lock> kernel_lock;
+        if (_state->symsys && _state->symsys->get_kernel_system()) {
+            kernel_lock.emplace(_state->symsys->get_kernel_system());
+        }
+        _state->conf.hosts = std::move(*hosts);
+    }
+    _state->conf.serialize();
+    return YES;
+}
+
+- (NSInteger)validateIMEI:(NSString *)imei {
+    return eka2l1::crypt::is_imei_valid(imei.UTF8String ? imei.UTF8String : "");
+}
+
+- (NSArray<EKA2L1LanguageEntry *> *)availableLanguages {
+    NSMutableArray<EKA2L1LanguageEntry *> *out = [NSMutableArray array];
+    if (!_state || !_state->symsys) {
+        return out;
+    }
+    auto *dvc = _state->symsys->get_device_manager();
+    if (!dvc) {
+        return out;
+    }
+    std::lock_guard<std::mutex> dvc_lock(dvc->lock);
+    auto &devices = dvc->get_devices();
+    const int device_index = _state->conf.device;
+    if ((device_index < 0) || (device_index >= static_cast<int>(devices.size()))) {
+        return out;
+    }
+    for (const int code: devices[device_index].languages) {
+        EKA2L1LanguageEntry *entry = [[EKA2L1LanguageEntry alloc] init];
+        entry.code = code;
+        entry.name = [NSString stringWithUTF8String:eka2l1::common::get_language_name_by_code(code).c_str()];
+        [out addObject:entry];
+    }
+    return out;
+}
+
+- (NSInteger)currentLanguageCode {
+    return _state ? _state->conf.language : -1;
+}
+
+- (void)setSystemLanguageCode:(NSInteger)code {
+    if (!_state) {
+        return;
+    }
+
+    _state->conf.language = static_cast<int>(code);
+    _state->conf.serialize();
+
+    if (!_state->symsys || !_state->mounted) {
+        // Not booted yet — setup_outsider applies conf.language on boot.
+        return;
+    }
+
+    // Mirror the Android frontend's set_language_current: flip the kernel's
+    // current language (drives .rXX resource selection on next app launch)
+    // and rewrite the live locale property so running guests see the change.
+    _state->symsys->set_system_language(static_cast<language>(code));
+
+    eka2l1::kernel_system *kern = _state->symsys->get_kernel_system();
+    if (!kern) {
+        return;
+    }
+
+    eka2l1::property_ptr lang_prop = kern->get_prop(eka2l1::epoc::SYS_CATEGORY, eka2l1::epoc::LOCALE_LANG_KEY);
+    if (!lang_prop) {
+        return;
+    }
+
+    auto locale_lang = lang_prop->get_pkg<eka2l1::epoc::locale_language>();
+    if (!locale_lang) {
+        return;
+    }
+
+    locale_lang->language = static_cast<eka2l1::epoc::language>(code);
+    lang_prop->set<eka2l1::epoc::locale_language>(locale_lang.value());
+
+    // The applist caches each registration's caption in the language it was
+    // first loaded in, and rescan_registries() skips reloading a registry whose
+    // .rsc mtime is unchanged — so a language switch alone leaves the app list
+    // showing the old-language names. Drop the cached registrations so the next
+    // rescanApps re-reads every caption with the new current language.
+    if (auto *alserv = eka2l1::ios::get_applist_server(kern)) {
+        alserv->get_registerations().clear();
+    }
+}
+
+- (BOOL)jitCompiledIn {
+#if EKA2L1_IOS_DYNARMIC
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)jitAvailable {
+    return eka2l1::arm::host_can_jit() ? YES : NO;
+}
+
+- (uint64_t)renderedFrameCount {
+    if (!_state) {
+        return 0;
+    }
+    return _state->rendered_frame_count.load(std::memory_order_relaxed);
+}
+
+- (nullable NSData *)iconPNGDataForUID:(uint32_t)uid sizePx:(NSUInteger)sizePx {
+    if (!_state || !_state->symsys || sizePx == 0) {
+        return nil;
+    }
+    std::lock_guard<std::mutex> icon_lock(_state->icon_mutex);
+    // Decoding walks the applist / fbs servers of the booted system. The
+    // frontend runs it off a background queue, so block on the session lock
+    // (never main: a boot holding it dispatch_syncs onto the main queue) to
+    // keep a reboot from freeing symsys under the decode.
+    std::lock_guard<std::recursive_mutex> session_lock(_state->session_mutex);
+    if (!_state->symsys) {
+        return nil;
+    }
+    auto *kern = _state->symsys->get_kernel_system();
+    if (!kern) return nil;
+    auto *alserv = eka2l1::ios::get_applist_server(kern);
+    if (!alserv) return nil;
+    auto *reg = alserv->get_registration(uid);
+    if (!reg) return nil;
+    const eka2l1::host_path cache_root = _state->caches_root.empty() ? eka2l1::host_path()
+        : eka2l1::add_path(_state->caches_root, "icons");
+    auto icon = alserv->get_host_icon(*reg, cache_root);
+    if (!icon) return nil;
+    return eka2l1::ios::encode_rgba_to_png(icon->pixels.data(), icon->size.x, icon->size.y,
+        static_cast<std::size_t>(sizePx));
+}
+
+@end

@@ -1,0 +1,935 @@
+import SwiftUI
+import UIKit
+
+// The keypad now has one user-positionable layout instead of a set of fixed
+// portrait/landscape presets. Positions are normalized so they survive changes
+// in screen size; portrait and landscape use separate stored configurations.
+enum KeypadElement: Hashable {
+    case dpad
+    case leftSoft
+    case rightSoft
+    case numeric
+    case menu
+    case clear
+    case call
+    case end
+    case edit
+    case key(QwertyKey)
+
+    static let controls: [KeypadElement] = [
+        .dpad, .leftSoft, .rightSoft, .numeric, .menu, .clear, .call, .end, .edit
+    ]
+    static let allCases = controls + QwertyKey.allCases.map(KeypadElement.key)
+
+    // The name a control is stored under in hiddenElements.
+    var rawValue: String {
+        switch self {
+        case .dpad: return "dpad"
+        case .leftSoft: return "leftSoft"
+        case .rightSoft: return "rightSoft"
+        case .numeric: return "numeric"
+        case .menu: return "menu"
+        case .clear: return "clear"
+        case .call: return "call"
+        case .end: return "end"
+        case .edit: return "edit"
+        case .key(let key): return key.rawValue
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .dpad: return String(localized: "keypad.editor.dpad")
+        case .leftSoft: return String(localized: "key.leftSoft")
+        case .rightSoft: return String(localized: "key.rightSoft")
+        case .numeric: return String(localized: "keypad.editor.numberPad")
+        case .menu: return String(localized: "emulator.menu")
+        case .clear: return String(localized: "keypad.accessibility.clear")
+        case .call: return String(localized: "keypad.accessibility.call")
+        case .end: return String(localized: "keypad.accessibility.end")
+        case .edit: return String(localized: "key.edit")
+        case .key(let key): return key.title
+        }
+    }
+
+    // Every control the user may switch off. Menu stays: it is the only way back into
+    // this editor once the keypad is off.
+    static var hideable: [KeypadElement] {
+        controls.filter { $0 != .menu }
+    }
+
+    static let hiddenByDefault: [String] = [KeypadElement.call, .end, .edit].map(\.rawValue).sorted()
+
+    func size(in canvasSize: CGSize) -> CGSize {
+        // Base both orientations on the display's physical short edge so a
+        // rotation never changes the apparent control size. Cap growth on
+        // large displays so the keypad does not become visually dominant.
+        let shortEdge = min(canvasSize.width, canvasSize.height)
+        let majorWidth = min(180, max(150, (shortEdge - 36) / 2))
+        let scale = majorWidth / 150
+
+        switch self {
+        case .dpad:
+            return CGSize(width: majorWidth - 4, height: majorWidth - 4)
+        case .leftSoft, .rightSoft, .menu, .clear, .call, .end, .edit:
+            return CGSize(width: 56 * scale, height: 36 * scale)
+        case .numeric:
+            return CGSize(width: majorWidth, height: majorWidth * 190 / 150)
+        case .key(let key):
+            // Ten letters fit across the short edge, as on a QWERTY phone.
+            let width = min(44, (shortEdge - 24 - QwertyKey.spacing * 9) / 10)
+            let columns = CGFloat(key.columns)
+            return CGSize(width: width * columns + QwertyKey.spacing * (columns - 1),
+                          height: 36 * scale)
+        }
+    }
+}
+
+// Letter keys and space of a QWERTY keyboard. Each one is off until the user
+// switches it on in the layout editor.
+enum QwertyKey: String, CaseIterable, Hashable {
+    case a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z
+    case space
+
+    static let spacing: CGFloat = 4
+
+    static let rows: [[QwertyKey]] = [
+        [.q, .w, .e, .r, .t, .y, .u, .i, .o, .p],
+        [.a, .s, .d, .f, .g, .h, .j, .k, .l],
+        [.z, .x, .c, .v, .b, .n, .m, .space]
+    ]
+
+    // Space fills the bottom row out to the width of the top one.
+    var columns: Int {
+        self == .space ? 3 : 1
+    }
+
+    var title: String {
+        self == .space ? String(localized: "key.space") : rawValue.uppercased()
+    }
+
+    // Symbian scan codes of letter keys are their upper-case ASCII codes.
+    var scan: UInt32 {
+        self == .space ? Scan.space : UInt32(rawValue.uppercased().unicodeScalars.first!.value)
+    }
+}
+
+struct NormalizedKeypadPoint: Codable, Equatable {
+    var x: Double
+    var y: Double
+
+    func point(in size: CGSize) -> CGPoint {
+        CGPoint(x: x * size.width, y: y * size.height)
+    }
+
+    static func make(_ point: CGPoint, in size: CGSize) -> NormalizedKeypadPoint {
+        guard size.width > 0, size.height > 0 else {
+            return NormalizedKeypadPoint(x: 0.5, y: 0.5)
+        }
+        return NormalizedKeypadPoint(
+            x: point.x / size.width,
+            y: point.y / size.height
+        )
+    }
+}
+
+struct KeypadLayoutConfiguration: Codable, Equatable {
+    var dpad: NormalizedKeypadPoint
+    var leftSoft: NormalizedKeypadPoint
+    var rightSoft: NormalizedKeypadPoint
+    var numeric: NormalizedKeypadPoint
+    var menu: NormalizedKeypadPoint
+    var clear: NormalizedKeypadPoint
+    // Added after the format shipped: absent in stored layouts, filled in from the
+    // reset layout when one is decoded.
+    var call: NormalizedKeypadPoint?
+    var end: NormalizedKeypadPoint?
+    var edit: NormalizedKeypadPoint?
+    // Nil for layouts saved before the setting existed; they take the reset layout's default.
+    var hiddenElements: [String]?
+    // QWERTY keys are listed when shown, so a layout saved before they existed keeps them off.
+    var shownKeys: [String]?
+    var keyPoints: [String: NormalizedKeypadPoint]?
+
+    func isHidden(_ element: KeypadElement) -> Bool {
+        if case .key(let key) = element {
+            return !(shownKeys?.contains(key.rawValue) ?? false)
+        }
+        return hiddenElements?.contains(element.rawValue) ?? false
+    }
+
+    mutating func setHidden(_ hidden: Bool, for element: KeypadElement) {
+        guard element != .menu else { return }
+        if case .key(let key) = element {
+            var current = Set(shownKeys ?? [])
+            if hidden {
+                current.remove(key.rawValue)
+            } else {
+                current.insert(key.rawValue)
+            }
+            shownKeys = current.sorted()
+            return
+        }
+        var current = Set(hiddenElements ?? [])
+        if hidden {
+            current.insert(element.rawValue)
+        } else {
+            current.remove(element.rawValue)
+        }
+        hiddenElements = current.sorted()
+    }
+
+    func point(for element: KeypadElement, in size: CGSize) -> CGPoint {
+        normalizedPoint(for: element).point(in: size)
+    }
+
+    func visibleElements(fullScreen: Bool) -> [KeypadElement] {
+        fullScreen ? [.menu] : KeypadElement.allCases.filter { $0 != .menu && !isHidden($0) } + [.menu]
+    }
+
+    // Keep hit regions in the same local geometry as the controls, without
+    // retaining transient navigation frames through preference callbacks.
+    func hitRegions(in size: CGSize, controlSize: CGSize, fullScreen: Bool) -> [CGRect] {
+        visibleElements(fullScreen: fullScreen).map { element in
+            let center = point(for: element, in: size)
+            let elementSize = element.size(in: controlSize)
+            return CGRect(
+                x: center.x - elementSize.width / 2,
+                y: center.y - elementSize.height / 2,
+                width: elementSize.width,
+                height: elementSize.height
+            )
+        }
+    }
+
+    mutating func setPoint(_ point: CGPoint, for element: KeypadElement, in size: CGSize) {
+        let normalized = NormalizedKeypadPoint.make(point, in: size)
+        switch element {
+        case .dpad: dpad = normalized
+        case .leftSoft: leftSoft = normalized
+        case .rightSoft: rightSoft = normalized
+        case .numeric: numeric = normalized
+        case .menu: menu = normalized
+        case .clear: clear = normalized
+        case .call: call = normalized
+        case .end: end = normalized
+        case .edit: edit = normalized
+        case .key(let key): keyPoints = (keyPoints ?? [:]).merging([key.rawValue: normalized]) { $1 }
+        }
+    }
+
+    mutating func constrainElementsToWindow(
+        in size: CGSize,
+        safeAreaInsets: EdgeInsets = EdgeInsets()
+    ) {
+        guard size.width > 0, size.height > 0 else { return }
+
+        let windowSize = CGSize(
+            width: size.width + safeAreaInsets.leading + safeAreaInsets.trailing,
+            height: size.height + safeAreaInsets.top + safeAreaInsets.bottom
+        )
+
+        for element in KeypadElement.allCases {
+            let elementSize = element.size(in: windowSize)
+            let point = point(for: element, in: size)
+            let constrainedPoint = CGPoint(
+                x: constrainedCoordinate(
+                    point.x,
+                    elementLength: elementSize.width,
+                    windowLength: windowSize.width
+                ),
+                y: constrainedCoordinate(
+                    point.y,
+                    elementLength: elementSize.height,
+                    windowLength: windowSize.height
+                )
+            )
+            setPoint(constrainedPoint, for: element, in: size)
+        }
+    }
+
+    func encoded() -> String {
+        guard let data = try? JSONEncoder().encode(self) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func decoded(
+        _ rawValue: String,
+        defaultFor size: CGSize,
+        safeAreaInsets: EdgeInsets = EdgeInsets()
+    ) -> KeypadLayoutConfiguration {
+        if let data = rawValue.data(using: .utf8),
+           var configuration = try? JSONDecoder().decode(KeypadLayoutConfiguration.self, from: data) {
+            let fallback = classicDefault(in: size, safeAreaInsets: safeAreaInsets)
+            configuration.call = configuration.call ?? fallback.call
+            configuration.end = configuration.end ?? fallback.end
+            configuration.hiddenElements = configuration.hiddenElements ?? fallback.hiddenElements
+            if configuration.edit == nil {
+                configuration.edit = fallback.edit
+                configuration.setHidden(true, for: .edit)
+            }
+            configuration.keyPoints = (fallback.keyPoints ?? [:])
+                .merging(configuration.keyPoints ?? [:]) { $1 }
+            return configuration
+        }
+        return classicDefault(in: size, safeAreaInsets: safeAreaInsets)
+    }
+
+    // The reset layout preserves the familiar bottom-centred arrangement.
+    // Portrait aligns the tops of the d-pad and number pad, with L/R above and
+    // Menu/Clear filling the shorter d-pad column down to the number-pad bottom.
+    static func classicDefault(
+        in size: CGSize,
+        safeAreaInsets: EdgeInsets = EdgeInsets()
+    ) -> KeypadLayoutConfiguration {
+        let controlSize = CGSize(
+            width: size.width + safeAreaInsets.leading + safeAreaInsets.trailing,
+            height: size.height + safeAreaInsets.top + safeAreaInsets.bottom
+        )
+        let dpadSize = KeypadElement.dpad.size(in: controlSize)
+        let numericSize = KeypadElement.numeric.size(in: controlSize)
+        let softKeySize = KeypadElement.leftSoft.size(in: controlSize)
+        let menuSize = KeypadElement.menu.size(in: controlSize)
+        let clearSize = KeypadElement.clear.size(in: controlSize)
+
+        if size.width > size.height {
+            // N-Gage-style landscape default: navigation in the left hand,
+            // number pad in the right, with the soft keys above each cluster.
+            let fullWidth = size.width + safeAreaInsets.leading + safeAreaInsets.trailing
+            let safeRightEdge = fullWidth - safeAreaInsets.trailing
+            let centerY = safeAreaInsets.top + size.height / 2
+            let dpadCenter = CGPoint(
+                x: safeAreaInsets.leading + 12 + dpadSize.width / 2,
+                y: centerY
+            )
+            let numericCenter = CGPoint(
+                x: safeRightEdge - 12 - numericSize.width / 2,
+                y: centerY
+            )
+            let leftSoft = CGPoint(
+                x: dpadCenter.x,
+                y: dpadCenter.y - dpadSize.height / 2 - 12 - softKeySize.height / 2
+            )
+            let rightSoft = CGPoint(
+                x: numericCenter.x,
+                y: numericCenter.y - numericSize.height / 2 - 12 - softKeySize.height / 2
+            )
+            let menu = CGPoint(
+                x: dpadCenter.x,
+                y: dpadCenter.y + dpadSize.height / 2 + 12 + menuSize.height / 2
+            )
+            let clear = CGPoint(
+                x: numericCenter.x,
+                y: numericCenter.y + numericSize.height / 2 + 12 + clearSize.height / 2
+            )
+
+            let softRowCenterX = (leftSoft.x + rightSoft.x) / 2
+            let call = CGPoint(x: softRowCenterX - softKeySize.width / 2 - 4, y: leftSoft.y)
+            let end = CGPoint(x: softRowCenterX + softKeySize.width / 2 + 4, y: rightSoft.y)
+
+            return KeypadLayoutConfiguration(
+                dpad: .make(dpadCenter, in: size),
+                leftSoft: .make(leftSoft, in: size),
+                rightSoft: .make(rightSoft, in: size),
+                numeric: .make(numericCenter, in: size),
+                menu: .make(menu, in: size),
+                clear: .make(clear, in: size),
+                call: .make(call, in: size),
+                end: .make(end, in: size),
+                edit: .make(CGPoint(x: softRowCenterX, y: menu.y), in: size),
+                hiddenElements: KeypadElement.hiddenByDefault,
+                keyPoints: qwertyPoints(
+                    centerX: softRowCenterX,
+                    bottom: safeAreaInsets.top + size.height,
+                    controlSize: controlSize,
+                    in: size
+                )
+            )
+        }
+
+        // The d-pad is 4pt narrower than its original slot; put that space
+        // between the two major controls so the outer 12pt margins stay fixed.
+        let gap: CGFloat = 16
+        let totalWidth = dpadSize.width + gap + numericSize.width
+        let leading = max(12, (size.width - totalWidth) / 2)
+        let dpadCenterX = leading + dpadSize.width / 2
+        let numericCenterX = dpadCenterX + dpadSize.width / 2
+            + gap + numericSize.width / 2
+        // GeometryReader reports the safe-area-reduced height here, while the
+        // overlay ignores safe areas. Adding the top inset maps the top of the
+        // bottom safe area into overlay coordinates.
+        let bottomEdge = size.height + safeAreaInsets.top
+        let topEdge = bottomEdge - numericSize.height
+        let numericCenterY = topEdge + numericSize.height / 2
+        let dpadCenterY = topEdge + dpadSize.height / 2
+        let softCenterY = topEdge - 12 - softKeySize.height / 2
+        let leftSoft = CGPoint(
+            x: dpadCenterX - dpadSize.width / 2 + softKeySize.width / 2,
+            y: softCenterY
+        )
+        let rightSoft = CGPoint(
+            x: numericCenterX + numericSize.width / 2 - softKeySize.width / 2,
+            y: softCenterY
+        )
+        let menu = CGPoint(
+            x: dpadCenterX - dpadSize.width / 2 + menuSize.width / 2,
+            y: bottomEdge - menuSize.height / 2
+        )
+        let clear = CGPoint(
+            x: dpadCenterX + dpadSize.width / 2 - clearSize.width / 2,
+            y: bottomEdge - clearSize.height / 2
+        )
+
+        // Off by default: the middle of the soft-key row is where guests draw their own
+        // middle soft-key label.
+        let softRowCenterX = (leftSoft.x + rightSoft.x) / 2
+        let call = CGPoint(x: softRowCenterX - softKeySize.width / 2 - 4, y: softCenterY)
+        let end = CGPoint(x: softRowCenterX + softKeySize.width / 2 + 4, y: softCenterY)
+
+        return KeypadLayoutConfiguration(
+            dpad: .make(CGPoint(x: dpadCenterX, y: dpadCenterY), in: size),
+            leftSoft: .make(leftSoft, in: size),
+            rightSoft: .make(rightSoft, in: size),
+            numeric: .make(CGPoint(x: numericCenterX, y: numericCenterY), in: size),
+            menu: .make(menu, in: size),
+            clear: .make(clear, in: size),
+            call: .make(call, in: size),
+            end: .make(end, in: size),
+            edit: .make(CGPoint(x: softRowCenterX, y: softCenterY - softKeySize.height - 12), in: size),
+            hiddenElements: KeypadElement.hiddenByDefault,
+            keyPoints: qwertyPoints(
+                centerX: softRowCenterX,
+                bottom: softCenterY - softKeySize.height * 1.5 - 24,
+                controlSize: controlSize,
+                in: size
+            )
+        )
+    }
+
+    // The reset places of the QWERTY keys: centred rows stacked up from `bottom`.
+    private static func qwertyPoints(
+        centerX: CGFloat,
+        bottom: CGFloat,
+        controlSize: CGSize,
+        in size: CGSize
+    ) -> [String: NormalizedKeypadPoint] {
+        let letterSize = KeypadElement.key(.a).size(in: controlSize)
+        let pitch = CGSize(width: letterSize.width + QwertyKey.spacing,
+                           height: letterSize.height + QwertyKey.spacing)
+        var points: [String: NormalizedKeypadPoint] = [:]
+        for (rowIndex, row) in QwertyKey.rows.enumerated() {
+            let y = bottom - letterSize.height / 2
+                - CGFloat(QwertyKey.rows.count - 1 - rowIndex) * pitch.height
+            var column = -CGFloat(row.map(\.columns).reduce(0, +)) / 2
+            for key in row {
+                let x = centerX + (column + CGFloat(key.columns) / 2) * pitch.width
+                points[key.rawValue] = .make(CGPoint(x: x, y: y), in: size)
+                column += CGFloat(key.columns)
+            }
+        }
+        return points
+    }
+
+    private func normalizedPoint(for element: KeypadElement) -> NormalizedKeypadPoint {
+        switch element {
+        case .dpad: return dpad
+        case .leftSoft: return leftSoft
+        case .rightSoft: return rightSoft
+        case .numeric: return numeric
+        case .menu: return menu
+        case .clear: return clear
+        case .call: return call ?? NormalizedKeypadPoint(x: 0.5, y: 0.5)
+        case .end: return end ?? NormalizedKeypadPoint(x: 0.5, y: 0.5)
+        case .edit: return edit ?? NormalizedKeypadPoint(x: 0.5, y: 0.5)
+        case .key(let key): return keyPoints?[key.rawValue] ?? NormalizedKeypadPoint(x: 0.5, y: 0.5)
+        }
+    }
+
+    private func constrainedCoordinate(
+        _ coordinate: CGFloat,
+        elementLength: CGFloat,
+        windowLength: CGFloat
+    ) -> CGFloat {
+        let minimum = elementLength / 2
+        let maximum = windowLength - elementLength / 2
+        guard minimum <= maximum else { return windowLength / 2 }
+        return min(max(coordinate, minimum), maximum)
+    }
+}
+
+enum KeypadDefaults {
+    static let opacityKey = "ios.keypadOpacity"
+    static let opacity = 0.85
+    static let opacityRange: ClosedRange<Double> = 0.1...1.0
+    static let portraitLayoutKey = "ios.keypadPositions.portrait"
+    static let landscapeLayoutKey = "ios.keypadPositions.landscape"
+    static let fullscreenKey = "ios.fullscreenDisplay"
+    static let touchFullscreenKey = "ios.fullscreenDisplay.touch"
+    static let orientationLockKey = "ios.lockGameOrientation"
+
+    // Keep the historical launch argument useful for automated touch tests.
+    // Every former non-fullscreen preset now selects the customizable keypad.
+    static func launchArgumentFullscreen() -> Bool? {
+        guard let value = UserDefaults.standard.string(forKey: "LaunchKeypadLayout") else {
+            return nil
+        }
+        return value == "fullscreen"
+    }
+}
+
+// What the system-menu key needs from the hosting emulator screen.
+struct KeypadMenuActions {
+    var fullScreen: Binding<Bool>
+    var locksOrientation: Binding<Bool>
+    var editKeypadLayout: () -> Void
+    var editDisplayLayout: () -> Void
+    var guestScreenModes: [Int]
+    var guestScreenMode: Binding<Int>
+    var frameLimit: Binding<Int>
+    var saveScreenshot: () -> Void
+    var exitGame: () -> Void
+}
+
+// MARK: - System menu
+
+struct SystemMenuKey: View {
+    let actions: KeypadMenuActions
+    var size: CGSize = CGSize(width: 58, height: 38)
+
+    var body: some View {
+        Menu {
+            menuContent
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: size.width, height: size.height)
+                .keyCap(pressed: false)
+        }
+        .accessibilityLabel("emulator.menu")
+    }
+
+    @ViewBuilder
+    private var menuContent: some View {
+        Button {
+            actions.editKeypadLayout()
+        } label: {
+            Label("keypad.editor.editLayout", systemImage: "move.3d")
+        }
+
+        // Fullscreen presents the picture centred over the whole screen, so
+        // there is no stored layout to edit.
+        if !actions.fullScreen.wrappedValue {
+            Button {
+                actions.editDisplayLayout()
+            } label: {
+                Label("display.editor.editLayout", systemImage: "rectangle.inset.filled")
+            }
+        }
+
+        Toggle(isOn: actions.locksOrientation) {
+            Label("emulator.menu.lockOrientation", systemImage: "lock.rotation")
+        }
+
+        Menu {
+            fpsLimitPicker
+
+            if !actions.guestScreenModes.isEmpty {
+                Divider()
+                guestScreenModePicker
+            }
+        } label: {
+            Label("emulator.menu.gameSettings", systemImage: "slider.horizontal.3")
+        }
+
+        Button {
+            actions.saveScreenshot()
+        } label: {
+            Label("emulator.saveScreenshot", systemImage: "camera")
+        }
+
+        Button(role: .destructive) {
+            actions.exitGame()
+        } label: {
+            Label("emulator.exit", systemImage: "xmark.circle")
+        }
+    }
+
+    @ViewBuilder
+    private var fpsLimitPicker: some View {
+        let picker = Picker("emulator.menu.fpsLimit", selection: actions.frameLimit) {
+            Text(verbatim: "15").tag(15)
+            Text(verbatim: "25").tag(25)
+            Text(verbatim: "30").tag(30)
+            Text(verbatim: "60").tag(60)
+            Text("emulator.fpsLimit.unlimited").tag(0)
+        }
+        if #available(iOS 17, *) {
+            picker.pickerStyle(.palette)
+        } else {
+            picker
+        }
+    }
+
+    @ViewBuilder
+    private var guestScreenModePicker: some View {
+        let picker = Picker("emulator.menu.guestScreenMode", selection: actions.guestScreenMode) {
+            ForEach(actions.guestScreenModes, id: \.self) { mode in
+                Text(verbatim: "\(mode)").tag(mode)
+            }
+        }
+        if #available(iOS 17, *) {
+            picker.pickerStyle(.palette)
+        } else {
+            picker
+        }
+    }
+}
+
+// MARK: - Runtime keypad
+
+struct VirtualKeypad: View {
+    let size: CGSize
+    let controlSize: CGSize
+    let configuration: KeypadLayoutConfiguration
+    let dpadMode: DirectionPadMode
+    let fullScreen: Bool
+    let actions: KeypadMenuActions
+
+    var body: some View {
+        ZStack {
+            ForEach(configuration.visibleElements(fullScreen: fullScreen), id: \.self) { element in
+                runtimeElement(element) {
+                    switch element {
+                    case .dpad:
+                        DirectionPad(mode: dpadMode, diameter: KeypadElement.dpad.size(in: controlSize).width)
+                    case .leftSoft:
+                        SoftKey(side: .left, size: KeypadElement.leftSoft.size(in: controlSize))
+                    case .rightSoft:
+                        SoftKey(side: .right, size: KeypadElement.rightSoft.size(in: controlSize))
+                    case .numeric:
+                        CapsNumericPad(size: KeypadElement.numeric.size(in: controlSize))
+                    case .menu:
+                        SystemMenuKey(actions: actions, size: KeypadElement.menu.size(in: controlSize))
+                    case .clear:
+                        ClearKey(size: KeypadElement.clear.size(in: controlSize))
+                    case .call:
+                        PhoneKey(side: .call, size: KeypadElement.call.size(in: controlSize))
+                    case .end:
+                        PhoneKey(side: .end, size: KeypadElement.end.size(in: controlSize))
+                    case .edit:
+                        EditKey(size: KeypadElement.edit.size(in: controlSize))
+                    case .key(let key):
+                        QwertyKeyCap(key: key, size: element.size(in: controlSize))
+                    }
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .ignoresSafeArea()
+        // Keys are white-on-dark by design; light glass would wash them out.
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func position(for element: KeypadElement) -> CGPoint {
+        return configuration.point(for: element, in: size)
+    }
+
+    private func runtimeElement<Content: View>(
+        _ element: KeypadElement,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let elementSize = element.size(in: controlSize)
+        return content()
+            .frame(width: elementSize.width, height: elementSize.height)
+            .position(position(for: element))
+    }
+}
+
+// MARK: - Layout editor
+
+struct KeypadLayoutEditor: View {
+    let size: CGSize
+    let controlSize: CGSize
+    let safeAreaInsets: EdgeInsets
+    @Binding var configuration: KeypadLayoutConfiguration
+    @Binding var dpadMode: DirectionPadMode
+    @Binding var opacity: Double
+    @Binding var fullScreen: Bool
+    let actions: KeypadMenuActions
+    let onReset: () -> Void
+    let onDone: () -> Void
+
+    @State private var dragStarts: [KeypadElement: CGPoint] = [:]
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .contentShape(Rectangle())
+
+            ForEach(editorElements, id: \.self) { element in
+                draggableElement(element)
+            }
+
+            VStack(spacing: 8) {
+                editorHeader
+                editorSettings
+            }
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.leading, max(14, safeAreaInsets.leading + 10))
+                .padding(.trailing, max(14, safeAreaInsets.trailing + 10))
+                .padding(.top, max(12, safeAreaInsets.top + 8))
+        }
+        .frame(width: size.width, height: size.height)
+        .ignoresSafeArea()
+    }
+
+    private var editorElements: [KeypadElement] {
+        fullScreen ? [.menu] : KeypadElement.allCases.filter { !configuration.isHidden($0) }
+    }
+
+    private var editorSettings: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                opacityBar
+                    .frame(minWidth: 240, maxWidth: 300)
+                visibilityMenu
+            }
+
+            VStack(spacing: 8) {
+                opacityBar
+                visibilityMenu
+            }
+        }
+    }
+
+    // Fullscreen hides every key and switching a key back on leaves it. The menu stays
+    // open so several keys can be toggled at once.
+    @ViewBuilder
+    private var visibilityMenu: some View {
+        let menu = Menu {
+            visibilityItem(
+                title: String(localized: "emulator.menu.fullScreen"),
+                on: fullScreen
+            ) {
+                fullScreen.toggle()
+            }
+
+            Divider()
+
+            ForEach(KeypadElement.hideable, id: \.self) { element in
+                visibilityItem(for: element)
+            }
+
+            Divider()
+
+            Menu {
+                ForEach(QwertyKey.allCases, id: \.self) { key in
+                    visibilityItem(for: .key(key))
+                }
+            } label: {
+                Label("keypad.editor.letterKeys", systemImage: "keyboard")
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "square.grid.2x2")
+                Text("keypad.editor.visibleControls")
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 50)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(.black.opacity(0.72), in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+        }
+
+        if #available(iOS 16.4, *) {
+            menu.menuActionDismissBehavior(.disabled)
+        } else {
+            menu
+        }
+    }
+
+    private func visibilityItem(for element: KeypadElement) -> some View {
+        let shown = !fullScreen && !configuration.isHidden(element)
+        return visibilityItem(title: element.title, on: shown) {
+            if fullScreen {
+                fullScreen = false
+                configuration.setHidden(false, for: element)
+            } else {
+                configuration.setHidden(shown, for: element)
+            }
+        }
+    }
+
+    private func visibilityItem(
+        title: String,
+        on: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            if on {
+                Label {
+                    Text(verbatim: title)
+                } icon: {
+                    Image(systemName: "checkmark")
+                }
+            } else {
+                Text(verbatim: title)
+            }
+        }
+    }
+
+    private var editorHeader: some View {
+        HStack(spacing: 12) {
+            editorButton(symbol: "arrow.counterclockwise", label: "keypad.editor.reset") {
+                onReset()
+            }
+
+            Text("keypad.editor.hint")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+                .frame(height: 44)
+                .background(.black.opacity(0.68), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+
+            editorButton(symbol: "checkmark", label: "common.done") {
+                onDone()
+            }
+        }
+    }
+
+    private var opacityBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "circle.lefthalf.filled")
+                .foregroundStyle(.white.opacity(0.8))
+            Slider(value: $opacity, in: KeypadDefaults.opacityRange)
+                .tint(.white)
+            Text(opacity.formatted(.percent.precision(.fractionLength(0))))
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 42, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 50)
+        .background(.black.opacity(0.72), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+        .accessibilityLabel("settings.keypadOpacity")
+    }
+
+    @ViewBuilder
+    private func draggableElement(_ element: KeypadElement) -> some View {
+        let elementSize = element.size(in: controlSize)
+        let control = ZStack(alignment: .topTrailing) {
+            elementContent(element)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .environment(\.colorScheme, .dark)
+
+            RoundedRectangle(cornerRadius: element == .dpad ? 28 : 14, style: .continuous)
+                .stroke(
+                    .white.opacity(0.9),
+                    style: StrokeStyle(lineWidth: 2, dash: [7, 5])
+                )
+
+            if element == .dpad {
+                Image(systemName: "arrow.right.arrow.left")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(.black.opacity(0.72), in: Circle())
+                    .padding(8)
+            }
+        }
+        .frame(width: elementSize.width, height: elementSize.height)
+        .opacity(opacity)
+        .contentShape(Rectangle())
+        .position(configuration.point(for: element, in: size))
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    let start = dragStarts[element]
+                        ?? configuration.point(for: element, in: size)
+                    dragStarts[element] = start
+                    let proposed = CGPoint(
+                        x: start.x + value.translation.width,
+                        y: start.y + value.translation.height
+                    )
+                    configuration.setPoint(
+                        proposed,
+                        for: element,
+                        in: size
+                    )
+                }
+                .onEnded { _ in
+                    dragStarts[element] = nil
+                }
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: element.title))
+
+        if element == .dpad {
+            control
+                .onTapGesture(perform: toggleDPadMode)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityValue(dpadMode.title)
+                .accessibilityHint("keypad.editor.dpadMode.hint")
+                .accessibilityAction { toggleDPadMode() }
+        } else {
+            control.accessibilityHint("keypad.editor.dragHint")
+        }
+    }
+
+    private func toggleDPadMode() {
+        dpadMode = dpadMode == .cross ? .stick : .cross
+    }
+
+    @ViewBuilder
+    private func elementContent(_ element: KeypadElement) -> some View {
+        let elementSize = element.size(in: controlSize)
+        switch element {
+        case .dpad:
+            DirectionPad(mode: dpadMode, diameter: elementSize.width, isInteractive: false)
+        case .leftSoft:
+            SoftKey(side: .left, size: elementSize)
+        case .rightSoft:
+            SoftKey(side: .right, size: elementSize)
+        case .numeric:
+            CapsNumericPad(size: elementSize)
+        case .menu:
+            SystemMenuKey(actions: actions, size: elementSize)
+        case .clear:
+            ClearKey(size: elementSize)
+        case .call:
+            PhoneKey(side: .call, size: elementSize)
+        case .end:
+            PhoneKey(side: .end, size: elementSize)
+        case .edit:
+            EditKey(size: elementSize)
+        case .key(let key):
+            QwertyKeyCap(key: key, size: elementSize)
+        }
+    }
+
+    private func editorButton(
+        symbol: String,
+        label: LocalizedStringKey,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(.black.opacity(0.72), in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}

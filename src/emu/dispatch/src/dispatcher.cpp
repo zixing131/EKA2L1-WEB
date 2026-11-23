@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <config/config.h>
 #include <dispatch/dispatcher.h>
 #include <dispatch/libraries/register.h>
@@ -91,6 +92,7 @@ namespace eka2l1::dispatch {
         if (!pr) {
             return;
         }
+        tls_controller_.erase_process(pr->unique_id());
 
         // Audio the process left playing must not outlive it: a killed or panicked app never
         // runs the guest destructor that would have stopped its player. Only orphan the
@@ -251,6 +253,7 @@ namespace eka2l1::dispatch {
             add_static_string(EGL_VENDOR_EMU, EGL_STATIC_STRING_VENDOR);
             add_static_string(EGL_VERSION_EMU, EGL_STATIC_STRING_VERSION);
             add_static_string(EGL_EXTENSIONS_EMU, EGL_STATIC_STRING_EXTENSION);
+            add_static_string(EGL_CLIENT_APIS_EMU, EGL_STATIC_STRING_CLIENT_APIS);
             add_static_string(VG_VENDOR_EMU, EKA2L1_GNUVG_VENDOR);
             add_static_string(VG_RENDERER_EMU, EKA2L1_GNUVG_RENDERER);
             add_static_string(VG_VERSION_EMU, EKA2L2_GNUVG_VERSION);
@@ -324,7 +327,7 @@ namespace eka2l1::dispatch {
             up_rect.top = { 0, 0 };
             up_rect.size = scr->size();
 
-            dispatch::update_screen(sys, 0, scr->number, 1, &up_rect);
+            dispatch::update_raw_screen(sys, scr->number, 1, &up_rect);
             scr = scr->next;
         }
     }
@@ -356,7 +359,7 @@ namespace eka2l1::dispatch {
         return ite->second;
     }
 
-    bool dispatcher::patch_libraries(const std::u16string &path, const patch_info *patches,
+    bool dispatcher::patch_libraries(const guest_path &path, const patch_info *patches,
         const std::size_t patch_count) {
         codeseg_ptr seg = libmngr_->load(path);
 

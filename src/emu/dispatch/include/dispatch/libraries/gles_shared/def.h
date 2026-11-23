@@ -29,10 +29,12 @@
 #include <common/vecx.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stack>
 #include <tuple>
+#include <vector>
 
 namespace eka2l1 {
     class system;
@@ -72,12 +74,16 @@ namespace eka2l1::dispatch {
     };
 
     struct egl_context_es_shared;
+    struct gles_object_namespace;
 
     struct gles_driver_object {
     protected:
-        egl_context_es_shared &context_;
+        gles_object_namespace &namespace_;
         drivers::handle driver_handle_;
         std::uint32_t client_handle_;
+
+        // The context making the current GL call, which may differ from the creator under EGL sharing.
+        egl_context_es_shared &context();
 
     public:
         explicit gles_driver_object(egl_context_es_shared &ctx);
@@ -132,6 +138,13 @@ namespace eka2l1::dispatch {
         bool auto_regen_mipmap_;
         bool mipmap_gened_;
 
+        struct image_info {
+            eka2l1::vec2 size;
+            std::uint32_t format;
+            bool compressed;
+            float scale;
+        };
+        std::map<std::pair<std::uint32_t, std::int32_t>, image_info> images_;
         eka2l1::vec2 size_;
         gles_driver_texture_type texture_type_;
 
@@ -192,9 +205,12 @@ namespace eka2l1::dispatch {
             auto_regen_mipmap_ = opt;
         }
 
-        void set_mipmap_generated(const bool opt) {
-            mipmap_gened_ = opt;
-        }
+        void set_mipmap_generated(const bool opt);
+        void define_image(std::uint32_t target, std::int32_t level, const eka2l1::vec2 &size,
+            std::uint32_t format, bool compressed = false);
+        std::uint32_t copy_sub_image(egl_controller &controller, drivers::graphics_driver *driver,
+            std::uint32_t target, std::int32_t level, const eka2l1::vec2 &offset,
+            const eka2l1::vec2 &source_pos, const eka2l1::vec2 &size);
 
         const bool is_mipmap_generated() const {
             return mipmap_gened_;
@@ -234,7 +250,12 @@ namespace eka2l1::dispatch {
     private:
         std::uint32_t data_size_;
 
+        // Copy of data uploaded as indices, so client-side attribute arrays can be sized to the highest index.
+        std::vector<std::uint8_t> index_data_;
+
     public:
+        bool was_bound_ = false;
+
         explicit gles_driver_buffer(egl_context_es_shared &ctx);
         ~gles_driver_buffer() override;
 
@@ -245,6 +266,15 @@ namespace eka2l1::dispatch {
         const std::uint32_t data_size() const {
             return data_size_;
         }
+
+        const std::uint8_t *index_data(std::uint32_t offset) const {
+            return offset < index_data_.size() ? index_data_.data() + offset : nullptr;
+        }
+        void assign_index_data(const std::uint32_t target, const void *data, const std::uint32_t size);
+        void update_index_data(const std::uint32_t offset, const void *data, const std::uint32_t size);
+
+        // Returns -1 when the referenced indices have no copy uploaded through GL_ELEMENT_ARRAY_BUFFER.
+        std::int32_t max_index(const std::uint32_t offset, const std::int32_t count, const std::uint32_t index_type) const;
 
         gles_object_type object_type() const override {
             return GLES_OBJECT_BUFFER;
@@ -261,6 +291,21 @@ namespace eka2l1::dispatch {
 
     using gles_driver_object_instance = std::unique_ptr<gles_driver_object>;
 
+    // Objects visible to every context created with the same EGL share_context.
+    struct gles_object_namespace {
+        common::identity_container<gles_driver_object_instance> objects_;
+        std::map<std::uint32_t, std::unique_ptr<gles_driver_buffer>> buffers_;
+
+        std::stack<drivers::handle> texture_pools_2d_;
+        std::stack<drivers::handle> texture_pools_cube_;
+        std::stack<drivers::handle> buffer_pools_;
+
+        common::roundabout texture_update_list_;
+        egl_context_es_shared *issuer_ = nullptr;
+
+        void return_handle_to_pool(const gles_object_type type, const drivers::handle h, const int subtype = 0);
+    };
+
     enum gles_get_data_type {
         GLES_GET_DATA_TYPE_INTEGER,
         GLES_GET_DATA_TYPE_FLOAT,
@@ -270,6 +315,7 @@ namespace eka2l1::dispatch {
 
     struct egl_context_es_shared : public egl_context {
     protected:
+        virtual void on_buffer_deleted(std::uint32_t name) = 0;
         virtual bool retrieve_vertex_buffer_slot(std::vector<drivers::handle> &vertex_buffers_alloc, drivers::graphics_driver *drv,
             kernel::process *crr_process, const gles_vertex_attrib &attrib, const std::int32_t first_index, const std::int32_t vcount,
             std::uint32_t &res, int &offset, bool &attrib_not_persistent);
@@ -292,11 +338,13 @@ namespace eka2l1::dispatch {
         drivers::blend_equation blend_equation_rgb_;
         drivers::blend_equation blend_equation_a_;
 
-        common::identity_container<gles_driver_object_instance> objects_;
+        std::shared_ptr<gles_object_namespace> namespace_;
+        common::identity_container<gles_driver_object_instance> &objects_;
+        std::map<std::uint32_t, std::unique_ptr<gles_driver_buffer>> &buffers_;
 
-        std::stack<drivers::handle> texture_pools_2d_;
-        std::stack<drivers::handle> texture_pools_cube_;
-        std::stack<drivers::handle> buffer_pools_;
+        std::stack<drivers::handle> &texture_pools_2d_;
+        std::stack<drivers::handle> &texture_pools_cube_;
+        std::stack<drivers::handle> &buffer_pools_;
         
         // Viewport
         eka2l1::rect viewport_bl_;
@@ -376,25 +424,32 @@ namespace eka2l1::dispatch {
         bool attrib_changed_;
 
         float blend_colour_[4];
-        common::roundabout texture_update_list_;
+        common::roundabout &texture_update_list_;
 
-        explicit egl_context_es_shared();
+        explicit egl_context_es_shared(std::shared_ptr<gles_object_namespace> shared_namespace = nullptr);
+
+        void make_object_issuer() {
+            namespace_->issuer_ = this;
+        }
 
         virtual gles_driver_texture *binded_texture() {
             return nullptr;
         }
 
+        std::uint32_t generate_buffer();
+        bool is_buffer(std::uint32_t name) const;
+        std::uint32_t bind_buffer(std::uint32_t target, std::uint32_t name);
+        void delete_buffer(std::uint32_t name);
         gles_driver_buffer *binded_buffer(const bool is_array_buffer);
 
         virtual void init_context_state() override;
-        void return_handle_to_pool(const gles_object_type type, const drivers::handle h, const int subtype = 0);
         void on_surface_changed(drivers::graphics_driver *driver, egl_surface *prev_read, egl_surface *prev_draw) override;
         void flush_state_changes();
         
         virtual void flush_to_driver(egl_controller &controller, drivers::graphics_driver *driver, const bool is_frame_swap_flush = false) override;
         virtual void destroy(drivers::graphics_driver *driver, drivers::graphics_command_builder &builder) override;
         virtual bool prepare_for_draw(drivers::graphics_driver *driver, egl_controller &controller, kernel::process *crr_process,
-            const std::int32_t first_index, const std::uint32_t vcount) = 0;
+            const std::int32_t first_index, const std::uint32_t vcount, const drivers::graphics_primitive_mode primitive_mode) = 0;
         virtual bool prepare_for_clear(drivers::graphics_driver *driver, egl_controller &controller);
         virtual bool enable(const std::uint32_t feature);
         virtual bool disable(const std::uint32_t feature);

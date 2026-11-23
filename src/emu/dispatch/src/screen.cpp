@@ -76,11 +76,8 @@ namespace eka2l1::dispatch {
         delete info;
     }
 
-    void screen_post_transferer::wait_vsync(epoc::screen *scr, epoc::notify_info &info) {
-        std::uint64_t next_sync = 0;
-        scr->vsync(timing_, next_sync);
-
-        if (next_sync == 0) {
+    void screen_post_transferer::wait_vsync(std::uint64_t delay_us, epoc::notify_info &info) {
+        if (delay_us == 0) {
             info.complete(epoc::error_none);
             return;
         }
@@ -91,7 +88,7 @@ namespace eka2l1::dispatch {
         *info_copy = info;
 
         vsync_notifies_.push_back(info_copy);
-        timing_->schedule_event(static_cast<std::int64_t>(next_sync), vsync_notify_event_,
+        timing_->schedule_event(static_cast<std::int64_t>(delay_us), vsync_notify_event_,
             reinterpret_cast<std::uint64_t>(info_copy));
     }
 
@@ -102,9 +99,13 @@ namespace eka2l1::dispatch {
         });
 
         if (ite != vsync_notifies_.end()) {
-            timing_->unschedule_event(vsync_notify_event_, reinterpret_cast<std::uint64_t>(*ite));
-            (*ite)->complete(epoc::error_cancel);
-
+            auto *pending = *ite;
+            const bool removed = timing_->unschedule_event(vsync_notify_event_, reinterpret_cast<std::uint64_t>(pending));
+            pending->complete(epoc::error_cancel);
+            // A dispatched callback owns the allocation once its timer has left the queue.
+            if (removed) {
+                delete pending;
+            }
             vsync_notifies_.erase(ite);
         }
     }
@@ -239,6 +240,28 @@ namespace eka2l1::dispatch {
         return info.transfer_texture_;
     }
 
+    static void update_screen_from_source(system *sys, const std::uint32_t screen_number,
+        const std::uint32_t num_rects, const eka2l1::rect *rect_list, epoc::framebuffer_update_source source) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+
+        epoc::screen *scr = dispatcher->winserv_->get_screens();
+
+        while (scr != nullptr) {
+            if (scr->number == static_cast<int>(screen_number)) {
+                const auto next_vsync_us = scr->vsync_delay_us();
+                if (next_vsync_us) {
+                    sys->get_kernel_system()->crr_thread()->sleep(static_cast<std::uint32_t>(next_vsync_us));
+                }
+                scr->update_direct_framebuffer(source);
+                scr->present_framebuffer(sys->get_graphics_driver(), sys->get_kernel_system(), rect_list, num_rects);
+                break;
+            }
+
+            scr = scr->next;
+        }
+    }
+
+#ifdef __EMSCRIPTEN__
     // Some direct-screen games ignore the reported framebuffer geometry and
     // render with the *other* orientation's stride (e.g. 320px rows into a
     // 240x320 portrait screen — their target hardware scans out landscape).
@@ -361,7 +384,8 @@ namespace eka2l1::dispatch {
                 // are distinguishable: at 16 bits the guest only ever fills the first
                 // half of the (always 32-bit sized) buffer. Start narrow and widen the
                 // moment anything lands in the upper half.
-                const bool dsa_depth_changed = scr->promote_dsa_depth_if_deep_pixels_written();
+                scr->update_direct_framebuffer(epoc::framebuffer_update_source::draw_device);
+                const bool dsa_depth_changed = scr->dsa_texture_mode != scr->dsa_disp_mode;
 
                 // Every writer lays its rows out at the pitch the screen reports, so read
                 // it back with that one. Only a 32-bit framebuffer is ever padded.
@@ -463,8 +487,7 @@ namespace eka2l1::dispatch {
                     data_ptr = reinterpret_cast<const char *>(rgb565_converted.data());
                 }
 
-                std::uint64_t next_vsync_us = 0;
-                scr->vsync(sys->get_ntimer(), next_vsync_us);
+                const std::uint64_t next_vsync_us = scr->vsync_delay_us();
 
                 if (next_vsync_us) {
                     kern->crr_thread()->sleep(static_cast<std::uint32_t>(next_vsync_us));
@@ -496,6 +519,7 @@ namespace eka2l1::dispatch {
                     guard.lock();
 
                     scr->dsa_texture = bitmap_handle;
+                    scr->dsa_texture_mode = scr->dsa_disp_mode;
                 }
 
                 if (!scr->screen_texture) {
@@ -568,6 +592,19 @@ namespace eka2l1::dispatch {
         }
     }
 
+#else
+    BRIDGE_FUNC_DISPATCHER(void, update_screen, const std::uint32_t screen_number,
+        const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
+        update_screen_from_source(sys, screen_number, num_rects, rect_list, epoc::framebuffer_update_source::draw_device);
+    }
+
+#endif
+
+    BRIDGE_FUNC_LIBRARY(void, update_raw_screen, const std::uint32_t screen_number,
+        const std::uint32_t num_rects, const eka2l1::rect *rect_list) {
+        update_screen_from_source(sys, screen_number, num_rects, rect_list, epoc::framebuffer_update_source::raw);
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, get_screen_buffer_byte_width, const std::uint32_t screen_number,
         const std::int32_t display_mode) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
@@ -596,7 +633,7 @@ namespace eka2l1::dispatch {
             if (scr->number == screen_index) {
                 epoc::notify_info info{ sts, kern->crr_thread() };
 
-                transferer.wait_vsync(scr, info);
+                transferer.wait_vsync(scr->vsync_delay_us(), info);
                 break;
             }
 

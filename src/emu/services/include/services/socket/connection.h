@@ -21,11 +21,14 @@
 
 #include <common/container.h>
 #include <services/socket/common.h>
+#include <utils/sec.h>
 
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace eka2l1 {
     class socket_server;
@@ -41,12 +44,71 @@ namespace eka2l1::epoc::socket {
 
     enum conn_progress_generic_stage {
         conn_progress_connection_opened = 3500,
-        conn_progress_connection_closed = 4500
+        conn_progress_connection_closed = 4500,
+        conn_progress_link_layer_open = 7000,
+        conn_progress_link_layer_closed = 8000
     };
 
     struct conn_progress {
         std::int32_t stage_;
         std::int32_t error_;
+    };
+
+    struct connection_info {
+        std::uint32_t version = 1;
+        std::uint32_t iap_id = 0;
+        std::uint32_t network_id = 0;
+    };
+
+    struct interface_notification {
+        connection_info info;
+        std::uint32_t state;
+    };
+
+    using interface_observer = std::function<void(const interface_notification &)>;
+    using interface_observers = std::vector<std::weak_ptr<interface_observer>>;
+
+    struct connection_control_description {
+        std::uint32_t option;
+        std::uint32_t descriptor;
+        std::uint32_t max_length;
+    };
+
+    struct connection_state {
+        connection_info info;
+        bool active = false;
+        std::int32_t stage = 0;
+        std::map<const void *, std::function<void(std::int32_t)>> observers;
+
+        std::weak_ptr<interface_observers> interface_observers_;
+
+        ~connection_state();
+        void advance(std::int32_t new_stage);
+    };
+
+    struct connection_reference {
+        std::u16string name;
+        std::weak_ptr<connection_state> state;
+        bool clone_enabled = false;
+        security_policy clone_policy;
+
+        bool enable_clone(const std::string &policy);
+    };
+
+    class connection_registry {
+        std::vector<std::weak_ptr<connection_state>> states_;
+        std::map<std::u16string, std::weak_ptr<connection_reference>> references_;
+        std::uint64_t next_reference_ = 0;
+        std::shared_ptr<interface_observers> interface_observers_ = std::make_shared<interface_observers>();
+
+    public:
+        std::shared_ptr<connection_state> create();
+        void observe_interfaces(const std::shared_ptr<interface_observer> &observer);
+        std::shared_ptr<connection_state> find(const connection_info &info);
+        std::vector<connection_info> enumerate();
+        std::shared_ptr<connection_reference> create_reference();
+        std::int32_t clone(const std::u16string &name, const security_info &caller,
+            std::shared_ptr<connection_state> &state);
     };
 
     using progress_advance_callback = std::function<void(conn_progress *)>;

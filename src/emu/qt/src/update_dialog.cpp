@@ -27,6 +27,8 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonObject>
 #include <QMessageBox>
+#include <QDesktopServices>
+#include <QUrl>
 
 #include <common/algorithm.h>
 #include <common/configure.h>
@@ -36,7 +38,7 @@
 #include <common/path.h>
 #include <common/log.h>
 
-#include <miniz.h>
+#include <common/archive.h>
 
 #include <cstring>
 #include <QFile>
@@ -44,30 +46,52 @@
 #include <QProcess>
 #include <QSettings>
 
+// Installing an update in place is Windows-only: it hands the downloaded zip to
+// updater.exe, a separate program the build only produces for Windows, and that
+// program overwrites an install made of loose files. The other desktops ship one
+// AppImage and an ad-hoc signed .app inside a DMG, neither of which that
+// mechanism can unpack over an existing install.
 #if EKA2L1_PLATFORM(WIN32) && BUILD_FOR_USER
 #define ENABLE_UPDATER 1
 #else
 #define ENABLE_UPDATER 0
 #endif
 
+// Checking, however, is three GitHub requests and nothing platform specific, so
+// every desktop can tell the user a new build exists and hand them the download.
+// Android is __unix__ too, and ships through its own store, so it is excluded.
+#if (EKA2L1_PLATFORM(WIN32) || EKA2L1_PLATFORM(MACOS) || (EKA2L1_PLATFORM(UNIX) && !EKA2L1_PLATFORM(ANDROID))) && BUILD_FOR_USER
+#define ENABLE_UPDATE_CHECK 1
+#else
+#define ENABLE_UPDATE_CHECK 0
+#endif
+
 // Code takes many reference from DuckStation!
-static const char *TAG_REQUEST_GET_URL = "https://api.github.com/repos/eka2l1/eka2l1/tags";
 static const char *TAG_RELEASE_INFO_REQUEST_GET_URL = "https://api.github.com/repos/eka2l1/eka2l1/releases/tags/%1";
 static const char *COMMITS_COMPARE_REQUEST_GET_URL = "https://api.github.com/repos/eka2l1/eka2l1/compare/%1...%2";
 static const char *UPDATE_TAG_NAME = "continous";
+
+#if ENABLE_UPDATE_CHECK
+static const char *TAG_REQUEST_GET_URL = "https://api.github.com/repos/eka2l1/eka2l1/tags";
+#endif
+
+#if ENABLE_UPDATER
 static const char *UPDATE_FILE_STORE_FOLDER = "staging";
 static const char *UPDATE_FILE_STORE_PATH = "staging\\update.zip";
+#endif
 
 static const char *INVALID_JSON_ERR_STR = "Invalid response from GitHub about newest update! Please check your internet connection!";
 static const char *NO_AUTO_CHECK_UPDATE_SETTING = "noAutoCheckUpdate";
 
+// These have to match the names the "roll-release" job of .github/workflows/build.yml
+// uploads to the rolling release, or the updater will never find anything to download.
 static QString get_platform_release_filename() {
 #if EKA2L1_PLATFORM(WIN32)
-    return QString("windows-latest.zip");
+    return QString("EKA2L1-Windows-x86_64.zip");
 #elif EKA2L1_PLATFORM(UNIX)
-    return QString("ubuntu-latest.zip");
+    return QString("EKA2L1-Linux-x86_64.AppImage");
 #else
-    return QString("macos-latest.zip");
+    return QString("EKA2L1-MacOS-arm64.dmg");
 #endif
 }
 
@@ -76,7 +100,8 @@ update_dialog::update_dialog(QWidget *parent)
     , ui_(new Ui::update_dialog)
     , access_manager_(new QNetworkAccessManager(this))
     , download_reply_(nullptr)
-    , downloaded_file_(nullptr) {
+    , downloaded_file_(nullptr)
+    , explicit_up_(false) {
     ui_->setupUi(this);
     ui_->cancel_button->hide();
     ui_->download_progress_bar->hide();
@@ -102,16 +127,29 @@ update_dialog::~update_dialog() {
     delete access_manager_;
 }
 
+// Both of these end the update check, so they also close the dialog: an
+// automatic check keeps it hidden, and a hidden dialog that is never closed is
+// never deleted either (WA_DeleteOnClose).
 void update_dialog::report_info(const QString &info_string) {
+    LOG_INFO(eka2l1::FRONTEND_UI, "Update check: {}", info_string.toStdString());
+
     if (explicit_up_) {
         QMessageBox::information(this, tr("Update success"), info_string);
     }
+
+    close();
 }
 
 void update_dialog::report_error(const QString &info_string) {
+    // An automatic check shows nothing, so the log is the only trace of why it
+    // gave up.
+    LOG_ERROR(eka2l1::FRONTEND_UI, "Update check failed: {}", info_string.toStdString());
+
     if (explicit_up_) {
         QMessageBox::critical(this, tr("Update failed"), info_string);
     }
+
+    close();
 }
 
 void update_dialog::on_tag_request_complete(QNetworkReply *reply) {
@@ -140,7 +178,6 @@ void update_dialog::on_tag_request_complete(QNetworkReply *reply) {
                         tag_download_link_request();
                     } else {
                         report_info(tr("The emulator is already updated to lastest version!"));
-                        close();
                     }
 
                     found = true;
@@ -173,21 +210,25 @@ void update_dialog::on_tag_download_link_request_complete(QNetworkReply *reply) 
             QJsonArray asset_array = doc["assets"].toArray();
             const QString platform_asset_name = get_platform_release_filename();
 
-            bool found_plat = false;
+            release_page_url_ = doc["html_url"].toString();
 
             for (const QJsonValue &asset: asset_array) {
                 if (asset["name"].toString() == platform_asset_name) {
                     download_url_ = asset["browser_download_url"].toString();
-                    found_plat = true;
-
-                    changelog_request();
-
                     break;
                 }
             }
 
-            if (!found_plat) {
+            // The installer needs the file itself, so a missing asset is fatal
+            // there. A platform that only opens the download can fall back to the
+            // release page instead, which keeps a future rename from silencing
+            // the check outright.
+            const bool can_fall_back_to_page = !ENABLE_UPDATER && !release_page_url_.isEmpty();
+
+            if (download_url_.isEmpty() && !can_fall_back_to_page) {
                 report_error(tr("Can't find the download link of newest update for your platform!"));
+            } else {
+                changelog_request();
             }
         } else {
             report_error(tr(INVALID_JSON_ERR_STR));
@@ -254,12 +295,15 @@ void update_dialog::changelog_request() {
 }
 
 void update_dialog::check_for_update(const bool explicit_request) {
-#if !ENABLE_UPDATER
+#if !ENABLE_UPDATE_CHECK
     if (explicit_request) {
         QMessageBox::information(this, tr("Updater unsupported"), tr("The updater is not yet supported on your platform!"));
-        close();
-        return;
     }
+
+    // Unconditional: an automatic check used to return here without closing,
+    // and a dialog that never closes is never deleted (WA_DeleteOnClose).
+    close();
+    return;
 #else
     if (strcmp(GIT_COMMIT_HASH, "Stable") == 0) {
         close();
@@ -297,6 +341,12 @@ void update_dialog::on_new_update_download_progress_report(quint64 received, qui
 }
 
 void update_dialog::on_update_button_clicked() {
+#if !ENABLE_UPDATER
+    // Nothing here can install over an AppImage or a mounted DMG, so open the
+    // download and let the user install it the way they installed the emulator.
+    QDesktopServices::openUrl(QUrl(download_url_.isEmpty() ? release_page_url_ : download_url_));
+    close();
+#else
     QDir().mkdir(UPDATE_FILE_STORE_FOLDER);
     downloaded_file_ = new QFile(UPDATE_FILE_STORE_PATH);
     if (!downloaded_file_->open(QIODevice::WriteOnly)) {
@@ -318,6 +368,7 @@ void update_dialog::on_update_button_clicked() {
 
     connect(download_reply_, &QNetworkReply::downloadProgress, this, &update_dialog::on_new_update_download_progress_report);
     connect(download_reply_, &QNetworkReply::readyRead, this, &update_dialog::on_new_update_download_read_ready);
+#endif
 }
 
 void update_dialog::on_ignore_button_clicked() {
@@ -345,7 +396,9 @@ void update_dialog::on_cancel_button_clicked() {
         downloaded_file_ = nullptr;
     }
 
+#if ENABLE_UPDATER
     QDir().remove(UPDATE_FILE_STORE_PATH);
+#endif
 
     revert_ui_to_update_wait();
     close();
@@ -390,51 +443,49 @@ void update_dialog::on_new_update_download_finished(QNetworkReply *reply) {
         ui_->download_progress_bar->setValue(ui_->download_progress_bar->maximum());
 
 #if EKA2L1_PLATFORM(WIN32)
-        std::unique_ptr<mz_zip_archive> archive = std::make_unique<mz_zip_archive>();
-        if (!mz_zip_reader_init_file(archive.get(), UPDATE_FILE_STORE_PATH, 0)) {
+        std::vector<eka2l1::common::archive_entry_info> entries;
+
+        if (!eka2l1::common::list_archive(eka2l1::host_path{UPDATE_FILE_STORE_PATH}, entries)) {
             update_encounter_error(tr("Downloaded update is not in zip format!"));
             return;
         }
 
-        const std::uint32_t num_files = mz_zip_reader_get_num_files(archive.get());
         static const char *UPDATER_FOLDER = "updater";
         static const char *UPDATER_FILENAME = "updater.exe";
         static const char *UPDATER_EXEC_LAUNCH_PATH = "updater\\updater.exe";
 
         bool updater_patched = false;
-        for (std::uint32_t i = 0; i < num_files; i++) {
-            mz_zip_archive_file_stat file_stat;
-            if (mz_zip_reader_file_stat(archive.get(), i, &file_stat)) {
-                if ((file_stat.m_external_attr & 0x10) == 0) {
-                    std::string filename = file_stat.m_filename;
-                    filename = filename.substr(0, eka2l1::common::min(strlen(UPDATER_FOLDER), filename.length()));
 
-                    if (eka2l1::common::compare_ignore_case(filename.c_str(), UPDATER_FOLDER) == 0) {
-                        eka2l1::common::create_directories(eka2l1::file_directory(file_stat.m_filename));
-                        FILE *c_file = eka2l1::common::open_c_file(file_stat.m_filename, "wb");
-                        if (!c_file) {
-                            continue;
-                        }
-                        if (mz_zip_reader_extract_file_to_cfile(archive.get(), file_stat.m_filename, c_file, 0)) {
-                            std::string real_filename = eka2l1::filename(file_stat.m_filename);
-                            if (eka2l1::common::compare_ignore_case(real_filename.c_str(), UPDATER_FILENAME) == 0)
-                                updater_patched = true;
-                        } else {
-                            mz_zip_reader_end(archive.get());
-                            update_encounter_error(tr("Failed to update the updater program!"));
-                            return;
-                        }
-                        fclose(c_file);
-                    }
+        // Only the updater folder is unpacked here, straight over the running installation: the updater
+        // is what performs the rest of the update, so it has to be the new build before it is launched.
+        const bool unpacked = eka2l1::common::extract_archive(eka2l1::host_path{UPDATE_FILE_STORE_PATH},
+            [&](const eka2l1::common::archive_entry_info &entry) -> eka2l1::host_path {
+                if (entry.is_directory) {
+                    return {};
                 }
-            } else {
-                mz_zip_reader_end(archive.get());
-                update_encounter_error(tr("Update zip file is corrupted!"));
-                return;
-            }
+
+                const std::string head = entry.path.substr(0,
+                    eka2l1::common::min(strlen(UPDATER_FOLDER), entry.path.length()));
+
+                if (eka2l1::common::compare_ignore_case(head.c_str(), UPDATER_FOLDER) != 0) {
+                    return {};
+                }
+
+                const std::string real_filename = eka2l1::filename(entry.path);
+
+                if (eka2l1::common::compare_ignore_case(real_filename.c_str(), UPDATER_FILENAME) == 0) {
+                    updater_patched = true;
+                }
+
+                return eka2l1::host_path{entry.path};
+            },
+            nullptr, nullptr);
+
+        if (!unpacked) {
+            update_encounter_error(tr("Failed to update the updater program!"));
+            return;
         }
 
-        mz_zip_reader_end(archive.get());
         if (!updater_patched) {
             update_encounter_error(tr("Can't find the updater program in the update archive file!"));
             return;

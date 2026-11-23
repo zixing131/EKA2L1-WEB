@@ -21,6 +21,8 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
+#include <filesystem>
 #include <common/chunkyseri.h>
 #include <common/cvt.h>
 #include <common/log.h>
@@ -134,7 +136,8 @@ namespace eka2l1 {
         seri.absorb(repo.time_stamp);
 
         // Start to read entries
-        std::uint32_t num_entries = static_cast<std::uint32_t>(repo.entries.size());
+        std::uint32_t num_entries = static_cast<std::uint32_t>(std::count_if(repo.entries.begin(), repo.entries.end(),
+            [](const central_repo_entry &entry) { return !entry.transient; }));
         seri.absorb(num_entries);
 
         if (seri.get_seri_mode() == common::SERI_MODE_READ) {
@@ -142,6 +145,11 @@ namespace eka2l1 {
         }
 
         for (auto &entry : repo.entries) {
+            if (seri.get_seri_mode() == common::SERI_MODE_READ) {
+                entry.transient = false;
+            } else if (entry.transient) {
+                continue;
+            }
             seri.absorb(entry.key);
             seri.absorb(entry.metadata_val);
 
@@ -242,7 +250,7 @@ namespace eka2l1 {
         return 0;
     }
 
-    void central_repo::write_changes(eka2l1::io_system *io, device_manager *mngr) {
+    bool central_repo::write_changes(eka2l1::io_system *io, device_manager *mngr, const bool atomic) {
         std::vector<std::uint8_t> bufs;
 
         {
@@ -260,15 +268,34 @@ namespace eka2l1 {
 
         p += u":\\Private\\10202BE9\\persists\\" + firm_code + u"\\" + common::utf8_to_ucs2(common::to_string(uid, std::hex)) + u".cre";
 
-        symfile f = io->open_file(p, WRITE_MODE | BIN_MODE);
+        const std::u16string output = atomic ? p + u".tmp" : p;
+        symfile f = io->open_file(eka2l1::guest_path{output}, WRITE_MODE | BIN_MODE);
 
         if (!f) {
             LOG_ERROR(SERVICE_CENREP, "Can't write CRE changes, opening {} failed", common::ucs2_to_utf8(p));
-            return;
+            return false;
         }
 
-        f->write_file(&bufs[0], 1, static_cast<std::uint32_t>(bufs.size()));
-        f->close();
+        const bool written = f->write_file(bufs.data(), 1, static_cast<std::uint32_t>(bufs.size())) == bufs.size()
+            && f->flush();
+        const bool closed = f->close();
+        if (!atomic) {
+            return written && closed;
+        }
+
+        if (written && closed) {
+            const auto from = io->get_raw_path(eka2l1::guest_path{output});
+            const auto to = io->get_raw_path(eka2l1::guest_path{p});
+            if (from && to) {
+                std::error_code error;
+                std::filesystem::rename(std::filesystem::path(from->utf8()), std::filesystem::path(to->utf8()), error);
+                if (!error) {
+                    return true;
+                }
+            }
+        }
+        io->delete_entry(eka2l1::guest_path{output});
+        return false;
     }
 
     void central_repo_client_subsession::write_changes(eka2l1::io_system *io, device_manager *mngr) {

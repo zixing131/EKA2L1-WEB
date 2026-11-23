@@ -42,6 +42,8 @@ import java.util.Map;
 import java.util.Set;
 
 public class AppDataStore extends PreferenceDataStore {
+    public static final String ANDROID_STORE_FILE_NAME = "android.yml";
+
     private final Yaml yaml;
     private final File configFile;
     private Map<String, Object> configMap = new HashMap<>();
@@ -72,7 +74,7 @@ public class AppDataStore extends PreferenceDataStore {
     }
 
     public static AppDataStore getAndroidStore() {
-        File file = new File(Emulator.getPersistentDataDir(), "android.yml");
+        File file = new File(Emulator.getPersistentDataDir(), ANDROID_STORE_FILE_NAME);
         return new AppDataStore(file);
     }
 
@@ -156,13 +158,30 @@ public class AppDataStore extends PreferenceDataStore {
         configMap.put(key, values);
     }
 
-    public void save() {
-        try {
-            FileWriter fileWriter = new FileWriter(configFile);
+    public Map<String, String> getStringMap(String key) {
+        Map<String, String> result = new HashMap<>();
+        Object value = configMap.get(key);
+        if (value instanceof Map) {
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                if (entry.getKey() instanceof String && entry.getValue() instanceof String) {
+                    result.put((String) entry.getKey(), (String) entry.getValue());
+                }
+            }
+        }
+        return result;
+    }
+
+    public void putStringMap(String key, Map<String, String> values) {
+        configMap.put(key, new HashMap<>(values));
+    }
+
+    public boolean save() {
+        try (FileWriter fileWriter = new FileWriter(configFile)) {
             yaml.dump(configMap, fileWriter);
-            fileWriter.close();
+            return true;
         } catch (IOException e) {
             e.printStackTrace();
+            return false;
         }
     }
 

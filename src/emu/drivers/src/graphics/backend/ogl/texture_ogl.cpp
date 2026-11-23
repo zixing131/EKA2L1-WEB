@@ -22,11 +22,18 @@
 #include <drivers/graphics/backend/ogl/texture_ogl.h>
 #include <drivers/graphics/backend/ogl/graphics_ogl.h>
 
+#include <common/platform.h>
+#if EKA2L1_PLATFORM(IOS)
+#include <drivers/graphics/backend/ogl/ios_gl_loader.h>
+#else
 #include <glad/glad.h>
+#endif
 
 #include <common/bytes.h>
 #include <common/log.h>
+#include <drivers/graphics/texture_upload.h>
 #include <cassert>
+#include <limits>
 
 void decompressBlockETC2(unsigned int block_part1, unsigned int block_part2, std::uint8_t *img, int width, int height, int startx, int starty);
 uint32_t PVRTDecompressPVRTC(const void *compressedData, uint32_t do2bitMode, uint32_t xDim, uint32_t yDim, uint32_t doPvrtType, uint8_t *outResultImage);
@@ -74,6 +81,23 @@ namespace eka2l1::drivers {
         }
     }
 
+    static bool convert_bgra_upload(std::vector<std::uint8_t> &dest, const void *data, const std::size_t data_size,
+        const vec3 &size, const int dimensions, const std::size_t row_length, const std::uint32_t alignment) {
+        const int height = dimensions == 1 ? 1 : size.y;
+        const int depth = dimensions == 3 ? size.z : 1;
+        if (size.x < 0 || height < 0 || depth < 0) {
+            return false;
+        }
+        if (size.x == 0 || height == 0 || depth == 0) {
+            dest.clear();
+            return true;
+        }
+        if (static_cast<std::size_t>(height) > std::numeric_limits<std::size_t>::max() / depth) {
+            return false;
+        }
+        return bgra8888_to_rgba(dest, data, data_size, size.x, static_cast<std::size_t>(height) * depth, row_length, alignment);
+    }
+
     bool ogl_texture::create(graphics_driver *driver, const int dim, const int miplvl, const vec3 &size, const texture_format internal_format,
         const texture_format format, const texture_data_type data_type, void *data, const std::size_t total_size, const std::size_t ppl,
         const std::uint32_t unpack_alignment) {
@@ -92,16 +116,40 @@ namespace eka2l1::drivers {
 
         bool res = true;
 
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(pixels_per_line));
-        glPixelStorei(GL_UNPACK_ALIGNMENT, static_cast<GLint>(unpack_alignment));
-
         drivers::texture_format converted_internal_format = internal_format;
         drivers::texture_format converted_format = format;
         drivers::texture_data_type converted_data_type = tex_data_type;
 
+        auto *ogl_driver = static_cast<ogl_graphics_driver *>(driver);
+#if EKA2L1_PLATFORM(IOS)
+        const bool use_bgra_internal_format = false;
+#else
+        const bool use_bgra_internal_format = ogl_driver->is_stricted() && !ogl_driver->convert_bgra_uploads();
+#endif
+        if (converted_internal_format == texture_format::bgra && !use_bgra_internal_format) {
+            converted_internal_format = texture_format::rgba;
+        }
+
+        std::size_t upload_row_length = ppl;
+        std::uint32_t upload_alignment = unpack_alignment;
+
         std::vector<std::uint8_t> converted_data;
+        if (converted_format == texture_format::bgra && ogl_driver->convert_bgra_uploads()) {
+            converted_format = texture_format::rgba;
+            if (data) {
+                if (data_type != texture_data_type::ubyte || !convert_bgra_upload(converted_data, data, total_size,
+                        size, dimensions, ppl, unpack_alignment)) {
+                    LOG_ERROR(DRIVER_GRAPHICS, "Invalid BGRA8888 texture upload");
+                    unbind(driver);
+                    return false;
+                }
+                data = converted_data.data();
+                upload_row_length = 0;
+                upload_alignment = 4;
+            }
+        }
+
         if (tex_data_type == drivers::texture_data_type::compressed) {
-            ogl_graphics_driver *ogl_driver = reinterpret_cast<ogl_graphics_driver*>(driver);
             if (internal_format == drivers::texture_format::etc2_rgb8 && !ogl_driver->get_supported_feature(OGL_FEATURE_SUPPORT_ETC2)) {
                 converted_data_type = drivers::texture_data_type::ubyte;
                 converted_internal_format = drivers::texture_format::rgb;
@@ -124,6 +172,9 @@ namespace eka2l1::drivers {
                 data = converted_data.data();
             }
         }
+
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(upload_row_length));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, static_cast<GLint>(upload_alignment));
 
         if (converted_data_type == drivers::texture_data_type::compressed) {
             switch (dimensions) {
@@ -320,16 +371,17 @@ namespace eka2l1::drivers {
     }
 
     void ogl_texture::bind(graphics_driver *driver, const int binding) {
-        glGetIntegerv(get_binding_enum_dim(dimensions), &last_tex);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active);
-
-        glActiveTexture(GL_TEXTURE0 + binding);
+        last_binding = GL_TEXTURE0 + binding;
+        glActiveTexture(last_binding);
+        glGetIntegerv(get_binding_enum_dim(dimensions), &last_tex);
         glBindTexture(to_gl_tex_dim(dimensions), texture);
     }
 
     void ogl_texture::unbind(graphics_driver *driver) {
-        glActiveTexture(last_active);
+        glActiveTexture(last_binding);
         glBindTexture(to_gl_tex_dim(dimensions), last_tex);
+        glActiveTexture(last_active);
         last_tex = 0;
     }
 
@@ -337,15 +389,26 @@ namespace eka2l1::drivers {
         const texture_format data_format, const texture_data_type data_type, const void *data, const std::size_t data_size, const std::uint32_t alg) {
         bind(driver, 0);
 
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(pixels_per_line));
-        glPixelStorei(GL_UNPACK_ALIGNMENT, static_cast<GLint>(alg));
-
         drivers::texture_format converted_format = data_format;
         drivers::texture_data_type converted_data_type = data_type;
 
+        std::size_t upload_row_length = pixels_per_line;
+        std::uint32_t upload_alignment = alg;
         std::vector<std::uint8_t> converted_data;
+        auto *ogl_driver = static_cast<ogl_graphics_driver *>(driver);
+        if (converted_format == texture_format::bgra && ogl_driver->convert_bgra_uploads()) {
+            if (data_type != texture_data_type::ubyte || !convert_bgra_upload(converted_data, data, data_size,
+                    size, dimensions, pixels_per_line, alg)) {
+                LOG_ERROR(DRIVER_GRAPHICS, "Invalid BGRA8888 texture update");
+                unbind(driver);
+                return;
+            }
+            converted_format = texture_format::rgba;
+            data = converted_data.data();
+            upload_row_length = 0;
+            upload_alignment = 4;
+        }
         if (data_type == drivers::texture_data_type::compressed) {
-            ogl_graphics_driver *ogl_driver = reinterpret_cast<ogl_graphics_driver*>(driver);
             if (!ogl_driver->get_supported_feature(OGL_FEATURE_SUPPORT_ETC2)) {
                 converted_data_type = drivers::texture_data_type::ubyte;
                 converted_format = drivers::texture_format::rgb;
@@ -356,6 +419,9 @@ namespace eka2l1::drivers {
             }
         }
     
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(upload_row_length));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, static_cast<GLint>(upload_alignment));
+
         if (converted_data_type == texture_data_type::compressed) {
             switch (dimensions) {
             case 1:

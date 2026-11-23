@@ -8,7 +8,9 @@
 
 TARGET          qjpeg_general.dll
 TARGETTYPE      dll
-UID             0x1000008D 0xEE000010
+// Stands in for Qt's qjpeg.dll, so it carries that image's identity.
+UID             0x1000008D 0x2001E61B
+CAPABILITY      ALL -TCB
 
 USERINCLUDE     ..\..\inc
 SYSTEMINCLUDE   \epoc32\include

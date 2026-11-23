@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -49,7 +50,7 @@ namespace eka2l1::j2me {
     // Empty/default preserves the application's choice; overrides affect the
     // generated JAD only, never the original JAR.
     void set_jad_keypad(std::string &jad, std::string_view mode);
-    install_error create_jad_fake_link_from_jar(FILE *jar_file_handle, std::string &jad_content);
-    install_error get_app_entry(FILE *jar_file_handle, app_entry &entry, std::string &jad_content, int &midp_ver);
-    install_error extract_icon_to_store(FILE *jar_file_handle, const config::state &conf, const app_entry &entry, std::string &final_real_path);
+    install_error create_jad_fake_link_from_jar(const host_path &jar_path, std::string &jad_content);
+    install_error get_app_entry(const host_path &jar_path, app_entry &entry, std::string &jad_content, int &midp_ver, std::string &icon_entry);
+    install_error extract_icon_to_store(const host_path &jar_path, const config::state &conf, const app_entry &entry, const std::string &icon_entry, host_path &final_real_path);
 }

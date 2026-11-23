@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <services/fbs/fbs.h>
 #include <services/ui/skin/bitmap_store.h>
 #include <services/ui/skin/common.h>
@@ -98,8 +99,8 @@ namespace eka2l1::epoc {
         // Remember to sort this
         std::vector<akn_skin_chunk_area> areas_;
 
-        std::uint32_t level_;
-        std::uint32_t filename_id_base_ = 0;
+        // Offset added to a skin's filename IDs so successive imports don't collide.
+        std::uint32_t filename_id_base_;
         std::uint32_t flags_;
 
         std::unique_ptr<akn_skin_bitmap_store> bitmap_store_;
@@ -261,7 +262,7 @@ namespace eka2l1::epoc {
          * 
          * \see     update_definition
          */
-        bool update_filename(const std::uint32_t filename_id, const std::u16string &filename, const std::u16string &filename_base);
+        bool update_filename(const std::uint32_t filename_id, const guest_path &filename, const guest_path &filename_base);
 
         /**
          * \brief Lookup filename and returns its data offset from filename area.
@@ -283,6 +284,10 @@ namespace eka2l1::epoc {
          * \returns True on success.
          */
         bool update_definition_hash(epoc::akns_item_def *def, const std::int32_t index);
+
+        // Item definitions are v1-sized in the chunk unless the linked-list lookup is used.
+        std::uint32_t definition_size() const;
+        akns_item_def *item_definition_at(const std::int32_t index);
 
         /**
          * \brief   Get item definition index with its ID.
@@ -314,7 +319,7 @@ namespace eka2l1::epoc {
          * 
          * \returns True on success.
          */
-        bool import(skn_file &skn, const std::u16string &filename_base);
+        bool import(skn_file &skn, const guest_path &filename_base);
 
         /**
          * \brief    Get an item's definition with given ID.
@@ -326,12 +331,12 @@ namespace eka2l1::epoc {
 
         bool store_scalable_gfx(const pid item_id, const skn_layout_info layout_info, fbsbitmap *bmp, fbsbitmap *mask);
 
-        bool set_wallpaper(const std::u16string &path, const std::u16string &base_path);
+        bool set_wallpaper(const guest_path &path, const guest_path &base_path);
 
-        bool inject_skin_background(const std::u16string &path, const std::u16string &base_path);
+        bool inject_skin_background(const guest_path &path, const guest_path &base_path);
 
-        const std::uint32_t level() const {
-            return level_;
+        const std::uint32_t filename_id_base() const {
+            return filename_id_base_;
         }
     };
 }

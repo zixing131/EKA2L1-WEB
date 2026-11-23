@@ -1,0 +1,160 @@
+# Provision a signing certificate entirely in CI and persist it as repo
+# secrets, so the TestFlight workflow reuses one certificate instead of
+# minting a new "Created via API" one per run (see ios-testflight.yml header
+# and the "iOS Signing Maintenance" workflow for the background).
+#
+# What it does, all on the runner:
+#   1. openssl generates a fresh RSA private key + CSR.
+#   2. The App Store Connect API creates a certificate from the CSR
+#      (this consumes one slot of Apple's certificate quota — revoke stale
+#      "Created via API" certificates first if the account is near the cap).
+#   3. Key + certificate are bundled into a passworded .p12.
+#   4. gh sets the repo secrets the TestFlight workflow consumes:
+#        DEVELOPMENT  -> IOS_DEV_SIGNING_KEY / IOS_DEV_SIGNING_KEY_PASSWORD
+#        DISTRIBUTION -> IOS_DIST_SIGNING_KEY / IOS_DIST_SIGNING_KEY_PASSWORD
+#
+# Required repository secrets:
+#   APPSTORE_ISSUER_ID / APPSTORE_KEY_ID / APPSTORE_PRIVATE_KEY
+#       Same App Store Connect API key as the TestFlight workflow.
+#       Creating certificates needs at least the Developer role
+#       (Admin if the team restricts certificate creation).
+#   GH_SECRETS_ADMIN_TOKEN
+#       A GitHub personal access token that can write this repository's
+#       Actions secrets (fine-grained PAT with "Secrets: Read and write" on
+#       this repo, or a classic PAT with the repo scope). The default
+#       GITHUB_TOKEN cannot modify secrets.
+#
+# Security notes:
+#   - The private key only ever exists on the ephemeral runner and inside the
+#     resulting secrets; it is never printed. The .p12 password is generated
+#     randomly and masked in logs.
+#   - Anyone who can read these secrets can sign as this team; that is the
+#     same trust boundary the TestFlight workflow already has.
+
+name: iOS Provision Dev Certificate
+
+on:
+  workflow_dispatch:
+    inputs:
+      certificate_type:
+        description: "Certificate type to create and persist"
+        required: true
+        default: DEVELOPMENT
+        type: choice
+        options:
+          - DEVELOPMENT
+          - DISTRIBUTION
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    name: Create ${{ inputs.certificate_type }} certificate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check secrets
+        env:
+          ASC_CONFIGURED: ${{ secrets.APPSTORE_ISSUER_ID != '' && secrets.APPSTORE_KEY_ID != '' && secrets.APPSTORE_PRIVATE_KEY != '' }}
+          GH_CONFIGURED: ${{ secrets.GH_SECRETS_ADMIN_TOKEN != '' }}
+        run: |
+          if [ "${ASC_CONFIGURED}" != "true" ]; then
+            echo "::error::APPSTORE_ISSUER_ID / APPSTORE_KEY_ID / APPSTORE_PRIVATE_KEY secrets are required."
+            exit 1
+          fi
+          if [ "${GH_CONFIGURED}" != "true" ]; then
+            echo "::error::GH_SECRETS_ADMIN_TOKEN secret is required (PAT with Secrets write on this repo); the default GITHUB_TOKEN cannot set secrets."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pip3 install --quiet pyjwt cryptography requests
+
+      - name: Generate private key and CSR
+        run: |
+          set -euo pipefail
+          openssl genrsa -out "${RUNNER_TEMP}/signing.key" 2048
+          openssl req -new -key "${RUNNER_TEMP}/signing.key" \
+            -out "${RUNNER_TEMP}/signing.csr" \
+            -subj "/emailAddress=ci@eka2l1.invalid/CN=EKA2L1 CI ${{ inputs.certificate_type }}/C=US"
+
+      - name: Create certificate via App Store Connect API
+        env:
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+          CERTIFICATE_TYPE: ${{ inputs.certificate_type }}
+        run: |
+          python3 - <<'EOF'
+          import base64, os, sys, time, jwt, requests
+
+          issuer = os.environ["APPSTORE_ISSUER_ID"]
+          key_id = os.environ["APPSTORE_KEY_ID"]
+          private_key = os.environ["APPSTORE_PRIVATE_KEY"]
+          cert_type = os.environ["CERTIFICATE_TYPE"]
+          tmp = os.environ["RUNNER_TEMP"]
+
+          with open(os.path.join(tmp, "signing.csr")) as f:
+              csr = f.read()
+
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": issuer, "iat": now, "exp": now + 1200, "aud": "appstoreconnect-v1"},
+              private_key, algorithm="ES256", headers={"kid": key_id})
+
+          resp = requests.post(
+              "https://api.appstoreconnect.apple.com/v1/certificates",
+              headers={"Authorization": f"Bearer {token}"},
+              json={"data": {"type": "certificates", "attributes": {
+                  "certificateType": cert_type, "csrContent": csr}}})
+
+          if resp.status_code != 201:
+              print(f"::error::certificate creation failed: HTTP {resp.status_code} {resp.text}")
+              if "maximum" in resp.text.lower():
+                  print("::error::The account is at its certificate cap - revoke stale 'Created via API' certificates first (iOS Signing Maintenance workflow).")
+              sys.exit(1)
+
+          data = resp.json()["data"]
+          attrs = data["attributes"]
+          with open(os.path.join(tmp, "signing.cer"), "wb") as f:
+              f.write(base64.b64decode(attrs["certificateContent"]))
+          print(f"created certificate id={data['id']} type={attrs['certificateType']} "
+                f"name={attrs.get('displayName') or attrs.get('name')} expires={attrs.get('expirationDate')}")
+          EOF
+
+      - name: Bundle .p12 and set repository secrets
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_ADMIN_TOKEN }}
+          CERTIFICATE_TYPE: ${{ inputs.certificate_type }}
+        run: |
+          set -euo pipefail
+          P12_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::${P12_PASSWORD}"
+
+          openssl x509 -inform DER \
+            -in "${RUNNER_TEMP}/signing.cer" -out "${RUNNER_TEMP}/signing.pem"
+          # -legacy keeps the .p12 encryption importable by the macOS
+          # `security import` used in ios-testflight.yml.
+          openssl pkcs12 -export -legacy \
+            -inkey "${RUNNER_TEMP}/signing.key" \
+            -in "${RUNNER_TEMP}/signing.pem" \
+            -name "EKA2L1 CI ${CERTIFICATE_TYPE}" \
+            -passout "pass:${P12_PASSWORD}" \
+            -out "${RUNNER_TEMP}/signing.p12"
+
+          if [ "${CERTIFICATE_TYPE}" = "DISTRIBUTION" ]; then
+            KEY_SECRET=IOS_DIST_SIGNING_KEY
+            PASSWORD_SECRET=IOS_DIST_SIGNING_KEY_PASSWORD
+          else
+            KEY_SECRET=IOS_DEV_SIGNING_KEY
+            PASSWORD_SECRET=IOS_DEV_SIGNING_KEY_PASSWORD
+          fi
+
+          base64 -w0 "${RUNNER_TEMP}/signing.p12" | gh secret set "${KEY_SECRET}" --repo "${GITHUB_REPOSITORY}"
+          gh secret set "${PASSWORD_SECRET}" --repo "${GITHUB_REPOSITORY}" --body "${P12_PASSWORD}"
+          echo "secrets ${KEY_SECRET} and ${PASSWORD_SECRET} updated for ${GITHUB_REPOSITORY}"
+
+      - name: Clean up key material
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/signing.key" "${RUNNER_TEMP}/signing.csr" "${RUNNER_TEMP}/signing.cer" "${RUNNER_TEMP}/signing.pem" "${RUNNER_TEMP}/signing.p12"

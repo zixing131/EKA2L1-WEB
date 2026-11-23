@@ -1,0 +1,138 @@
+import SwiftUI
+
+// Device management surface, pushed from the home title menu ("Manage
+// devices"): switch to a device by tapping it, add one through the shared
+// import sheet, rename or remove one by swiping, or rebuild the list from drive Z
+// ("Rescan devices", mirroring the Android device-list screen).
+//
+// The page holds no device state of its own: it observes the same DeviceStore
+// the home surface owns and drives it with the same operations the title menu
+// uses, so the two surfaces can never disagree about which devices exist or
+// which one is running. Installing is the exception — the import sheet is
+// presented by the home surface, so that one stays a callback.
+struct DeviceManagerView: View {
+    @ObservedObject var store: DeviceStore
+    let onInstall: () -> Void
+
+    @State private var renameTarget: EKA2L1DeviceItem?
+    @State private var deviceName = ""
+    @State private var showingRename = false
+    @State private var renameFailed = false
+    @State private var deleteTarget: EKA2L1DeviceItem?
+
+    var body: some View {
+        List {
+            Section {
+                if store.devices.isEmpty {
+                    Text("devices.none")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.devices) { device in
+                        deviceRow(device)
+                    }
+                }
+            } header: {
+                Text("devices.installed")
+            } footer: {
+                if store.busy {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("devices.working")
+                    }
+                } else if !store.devices.isEmpty {
+                    Text("devices.hint")
+                }
+            }
+
+            Section {
+                Button(action: onInstall) {
+                    Label("import.title", systemImage: "square.and.arrow.down")
+                }
+                .disabled(store.busy)
+
+                Button {
+                    Task { await store.rescanDevices() }
+                } label: {
+                    Label("device.rescan", systemImage: "arrow.clockwise")
+                }
+                .disabled(store.busy)
+            } footer: {
+                Text("devices.rescanHint")
+            }
+        }
+        .navigationTitle("devices.title")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("devices.rename", isPresented: $showingRename) {
+            TextField("devices.name", text: $deviceName)
+            Button("common.cancel", role: .cancel) { renameTarget = nil }
+            Button("devices.rename") {
+                if let target = renameTarget {
+                    renameFailed = !store.renameDevice(target, to: deviceName)
+                }
+                renameTarget = nil
+            }
+            .disabled(store.busy || deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .alert("common.error", isPresented: $renameFailed) {
+            Button("common.done", role: .cancel) {}
+        } message: {
+            Text("devices.renameFailed")
+        }
+        .alert("devices.delete.title",
+               isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
+               presenting: deleteTarget) { device in
+            Button("common.cancel", role: .cancel) {}
+            Button("devices.delete", role: .destructive) {
+                guard let offset = store.devices.firstIndex(where: { $0.firmwareCode == device.firmwareCode }) else { return }
+                Task { await store.deleteDevices(at: IndexSet(integer: offset)) }
+            }
+        } message: { _ in
+            Text("devices.delete.message")
+        }
+    }
+
+    // Tapping a row boots that device. The plain button style keeps the row
+    // looking like a list row rather than tinted text, and the content shape
+    // makes the whole row (including the gap before the checkmark) tappable.
+    private func deviceRow(_ device: EKA2L1DeviceItem) -> some View {
+        Button {
+            Task { await store.switchDevice(to: device.index) }
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(device.displayName)
+                    Text(device.firmwareCode)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if device.index == store.currentIndex {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(store.busy)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            // Not role: .destructive, which removes the row before the alert is answered.
+            Button {
+                deleteTarget = device
+            } label: {
+                Label("devices.delete", systemImage: "trash")
+            }
+            .tint(.red)
+            .disabled(store.busy)
+            Button {
+                renameTarget = device
+                deviceName = device.model
+                showingRename = true
+            } label: {
+                Label("devices.rename", systemImage: "pencil")
+            }
+            .tint(.blue)
+            .disabled(store.busy)
+        }
+    }
+}

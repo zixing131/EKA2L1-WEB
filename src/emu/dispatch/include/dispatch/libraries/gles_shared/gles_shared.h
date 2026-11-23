@@ -50,6 +50,8 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_tex_sub_image_2d_emu, std::uint32_t target, std::int32_t level, std::int32_t xoffset,
         std::int32_t yoffset, std::int32_t width, std::int32_t height, std::uint32_t format, std::uint32_t data_type,
         void *data_pixels);
+    BRIDGE_FUNC_LIBRARY(void, gl_copy_tex_sub_image_2d_emu, std::uint32_t target, std::int32_t level,
+        std::int32_t xoffset, std::int32_t yoffset, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height);
     BRIDGE_FUNC_LIBRARY(void, gl_active_texture_emu, std::uint32_t unit);
     BRIDGE_FUNC_LIBRARY(void, gl_bind_texture_emu, std::uint32_t target, std::uint32_t name);
     BRIDGE_FUNC_LIBRARY(void, gl_buffer_data_emu, std::uint32_t target, std::int32_t size, const void *data, std::uint32_t usage);
@@ -86,8 +88,6 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_get_tex_parameter_xv_emu, std::uint32_t target, std::uint32_t pname, gl_fixed *param);
     BRIDGE_FUNC_LIBRARY(void, gl_point_size_emu, float size);
     BRIDGE_FUNC_LIBRARY(void, gl_point_sizex_emu, gl_fixed size);
-    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_f_emu, std::uint32_t pname, float param);
-    BRIDGE_FUNC_LIBRARY(void, gl_point_parameter_fv_emu, std::uint32_t pname, const float *param);
     BRIDGE_FUNC_LIBRARY(void, gl_draw_arrays_emu, std::uint32_t mode, std::int32_t first_index, std::int32_t count);
     BRIDGE_FUNC_LIBRARY(void, gl_draw_elements_emu, std::uint32_t mode, std::int32_t count, const std::uint32_t index_type,
         std::uint32_t indices_ptr);
@@ -98,7 +98,7 @@ namespace eka2l1::dispatch {
     BRIDGE_FUNC_LIBRARY(void, gl_enable_emu, std::uint32_t cap);
     BRIDGE_FUNC_LIBRARY(void, gl_disable_emu, std::uint32_t cap);
     BRIDGE_FUNC_LIBRARY(void, gl_get_integerv_emu, std::uint32_t pname, std::uint32_t *params);
-    BRIDGE_FUNC_LIBRARY(void, gl_get_booleanv_emu, std::uint32_t pname, std::int32_t *params);
+    BRIDGE_FUNC_LIBRARY(void, gl_get_booleanv_emu, std::uint32_t pname, std::uint8_t *params);
     BRIDGE_FUNC_LIBRARY(void, gl_get_fixedv_emu, std::uint32_t pname, gl_fixed *params);
     BRIDGE_FUNC_LIBRARY(void, gl_get_floatv_emu, std::uint32_t pname, float *params);
     BRIDGE_FUNC_LIBRARY(std::int32_t, gl_is_enabled_emu, std::uint32_t cap);

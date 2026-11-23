@@ -132,12 +132,12 @@ namespace eka2l1 {
 
         // Browser-hosted Flash Lite is a separate feature from the standalone viewer
         // below, so report it only when the ROM carries the browser plug-in itself.
-        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\npflashlite.dll")) {
+        if (sys->get_io_system()->exist(eka2l1::guest_path{u"z:\\sys\\bin\\npflashlite.dll"})) {
             enable_features.push_back(feature_id_flash_lite_browser_plugin);
         }
 
         // 2. Are we welcoming SVG? Check for OpenVG, cause it should be there if this feature is available
-        if (sys->get_io_system()->exist(u"z:\\sys\\bin\\libopenvg.dll")) {
+        if (sys->get_io_system()->exist(eka2l1::guest_path{u"z:\\sys\\bin\\libopenvg.dll"})) {
             enable_features.push_back(feature_id_svgt);
         }
 
@@ -182,7 +182,7 @@ namespace eka2l1 {
                 enable_features.insert(enable_features.end(), features.begin(), features.end());
             }
         }
-        symfile cfg_file = io->open_file(u"Z:\\private\\102744CA\\featreg.cfg", READ_MODE | BIN_MODE);
+        symfile cfg_file = io->open_file(eka2l1::guest_path{u"Z:\\private\\102744CA\\featreg.cfg"}, READ_MODE | BIN_MODE);
 
         if (!cfg_file) {
             LOG_WARN(SERVICE_FEATMGR, "Feature registration config file not present!");

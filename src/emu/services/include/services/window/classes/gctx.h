@@ -29,11 +29,13 @@
 #include <common/rgb.h>
 #include <common/vecx.h>
 
+#include <map>
 #include <queue>
 #include <string>
 
 namespace eka2l1 {
     struct fbsfont;
+    struct fbsbitmap;
 }
 
 namespace eka2l1::epoc {
@@ -60,6 +62,12 @@ namespace eka2l1::epoc {
         dot_dot_dash = 5
     };
 
+    enum class draw_mode {
+        invert_screen = 1,
+        exclusive_or = 2,
+        pen = 32
+    };
+
     struct graphic_context : public window_client_obj {
         canvas_base *attached_window;
 
@@ -71,11 +79,16 @@ namespace eka2l1::epoc {
 
         brush_style fill_mode;
         pen_style line_mode;
+        draw_mode drawing_mode = draw_mode::pen;
 
         common::rgba brush_color;
         common::rgba pen_color;
 
+        fbsbitmap *brush_pattern = nullptr;
+        eka2l1::vec2 brush_origin;
+
         eka2l1::vec2 pen_size;
+        eka2l1::vec2 origin;
         eka2l1::rect clipping_rect;
         common::region clipping_region;
 
@@ -87,6 +100,10 @@ namespace eka2l1::epoc {
             pen
         };
 
+        void apply_origin(gdi_store_command &cmd) const;
+        void add_draw_command(gdi_store_command &cmd);
+        void set_origin(service::ipc_context &context, ws_cmd &cmd);
+        void reset_internal_status();
         void reset_context();
         bool no_building() const;
 
@@ -96,12 +113,21 @@ namespace eka2l1::epoc {
 
         void do_command_draw_bitmap(service::ipc_context &ctx, void *bitmap, eka2l1::rect source_rect, eka2l1::rect dest_rect, const std::uint8_t flags);
         bool get_brush_color(eka2l1::vec4 &color_brush);
+        bool make_brush_fill_command(const eka2l1::rect &area, gdi_store_command &cmd);
+
+        // True when the draw mode replays as gdi_store_command_xor_rect; adjusts the colour to what that blend needs.
+        bool resolve_xor_color(eka2l1::vec4 &color) const;
+        void set_brush_pattern(fbsbitmap *bitmap);
         bool get_pen_color_and_style(eka2l1::vec4 &pen_color, drivers::pen_style &style);
 
         void do_submit_clipping();
 
         void draw_mask_impl(void *source_bitmap, void *mask_bitmap, eka2l1::rect dest_rect, eka2l1::rect source_rect, const std::uint8_t flags);
-        void fill_polygon_impl(const eka2l1::point *points, const std::size_t count, const bool winding, const eka2l1::vec4 &color);
+        using span_map = std::map<int, std::vector<std::pair<int, int>>>;
+
+        // With spans given, the spans are collected there instead of being drawn.
+        void fill_polygon_impl(const eka2l1::point *points, const std::size_t count, const bool winding, const eka2l1::vec4 &color,
+            span_map *spans = nullptr);
         void stroke_polyline_impl(const eka2l1::point *points, const std::size_t count);
         void draw_poly_line_impl(service::ipc_context &context, ws_cmd &cmd, const bool continued);
 
@@ -118,6 +144,9 @@ namespace eka2l1::epoc {
         void draw_polygon(service::ipc_context &context, ws_cmd &cmd);
         void set_brush_color(service::ipc_context &context, ws_cmd &cmd);
         void set_brush_style(service::ipc_context &context, ws_cmd &cmd);
+        void set_brush_origin(service::ipc_context &context, ws_cmd &cmd);
+        void use_brush_pattern(service::ipc_context &context, ws_cmd &cmd);
+        void discard_brush_pattern(service::ipc_context &context, ws_cmd &cmd);
         void set_pen_color(service::ipc_context &context, ws_cmd &cmd);
         void set_pen_style(service::ipc_context &context, ws_cmd &cmd);
         void set_pen_size(service::ipc_context &context, ws_cmd &cmd);

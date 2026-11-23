@@ -27,6 +27,8 @@
 #include <queue>
 #include <thread>
 
+#include <control/native.h>
+#include <control/service.h>
 #include <common/queue.h>
 #include <common/sync.h>
 #include <config/app_settings.h>
@@ -80,7 +82,13 @@ namespace eka2l1::desktop {
         bool stretch_to_fill_display;
 
         common::event graphics_event;
+
+        // init_event asks the OS thread to (re)attempt the stage two initialisation, init_done_event
+        // reports an attempt back. They must stay separate: outside of Win32 common::event auto-resets
+        // on wait, so one event for both directions lets the requester swallow its own signal.
         common::event init_event;
+        common::event init_done_event;
+
         common::event pause_event;
         common::event kill_event;
 
@@ -94,6 +102,13 @@ namespace eka2l1::desktop {
         int present_status;
 
         std::string launched_app_name_;
+
+        int debug_control_port = 0;
+        std::atomic<std::uint64_t> debug_frames{0};
+        std::shared_ptr<control::native_backend> debug_backend;
+        std::unique_ptr<control::service> debug_service;
+        std::unique_ptr<control::server> debug_server;
+        std::shared_ptr<std::atomic<bool>> debug_active;
 
         explicit emulator();
 

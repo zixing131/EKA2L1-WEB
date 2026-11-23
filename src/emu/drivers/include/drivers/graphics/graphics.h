@@ -105,7 +105,8 @@ namespace eka2l1::drivers {
         graphics_driver_set_blend_colour,
         graphics_driver_read_framebuffer,
         graphics_driver_backup_state, // Backup all possible state to a struct
-        graphics_driver_restore_state // Restore previously backup data
+        graphics_driver_restore_state, // Restore previously backup data
+        graphics_driver_copy_framebuffer_to_texture
     };
 
     enum graphics_driver_extension {
@@ -115,7 +116,8 @@ namespace eka2l1::drivers {
     };
 
     enum graphics_driver_extension_query {
-        graphics_driver_extension_query_max_texture_max_anisotrophy
+        graphics_driver_extension_query_max_texture_max_anisotrophy,
+        graphics_driver_extension_query_point_size_range
     };
 
     using display_hook = std::function<void()>;

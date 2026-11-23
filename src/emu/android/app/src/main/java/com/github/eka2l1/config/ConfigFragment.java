@@ -92,6 +92,8 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
     protected SeekBar sbScaleRatio;
     protected EditText etScaleRatioValue;
     protected Spinner spOrientation;
+    protected TextView tvScreenMode;
+    protected Spinner spScreenMode;
     protected Spinner spScreenGravity;
     protected Spinner spScaleType;
     protected TextView tvUpscaleShader;
@@ -121,10 +123,12 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
     private boolean isProfile;
     private File configDir;
     private String defProfile;
+    private String deviceCode;
     private boolean needShow;
     private AppDataStore dataStore;
     private long uid;
     private boolean compatChanged;
+    private int loadedScreenMode = -1;
 
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
@@ -158,11 +162,12 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
             actionBar.setTitle(args.getString(KEY_APP_NAME));
             configDir = new File(Emulator.getConfigsDir(), uidStr);
             dataStore = AppDataStore.getAppStore(uidStr);
+            deviceCode = args.getString(KEY_DEVICE_CODE);
         }
         configDir.mkdirs();
 
         defProfile = AppDataStore.getAndroidStore().getString(PREF_DEFAULT_PROFILE, null);
-        params = ProfilesManager.loadConfigOrDefault(configDir, defProfile);
+        params = loadConfigOrDefault();
         if (!params.isNew && !needShow) {
             startApp();
             getParentFragmentManager().popBackStackImmediate();
@@ -246,6 +251,8 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
         sbScaleRatio = view.findViewById(R.id.sbScaleRatio);
         etScaleRatioValue = view.findViewById(R.id.etScaleRatioValue);
         spOrientation = view.findViewById(R.id.spOrientation);
+        tvScreenMode = view.findViewById(R.id.tvScreenMode);
+        spScreenMode = view.findViewById(R.id.spScreenMode);
         tvUpscaleShader = view.findViewById(R.id.tvUpscaleShader);
         spUpscaleShader = view.findViewById(R.id.spUpscaleShader);
         cbUseShaderForUpscale = view.findViewById(R.id.cbShouldUseShaderForUpscale);
@@ -300,6 +307,17 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
 
         spUpscaleShader.setAdapter(adapter);
 
+        // Entry 0 lets the app pick; entry i + 1 pins guest screen mode i.
+        List<String> screenModeNames = new ArrayList<>();
+        screenModeNames.add(getString(R.string.pref_guest_screen_mode_app));
+        int[] screenModeSizes = Emulator.getScreenModeSizes();
+        for (int i = 0; i + 1 < screenModeSizes.length; i += 2) {
+            screenModeNames.add(getString(R.string.pref_guest_screen_mode_entry_size, i / 2,
+                    screenModeSizes[i], screenModeSizes[i + 1]));
+        }
+        spScreenMode.setAdapter(new ArrayAdapter<>(getContext(),
+                android.R.layout.simple_spinner_dropdown_item, screenModeNames));
+
         etScreenRefreshRate.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {
@@ -350,6 +368,16 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
             }
 
             compatChanged = true;
+        });
+        spScreenMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> adapterView, View view, int i, long l) {
+                if (i - 1 != loadedScreenMode) compatChanged = true;
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> adapterView) {
+            }
         });
         spUpscaleShader.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
@@ -403,6 +431,15 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
         }
     }
 
+    // Show the keypad default the emulator will actually use, so saving untouched settings keeps it.
+    private ProfileModel loadConfigOrDefault() {
+        ProfileModel result = ProfilesManager.loadConfigOrDefault(configDir, defProfile);
+        if (!isProfile && ProfilesManager.hidesKeyboardByDefault(configDir, deviceCode)) {
+            result.showKeyboard = false;
+        }
+        return result;
+    }
+
     @Override
     public void onPause() {
         if (needShow && configDir != null) {
@@ -436,12 +473,23 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
     @SuppressLint("SetTextI18n")
     public void loadParams(boolean reloadFromFile) {
         if (reloadFromFile) {
-            params = ProfilesManager.loadConfigOrDefault(configDir, defProfile);
+            params = loadConfigOrDefault();
         }
         if (!isProfile) {
             etScreenRefreshRate.setText(dataStore.getString("fps", "60"));
             etSystemTimeDelay.setText(dataStore.getString("time-delay", "0"));
             cbShouldChildInherit.setChecked(dataStore.getBoolean("should-child-inherit-setting", true));
+
+            loadedScreenMode = parseInt(dataStore.getString("screen-mode", "-1"));
+            if (loadedScreenMode < -1) {
+                loadedScreenMode = -1;
+            }
+            // Keep a saved mode selectable even if the running device does not report it.
+            ArrayAdapter<String> screenModeAdapter = (ArrayAdapter<String>) spScreenMode.getAdapter();
+            while (loadedScreenMode + 1 >= screenModeAdapter.getCount()) {
+                screenModeAdapter.add(getString(R.string.pref_guest_screen_mode_entry, screenModeAdapter.getCount() - 1));
+            }
+            spScreenMode.setSelection(loadedScreenMode + 1);
 
             cbUseShaderForUpscale.setChecked(!dataStore.getString("screen-upscale-method", "0").equals("0"));
             if (!cbUseShaderForUpscale.isChecked()) {
@@ -466,6 +514,8 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
         } else {
             tvUpscaleShader.setVisibility(View.GONE);
             spUpscaleShader.setVisibility(View.GONE);
+            tvScreenMode.setVisibility(View.GONE);
+            spScreenMode.setVisibility(View.GONE);
         }
 
         etScreenBack.setText(String.format("%06X", params.screenBackgroundColor));
@@ -558,6 +608,7 @@ public class ConfigFragment extends Fragment implements View.OnClickListener {
                 dataStore.putString("fps", etScreenRefreshRate.getText().toString());
                 dataStore.putString("time-delay", etSystemTimeDelay.getText().toString());
                 dataStore.putBoolean("should-child-inherit-setting", cbShouldChildInherit.isChecked());
+                dataStore.putString("screen-mode", Integer.toString(spScreenMode.getSelectedItemPosition() - 1));
                 dataStore.putString("screen-upscale-method", cbUseShaderForUpscale.isChecked() ? "1" : "0");
                 String toSaveFilterName = "Default";
                 if (spUpscaleShader.getSelectedItemPosition() != 0) {

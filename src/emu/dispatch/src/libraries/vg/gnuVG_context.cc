@@ -17,6 +17,8 @@
  *
  */
 
+#include <algorithm>
+#include <cstring>
 #include <limits>
 #include <string.h>
 
@@ -26,6 +28,7 @@
 #include <dispatch/libraries/vg/gnuVG_image.hh>
 #include <dispatch/libraries/vg/gnuVG_emuutils.hh>
 #include <dispatch/libraries/egl/def.h>
+#include <dispatch/libraries/egl/egl.h>
 
 #include <system/epoc.h>
 #include <dispatch/dispatcher.h>
@@ -56,6 +59,9 @@ namespace gnuVG {
 	}
 
 	void Context::on_surface_changed(eka2l1::drivers::graphics_driver *driver, eka2l1::dispatch::egl_surface *prev_read, eka2l1::dispatch::egl_surface *prev_draw) {
+		if (driver) {
+			max_image_dimension = static_cast<VGint>(std::min<std::uint32_t>(driver->max_texture_size(), std::numeric_limits<VGint>::max()));
+		}
 		if (!draw_surface_) {
 			return;
 		}
@@ -68,6 +74,10 @@ namespace gnuVG {
 		temp.driver = driver;
 
 		resize(temp, draw_surface_->dimension_.x, draw_surface_->dimension_.y);
+	}
+
+	void Context::on_draw_surface_resized(eka2l1::drivers::graphics_driver *driver) {
+		on_surface_changed(driver, draw_surface_, draw_surface_);
 	}
 
 	void Context::destroy(eka2l1::drivers::graphics_driver *driver, eka2l1::drivers::graphics_command_builder &builder) {
@@ -109,21 +119,25 @@ namespace gnuVG {
 	}
 
 	void Context::flush_to_driver(eka2l1::dispatch::egl_controller &controller, eka2l1::drivers::graphics_driver *driver, const bool is_frame_swap_flush) {
+		GraphicState state;
+		state.driver = driver;
+		state.shaderman = &controller.get_vg_shaderman();
+
+		flush_to_driver(state, is_frame_swap_flush);
+	}
+
+	void Context::flush_to_driver(const GraphicState &state, const bool is_frame_swap_flush) {
 		eka2l1::drivers::graphics_command_builder transfer_builder;
         vertex_buffer_pusher.flush(transfer_builder);
         index_buffer_pusher.flush(transfer_builder);
 
         eka2l1::drivers::command_list retrieved = transfer_builder.retrieve_command_list();
-        driver->submit_command_list(retrieved);
+        state.driver->submit_command_list(retrieved);
 
 		// Reference is important!
-		GraphicState temp_state;
-		temp_state.driver = driver;
-		temp_state.shaderman = &controller.get_vg_shaderman();
-
-		eka2l1::common::erase_elements(cleanup_lists, [&temp_state](auto &cleanup) {
+		eka2l1::common::erase_elements(cleanup_lists, [&state](auto &cleanup) {
 			if (cleanup.use_count() == 1) {
-				cleanup->free_resources(temp_state);
+				cleanup->free_resources(state);
 				return true;
 			}
 			return false;
@@ -131,7 +145,7 @@ namespace gnuVG {
 
 		retrieved = cmd_builder_.retrieve_command_list();
 
-		driver->submit_command_list(retrieved);
+		state.driver->submit_command_list(retrieved);
 		init_context_state();
 
 		if (is_frame_swap_flush) {
@@ -508,7 +522,12 @@ namespace gnuVG {
 		case VG_FILL_RULE:
 		case VG_IMAGE_QUALITY:
 		case VG_RENDERING_QUALITY:
+			break;
 		case VG_IMAGE_MODE:
+			if (value == VG_DRAW_IMAGE_NORMAL || value == VG_DRAW_IMAGE_MULTIPLY || value == VG_DRAW_IMAGE_STENCIL)
+				image_mode = static_cast<VGImageMode>(value);
+			else
+				set_error(VG_ILLEGAL_ARGUMENT_ERROR);
 			break;
 
 		case VG_BLEND_MODE:
@@ -600,6 +619,9 @@ namespace gnuVG {
 
 			/* Enable/disable alpha masking and scissoring */
 		case VG_MASKING:
+			if (value == VG_TRUE && !ensure_mask_buffers(graphic_state)) {
+				return;
+			}
 			mask_is_active = (((VGboolean)value) == VG_TRUE) ? true : false;
 			break;
 
@@ -790,8 +812,10 @@ namespace gnuVG {
 		case VG_MAX_IMAGE_HEIGHT:
 		case VG_MAX_IMAGE_PIXELS:
 		case VG_MAX_IMAGE_BYTES:
+			return static_cast<VGfloat>(vgGeti(paramType));
+
 		case VG_MAX_GAUSSIAN_STD_DEVIATION:
-			break;
+			return GNUVG_MAX_GAUSSIAN_STD_DEVIATION;
 		}
 
 		// illegal argument (/not implemented)
@@ -820,8 +844,9 @@ namespace gnuVG {
 		case VG_FILL_RULE:
 		case VG_IMAGE_QUALITY:
 		case VG_RENDERING_QUALITY:
-		case VG_IMAGE_MODE:
 			break;
+		case VG_IMAGE_MODE:
+			return image_mode;
 
 		case VG_BLEND_MODE:
 			switch(blend_mode) {
@@ -903,14 +928,27 @@ namespace gnuVG {
 		case VG_MAX_COLOR_RAMP_STOPS:
 			return GNUVG_MAX_COLOR_RAMP_STOPS;
 
-		case VG_MAX_KERNEL_SIZE:
-		case VG_MAX_SEPARABLE_KERNEL_SIZE:
 		case VG_MAX_IMAGE_WIDTH:
 		case VG_MAX_IMAGE_HEIGHT:
+			return max_image_dimension;
+
 		case VG_MAX_IMAGE_PIXELS:
+			return static_cast<VGint>(std::min<std::int64_t>(static_cast<std::int64_t>(max_image_dimension) * max_image_dimension,
+				std::numeric_limits<VGint>::max() / 4));
+
 		case VG_MAX_IMAGE_BYTES:
-		case VG_MAX_FLOAT:
+			return vgGeti(VG_MAX_IMAGE_PIXELS) * 4;
+
+		case VG_MAX_KERNEL_SIZE:
+			return GNUVG_MAX_KERNEL_SIZE;
+
+		case VG_MAX_SEPARABLE_KERNEL_SIZE:
+			return GNUVG_MAX_SEPARABLE_KERNEL_SIZE;
+
 		case VG_MAX_GAUSSIAN_STD_DEVIATION:
+			return GNUVG_MAX_GAUSSIAN_STD_DEVIATION;
+
+		case VG_MAX_FLOAT:
 			break;
 		case VG_MAX_DASH_COUNT:
 			return 128;
@@ -1122,7 +1160,7 @@ namespace gnuVG {
 
 	void Context::recreate_buffers(const GraphicState &state) {
 		// Then the mask
-		if(mask.framebuffer != 0)
+		if(mask.color_buffer != 0)
 			delete_framebuffer(state, &mask);
 		if(!create_framebuffer(state, &mask, VG_sRGBA_8888,
 				       current_framebuffer->width, current_framebuffer->height,
@@ -1130,18 +1168,35 @@ namespace gnuVG {
 			GNUVG_ERROR("failed to create framebuffer for mask.\n");
 
 		// Then two temporary buffers
-		if(temporary_a.framebuffer != 0)
+		if(temporary_a.color_buffer != 0)
 			delete_framebuffer(state, &temporary_a);
 		if(!create_framebuffer(state, &temporary_a, VG_sRGBA_8888,
 				       current_framebuffer->width, current_framebuffer->height,
 				       VG_IMAGE_QUALITY_FASTER))
 			GNUVG_ERROR("failed to create framebuffer for temporary_a.\n");
-		if(temporary_b.framebuffer != 0)
+		if(temporary_b.color_buffer != 0)
 			delete_framebuffer(state, &temporary_b);
 		if(!create_framebuffer(state, &temporary_b, VG_sRGBA_8888,
 				       current_framebuffer->width, current_framebuffer->height,
 				       VG_IMAGE_QUALITY_FASTER))
 			GNUVG_ERROR("failed to create framebuffer for temporary_b.\n");
+	}
+
+	bool Context::ensure_mask_buffers(const GraphicState &state) {
+		if (mask.color_buffer && mask.width == draw_surface_->dimension_.x && mask.height == draw_surface_->dimension_.y) {
+			return true;
+		}
+		recreate_buffers(state);
+		if (!mask.color_buffer || !temporary_a.color_buffer || !temporary_b.color_buffer) {
+			set_error(VG_OUT_OF_MEMORY_ERROR);
+			return false;
+		}
+		save_current_framebuffer();
+		render_to_framebuffer(state, &mask);
+		cmd_builder_.set_color_mask(0b1111);
+		cmd_builder_.clear({ 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f }, eka2l1::drivers::draw_buffer_bit_color_buffer);
+		restore_current_framebuffer(state);
+		return true;
 	}
 
 	void Context::resize(const GraphicState &state, VGint pxlw, VGint pxlh) {
@@ -1150,6 +1205,9 @@ namespace gnuVG {
 
 		if(current_framebuffer == &screen_buffer)
 			render_to_framebuffer(state, &screen_buffer);
+		if (mask.color_buffer) {
+			ensure_mask_buffers(state);
+		}
 	}
 
 	void Context::clear(const GraphicState &state, VGint x, VGint y,
@@ -1176,7 +1234,7 @@ namespace gnuVG {
 						 int gaussian_height,
 						 VGTilingMode tiling_mode,
 						 const FrameBufferSubsetInfo *subset_info,
-						 bool do_glyph) {
+						 bool do_glyph, bool paint_alpha) {
 		VGfloat w, h;
 
 		if(subset_info && (subset_info->subset_width >= 0)) {
@@ -1194,6 +1252,8 @@ namespace gnuVG {
 		}
 
 		int matrix_select = (do_glyph ? GNUVG_MATRIX_GLYPH_USER_TO_SURFACE : GNUVG_MATRIX_IMAGE_USER_TO_SURFACE);
+		paint_alpha = paint_alpha && matrix[matrix_select].c == 0.0f
+			&& matrix[matrix_select].f == 0.0f && matrix[matrix_select].i == 1.0f;
 
 		// calculate corners of image
 		auto c1_p = matrix[matrix_select].map_point(Point(x, y));
@@ -1242,11 +1302,18 @@ namespace gnuVG {
 			c4.x, c4.y,
 		};
 
+		float left = 0.0f, bottom = 0.0f, right = 1.0f, top = 1.0f;
+		if (paint_alpha && subset_info && subset_info->subset_x >= 0) {
+			left = static_cast<float>(subset_info->subset_x) / framebuffer->width;
+			bottom = static_cast<float>(subset_info->subset_y) / framebuffer->height;
+			right = static_cast<float>(subset_info->subset_x + subset_info->subset_width) / framebuffer->width;
+			top = static_cast<float>(subset_info->subset_y + subset_info->subset_height) / framebuffer->height;
+		}
 		float texture_coords[] = {
-			0.0f, 0.0f,
-			0.0f, 1.0f,
-			1.0f, 1.0f,
-			1.0f, 0.0f
+			left, bottom,
+			left, top,
+			right, top,
+			right, bottom
 		};
 
         std::uint32_t indices[] = {
@@ -1271,50 +1338,61 @@ namespace gnuVG {
 		}
 
 		apply_state_changes(state);
-		prepare_framebuffer_matrix(framebuffer, subset_info, do_glyph);
+		if (paint_alpha)
+			select_conversion_matrix(static_cast<MatrixMode>(matrix_select));
+		prepare_framebuffer_matrix(framebuffer, subset_info, do_glyph ? GNUVG_MATRIX_GLYPH_USER_TO_SURFACE : GNUVG_MATRIX_IMAGE_USER_TO_SURFACE);
 
-		auto f = [this, vertices, vertices_full, mat, mat_full, indices, texture_coords, wrap_mode, state, do_glyph]
+		auto f = [this, vertices, vertices_full, mat, mat_full, indices, texture_coords, wrap_mode, state, do_glyph, paint_alpha]
 			(const FrameBuffer *fbuffer,
 			 bool do_horizontal_gauss,
 			 int kern_diameter) {
-			int caps = (do_glyph ? Shader::do_texture : Shader::do_pattern);
-			if(kern_diameter > 1) {
-				caps |= do_horizontal_gauss ?
-					Shader::do_horizontal_gaussian :
-					Shader::do_vertical_gaussian;
-				caps |= (kern_diameter << Shader::gauss_krn_diameter_shift) &
-					Shader::gauss_krn_diameter_mask;
-			}
-			if(do_color_transform)
-				caps |= Shader::do_color_transform;
-
-			active_shader = state.shaderman->get_shader(
-				state.driver,
-				caps
-				);
-			active_shader->set_current_graphics_command_builder(cmd_builder_);
-			active_shader->use_shader();
-			active_shader->set_matrix(mat);
-
-			if(do_color_transform)
-				active_shader->set_color_transform(
-					color_transform_scale,
-					color_transform_bias);
-
-			if (do_glyph) {
+			if (paint_alpha) {
+				use_pipeline(state, GNUVG_SIMPLE_PIPELINE, VG_FILL_PATH,
+					image_mode == VG_DRAW_IMAGE_STENCIL ? Shader::do_alpha_stencil : Shader::do_alpha_multiply);
+				active_shader->set_matrix(mat);
 				active_shader->set_texture(fbuffer->color_buffer);
-
 				setup_buffers_and_descriptors(state.driver, vertices, 8 * sizeof(float), 0,
 					texture_coords, 8 * sizeof(float), 0);
 			} else {
-				active_shader->set_pattern_texture(fbuffer->color_buffer, wrap_mode);
-				active_shader->set_pattern_matrix(do_horizontal_gauss ?
-								mat_full :
-								image_matrix_data);
-				active_shader->set_pattern_size(fbuffer->width, fbuffer->height);
+				int caps = (do_glyph ? Shader::do_texture : Shader::do_pattern);
+				if(kern_diameter > 1) {
+					caps |= do_horizontal_gauss ?
+						Shader::do_horizontal_gaussian :
+						Shader::do_vertical_gaussian;
+					caps |= (kern_diameter << Shader::gauss_krn_diameter_shift) &
+						Shader::gauss_krn_diameter_mask;
+				}
+				if(do_color_transform)
+					caps |= Shader::do_color_transform;
 
-				setup_buffers_and_descriptors(state.driver, do_horizontal_gauss ? vertices_full : vertices,
-					8 * sizeof(float), 0, nullptr, 0, 0);
+				active_shader = state.shaderman->get_shader(
+					state.driver,
+					caps
+					);
+				active_shader->set_current_graphics_command_builder(cmd_builder_);
+				active_shader->use_shader();
+				active_shader->set_matrix(mat);
+
+				if(do_color_transform)
+					active_shader->set_color_transform(
+						color_transform_scale,
+						color_transform_bias);
+
+				if (do_glyph) {
+					active_shader->set_texture(fbuffer->color_buffer);
+
+					setup_buffers_and_descriptors(state.driver, vertices, 8 * sizeof(float), 0,
+						texture_coords, 8 * sizeof(float), 0);
+				} else {
+					active_shader->set_pattern_texture(fbuffer->color_buffer, wrap_mode);
+					active_shader->set_pattern_matrix(do_horizontal_gauss ?
+									mat_full :
+									image_matrix_data);
+					active_shader->set_pattern_size(fbuffer->width, fbuffer->height);
+
+					setup_buffers_and_descriptors(state.driver, do_horizontal_gauss ? vertices_full : vertices,
+						8 * sizeof(float), 0, nullptr, 0, 0);
+				}
 			}
 
 			if (!index_buffer_pusher.is_initialized()) {
@@ -1420,14 +1498,14 @@ namespace gnuVG {
 		trivial_render_elements(state, vertices, 8, indices, 6, r, g, b, a);
 	}
 
-	void Context::prepare_framebuffer_matrix(const FrameBuffer* fbuf, const FrameBufferSubsetInfo *subset, bool is_glyph) {
-		int matrix_index = (is_glyph ? GNUVG_MATRIX_GLYPH_USER_TO_SURFACE : GNUVG_MATRIX_IMAGE_USER_TO_SURFACE);
-
-		/* if dirty - calculate final matrix */
-		if(matrix_is_dirty[matrix_index]) {
-			matrix_is_dirty[matrix_index] = false;
-
-			final_matrix[matrix_index].multiply(screen_matrix, matrix[matrix_index]);
+	void Context::prepare_framebuffer_matrix(const FrameBuffer* fbuf, const FrameBufferSubsetInfo *subset, MatrixMode matrix_mode) {
+		Matrix image_to_clip;
+		if (matrix_mode == GNUVG_MATRIX_FILL_PAINT_TO_USER || matrix_mode == GNUVG_MATRIX_STROKE_PAINT_TO_USER) {
+			Matrix paint_to_surface;
+			paint_to_surface.multiply(matrix[conversion_matrix], matrix[matrix_mode]);
+			image_to_clip.multiply(screen_matrix, paint_to_surface);
+		} else {
+			image_to_clip.multiply(screen_matrix, matrix[matrix_mode]);
 		}
 
 		/* Create matrix to convert from final on-screen OpenGL
@@ -1437,7 +1515,7 @@ namespace gnuVG {
 		if(subset && (subset->subset_x >= 0))
 			temp_a.translate(-subset->subset_x, -subset->subset_y);
 		temp_a.scale(fbuf->width, fbuf->height);
-		temp_b.multiply(final_matrix[matrix_index], temp_a);
+		temp_b.multiply(image_to_clip, temp_a);
 		temp_b.invert();
 
 		/* Convert to OpenGL friendly format */
@@ -1517,13 +1595,15 @@ namespace gnuVG {
 		}
 	}
 
-	void Context::use_pipeline(const GraphicState &state, gnuVGPipeline new_pipeline, VGPaintMode _mode) {
+	void Context::use_pipeline(const GraphicState &state, gnuVGPipeline new_pipeline, VGPaintMode _mode, int extra_shader_caps) {
 		pipeline_mode = _mode;
 		active_pipeline = new_pipeline;
 
 		auto active_paint =
 			pipeline_mode == VG_STROKE_PATH ? stroke_paint : fill_paint;
-		int caps = Shader::do_flat_color | Shader::do_pretranslate;
+		int caps = Shader::do_flat_color | extra_shader_caps;
+		if (!(extra_shader_caps & Shader::alpha_image_modes_mask))
+			caps |= Shader::do_pretranslate;
 
 		bool gradient_enabled = false;
 		switch(active_paint->ptype) {
@@ -1570,7 +1650,8 @@ namespace gnuVG {
 		active_shader->set_current_graphics_command_builder(cmd_builder_);
 		active_shader->use_shader();
 		active_shader->set_matrix(conversion_matrix_data);
-		active_shader->set_pre_translation(pre_translation);
+		if (caps & Shader::do_pretranslate)
+			active_shader->set_pre_translation(pre_translation);
 
 		if(do_color_transform)
 			active_shader->set_color_transform(
@@ -1617,7 +1698,7 @@ namespace gnuVG {
 			if(active_paint->pattern) {
 				auto ptf = active_paint->pattern->get_framebuffer();
 				auto subset = active_paint->pattern->get_subset_info();
-				prepare_framebuffer_matrix(ptf, &subset, false);
+				prepare_framebuffer_matrix(ptf, &subset, pipeline_mode == VG_FILL_PATH ? GNUVG_MATRIX_FILL_PAINT_TO_USER : GNUVG_MATRIX_STROKE_PAINT_TO_USER);
 
 				eka2l1::drivers::addressing_option wrap_mode = eka2l1::drivers::addressing_option::clamp_to_edge;
 				switch (active_paint->tiling_mode) {
@@ -1808,6 +1889,15 @@ namespace gnuVG {
 		return 0;
 	}
 
+	// ARGB words are BGRA bytes in little-endian memory.
+	static bool is_bgra_byte_order(VGImageFormat format) {
+		return (format == VG_sARGB_8888) || (format == VG_sXRGB_8888) || (format == VG_sARGB_8888_PRE);
+	}
+
+	static bool is_premultiplied(VGImageFormat format) {
+		return (format == VG_sRGBA_8888_PRE) || (format == VG_sARGB_8888_PRE);
+	}
+
 	static bool translate_vg_image_format_to_driver_format(VGImageFormat src_format, eka2l1::drivers::texture_format &in_format,
 		eka2l1::drivers::texture_format &internal_format,
 		eka2l1::drivers::texture_data_type &dtype,
@@ -1840,12 +1930,11 @@ namespace gnuVG {
 		case VG_sARGB_8888:
 		case VG_sXRGB_8888:
 		case VG_sARGB_8888_PRE:
+			// Uploads swap these to RGBA bytes, so rendering into the texture stores the same layout as sampling expects.
 			in_format = eka2l1::drivers::texture_format::rgba;
 			internal_format = eka2l1::drivers::texture_format::rgba;
 			dtype = eka2l1::drivers::texture_data_type::ubyte;
-			swizzle = eka2l1::drivers::channel_swizzles{ eka2l1::drivers::channel_swizzle::blue, eka2l1::drivers::channel_swizzle::green,
-				eka2l1::drivers::channel_swizzle::red,
-				(src_format == VG_sXRGB_8888) ? eka2l1::drivers::channel_swizzle::one : eka2l1::drivers::channel_swizzle::alpha };
+			swizzle[3] = (src_format == VG_sXRGB_8888) ? eka2l1::drivers::channel_swizzle::one : eka2l1::drivers::channel_swizzle::alpha;
 			break;
 
 		case VG_sBGRA_8888:
@@ -2105,51 +2194,149 @@ namespace gnuVG {
 		available_temporary_framebuffers.push_back(fbf);
 	}
 
+	// The region a transfer may touch: the whole framebuffer, or a child image's subset of it.
+	static void get_transfer_extent(const Context::FrameBuffer *fb, const Context::FrameBufferSubsetInfo *subset_info,
+		std::int64_t &origin_x, std::int64_t &origin_y, std::int64_t &width, std::int64_t &height) {
+		if (subset_info && (subset_info->subset_width >= 0)) {
+			origin_x = subset_info->subset_x;
+			origin_y = subset_info->subset_y;
+			width = subset_info->subset_width;
+			height = subset_info->subset_height;
+		} else {
+			origin_x = 0;
+			origin_y = 0;
+			width = fb->width;
+			height = fb->height;
+		}
+	}
+
+	// Clips a copy against both extents like computeBlitRegion() in the reference implementation, so source pixels
+	// outside the source are skipped rather than clamped. Coordinates come back relative to the textures.
+	static bool clip_blit_region(const Context::FrameBuffer *dst, const Context::FrameBufferSubsetInfo *dst_subset,
+		const Context::FrameBuffer *src, const Context::FrameBufferSubsetInfo *src_subset,
+		VGint &dx, VGint &dy, VGint &sx, VGint &sy, VGint &width, VGint &height) {
+		std::int64_t dst_x, dst_y, dst_w, dst_h;
+		std::int64_t src_x, src_y, src_w, src_h;
+		get_transfer_extent(dst, dst_subset, dst_x, dst_y, dst_w, dst_h);
+		get_transfer_extent(src, src_subset, src_x, src_y, src_w, src_h);
+
+		const std::int64_t skip_x = std::max<std::int64_t>({ 0, -static_cast<std::int64_t>(sx), -static_cast<std::int64_t>(dx) });
+		const std::int64_t skip_y = std::max<std::int64_t>({ 0, -static_cast<std::int64_t>(sy), -static_cast<std::int64_t>(dy) });
+		const std::int64_t w = std::min<std::int64_t>({ width - skip_x, src_w - (sx + skip_x), dst_w - (dx + skip_x) });
+		const std::int64_t h = std::min<std::int64_t>({ height - skip_y, src_h - (sy + skip_y), dst_h - (dy + skip_y) });
+
+		if ((w <= 0) || (h <= 0)) {
+			return false;
+		}
+
+		dx = static_cast<VGint>(dst_x + dx + skip_x);
+		dy = static_cast<VGint>(dst_y + dy + skip_y);
+		sx = static_cast<VGint>(src_x + sx + skip_x);
+		sy = static_cast<VGint>(src_y + sy + skip_y);
+		width = static_cast<VGint>(w);
+		height = static_cast<VGint>(h);
+
+		return true;
+	}
+
+	// Whether drawing sampled source colours straight into the destination texture would store the wrong values.
+	static bool needs_format_conversion(VGImageFormat src_format, VGImageFormat dst_format) {
+		return (dst_format == VG_A_8) || (is_premultiplied(src_format) != is_premultiplied(dst_format));
+	}
+
 	void Context::copy_framebuffer_to_framebuffer(const GraphicState &state,
 							  FrameBuffer* dst,
 						      FrameBuffer* src,
 						      VGint dx, VGint dy,
 						      VGint sx, VGint sy,
 						      VGint _width, VGint _height,
-						      bool do_blend) {
+						      const FrameBufferSubsetInfo *dst_subset,
+						      const FrameBufferSubsetInfo *src_subset) {
+		if (src == &screen_buffer) {
+			GNUVG_ERROR("Copying from the drawing surface is not supported!\n");
+			return;
+		}
+
+		if (!clip_blit_region(dst, dst_subset, src, src_subset, dx, dy, sx, sy, _width, _height)) {
+			return;
+		}
+
+		if ((dst != &screen_buffer) && needs_format_conversion(src->format, dst->format)) {
+			const VGint row_stride = static_cast<VGint>(calculate_image_data_stride(dst->format, _width));
+			std::vector<std::uint8_t> pixels(static_cast<std::size_t>(row_stride) * _height);
+
+			copy_framebuffer_to_memory(state, src, nullptr, pixels.data(), row_stride, dst->format, sx, sy, _width, _height);
+			copy_memory_to_framebuffer(state, dst, nullptr, pixels.data(), row_stride, dst->format, dx, dy, _width, _height);
+			return;
+		}
+
+		if (src->color_buffer == dst->color_buffer) {
+			// Sampling the texture being rendered to is undefined, and vgCopyImage allows the regions to overlap.
+			FrameBuffer staging;
+			if (!create_framebuffer(state, &staging, src->format, _width, _height, VG_IMAGE_QUALITY_NONANTIALIASED, true)) {
+				return;
+			}
+
+			copy_framebuffer_to_framebuffer(state, &staging, src, 0, 0, sx, sy, _width, _height);
+			copy_framebuffer_to_framebuffer(state, dst, &staging, dx, dy, 0, 0, _width, _height);
+			delete_framebuffer(state, &staging);
+			return;
+		}
+
 		save_current_framebuffer();
 
 		apply_state_changes(state);
 		render_to_framebuffer(state, dst);
 
-		auto caps = Shader::do_pattern;
-		auto shader = state.shaderman->get_shader(state.driver, caps);
+		// Scissoring applies to the drawing surface (vgSetPixels), never to copies into images.
+		if (dst != &screen_buffer) {
+			cmd_builder_.set_feature(eka2l1::drivers::graphics_feature::stencil_test, false);
+		}
 
-		Blending blend_mode_temp = (do_blend ? blend_src_over : blend_src);
+		auto shader = state.shaderman->get_shader(state.driver, Shader::do_texture);
+		shader->set_current_graphics_command_builder(cmd_builder_);
+		shader->use_shader();
+
+		float identity[] = {
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f,
+			0.0f, 0.0f, 0.0f, 1.0f
+		};
+
+		shader->set_matrix(identity);
+
 		Blending blend_mode_prev = blend_mode;
 
-		if (blend_mode != blend_mode_temp) {
-			blend_mode = blend_mode_temp;
+		if (blend_mode != blend_src) {
+			blend_mode = blend_src;
 			sync_blend_mode();
 		}
 
-		shader->set_pattern_texture(src->color_buffer, eka2l1::drivers::addressing_option::clamp_to_edge);
-		shader->set_pattern_size(_width, _height);
+		cmd_builder_.set_texture_addressing_mode(src->color_buffer, eka2l1::drivers::addressing_direction::s, eka2l1::drivers::addressing_option::clamp_to_edge);
+		cmd_builder_.set_texture_addressing_mode(src->color_buffer, eka2l1::drivers::addressing_direction::t, eka2l1::drivers::addressing_option::clamp_to_edge);
+		shader->set_texture(src->color_buffer);
 
-		float mtrx[] = {
-			1.0, 0.0, 0.0, (float)(sx - dx),
-			0.0, 1.0, 0.0, (float)(sy - dy),
-			0.0, 0.0, 1.0,     0.0,
-			0.0, 0.0, 0.0,     1.0
-		};
-
-		shader->set_pattern_matrix(mtrx);
-
-		VGfloat x = (VGfloat)dx;
-		VGfloat y = (VGfloat)dy;
-		VGfloat width = (VGfloat)_width;
-		VGfloat height = (VGfloat)_height;
+		auto c1 = screen_matrix.map_point(Point((VGfloat)dx, (VGfloat)dy));
+		auto c2 = screen_matrix.map_point(Point((VGfloat)(dx + _width), (VGfloat)(dy + _height)));
 
 		float vertices[] = {
-			x,         y,
-			x + width, y,
-			x + width, y + height,
-			x        , y + height
+			c1.x, c1.y,
+			c2.x, c1.y,
+			c2.x, c2.y,
+			c1.x, c2.y
+		};
+
+		const float u1 = (float)sx / src->width;
+		const float v1 = (float)sy / src->height;
+		const float u2 = (float)(sx + _width) / src->width;
+		const float v2 = (float)(sy + _height) / src->height;
+
+		float texture_coords[] = {
+			u1, v1,
+			u2, v1,
+			u2, v2,
+			u1, v2
 		};
 
 		std::uint32_t indices[] = {
@@ -2158,7 +2345,7 @@ namespace gnuVG {
 		};
 
 		setup_buffers_and_descriptors(state.driver, vertices, 8 * sizeof(float), 0,
-			nullptr, 0, 0);
+			texture_coords, 8 * sizeof(float), 0);
 
 		if (!index_buffer_pusher.is_initialized()) {
 			index_buffer_pusher.initialize(eka2l1::common::MB(2));
@@ -2180,26 +2367,192 @@ namespace gnuVG {
 		restore_current_framebuffer(state);
 	}
 
-	void Context::copy_framebuffer_to_memory(const FrameBuffer* src,
+	// Clips a transfer between client memory and an image to the image extent (a child image's subset when given), like
+	// computeBlitRegion() in the reference implementation. Returns false when nothing is left to transfer.
+	static bool clip_image_transfer(const Context::FrameBuffer *fb, const Context::FrameBufferSubsetInfo *subset_info,
+		std::ptrdiff_t stride, std::ptrdiff_t pixel_size, VGint &x, VGint &y, VGint &width, VGint &height,
+		std::ptrdiff_t &memory_offset) {
+		std::int64_t origin_x, origin_y, extent_w, extent_h;
+		get_transfer_extent(fb, subset_info, origin_x, origin_y, extent_w, extent_h);
+
+		const std::int64_t x0 = std::max<std::int64_t>(x, 0);
+		const std::int64_t y0 = std::max<std::int64_t>(y, 0);
+		const std::int64_t x1 = std::min<std::int64_t>(static_cast<std::int64_t>(x) + width, extent_w);
+		const std::int64_t y1 = std::min<std::int64_t>(static_cast<std::int64_t>(y) + height, extent_h);
+
+		if ((x0 >= x1) || (y0 >= y1)) {
+			return false;
+		}
+
+		memory_offset = static_cast<std::ptrdiff_t>(y0 - y) * stride + static_cast<std::ptrdiff_t>(x0 - x) * pixel_size;
+
+		x = static_cast<VGint>(origin_x + x0);
+		y = static_cast<VGint>(origin_y + y0);
+		width = static_cast<VGint>(x1 - x0);
+		height = static_cast<VGint>(y1 - y0);
+
+		return true;
+	}
+
+	// Converts a 32-bit pixel (alpha in byte 3 for every supported layout) between straight and premultiplied alpha.
+	static void convert_alpha_mode(std::uint8_t *pixel, bool to_premultiplied) {
+		const std::uint32_t alpha = pixel[3];
+
+		for (int channel = 0; channel < 3; channel++) {
+			if (to_premultiplied) {
+				pixel[channel] = static_cast<std::uint8_t>((pixel[channel] * alpha + 127) / 255);
+			} else {
+				pixel[channel] = static_cast<std::uint8_t>((alpha == 0) ? 0 : std::min<std::uint32_t>(255, (pixel[channel] * 255 + alpha / 2) / alpha));
+			}
+		}
+	}
+
+	static std::uint8_t swizzle_channel(const std::uint8_t *texel, eka2l1::drivers::channel_swizzle swizzle) {
+		switch (swizzle) {
+		case eka2l1::drivers::channel_swizzle::red:
+			return texel[0];
+		case eka2l1::drivers::channel_swizzle::green:
+			return texel[1];
+		case eka2l1::drivers::channel_swizzle::blue:
+			return texel[2];
+		case eka2l1::drivers::channel_swizzle::alpha:
+			return texel[3];
+		case eka2l1::drivers::channel_swizzle::zero:
+			return 0;
+		default:
+			break;
+		}
+
+		return 0xFF;
+	}
+
+	// Packs one colour into client memory, the inverse of how copy_memory_to_framebuffer() uploads it.
+	static void write_image_pixel(VGImageFormat fmt, const std::uint8_t *rgba, std::uint8_t *out) {
+		switch (fmt) {
+		case VG_sRGBA_8888:
+		case VG_sRGBA_8888_PRE:
+			std::memcpy(out, rgba, 4);
+			break;
+
+		case VG_sARGB_8888:
+		case VG_sXRGB_8888:
+		case VG_sARGB_8888_PRE:
+		case VG_sBGRA_8888:
+			out[0] = rgba[2];
+			out[1] = rgba[1];
+			out[2] = rgba[0];
+			out[3] = (fmt == VG_sXRGB_8888) ? 0xFF : rgba[3];
+			break;
+
+		case VG_sRGB_565: {
+			const std::uint16_t value = static_cast<std::uint16_t>(((rgba[0] >> 3) << 11) | ((rgba[1] >> 2) << 5) | (rgba[2] >> 3));
+			std::memcpy(out, &value, sizeof(value));
+			break;
+		}
+
+		case VG_sRGBA_5551: {
+			const std::uint16_t value = static_cast<std::uint16_t>(((rgba[0] >> 3) << 11) | ((rgba[1] >> 3) << 6) | ((rgba[2] >> 3) << 1) | (rgba[3] >> 7));
+			std::memcpy(out, &value, sizeof(value));
+			break;
+		}
+
+		case VG_A_8:
+			out[0] = rgba[3];
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	void Context::copy_framebuffer_to_memory(const GraphicState &state,
+						 FrameBuffer* src,
+						 const FrameBufferSubsetInfo *subset_info,
 						 void *memory, VGint stride,
 						 VGImageFormat fmt,
 						 VGint x, VGint y,
 						 VGint width, VGint height) {
+		if (!memory || (width <= 0) || (height <= 0)) {
+			set_error(VG_ILLEGAL_ARGUMENT_ERROR);
+			return;
+		}
+
+		if ((src == &screen_buffer) || (src->scale_factor > 0.0f)) {
+			GNUVG_ERROR("Reading back from the drawing surface is not supported!\n");
+			return;
+		}
+
+		eka2l1::drivers::texture_format in_format;
+		eka2l1::drivers::texture_format internal_format;
+		eka2l1::drivers::texture_data_type dtype;
+		eka2l1::drivers::channel_swizzles src_swizzle;
+		eka2l1::drivers::channel_swizzles dst_swizzle;
+
+		if (!translate_vg_image_format_to_driver_format(fmt, in_format, internal_format, dtype,
+			dst_swizzle, state.driver->is_stricted())) {
+			set_error(VG_UNSUPPORTED_IMAGE_FORMAT_ERROR);
+			return;
+		}
+
+		if (!translate_vg_image_format_to_driver_format(src->format, in_format, internal_format, dtype,
+			src_swizzle, state.driver->is_stricted())) {
+			return;
+		}
+
+		const std::ptrdiff_t pixel_size = static_cast<std::ptrdiff_t>(calculate_image_data_stride(fmt, 1));
+		const std::ptrdiff_t row_stride = stride;
+
+		std::ptrdiff_t memory_offset = 0;
+		if (!clip_image_transfer(src, subset_info, row_stride, pixel_size, x, y, width, height, memory_offset)) {
+			return;
+		}
+
+		if (!link_buffers_for_framebuffer_and_scale(state, src)) {
+			return;
+		}
+
+		// The read is synchronous, so everything queued so far must reach the driver first.
+		flush_to_driver(state);
+
+		std::vector<std::uint8_t> texels(static_cast<std::size_t>(width) * height * 4);
+		eka2l1::drivers::read_framebuffer(state.driver, src->framebuffer, eka2l1::vec2(x, y), eka2l1::vec2(width, height),
+			eka2l1::drivers::texture_format::rgba, eka2l1::drivers::texture_data_type::ubyte, texels.data());
+
+		std::uint8_t *out_base = reinterpret_cast<std::uint8_t*>(memory) + memory_offset;
+		const bool dst_premultiplied = is_premultiplied(fmt);
+		const bool convert_alpha = (is_premultiplied(src->format) != dst_premultiplied);
+
+		for (VGint row = 0; row < height; row++) {
+			const std::uint8_t *texel = texels.data() + static_cast<std::size_t>(row) * width * 4;
+			std::uint8_t *out = out_base + static_cast<std::ptrdiff_t>(row) * row_stride;
+
+			for (VGint col = 0; col < width; col++, texel += 4, out += pixel_size) {
+				// Texels are RGBA; the source swizzle fills in what sampling sees for alpha-only and X formats.
+				std::uint8_t rgba[4] = {
+					swizzle_channel(texel, src_swizzle[0]),
+					swizzle_channel(texel, src_swizzle[1]),
+					swizzle_channel(texel, src_swizzle[2]),
+					swizzle_channel(texel, src_swizzle[3])
+				};
+
+				if (convert_alpha) {
+					convert_alpha_mode(rgba, dst_premultiplied);
+				}
+
+				write_image_pixel(fmt, rgba, out);
+			}
+		}
 	}
 
 	void Context::copy_memory_to_framebuffer(const GraphicState &state,
 						 FrameBuffer* dst,
+						 const FrameBufferSubsetInfo *subset_info,
 						 const void *memory, VGint stride,
 						 VGImageFormat fmt,
 						 VGint x, VGint y,
 						 VGint width, VGint height) {
-		if(dst == &screen_buffer) {
-			GNUVG_ERROR("Trying to write from memory directly to the screen buffer.\n");
-			return; /* can't copy directly to framebuffer */
-		}
-
-		if (dst->scale_factor > 0.0f) {
-			GNUVG_ERROR("Trying to write to scalable framebuffer texture!");
+		if (!memory || (width <= 0) || (height <= 0)) {
+			set_error(VG_ILLEGAL_ARGUMENT_ERROR);
 			return;
 		}
 
@@ -2210,21 +2563,81 @@ namespace gnuVG {
 
 		if (!translate_vg_image_format_to_driver_format(fmt, in_format, internal_format, dtype,
 			swizzle, state.driver->is_stricted())) {
-			GNUVG_ERROR("Format 0x{:X} is currently unsupported.\n", static_cast<int>(fmt));
+			set_error(VG_UNSUPPORTED_IMAGE_FORMAT_ERROR);
 			return;
 		}
 
-		std::size_t stride_selfcalc = calculate_image_data_stride(fmt, width);
-		std::size_t total_data_size = height * ((stride == 0) ? stride_selfcalc : stride);
-		std::size_t bytes_per_pixel = (stride_selfcalc / width);
+		if ((dst == &screen_buffer) || (dst->scale_factor > 0.0f)) {
+			// The surface texture is not addressable in VG pixels, so stage the data and draw it like vgSetPixels.
+			FrameBuffer staging;
+			if (!create_framebuffer(state, &staging, fmt, width, height, VG_IMAGE_QUALITY_NONANTIALIASED, true)) {
+				return;
+			}
 
-		if ((stride % bytes_per_pixel) != 0) {
+			copy_memory_to_framebuffer(state, &staging, nullptr, memory, stride, fmt, 0, 0, width, height);
+			copy_framebuffer_to_framebuffer(state, dst, &staging, x, y, 0, 0, width, height);
+			delete_framebuffer(state, &staging);
+			return;
+		}
+
+		const std::ptrdiff_t pixel_size = static_cast<std::ptrdiff_t>(calculate_image_data_stride(fmt, 1));
+		std::ptrdiff_t row_stride = stride;
+
+		std::ptrdiff_t memory_offset = 0;
+		if (!clip_image_transfer(dst, subset_info, row_stride, pixel_size, x, y, width, height, memory_offset)) {
+			return;
+		}
+
+		const std::uint8_t *data = reinterpret_cast<const std::uint8_t*>(memory) + memory_offset;
+		const std::size_t clipped_row_size = static_cast<std::size_t>(pixel_size * width);
+
+		// Repack when the driver cannot take the rows as they are: ARGB needs its bytes swapped, alpha may need
+		// converting, and a zero or negative stride (Qt passes flipped QImages this way) is no unpack row length.
+		const bool dst_premultiplied = is_premultiplied(dst->format);
+		const bool swap_red_blue = is_bgra_byte_order(fmt);
+		const bool convert_alpha = (pixel_size == 4) && (is_premultiplied(fmt) != dst_premultiplied);
+		std::vector<std::uint8_t> packed;
+
+		if ((row_stride <= 0) || swap_red_blue || convert_alpha) {
+			packed.resize(clipped_row_size * height);
+
+			for (VGint row = 0; row < height; row++) {
+				std::uint8_t *packed_row = packed.data() + row * clipped_row_size;
+				std::memcpy(packed_row, data + static_cast<std::ptrdiff_t>(row) * row_stride, clipped_row_size);
+
+				if (!swap_red_blue && !convert_alpha) {
+					continue;
+				}
+
+				for (std::size_t offset = 0; offset < clipped_row_size; offset += 4) {
+					if (swap_red_blue) {
+						std::swap(packed_row[offset], packed_row[offset + 2]);
+					}
+
+					// The X byte is padding; the pixel is opaque.
+					if (fmt == VG_sXRGB_8888) {
+						packed_row[offset + 3] = 0xFF;
+					}
+
+					if (convert_alpha) {
+						convert_alpha_mode(packed_row + offset, dst_premultiplied);
+					}
+				}
+			}
+
+			data = packed.data();
+			row_stride = pixel_size * width;
+		}
+
+		if ((row_stride % pixel_size) != 0) {
 			LOG_WARN(eka2l1::HLE_DISPATCHER, "Stride byte count is odd compare to pixel size! VG Image may contains distortion!");
 		}
 
-		cmd_builder_.update_texture(dst->color_buffer, reinterpret_cast<const char*>(memory),
+		const std::size_t total_data_size = static_cast<std::size_t>((height - 1) * row_stride) + clipped_row_size;
+
+		cmd_builder_.update_texture(dst->color_buffer, reinterpret_cast<const char*>(data),
 			total_data_size, 0, in_format, dtype, eka2l1::vec3(x, y, 0), eka2l1::vec3(width, height, 0),
-			(stride == 0) ? 0 : stride / bytes_per_pixel);
+			row_stride / pixel_size, 1);
 	}
 
 	void Context::save_current_framebuffer() {
@@ -2271,18 +2684,47 @@ namespace gnuVG {
 using namespace gnuVG;
 
 namespace eka2l1::dispatch {
+    BRIDGE_FUNC_LIBRARY(void, vg_flush_emu) {
+        gnuVG::Context *ctx = get_active_context(sys);
+        if (ctx) {
+            ctx->flush_to_driver(sys->get_dispatcher()->get_egl_controller(), sys->get_graphics_driver());
+        }
+    }
 
 	/*********************
 	 *
 	 *  Getters and Setters
 	 *
 	 *********************/
-	BRIDGE_FUNC_LIBRARY(VGErrorCode, vg_get_error_emu) {
+	BRIDGE_FUNC_LIBRARY(VGint, vg_get_error_emu) {
 		gnuVG::Context *ctx = get_active_context(sys);
 		if (!ctx) {
 			return VG_NO_CONTEXT_ERROR;
 		}
 		return ctx->get_error();
+	}
+
+	BRIDGE_FUNC_LIBRARY(void, vg_finish_emu) {
+		vg_flush_emu(sys);
+		egl_wait_gl_emu(sys);
+	}
+
+	BRIDGE_FUNC_LIBRARY(VGint, vg_hardware_query_emu, VGHardwareQueryType key, VGint setting) {
+		gnuVG::Context *ctx = get_active_context(sys);
+		if (!ctx) {
+			return VG_HARDWARE_UNACCELERATED;
+		}
+		bool valid = false;
+		if (key == VG_IMAGE_FORMAT_QUERY) {
+			valid = !(setting & ~0xFF) && ((setting & 0x3F) <= VG_A_4);
+		} else if (key == VG_PATH_DATATYPE_QUERY) {
+			valid = (setting >= VG_PATH_DATATYPE_S_8) && (setting <= VG_PATH_DATATYPE_F);
+		}
+		if (!valid) {
+			ctx->set_error(VG_ILLEGAL_ARGUMENT_ERROR);
+			return VG_HARDWARE_UNACCELERATED;
+		}
+		return VG_HARDWARE_ACCELERATED;
 	}
 
 	BRIDGE_FUNC_LIBRARY(void, vg_setf_emu, VGParamType type, VGfloat value) {
@@ -2538,10 +2980,6 @@ namespace eka2l1::dispatch {
 			return;
 		}
 		ctx->clear(state, x, y, width, height);
-
-        if (ctx->cmd_builder_.need_flush()) {
-            ctx->flush_to_driver(sys->get_dispatcher()->get_egl_controller(), state.driver);
-        }
 	}
 
     BRIDGE_FUNC_LIBRARY(address, vg_get_string_emu, std::uint32_t pname) {

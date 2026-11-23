@@ -20,10 +20,14 @@
 
 #pragma once
 
+#include <common/path_types.h>
 #include <services/applist/common.h>
+#include <services/applist/icons.h>
 #include <services/framework.h>
 
+#include <common/vecx.h>
 #include <utils/des.h>
+#include <utils/reqsts.h>
 #include <vfs/vfs.h>
 
 #include <functional>
@@ -84,15 +88,15 @@ namespace eka2l1 {
         apa_app_info mandatory_info;
         apa_capability caps;
 
-        std::u16string rsc_path;
+        guest_path rsc_path;
         std::uint64_t last_rsc_modified{ 0 };
-        std::u16string localised_info_rsc_path;
+        guest_path localised_info_rsc_path;
         std::uint32_t localised_info_rsc_id{ 1 };
 
         std::uint8_t default_screen_number{ 0 };
 
         std::int16_t icon_count;
-        std::u16string icon_file_path;
+        guest_path icon_file_path;
 
         std::vector<apa_app_icon> app_icons;
         std::vector<data_type> data_types;
@@ -115,10 +119,13 @@ namespace eka2l1 {
          * @param args                          Command line arguments. You can prefill variables that you want,
          *                                      this function will fill parameters that you don't yet know.
          */
-        void get_launch_parameter(std::u16string &native_executable_path, epoc::apa::command_line &args);
+        void get_launch_parameter(guest_path &native_executable_path, epoc::apa::command_line &args);
 
         bool supports_screen_mode(const int mode_num);
     };
+
+    epoc::uid find_data_type_handler(const std::vector<apa_app_registry> &registries,
+        const std::string &mime_type, epoc::uid native_uid = 0);
 
     /**
      * \brief Read registeration info from a stream.
@@ -191,10 +198,10 @@ namespace eka2l1 {
             APP_FILTER_NONE
         };
 
-        std::size_t current_index_;
-        std::uint32_t flags_mask_;
-        std::uint32_t flags_match_value_;
-        std::uint32_t requested_screen_mode_;
+        std::size_t current_index_ = 0;
+        std::uint32_t flags_mask_ = 0;
+        std::uint32_t flags_match_value_ = 0;
+        std::uint32_t requested_screen_mode_ = 0;
 
         app_filter_method filter_method_;
         std::vector<std::uint8_t> pending_opaque_data_;
@@ -216,6 +223,7 @@ namespace eka2l1 {
 
         bool non_native_update_prepared_{ false };
         std::vector<pending_non_native_update> pending_non_native_updates_;
+        epoc::notify_info list_change_notify_;
 
     public:
         explicit applist_session(service::typical_server *svr, kernel::uid client_ss_uid, epoc::version client_ver);
@@ -231,6 +239,8 @@ namespace eka2l1 {
         void deregister_non_native_app(service::ipc_context &ctx);
         void commit_non_native_app_updates(service::ipc_context &ctx);
         void rollback_non_native_app_updates(service::ipc_context &ctx);
+        void set_list_change_notify(service::ipc_context &ctx);
+        void cancel_list_change_notify(service::ipc_context &ctx);
     };
 
     /*! \brief Applist services
@@ -265,21 +275,20 @@ namespace eka2l1 {
         void sort_registry_list();
         void init();
 
-
-        bool load_registry(eka2l1::io_system *io, const std::u16string &path, drive_number land_drive,
+        bool load_registry(eka2l1::io_system *io, const guest_path &path, drive_number land_drive,
             const language ideal_lang = language::en);
 
-        bool load_registry_oldarch(eka2l1::io_system *io, const std::u16string &path, drive_number land_drive,
+        bool load_registry_oldarch(eka2l1::io_system *io, const guest_path &path, drive_number land_drive,
             const language ideal_lang = language::en);
 
         void on_drive_change(void *userdata, drive_number drv, drive_action act);
 
         void remove_registries_on_drive(const drive_number drv);
 
-        void rescan_registries_on_drive_oldarch(eka2l1::io_system *io, const drive_number num, std::vector<std::u16string> &results);
-        void rescan_registries_on_drive_newarch(eka2l1::io_system *io, const drive_number num, std::vector<std::u16string> &results);
-        void rescan_registries_on_drive_newarch_with_path(eka2l1::io_system *io, const drive_number num, const std::u16string &path,
-            std::vector<std::u16string> &results);
+        void rescan_registries_on_drive_oldarch(eka2l1::io_system *io, const drive_number num, std::vector<guest_path> &results);
+        void rescan_registries_on_drive_newarch(eka2l1::io_system *io, const drive_number num, std::vector<guest_path> &results);
+        void rescan_registries_on_drive_newarch_with_path(eka2l1::io_system *io, const drive_number num, const guest_path &path,
+            std::vector<guest_path> &results);
 
         /*! \brief Get the number of screen shared for an app. 
          * 
@@ -334,18 +343,23 @@ namespace eka2l1 {
         /**
          * \brief Get app icon bitmap handles.
          */
-        void get_app_icon(service::ipc_context &ctx);
+        void get_app_icon(service::ipc_context &ctx, const bool by_index = false);
 
-        void get_app_icon_sizes(service::ipc_context &ctx);
+        void get_app_icon_sizes(service::ipc_context &ctx, const bool check_client_size = false);
+        void get_app_owned_files(service::ipc_context &ctx);
+        void get_native_executable_name_if_non_native(service::ipc_context &ctx);
         void app_info_provided_by_reg_file(service::ipc_context &ctx);
 
-        void launch_app(service::ipc_context &ctx);
+        void launch_app(service::ipc_context &ctx, const bool return_thread_id);
         void is_program(service::ipc_context &ctx);
         void get_preferred_buf_size(service::ipc_context &ctx);
         void get_app_for_document(service::ipc_context &ctx);
         void get_app_for_document_by_file_handle(service::ipc_context &ctx);
-        void get_app_for_document_impl(service::ipc_context &ctx, const std::u16string &path);
         void get_app_for_data_type(service::ipc_context &ctx);
+        void get_app_for_document_impl(service::ipc_context &ctx, const guest_path &path);
+        void get_app_executable_name_given_app_uid(service::ipc_context &ctx);
+        void get_app_executable_name_given_document(service::ipc_context &ctx);
+        void get_app_executable_name(service::ipc_context &ctx, epoc::uid app_uid);
         void recognize_data(service::ipc_context &ctx);
         void recognize_data_by_file_handle(service::ipc_context &ctx);
         void get_supported_data_types_phase1(service::ipc_context &ctx);
@@ -360,7 +374,7 @@ namespace eka2l1 {
         void connect(service::ipc_context &ctx) override;
 
     protected:
-        bool launch_app(const std::u16string &exe_path, const std::u16string &cmd, kernel::uid *thread_id,
+        bool launch_app(const guest_path &exe_path, const std::u16string &cmd, kernel::uid *thread_id,
             kernel::process *requester = nullptr, const epoc::uid known_uid = 0,
             std::function<void(kernel::process*)> app_exit_callback = nullptr,
             const bool pass_command_line_in_env_slot = false,
@@ -373,7 +387,6 @@ namespace eka2l1 {
 
         // Recognition depends on the data and the name, not on server state, so this
         // is a static and can be exercised on its own.
-        static data_recog_result recognize_data_impl(common::ro_stream &stream, const std::u16string &name);
 
         /**
          * \brief Forget a registeration without waiting for the next rescan.
@@ -382,8 +395,18 @@ namespace eka2l1 {
          *
          * \param rsc_path Path of the registeration file the entry was read from.
          */
-        bool delete_registry(const std::u16string &rsc_path);
         bool remove_non_native_registration(io_system *io, epoc::uid uid);
+
+        static data_recog_result recognize_data_impl(common::ro_stream &stream, const guest_path &name);
+
+        /**
+         * \brief Forget a registeration without waiting for the next rescan.
+         *
+         * Used by frontends that delete an installed app's files themselves.
+         *
+         * \param rsc_path Path of the registeration file the entry was read from.
+         */
+        bool delete_registry(const guest_path &rsc_path);
 
         /**
          * @brief       Get the legacy level of the server.
@@ -408,7 +431,14 @@ namespace eka2l1 {
         apa_app_registry *inject_non_native_java_midlet(epoc::uid app_uid,
             const std::u16string &caption, const std::u16string &logical_jad_path);
 
-        std::optional<apa_app_masked_icon_bitmap> get_icon(apa_app_registry &registry, const std::int8_t index);
+
+        std::optional<apa_app_masked_icon_bitmap> get_icon(apa_app_registry &registry, const std::size_t index);
+
+        // Exact dimensions win; otherwise choose the nearest area that does not exceed the request.
+        std::optional<apa_app_masked_icon_bitmap> get_icon_by_size(apa_app_registry &registry, const eka2l1::vec2 &size);
+        std::optional<apa_app_masked_icon_bitmap> get_list_icon(apa_app_registry &registry);
+
+        std::optional<app_icon_image> get_host_icon(apa_app_registry &registry, const host_path &cache_root);
 
         std::mutex list_access_mut_;
 

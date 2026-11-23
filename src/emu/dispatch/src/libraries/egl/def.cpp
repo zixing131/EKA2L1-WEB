@@ -25,10 +25,10 @@
 #include <common/log.h>
 
 namespace eka2l1::dispatch {
-    static const std::uint32_t RED_SIZE_CONFIG_LOOKUP_TABLE[3] = { 5, 8, 8 };
-    static const std::uint32_t GREEN_SIZE_CONFIG_LOOKUP_TABLE[3] = { 6, 8, 8 };
-    static const std::uint32_t BLUE_SIZE_CONFIG_LOOKUP_TABLE[3] = { 5, 8, 8 };
-    static const std::uint32_t ALPHA_SIZE_CONFIG_LOOKUP_TABLE[3] = { 0, 0, 8 };
+    static const std::uint32_t RED_SIZE_CONFIG_LOOKUP_TABLE[4] = { 0, 5, 8, 8 };
+    static const std::uint32_t GREEN_SIZE_CONFIG_LOOKUP_TABLE[4] = { 0, 6, 8, 8 };
+    static const std::uint32_t BLUE_SIZE_CONFIG_LOOKUP_TABLE[4] = { 0, 5, 8, 8 };
+    static const std::uint32_t ALPHA_SIZE_CONFIG_LOOKUP_TABLE[4] = { 0, 0, 0, 8 };
 
     egl_context::egl_context()
         : draw_surface_(nullptr)
@@ -86,12 +86,15 @@ namespace eka2l1::dispatch {
     }
 
     void egl_surface::scale(egl_context *context, drivers::graphics_driver *drv) {
+        if (!backed_window_) {
+            return;
+        }
         if (current_scale_ != backed_screen_->display_scale_factor) {
             // Silently resize and scale
             float new_display_factor = backed_screen_->display_scale_factor;
             eka2l1::vec2 new_scaled_size = dimension_ * new_display_factor;
 
-            drivers::handle new_surface = drivers::create_bitmap(drv, new_scaled_size, 32);
+            drivers::handle new_surface = drivers::create_bitmap(drv, new_scaled_size, 32, config_.depth_bits());
 
             context->cmd_builder_.bind_bitmap(new_surface);
             context->cmd_builder_.draw_bitmap(handle_, 0, eka2l1::rect(eka2l1::vec2(0, 0), new_scaled_size),
@@ -100,6 +103,10 @@ namespace eka2l1::dispatch {
 
             handle_ = new_surface;
             current_scale_ = backed_screen_->display_scale_factor;
+
+            if (context->draw_surface_ == this) {
+                context->on_draw_surface_resized(drv);
+            }
         }
     }
 
@@ -154,6 +161,17 @@ namespace eka2l1::dispatch {
 
         auto ite = active_context_.find(thread_id);
         if ((ite != active_context_.end()) && ite->second && (ite->second != context_to_set)) {
+            // Uploads still staged in the context's buffer pushers must reach the driver with its draws.
+            if (ite->second->draw_surface_ && ite->second->read_surface_ && !ite->second->dead_pending_) {
+                ite->second->flush_to_driver(*this, driver_);
+            }
+
+            if (ite->second->draw_surface_) {
+                ite->second->draw_surface_->bounded_context_ = nullptr;
+            }
+            if (ite->second->read_surface_) {
+                ite->second->read_surface_->bounded_context_ = nullptr;
+            }
             if (ite->second->draw_surface_ && ite->second->draw_surface_->dead_pending_) {
                 ite->second->cmd_builder_.destroy_bitmap(ite->second->draw_surface_->handle_);
 
@@ -174,14 +192,6 @@ namespace eka2l1::dispatch {
                         var = nullptr;
                     }
                 }
-            }
-
-            if (ite->second->draw_surface_) {
-                ite->second->draw_surface_->bounded_context_ = nullptr;
-            }
-
-            if (ite->second->read_surface_) {
-                ite->second->read_surface_->bounded_context_ = nullptr;
             }
 
             ite->second->draw_surface_ = nullptr;

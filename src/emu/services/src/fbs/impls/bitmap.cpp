@@ -41,6 +41,7 @@
 
 #include <common/buffer.h>
 #include <loader/nvg.h>
+#include <loader/rom.h>
 
 #include <lunasvg.h>
 
@@ -48,19 +49,6 @@
 #include <cassert>
 
 namespace eka2l1 {
-    static epoc::bitmap_color get_bitmap_color_type_from_display_mode(const epoc::display_mode bpp) {
-        switch (bpp) {
-        case epoc::display_mode::gray2:
-            return epoc::monochrome_bitmap;
-        case epoc::display_mode::color16ma:
-        case epoc::display_mode::color16map:
-            return epoc::color_bitmap_with_alpha;
-        default:
-            break;
-        }
-
-        return epoc::color_bitmap;
-    }
 
     fbs_bitmap_data_info::fbs_bitmap_data_info()
         : dpm_(epoc::display_mode::none)
@@ -93,6 +81,29 @@ namespace eka2l1 {
         void bitwise_bitmap::settings::initial_display_mode(const display_mode &mode) {
             flags_ &= 0xFFFFFF00;
             flags_ |= static_cast<std::uint32_t>(mode);
+        }
+
+        bitmap_color get_bitmap_color_from_display_mode(const display_mode mode) {
+            // SEpocBitmapHeader::TColor distinguishes grayscale, colour and alpha
+            // (Symbian bmconv/PBMCOMP.CPP and CBitwiseBitmap::IsColor()).
+            if (is_display_mode_mono(mode)) {
+                return monochrome_bitmap;
+            }
+
+            if (mode == display_mode::color16map) {
+                return color_bitmap_with_alpha_pm;
+            }
+
+            if (mode == display_mode::color16ma) {
+                return color_bitmap_with_alpha;
+            }
+
+            return color_bitmap;
+        }
+
+        display_mode bitwise_bitmap::current_display_mode() const {
+            const display_mode mode = settings_.current_display_mode();
+            return (mode == display_mode::none) ? settings_.initial_display_mode() : mode;
         }
 
         bool bitwise_bitmap::settings::dirty_bitmap() const {
@@ -157,7 +168,8 @@ namespace eka2l1 {
             std::fill(dest, dest + size, 0xFF);
         }
 
-        void bitwise_bitmap::construct(loader::sbm_header &info, epoc::display_mode disp_mode, void *data, const void *base, const bool support_current_display_mode_flag, const bool white_fill) {
+        void bitwise_bitmap::construct(loader::sbm_header &info, epoc::display_mode disp_mode, void *data, const void *base, const bool support_current_display_mode_flag, const bool white_fill,
+            const std::uint32_t data_header_size) {
             uid_ = epoc::BITWISE_BITMAP_UID;
             allocator_ = MAGIC_FBS_HEAP_PTR;
             pile_ = MAGIC_FBS_PILE_PTR;
@@ -182,6 +194,10 @@ namespace eka2l1 {
                 } else {
                     data_offset_ = static_cast<int>(reinterpret_cast<const std::uint8_t *>(data) - reinterpret_cast<const std::uint8_t *>(base));
                 }
+
+                // The header sits right before the pixels, which may be inside reserved rows.
+                data_offset_ -= static_cast<int>(data_header_size);
+                std::memset(reinterpret_cast<std::uint8_t *>(data) - data_header_size, 0, data_header_size);
             } else {
                 data_offset_ = 0;
             }
@@ -364,13 +380,22 @@ namespace eka2l1 {
             return static_cast<bitmap_file_compression>(header_.compression);
         }
 
-        std::uint8_t *bitwise_bitmap::data_pointer(fbs_server *ss) {
+        std::uint8_t *bitwise_bitmap::data_block_pointer(fbs_server *ss) {
             // Use traditional method for on-rom bitmap that does not have additional info
             if (!allocator_ || !pile_ || !ss->is_large_bitmap(header_.bitmap_size - sizeof(loader::sbm_header))) {
                 return reinterpret_cast<std::uint8_t *>(this) + data_offset_;
             }
 
             return ss->get_large_chunk_base() + data_offset_;
+        }
+
+        std::uint8_t *bitwise_bitmap::data_pointer(fbs_server *ss) {
+            std::uint8_t *block = data_block_pointer(ss);
+            if ((uid_ == epoc::BITWISE_BITMAP_UID) && (block == ss->get_large_chunk_base() + data_offset_)) {
+                return block + ss->bitmap_data_header_size();
+            }
+
+            return block;
         }
 
         std::uint32_t bitwise_bitmap::data_size() const {
@@ -468,7 +493,7 @@ namespace eka2l1 {
             const std::lock_guard<std::recursive_mutex> guard(allocator_lock_);
 
             if (is_large_bitmap(static_cast<std::uint32_t>(avail_dest_size))) {
-                data = large_chunk_allocator->allocate(avail_dest_size);
+                data = allocate_bitmap_pixels(avail_dest_size);
             } else {
                 data = shared_chunk_allocator->allocate(avail_dest_size);
                 *err_code = fbs_load_data_err_small_bitmap;
@@ -544,7 +569,7 @@ namespace eka2l1 {
             }
         }
 
-        symfile source_file = ctx->sys->get_io_system()->open_file(name.value(), READ_MODE | BIN_MODE);
+        symfile source_file = ctx->sys->get_io_system()->open_file(eka2l1::guest_path{name.value()}, READ_MODE | BIN_MODE);
 
         if (!source_file) {
             ctx->complete(epoc::error_not_found);
@@ -739,7 +764,8 @@ namespace eka2l1 {
             loader::sbm_header &header_to_give = mbmf_.sbm_headers[load_options->bitmap_id];
             const epoc::display_mode dpm = epoc::get_display_mode_from_bpp(header_to_give.bit_per_pixels, header_to_give.color);
 
-            bws_bmp->construct(header_to_give, dpm, bmp_data, bmp_data_base, support_current_display_mode, false);
+            bws_bmp->construct(header_to_give, dpm, bmp_data, bmp_data_base, support_current_display_mode, false,
+                (err_code == fbs_load_data_err_small_bitmap) ? 0 : fbss->bitmap_data_header_size());
             bws_bmp->offset_from_me_ = (err_code == fbs_load_data_err_small_bitmap);
 
             bws_bmp->header_.bitmap_size = static_cast<std::uint32_t>(bws_bmp->header_.header_len + size_when_decomp);
@@ -872,6 +898,11 @@ namespace eka2l1 {
         const int bpp = epoc::get_bpp_from_display_mode(dpm);
         const int byte_width = bws->byte_width_;
 
+        // Once plain, large-chunk pixels move behind the client-side data header allocated with the block.
+        const std::uint32_t header_size = bws->offset_from_me_ ? 0 : bitmap_data_header_size_;
+        std::memset(data, 0, header_size);
+        data += header_size;
+
         // Scanlines are word aligned, so an odd width leaves padding pixels the loop
         // below never touches. Clear the whole raster region first: leftover vector
         // bytes there show up as a stray column of noise once BitGDI blits the bitmap.
@@ -981,7 +1012,7 @@ namespace eka2l1 {
                 smol = true;
             } else {
                 base = base_large_chunk;
-                data = large_chunk_allocator->allocate(avail_dest_size);
+                data = allocate_bitmap_pixels(avail_dest_size);
             }
 
             if (!data) {
@@ -994,7 +1025,7 @@ namespace eka2l1 {
         header.compression = info.comp_;
         header.bitmap_size = static_cast<std::uint32_t>(original_bytes + sizeof(loader::sbm_header));
         header.size_pixels = info.size_;
-        header.color = get_bitmap_color_type_from_display_mode(info.dpm_);
+        header.color = epoc::get_bitmap_color_from_display_mode(info.dpm_);
         header.header_len = sizeof(loader::sbm_header);
         header.palette_size = 0;
         header.size_twips = info.size_ * epoc::get_approximate_pixel_to_twips_mul(kern->get_epoc_version());
@@ -1007,7 +1038,8 @@ namespace eka2l1 {
             data = reinterpret_cast<std::uint8_t *>(data) + reserved_bytes;
         }
 
-        bws_bmp->construct(header, info.dpm_, data, base, support_current_display_mode_flag, true);
+        bws_bmp->construct(header, info.dpm_, data, base, support_current_display_mode_flag, true,
+            (data && !smol) ? bitmap_data_header_size_ : 0);
         bws_bmp->offset_from_me_ = smol;
         bws_bmp->post_construct(this);
 
@@ -1016,6 +1048,29 @@ namespace eka2l1 {
         }
 
         fbsbitmap *bmp = make_new<fbsbitmap>(this, bws_bmp, false, support_dirty, final_reserve_each_side);
+        return bmp;
+    }
+
+    fbsbitmap *fbs_server::get_rom_bitmap(const address addr) {
+        if (!kern->get_rom_info() || !kern->is_address_in_rom(addr)) {
+            return nullptr;
+        }
+
+        if (auto ite = rom_bitmaps_.find(addr); ite != rom_bitmaps_.end()) {
+            return ite->second;
+        }
+
+        epoc::bitwise_bitmap *bws_bmp = eka2l1::ptr<epoc::bitwise_bitmap>(addr).get(kern->get_memory_system());
+        if (!bws_bmp || (bws_bmp->uid_ != epoc::bitwise_bitmap_uid)) {
+            return nullptr;
+        }
+
+        // CFbsBitmap::DuplicateInRom() contract. No owning server, so the ROM data is never freed;
+        // the extra reference keeps the wrapper alive.
+        fbsbitmap *bmp = make_new<fbsbitmap>(nullptr, bws_bmp, false, false);
+        bmp->ref();
+
+        rom_bitmaps_.emplace(addr, bmp);
         return bmp;
     }
 
@@ -1037,7 +1092,7 @@ namespace eka2l1 {
                 shared_chunk_allocator->freep(bmp->bitmap_->data_pointer(this) - reserved_bytes);
                 no_failure = true;
             } else {
-                large_chunk_allocator->freep(bmp->bitmap_->data_pointer(this) - reserved_bytes);
+                free_large_data(bmp->bitmap_->data_block_pointer(this) - reserved_bytes);
                 no_failure = true;
             }
         }
@@ -1068,11 +1123,18 @@ namespace eka2l1 {
             return (ptr < committed_end) ? static_cast<std::size_t>(committed_end - ptr) : 0;
         }
 
-        // Pixels always come out of one of the two chunks above, whatever the
-        // bitmap's age or format: even a bitmap read straight from a ROM MBM is
-        // decompressed into them (load_data_to_rom). A pointer that lands outside
-        // both was computed from a header field that no longer describes reality,
-        // and following it walks host memory the emulator does not own.
+        // Clients also use ROM bitmaps in place (see get_rom_bitmap()).
+        if (const loader::rom *rom = kern->get_rom_info()) {
+            const std::uint8_t *rom_begin = eka2l1::ptr<std::uint8_t>(rom->header.rom_base).get(kern->get_memory_system());
+
+            if (rom_begin && (ptr >= rom_begin) && (ptr < rom_begin + rom->header.rom_size)) {
+                return static_cast<std::size_t>(rom_begin + rom->header.rom_size - ptr);
+            }
+        }
+
+        // Any other pixels come out of one of the two chunks above. A pointer that
+        // lands outside them was computed from a header field that no longer
+        // describes reality, and following it walks host memory the emulator does not own.
         return 0;
     }
 
@@ -1101,8 +1163,7 @@ namespace eka2l1 {
         bmp_specs_legacy specs;
 
         const bool use_spec_legacy = ctx->get_argument_data_size(0) >= sizeof(bmp_specs_legacy);
-        const bool use_bmp_handles_writeback = (server<fbs_server>()->get_system()->get_symbian_version_use()
-            >= epocver::epoc10);
+        const bool use_bmp_handles_writeback = !use_spec_legacy && (ctx->get_argument_data_size(0) >= sizeof(bmp_specs_v2));
 
         std::uint32_t assign_uid = epoc::NORMAL_BITMAP_UID_REV2;
         std::uint32_t force_size = 0;
@@ -1169,7 +1230,7 @@ namespace eka2l1 {
         if ((force_size > vector_size) && bmp->bitmap_) {
             // The client only fills the vector part; keep the padding deterministic so a
             // reader that trusts the (now larger) data size never sees stale heap.
-            if (std::uint8_t *data = reinterpret_cast<std::uint8_t *>(bmp->bitmap_->data_pointer(fbss))) {
+            if (std::uint8_t *data = reinterpret_cast<std::uint8_t *>(bmp->bitmap_->data_block_pointer(fbss))) {
                 std::memset(data + vector_size, 0, force_size - vector_size);
             }
         }
@@ -1266,7 +1327,7 @@ namespace eka2l1 {
                 const int size_added_reserve = size_total + reserved_each_size * dest_byte_width * 2;
 
                 if (fbss->is_large_bitmap(size_total)) {
-                    dest_data = reinterpret_cast<std::uint8_t *>(fbss->allocate_large_data(size_added_reserve));
+                    dest_data = reinterpret_cast<std::uint8_t *>(fbss->allocate_bitmap_pixels(size_added_reserve));
                     base = fbss->get_large_chunk_base();
                 } else {
                     dest_data = reinterpret_cast<std::uint8_t *>(fbss->allocate_general_data_impl(size_added_reserve));
@@ -1313,15 +1374,18 @@ namespace eka2l1 {
             // Own a reference to the clean bitmap, until it is removed
             new_bmp->ref();
 
-            bmp_handles handle_info;
+            // Clients without a handle buffer keep the dirty bitmap and swap to the clean one later.
+            if (ctx->get_argument_max_data_size(3) >= sizeof(bmp_handles)) {
+                bmp_handles handle_info;
 
-            // Add this object to the object table!
-            handle_info.handle = obj_table_.add(new_bmp);
-            handle_info.server_handle = new_bmp->id;
-            handle_info.address_offset = server<fbs_server>()->host_ptr_to_guest_shared_offset(new_bmp->bitmap_);
+                // Add this object to the object table!
+                handle_info.handle = obj_table_.add(new_bmp);
+                handle_info.server_handle = new_bmp->id;
+                handle_info.address_offset = server<fbs_server>()->host_ptr_to_guest_shared_offset(new_bmp->bitmap_);
 
-            ctx->write_data_to_descriptor_argument(3, handle_info);
-            obj_table_.remove(handle);
+                ctx->write_data_to_descriptor_argument(3, handle_info);
+                obj_table_.remove(handle);
+            }
 
             // Notify dirty
             if (fbss->compressor)
@@ -1331,6 +1395,11 @@ namespace eka2l1 {
             old_header.size_pixels.x = new_size.x;
             old_header.size_pixels.y = new_size.y;
             old_header.size_twips = old_header.size_pixels * epoc::get_approximate_pixel_to_twips_mul(fbss->kern->get_epoc_version());
+
+            // data_pointer() re-derives which chunk the pixels live in from this size, so a
+            // resize that leaves it describing the old data sends the next read to the wrong base.
+            old_header.bitmap_size = old_header.header_len + epoc::get_byte_width(new_size.x,
+                static_cast<std::uint8_t>(old_header.bit_per_pixels)) * new_size.y;
 
             // Free old data
             std::uint8_t *data = new_bmp->original_pointer(fbss);
@@ -1342,7 +1411,7 @@ namespace eka2l1 {
 
             new_bmp->reserved_height_each_side_ = reserved_each_size;
             new_bmp->bitmap_->construct(old_header, new_bmp->bitmap_->settings_.initial_display_mode(),
-                dest_data, base, support_current_display_mode, false);
+                dest_data, base, support_current_display_mode, false, offset_from_me_now ? 0 : fbss->bitmap_data_header_size());
             new_bmp->bitmap_->post_construct(fbss);
         }
 
@@ -1504,7 +1573,7 @@ namespace eka2l1 {
                     for (std::size_t y = 0; y < bitmap->header_.size_pixels.y; y++) {
                         for (std::size_t x = 0; x < bitmap->header_.size_pixels.x; x++) {
                             const std::uint8_t pixel = *reinterpret_cast<const std::uint8_t *>(packed_data + y * byte_width + x);
-                            std::uint32_t palette_color = epoc::get_suitable_palette_256(sysver, false)[pixel];
+                            std::uint32_t palette_color = epoc::get_suitable_palette_256(sysver)[pixel];
 
                             file.write(reinterpret_cast<const char *>(&palette_color) + 2, 1);
                             file.write(reinterpret_cast<const char *>(&palette_color) + 1, 1);
@@ -1648,12 +1717,11 @@ namespace eka2l1 {
             }
 
             switch (dpm) {
-            case epoc::display_mode::color256:
+            case epoc::display_mode::color256: {
+                const epoc::palette_256 &palette = serv->palette_256();
+
                 for (std::size_t y = 0; y < header.size_pixels.y; y++) {
                     current_to_look->seek(y * byte_width, common::seek_where::beg);
-                    
-                    epoc::palette_256 &palette = epoc::get_suitable_palette_256(serv->get_kernel_object_owner()->get_epoc_version(),
-                        serv->get_system()->is_s80_device_active());
 
                     for (std::size_t x = 0; x < header.size_pixels.x; x++) {
                         std::uint8_t pixel = 0;
@@ -1673,6 +1741,7 @@ namespace eka2l1 {
                 }
 
                 break;
+            }
 
             case epoc::display_mode::color4k:
                 for (std::size_t y = 0; y < header.size_pixels.y; y++) {
@@ -1765,6 +1834,27 @@ namespace eka2l1 {
                 break;
             }
 
+            case epoc::display_mode::gray4:
+                for (std::size_t y = 0; y < header.size_pixels.y; y++) {
+                    current_to_look->seek(y * byte_width, common::seek_where::beg);
+                    std::uint8_t packed = 0;
+
+                    for (std::size_t x = 0; x < header.size_pixels.x; x++) {
+                        if ((x % 4 == 0) && (current_to_look->read(&packed, 1) != 1)) {
+                            return false;
+                        }
+
+                        const std::uint8_t level = ((packed >> ((x % 4) * 2)) & 3) * 85;
+                        const std::uint8_t alpha = make_standard_mask ? ((level == 255) ? 255 : 0) : 255;
+                        dest.write(&level, 1);
+                        dest.write(&level, 1);
+                        dest.write(&level, 1);
+                        dest.write(&alpha, 1);
+                    }
+                }
+
+                break;
+
             case epoc::display_mode::gray256:
                 for (std::size_t y = 0; y < header.size_pixels.y; y++) {
                     current_to_look->seek(y * byte_width, common::seek_where::beg);
@@ -1777,7 +1867,8 @@ namespace eka2l1 {
                         dest.write(&pixel, 1);
                         dest.write(&pixel, 1);
                         dest.write(&pixel, 1);
-                        dest.write(&pixel, 1);
+                        const std::uint8_t alpha = make_standard_mask ? pixel : 255;
+                        dest.write(&alpha, 1);
                     }
                 }
 
@@ -1835,101 +1926,27 @@ namespace eka2l1 {
             return convert_to_rgba8888(serv, buf_stream, dest, file.sbm_headers[index], -1, static_cast<bitmap_file_compression>(file.sbm_headers[index].compression), make_standard_mask);
         }
 
-        // Symbian icon masks come in two families with opposite polarities. BITGDI's
-        // CFbsBitGc::BitBltMasked (bitgdi/sbit/BITBLT.CPP) picks between them:
-        //
-        //     if (aMaskBitmap->DisplayMode() == EGray256)
-        //         DoBitBltAlpha(..., EFalse);          // alpha blend, aInvertMask ignored
-        //     ...
-        //     const TDrawMode drawMode = aInvertMask ? EDrawModeAND : EDrawModeANDNOT;
-        //
-        // So only an EGray256 mask is a real alpha/soft mask, where luminance is the
-        // alpha and white is opaque. Every other display mode is a binary stencil
-        // whose polarity comes from the caller, and Avkon passes aInvertMask=ETrue
-        // almost everywhere (EIKCLBD.CPP, EIKMENUB.CPP, Aknscind.cpp, ...), which
-        // ANDs the mask in as-is: white keeps the destination, so white is
-        // transparent.
-        //
-        // We keep classifying by depth rather than by that display mode, because
-        // some S60v2 icons carry gray-valued opacity in a mask the header flags as
-        // colour, and treating those as stencils inverts them. Depth alone gets
-        // every mask in the 6680 ROM right except the handful covered below.
-        static bool mask_depth_is_soft(const std::uint32_t bpp) {
-            return (bpp > 1) && (bpp <= 8);
-        }
-
-        // The exception: a few S60v2 AIF icons store a *binary* stencil at 8bpp, in
-        // the colour-key polarity the contract above describes, so the soft reading
-        // turns them inside out - the shape goes fully transparent while the backdrop
-        // stays opaque, which reads as a blank icon.
-        // The mask content settles it. An icon's outer frame is transparent by
-        // definition, so a mask that holds only white plus one other level, has a
-        // solid white border and some non-white interior, can only be colour-key.
-        // Masks with a real alpha ramp, with an already-transparent black border, or
-        // fully opaque ones (a full-bleed icon) keep the soft reading.
-        static bool soft_mask_reads_inside_out(const std::uint8_t *mask_rgba, const std::size_t width,
-            const std::size_t height) {
-            static constexpr std::uint8_t WHITE_MIN = 250;
-
-            if ((width < 3) || (height < 3)) {
-                return false;
-            }
-
-            std::uint8_t other_level = 0;
-            bool has_other_level = false;
-
-            for (std::size_t i = 0; i < width * height; i++) {
-                const std::uint8_t level = mask_rgba[i * 4];
-
-                if (level >= WHITE_MIN) {
-                    continue;
-                }
-
-                if (!has_other_level) {
-                    other_level = level;
-                    has_other_level = true;
-                } else if (level != other_level) {
-                    // Three or more levels: a genuine alpha ramp.
-                    return false;
-                }
-            }
-
-            if (!has_other_level) {
-                return false;
-            }
-
-            for (std::size_t x = 0; x < width; x++) {
-                if ((mask_rgba[x * 4] < WHITE_MIN) || (mask_rgba[((height - 1) * width + x) * 4] < WHITE_MIN)) {
-                    return false;
-                }
-            }
-
-            for (std::size_t y = 0; y < height; y++) {
-                if ((mask_rgba[(y * width) * 4] < WHITE_MIN) || (mask_rgba[(y * width + width - 1) * 4] < WHITE_MIN)) {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
         void apply_icon_mask_alpha(std::uint8_t *icon_rgba, const std::uint8_t *mask_rgba,
-            const std::size_t width, const std::size_t height, const std::uint32_t mask_bpp) {
+            const std::size_t width, const std::size_t height, const epoc::display_mode mask_mode,
+            const icon_mask_composition composition) {
             if (!icon_rgba || !mask_rgba) {
                 return;
             }
 
-            const bool soft = mask_depth_is_soft(mask_bpp) && !soft_mask_reads_inside_out(mask_rgba, width, height);
+            const bool soft = (mask_mode == epoc::display_mode::gray256);
 
-            // A soft mask maps its gray value straight to alpha (white opaque). The
-            // mask is gray-valued, so its red channel carries the luminance directly
-            // and anti-aliased edges are preserved. A colour-key mask instead inverts
-            // the pure-white test that make_standard_mask left in the alpha channel,
-            // so only the white backdrop becomes transparent.
             for (std::size_t i = 0; i < width * height; i++) {
-                icon_rgba[i * 4 + 3] = soft
-                    ? mask_rgba[i * 4]
-                    : static_cast<std::uint8_t>(255 - mask_rgba[i * 4 + 3]);
+                const auto *pixel = mask_rgba + i * 4;
+                if (composition == icon_mask_composition::uiq) {
+                    // UIQ draws app icons with a non-inverted mask: white is opaque at every depth.
+                    icon_rgba[i * 4 + 3] = static_cast<std::uint8_t>((2 * pixel[0] + 5 * pixel[1] + pixel[2]) >> 3);
+                } else if (composition == icon_mask_composition::alf_canvas) {
+                    // ALF Canvas inverts EGray2 before ReplaceAlphaChannelL converts to Gray256.
+                    const std::uint8_t alpha = (2 * pixel[0] + 5 * pixel[1] + pixel[2]) >> 3;
+                    icon_rgba[i * 4 + 3] = mask_mode == epoc::display_mode::gray2 ? 255 - alpha : alpha;
+                } else {
+                    icon_rgba[i * 4 + 3] = soft ? pixel[0] : static_cast<std::uint8_t>(255 - pixel[3]);
+                }
             }
         }
     }

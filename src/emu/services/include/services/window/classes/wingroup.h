@@ -43,8 +43,12 @@ namespace eka2l1::epoc {
         eka2l1::config::app_setting saved_setting;
         std::size_t uid_owner_change_callback_handle;
 
-        kernel::process *uid_owner_change_process;
+        // Kept by ID: a parent whose settings this group inherits can exit first.
+        kernel::uid uid_owner_change_process;
         ws::uid screen_change_event_handle;
+
+        // Client-side CWsScreenDevice this group was constructed with.
+        std::uint32_t client_device_pointer = 0;
 
         bool can_receive_focus() {
             return flags & flag_focus_receiveable;

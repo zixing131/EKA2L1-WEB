@@ -46,19 +46,20 @@ namespace eka2l1::drivers::camera {
     }
 
     instance_android::~instance_android() {
+        if (managed_handle_ < 0) {
+            return;
+        }
+
         release();
 
         android::emulator_camera_destroy(managed_handle_);
     }
 
     bool instance_android::set_parameter(const parameter_key key, const std::uint32_t value) {
-        switch (key) {
-            case PARAMETER_KEY_OPTICAL_ZOOM:
-                stub_optical_zoom_ = value;
-                return true;
+        CHECK_IF_RESERVED(return false);
 
+        switch (key) {
             case PARAMETER_KEY_FLASH:
-                CHECK_IF_RESERVED(return false);
                 return android::emulator_camera_set_flash_mode(managed_handle_, static_cast<int>(value));
 
             case PARAMETER_KEY_EXPOSURE:
@@ -67,6 +68,10 @@ namespace eka2l1::drivers::camera {
 
             case PARAMETER_KEY_DIGITAL_ZOOM:
                 stub_digital_zoom_ = value;
+                return true;
+
+            case PARAMETER_KEY_OPTICAL_ZOOM:
+                stub_optical_zoom_ = value;
                 return true;
 
             case PARAMETER_KEY_CONTRAST:
@@ -90,13 +95,10 @@ namespace eka2l1::drivers::camera {
     }
 
     bool instance_android::get_parameter(const parameter_key key, std::uint32_t &value) {
-        switch (key) {
-            case PARAMETER_KEY_OPTICAL_ZOOM:
-                value = stub_optical_zoom_;
-                break;
+        CHECK_IF_RESERVED(return false);
 
+        switch (key) {
             case PARAMETER_KEY_FLASH:
-                CHECK_IF_RESERVED(return false);
                 value = static_cast<std::uint32_t>(android::emulator_camera_get_flash_mode(managed_handle_));
                 break;
 
@@ -106,6 +108,10 @@ namespace eka2l1::drivers::camera {
 
             case PARAMETER_KEY_DIGITAL_ZOOM:
                 value = stub_digital_zoom_;
+                break;
+
+            case PARAMETER_KEY_OPTICAL_ZOOM:
+                value = stub_optical_zoom_;
                 break;
 
             case PARAMETER_KEY_CONTRAST:

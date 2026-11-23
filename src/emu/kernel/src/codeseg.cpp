@@ -25,6 +25,7 @@
 #include <kernel/libmanager.h>
 #include <loader/common.h>
 #include <xxHash/xxhash.h>
+#include <utils/consts.h>
 
 #include <algorithm>
 #include <cstring>
@@ -112,6 +113,10 @@ namespace eka2l1::kernel {
         return (ordinal == 222) ? idiv : uidiv;
     }
 
+    static bool is_fixed_process_data(kernel_system *kern, const address data_base) {
+        return !kern->is_eka1() && (kern->get_epoc_version() < epocver::epoc95) && (data_base >= mem::shared_data) && (data_base < mem::ram_code_addr);
+    }
+
     codeseg::codeseg(kernel_system *kern, const std::string &name, codeseg_create_info &info)
         : kernel_obj(kern, name, nullptr, kernel::access_type::global_access)
         , patched_(false)
@@ -159,31 +164,49 @@ namespace eka2l1::kernel {
             kern->destroy(code_chunk_shared);
         }
 
-        for (auto &dep: dependencies) {
-            dep.dep_->decrease_access_count();
-        }
+        clear_dependencies();
 
         return 0;
     }
 
+    void codeseg::clear_dependencies() {
+        auto released = std::move(dependencies);
+        dependencies.clear();
+        for (auto &dep : released) {
+            dep.dep_->decrease_access_count();
+        }
+    }
+
+    int codeseg::decrease_access_count() {
+        // The loader owns pending segments until dependency resolution finishes.
+        if (loading_) {
+            --access_count;
+            return 0;
+        }
+        return kernel_obj::decrease_access_count();
+    }
+
+    // Shared code keeps the import addresses patched for the first process, so every
+    // codeseg it reaches must also be shared. The walk ignores mark, which attach() reuses.
     bool codeseg::eligible_for_codeseg_reuse() {
-        // Attachment traversal also uses mark. A marked dependency may still
-        // have process-local data: skipping it would share an import veneer
-        // patched to another process's copy of that DLL (e.g. javalogger).
-        // Inspect the entire dependency closure with independent cycle tracking.
-        std::unordered_set<const codeseg *> visited;
-        std::vector<const codeseg *> pending{this};
+        memory_system *mem = kern->get_memory_system();
+
+        std::vector<codeseg *> pending{ this };
+        std::unordered_set<codeseg *> visited{ this };
+
         while (!pending.empty()) {
-            const codeseg *seg = pending.back();
+            codeseg *seg = pending.back();
             pending.pop_back();
-            if (!visited.insert(seg).second) {
-                continue;
-            }
-            if ((seg->data_size || seg->bss_size) && !seg->is_rom()) {
+
+            const auto data_size_align = common::align(seg->data_size + seg->bss_size, mem->get_page_size());
+            if ((data_size_align != 0) && !seg->is_rom()) {
                 return false;
             }
-            for (const auto &dep : seg->dependencies) {
-                pending.push_back(dep.dep_);
+
+            for (auto &dep : seg->dependencies) {
+                if (visited.insert(dep.dep_).second) {
+                    pending.push_back(dep.dep_);
+                }
             }
         }
         return true;
@@ -377,8 +400,17 @@ namespace eka2l1::kernel {
                     dt_chunk = kern->create<kernel::chunk>(mem, new_foe, "", 0, data_size_align, data_size_align,
                         prot_read_write, kernel::chunk_type::normal, acc, kernel::chunk_attrib::anonymous,
                         0x00, false, data_base, nullptr);
+                } else if (is_fixed_process_data(kern, data_base)) {
+                    // The moving model links the data of a fixed ROM process into the kernel section, mapped in every process.
+                    dt_chunk = kern->create<kernel::chunk>(mem, new_foe, "", 0, data_size_align, data_size_align,
+                        prot_read_write, kernel::chunk_type::normal, kernel::chunk_access::global, kernel::chunk_attrib::anonymous,
+                        0x00, false, data_base, nullptr);
                 } else {
                     dt_chunk = new_foe->get_rom_bss_chunk(data_base);
+                    if (!dt_chunk) {
+                        return false;
+                    }
+
                     add_offset = data_base - dt_chunk->base(new_foe).ptr_address();
 
                     if (!dt_chunk->commit(add_offset, data_size_align)) {
@@ -623,6 +655,14 @@ namespace eka2l1::kernel {
         }
     }
 
+    kernel::process *codeseg::fixed_data_owner() {
+        if (attaches.empty() || !is_rom() || !(data_size || bss_size) || !is_fixed_process_data(kern, data_base)) {
+            return nullptr;
+        }
+
+        return attaches.front()->attached_process;
+    }
+
     codeseg_state codeseg::state_with(kernel::process *foe) {
         auto attach_info = common::find_and_ret_if(attaches, [=](const std::unique_ptr<attached_info> &info) {
             return info->attached_process == foe;
@@ -741,7 +781,7 @@ namespace eka2l1::kernel {
     address codeseg::lookup(kernel::process *pr, const std::uint32_t ord) {
         const address lookup_res = lookup_no_relocate(ord);
 
-        if (code_addr != 0 || !lookup_res || patched_) {
+        if (code_addr != 0 || !lookup_res || ((ord <= absolute_exports_.size()) && absolute_exports_[ord - 1])) {
             return lookup_res;
         }
 
@@ -765,7 +805,7 @@ namespace eka2l1::kernel {
         return attach_info->get()->code_chunk->base(pr).ptr_address() + lookup_res - code_base;
     }
 
-    void codeseg::queries_call_list(kernel::process *pr, std::vector<std::uint32_t> &call_list, const bool for_init) {
+    void codeseg::queries_call_list(kernel::process *pr, std::vector<std::uint32_t> &call_list, const bool for_init, const bool include_entry) {
         // Add forced entry points
         call_list.insert(call_list.end(), premade_eps.begin(), premade_eps.end());
 
@@ -773,12 +813,13 @@ namespace eka2l1::kernel {
         for (auto &dependency : dependencies) {
             if (!dependency.dep_->mark) {
                 dependency.dep_->mark = true;
-                dependency.dep_->queries_call_list(pr, call_list, for_init);
+                // An imported executable supplies exports, not a DLL entry point.
+                dependency.dep_->queries_call_list(pr, call_list, for_init, dependency.dep_->uids[0] != epoc::EXECUTABLE_UID);
             }
         }
 
         // Add our last. Don't change order, this is how it supposed to be
-        if (!ep_disabled_) {
+        if (!ep_disabled_ && include_entry) {
             auto attach_info = common::find_and_ret_if(attaches, [=](const std::unique_ptr<attached_info> &info) {
                 return info->attached_process == pr;
             });
@@ -873,11 +914,16 @@ namespace eka2l1::kernel {
     }
 
     void codeseg::set_export(const std::uint32_t ordinal, eka2l1::ptr<void> address) {
-        if (export_table.size() < ordinal) {
+        if ((ordinal == 0) || (export_table.size() < ordinal)) {
             return;
         }
 
         export_table[ordinal - 1] = address.ptr_address();
+
+        if (absolute_exports_.size() < export_table.size()) {
+            absolute_exports_.resize(export_table.size(), false);
+        }
+        absolute_exports_[ordinal - 1] = true;
     }
 
     void codeseg::set_entry_point(eka2l1::ptr<void> address) {

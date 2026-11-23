@@ -20,6 +20,7 @@
 #include <dispatch/libraries/egl/egl.h>
 #include <dispatch/libraries/gles1/def.h>
 #include <dispatch/libraries/gles2/def.h>
+#include <dispatch/libraries/gles_shared/gles_shared.h>
 #include <dispatch/libraries/vg/gnuVG_context.hh>
 #include <dispatch/dispatcher.h>
 #include <kernel/kernel.h>
@@ -39,7 +40,7 @@ namespace eka2l1::dispatch {
     // First bit is surface type, and second bit is buffer size bits
     static constexpr std::uint32_t EGL_EMU_CONFIG_LIST_VALS[] = {
         // GLES1
-        0b010, 0b100, 0b110,
+        0b100010, 0b010, 0b100100, 0b100, 0b100110, 0b110,
         // GLES2
         0b1010, 0b1100, 0b1110,
         // VG
@@ -47,6 +48,28 @@ namespace eka2l1::dispatch {
     };
 
     static constexpr std::uint32_t EGL_EMU_CONFIG_LIST_VALS_LENGTH = sizeof(EGL_EMU_CONFIG_LIST_VALS) / sizeof(std::uint32_t);
+
+    void copy_egl_pixmap_pixels(const std::uint8_t *rgba, std::uint8_t *data, const eka2l1::vec2 &size,
+        const std::int32_t stride, const epoc::display_mode mode) {
+        for (int y = 0; y < size.y; y++) {
+            auto *row = data + y * stride;
+            const auto *source = rgba + (size.y - y - 1) * size.x * 4;
+            for (int x = 0; x < size.x; x++, source += 4) {
+                if (mode == epoc::display_mode::color64k) {
+                    const std::uint16_t pixel = ((source[0] >> 3) << 11) | ((source[1] >> 2) << 5) | (source[2] >> 3);
+                    std::memcpy(row + x * 2, &pixel, 2);
+                } else {
+                    const int bytes = mode == epoc::display_mode::color16m ? 3 : 4;
+                    row[x * bytes] = source[2];
+                    row[x * bytes + 1] = source[1];
+                    row[x * bytes + 2] = source[0];
+                    if (bytes == 4) {
+                        row[x * bytes + 3] = mode == epoc::display_mode::color16ma ? source[3] : 255;
+                    }
+                }
+            }
+        }
+    }
 
     static void egl_push_error(system *sys, const std::int32_t error) {
         dispatcher *dp = sys->get_dispatcher();
@@ -132,6 +155,8 @@ namespace eka2l1::dispatch {
         std::int32_t total_color_bits_calculated = -1;
         std::int32_t total_color_bits_provided = -1;
         std::int32_t gles_context_type = EGL_OPENGL_ES1_BIT;
+        std::int32_t depth_bits = 0;
+        std::int32_t stencil_bits = 0;
 
         while (attrib_lists != nullptr) {
             std::uint32_t pname = *attrib_lists++;
@@ -163,6 +188,14 @@ namespace eka2l1::dispatch {
                 gles_context_type = param;
                 break;
 
+            case EGL_DEPTH_SIZE_EMU:
+                depth_bits = param;
+                break;
+
+            case EGL_STENCIL_SIZE_EMU:
+                stencil_bits = param;
+                break;
+
             default:
                 break;
             }
@@ -177,7 +210,7 @@ namespace eka2l1::dispatch {
         }
 
         if (surface_type != -1) {
-            if (((surface_type & EGL_PBUFFER_BIT_EMU) == 0) && ((surface_type & EGL_WINDOW_BIT_EMU) == 0)) {
+            if ((surface_type & (EGL_PBUFFER_BIT_EMU | EGL_WINDOW_BIT_EMU | EGL_PIXMAP_BIT_EMU)) == 0) {
                 // This is not a fail. We don't support it now.
                 *num_config_choosen = 0;
                 return EGL_TRUE;
@@ -188,6 +221,9 @@ namespace eka2l1::dispatch {
 
         for (std::int32_t i = 0; i < EGL_EMU_CONFIG_LIST_VALS_LENGTH; i++) {
             egl_config config_parser(EGL_EMU_CONFIG_LIST_VALS[i]);
+            if (config_parser.depth_bits() < depth_bits || config_parser.stencil_bits() < stencil_bits) {
+                continue;
+            }
             egl_config::target_context_version ver = config_parser.get_target_context_version();
             std::uint32_t egl_version_enum = EGL_OPENGL_ES1_BIT;
 
@@ -256,7 +292,8 @@ namespace eka2l1::dispatch {
             return EGL_NO_SURFACE_EMU;
         }
 
-        drivers::handle hh = drivers::create_bitmap(driver, canvas->size_for_egl_surface() * canvas->scr->display_scale_factor, choosen_config.buffer_size());
+        drivers::handle hh = drivers::create_bitmap(driver, canvas->size_for_egl_surface() * canvas->scr->display_scale_factor,
+            choosen_config.buffer_size(), choosen_config.depth_bits());
         if (hh == 0) {
             egl_push_error(sys, EGL_BAD_CONFIG);
             return EGL_NO_SURFACE_EMU;
@@ -299,9 +336,12 @@ namespace eka2l1::dispatch {
         }
 
         eka2l1::vec2 dim(0, 0);
+        std::uint32_t texture_format = EGL_NO_TEXTURE_EMU;
+        std::uint32_t texture_target = EGL_NO_TEXTURE_EMU;
+
         while (true) {
             std::int32_t pname = *additional_attribs++;
-            if (pname == 0) {
+            if ((pname == 0) || (pname == EGL_NONE_EMU)) {
                 break;
             }
             std::int32_t param = *additional_attribs++;
@@ -314,6 +354,14 @@ namespace eka2l1::dispatch {
                 dim.y = param;
                 break;
 
+            case EGL_TEXTURE_FORMAT_EMU:
+                texture_format = param;
+                break;
+
+            case EGL_TEXTURE_TARGET_EMU:
+                texture_target = param;
+                break;
+
             default:
                 break;
             }
@@ -324,9 +372,14 @@ namespace eka2l1::dispatch {
             return EGL_NO_SURFACE_EMU;
         }
 
+        if ((texture_format == EGL_NO_TEXTURE_EMU) != (texture_target == EGL_NO_TEXTURE_EMU)) {
+            egl_push_error(sys, EGL_BAD_MATCH_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+
         drivers::graphics_driver *driver = sys->get_graphics_driver();
 
-        drivers::handle hh = drivers::create_bitmap(driver, dim, choosen_config.buffer_size());
+        drivers::handle hh = drivers::create_bitmap(driver, dim, choosen_config.buffer_size(), choosen_config.depth_bits());
         if (hh == 0) {
             egl_push_error(sys, EGL_BAD_CONFIG);
             return EGL_NO_SURFACE_EMU;
@@ -335,6 +388,8 @@ namespace eka2l1::dispatch {
         std::unique_ptr<egl_surface> result_surface = std::make_unique<egl_surface>(nullptr, backed_screen, dim, hh, choosen_config);
 
         result_surface->current_scale_ = 1.0f;
+        result_surface->is_pbuffer_ = true;
+        result_surface->texture_format_ = texture_format;
         egl_surface_handle result_handle = controller.add_managed_surface(result_surface);
 
         if (result_handle == EGL_NO_SURFACE_EMU) {
@@ -345,12 +400,131 @@ namespace eka2l1::dispatch {
         return result_handle;
     }
     
-    BRIDGE_FUNC_LIBRARY(egl_context_handle, egl_create_context_emu, egl_display display, std::uint32_t choosen_config_value, egl_context_handle shared_context, std::int32_t *additional_attribs_) {
-        if (shared_context) {
-            LOG_ERROR(HLE_DISPATCHER, "Shared context is not yet supported!");
-            egl_push_error(sys, EGL_BAD_PARAMETER_EMU);
+    BRIDGE_FUNC_LIBRARY(egl_surface_handle, egl_create_pixmap_surface_emu, egl_display display, std::uint32_t config, utils::fbs_bitmap *pixmap, std::int32_t *attribs) {
+        auto *kern = sys->get_kernel_system();
+        auto *dp = sys->get_dispatcher();
+        auto *screen = dp->winserv_->get_screen(display - 1);
+        if (!screen) {
+            egl_push_error(sys, EGL_BAD_DISPLAY_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        if (std::find(std::begin(EGL_EMU_CONFIG_LIST_VALS), std::end(EGL_EMU_CONFIG_LIST_VALS), config)
+            == std::end(EGL_EMU_CONFIG_LIST_VALS)) {
+            egl_push_error(sys, EGL_BAD_CONFIG);
+            return EGL_NO_SURFACE_EMU;
+        }
+        if (attribs && *attribs != EGL_NONE_EMU) {
+            egl_push_error(sys, EGL_BAD_ATTRIBUTE_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        auto *bitmap = pixmap ? pixmap->bitwise_bitmap_addr_.cast<epoc::bitwise_bitmap>().get(kern->crr_process()) : nullptr;
+        auto *fbss = kern->get_by_name<fbs_server>(epoc::get_fbs_server_name_by_epocver(kern->get_epoc_version()));
+        if (!bitmap || !fbss || fbss->readable_bytes_from(reinterpret_cast<const std::uint8_t *>(bitmap)) < sizeof(*bitmap)
+            || bitmap->uid_ != epoc::bitwise_bitmap_uid || !bitmap->data_pointer(fbss)
+            || bitmap->compression_type() != epoc::bitmap_file_no_compression) {
+            egl_push_error(sys, EGL_BAD_NATIVE_PIXMAP_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        const auto mode = bitmap->current_display_mode();
+        const auto dim = bitmap->header_.size_pixels;
+        egl_config chosen(config);
+        if (dim.x <= 0 || dim.y <= 0 || dim.x > MAX_EGL_FB_WIDTH || dim.y > MAX_EGL_FB_HEIGHT
+            || (mode != epoc::display_mode::color64k && mode != epoc::display_mode::color16m
+                && mode != epoc::display_mode::color16mu && mode != epoc::display_mode::color16ma)
+            || chosen.buffer_size() != bitmap->header_.bit_per_pixels) {
+            egl_push_error(sys, EGL_BAD_MATCH_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        const auto valid_pixels = [bitmap, fbss, dim, mode]() {
+            if (bitmap->header_.size_pixels != dim || bitmap->current_display_mode() != mode
+                || bitmap->byte_width_ != epoc::get_byte_width(dim.x, bitmap->header_.bit_per_pixels)
+                || bitmap->compression_type() != epoc::bitmap_file_no_compression) {
+                return false;
+            }
+            return fbss->readable_bytes_from(bitmap->data_pointer(fbss))
+                >= static_cast<std::size_t>(bitmap->byte_width_) * dim.y;
+        };
+        if (!valid_pixels()) {
+            egl_push_error(sys, EGL_BAD_NATIVE_PIXMAP_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        auto *driver = sys->get_graphics_driver();
+        const auto handle = drivers::create_bitmap(driver, dim, chosen.buffer_size(), chosen.depth_bits());
+        if (!handle) {
+            egl_push_error(sys, EGL_BAD_ALLOC_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        auto surface = std::make_unique<egl_surface>(nullptr, screen, dim, handle, chosen);
+        surface->current_scale_ = 1.0f;
+        auto *target = surface.get();
+        surface->pixmap_readback_ = std::make_shared<std::function<void()>>([sys, fbss, bitmap, target, mode, dim, valid_pixels]() {
+            if (!valid_pixels()) {
+                return;
+            }
+            auto *data = bitmap->data_pointer(fbss);
+            if (!data) {
+                return;
+            }
+            auto *driver = sys->get_graphics_driver();
+            if (target->bounded_context_) {
+                target->bounded_context_->flush_to_driver(sys->get_dispatcher()->get_egl_controller(), driver, true);
+            }
+            std::vector<std::uint8_t> rgba(dim.x * dim.y * 4);
+            if (!drivers::read_bitmap(driver, target->handle_, { 0, 0 }, dim, 32, rgba.data())) {
+                return;
+            }
+            copy_egl_pixmap_pixels(rgba.data(), data, dim, bitmap->byte_width_, mode);
+        });
+        if (!dp->winserv_->get_bitmap_cache()->set_bitmap_writer(bitmap, surface->pixmap_readback_)) {
+            drivers::graphics_command_builder builder;
+            builder.destroy_bitmap(handle);
+            auto commands = builder.retrieve_command_list();
+            driver->submit_command_list(commands);
+            egl_push_error(sys, EGL_BAD_ALLOC_EMU);
+            return EGL_NO_SURFACE_EMU;
+        }
+        surface->pixmap_upload_ = [sys, fbss, bitmap, target, dim, mode, valid_pixels]() {
+            if (!valid_pixels()) {
+                return;
+            }
+            if (target->bounded_context_) {
+                target->bounded_context_->flush_to_driver(sys->get_dispatcher()->get_egl_controller(), sys->get_graphics_driver());
+            }
+            auto *data = bitmap->data_pointer(fbss);
+            if (!data) {
+                return;
+            }
+            const std::size_t pitch = bitmap->byte_width_;
+            std::vector<std::uint8_t> native(pitch * dim.y);
+            for (int y = 0; y < dim.y; y++) {
+                auto *row = native.data() + y * pitch;
+                std::memcpy(row, data + (dim.y - y - 1) * pitch, pitch);
+                if (mode == epoc::display_mode::color16mu) {
+                    for (int x = 0; x < dim.x; x++) {
+                        row[x * 4 + 3] = 255;
+                    }
+                }
+            }
+            drivers::graphics_command_builder builder;
+            builder.update_bitmap(target->handle_, reinterpret_cast<const char *>(native.data()), native.size(), { 0, 0 }, dim);
+            auto commands = builder.retrieve_command_list();
+            sys->get_graphics_driver()->submit_command_list(commands);
+        };
+        surface->pixmap_upload_();
+        return dp->get_egl_controller().add_managed_surface(surface);
+    }
 
-            return EGL_NO_CONTEXT_EMU;
+    BRIDGE_FUNC_LIBRARY(egl_context_handle, egl_create_context_emu, egl_display display, std::uint32_t choosen_config_value, egl_context_handle shared_context, std::int32_t *additional_attribs_) {
+        dispatcher *dp = sys->get_dispatcher();
+        dispatch::egl_controller &controller = dp->get_egl_controller();
+
+        egl_context *share_with = nullptr;
+        if (shared_context) {
+            share_with = controller.get_context(shared_context);
+            if (!share_with) {
+                egl_push_error(sys, EGL_BAD_CONTEXT_EMU);
+                return EGL_NO_CONTEXT_EMU;
+            }
         }
 
         egl_config choosen_config(choosen_config_value);
@@ -374,13 +548,34 @@ namespace eka2l1::dispatch {
             }
         }
 
+        std::shared_ptr<gles_object_namespace> shared_namespace;
+        if (share_with) {
+            const egl_context_type wanted_type = (version == egl_config::EGL_TARGET_CONTEXT_ES2) ? EGL_GLES2_CONTEXT
+                : ((version == egl_config::EGL_TARGET_CONTEXT_VG) ? EGL_VG_CONTEXT : EGL_GLES1_CONTEXT);
+
+            if ((share_with->context_type() == EGL_VG_CONTEXT) != (wanted_type == EGL_VG_CONTEXT)) {
+                // The share context must use the same client API.
+                egl_push_error(sys, EGL_BAD_CONTEXT_EMU);
+                return EGL_NO_CONTEXT_EMU;
+            }
+
+            if ((share_with->context_type() != wanted_type) || (wanted_type == EGL_VG_CONTEXT)) {
+                LOG_ERROR(HLE_DISPATCHER, "Sharing objects is only supported between OpenGL ES contexts of the same version");
+                egl_push_error(sys, EGL_BAD_MATCH_EMU);
+
+                return EGL_NO_CONTEXT_EMU;
+            }
+
+            shared_namespace = static_cast<egl_context_es_shared *>(share_with)->namespace_;
+        }
+
         switch (version) {
         case egl_config::EGL_TARGET_CONTEXT_ES11:
-            context_inst = std::make_unique<egl_context_es1>();
+            context_inst = std::make_unique<egl_context_es1>(shared_namespace);
             break;
 
         case egl_config::EGL_TARGET_CONTEXT_ES2:
-            context_inst = std::make_unique<egl_context_es2>();
+            context_inst = std::make_unique<egl_context_es2>(shared_namespace);
             break;
 
         case egl_config::EGL_TARGET_CONTEXT_VG:
@@ -393,9 +588,6 @@ namespace eka2l1::dispatch {
 
             return EGL_NO_CONTEXT_EMU;
         }
-
-        dispatcher *dp = sys->get_dispatcher();
-        dispatch::egl_controller &controller = dp->get_egl_controller();
 
         egl_context_handle hh = controller.add_context(context_inst);
         if (!hh) {
@@ -412,6 +604,12 @@ namespace eka2l1::dispatch {
         dispatcher *dp = sys->get_dispatcher();
         dispatch::egl_controller &controller = dp->get_egl_controller();
         kernel_system *kern = sys->get_kernel_system();
+
+        auto *previous = controller.current_context(kern->crr_thread()->unique_id());
+        if (previous && previous->draw_surface_ && previous->draw_surface_->pixmap_readback_
+            && (previous != controller.get_context(context) || previous->draw_surface_handle_ != write_surface)) {
+            (*previous->draw_surface_->pixmap_readback_)();
+        }
 
         egl_surface *read_surface_real = controller.get_managed_surface(read_surface);
         egl_surface *write_surface_real = controller.get_managed_surface(write_surface);
@@ -492,6 +690,10 @@ namespace eka2l1::dispatch {
             return EGL_FALSE;
         }
 
+        if (surface->pixmap_readback_) {
+            return EGL_TRUE;
+        }
+
         drivers::graphics_driver *drv = sys->get_graphics_driver();
 
         egl_context *ctx = surface->bounded_context_;
@@ -550,7 +752,19 @@ namespace eka2l1::dispatch {
     }
     
     BRIDGE_FUNC_LIBRARY(std::int32_t, egl_wait_native_emu, std::int32_t engine) {
-        // Nothing
+        if (engine != EGL_CORE_NATIVE_ENGINE_EMU) {
+            egl_push_error(sys, EGL_BAD_PARAMETER_EMU);
+            return EGL_FALSE;
+        }
+        auto *context = sys->get_dispatcher()->get_egl_controller().current_context(
+            sys->get_kernel_system()->crr_thread()->unique_id());
+        if (context && context->draw_surface_ && context->draw_surface_->pixmap_upload_) {
+            context->draw_surface_->pixmap_upload_();
+        }
+        if (context && context->read_surface_ && context->read_surface_ != context->draw_surface_
+            && context->read_surface_->pixmap_upload_) {
+            context->read_surface_->pixmap_upload_();
+        }
         return EGL_TRUE;
     }
     
@@ -574,6 +788,11 @@ namespace eka2l1::dispatch {
     }
 
     BRIDGE_FUNC_LIBRARY(std::int32_t, egl_wait_gl_emu) {
+        auto *context = sys->get_dispatcher()->get_egl_controller().current_context(
+            sys->get_kernel_system()->crr_thread()->unique_id());
+        if (context && context->draw_surface_ && context->draw_surface_->pixmap_readback_) {
+            (*context->draw_surface_->pixmap_readback_)();
+        }
         return EGL_TRUE;
     }
     
@@ -581,7 +800,7 @@ namespace eka2l1::dispatch {
         dispatcher *dp = sys->get_dispatcher();
         dispatch::egl_controller &controller = dp->get_egl_controller();
 
-        if ((param != EGL_EXTENSIONS_EMU) && (param != EGL_VENDOR_EMU) && (param != EGL_VERSION_EMU)) {
+        if ((param != EGL_EXTENSIONS_EMU) && (param != EGL_VENDOR_EMU) && (param != EGL_VERSION_EMU) && (param != EGL_CLIENT_APIS_EMU)) {
             egl_push_error(sys, EGL_BAD_PARAMETER_EMU);
             return 0;
         }
@@ -602,7 +821,8 @@ namespace eka2l1::dispatch {
         egl_config parser(config);
 
         switch (attribute) {
-        case EGL_RENDERABLE_TYPE_EMU: {
+        case EGL_RENDERABLE_TYPE_EMU:
+        case EGL_CONFORMANT_EMU: {
             const auto ver = parser.get_target_context_version();
             if (ver == egl_config::EGL_TARGET_CONTEXT_ES11) {
                 *value = EGL_OPENGL_ES1_BIT;
@@ -635,17 +855,16 @@ namespace eka2l1::dispatch {
             *value = EGL_NONE_EMU;
             break;
 
-        // Depth stencil surface is in D24S8 format.
         case EGL_DEPTH_SIZE_EMU:
-            *value = 24;
+            *value = parser.depth_bits();
             break;
 
         case EGL_STENCIL_SIZE_EMU:
-            *value = 8;
+            *value = parser.stencil_bits();
             break;
         
         case EGL_SURFACE_TYPE_EMU:
-            *value = EGL_WINDOW_BIT_EMU | EGL_PBUFFER_BIT_EMU;
+            *value = EGL_WINDOW_BIT_EMU | EGL_PBUFFER_BIT_EMU | EGL_PIXMAP_BIT_EMU;
             break;
 
         case EGL_MAX_PBUFFER_WIDTH_EMU:
@@ -659,6 +878,45 @@ namespace eka2l1::dispatch {
         case EGL_BIND_TO_TEXTURE_RGB_EMU:
         case EGL_BIND_TO_TEXTURE_RGBA_EMU:
             *value = EGL_TRUE;
+            break;
+
+        case EGL_MIN_SWAP_INTERVAL_EMU:
+        case EGL_MAX_SWAP_INTERVAL_EMU:
+            *value = 1;
+            break;
+
+        case EGL_BUFFER_SIZE_EMU:
+            *value = parser.red_bits() + parser.green_bits() + parser.blue_bits() + parser.alpha_bits();
+            break;
+
+        case EGL_CONFIG_ID_EMU:
+            *value = config;
+            break;
+
+        case EGL_MAX_PBUFFER_PIXELS_EMU:
+            *value = MAX_EGL_FB_WIDTH * MAX_EGL_FB_HEIGHT;
+            break;
+
+        case EGL_NATIVE_VISUAL_TYPE_EMU:
+        case EGL_TRANSPARENT_TYPE_EMU:
+            *value = EGL_NONE_EMU;
+            break;
+
+        case EGL_COLOR_BUFFER_TYPE_EMU:
+            *value = EGL_RGB_BUFFER_EMU;
+            break;
+
+        case EGL_LEVEL_EMU:
+        case EGL_NATIVE_RENDERABLE_EMU:
+        case EGL_NATIVE_VISUAL_ID_EMU:
+        case EGL_SAMPLES_EMU:
+        case EGL_SAMPLE_BUFFERS_EMU:
+        case EGL_TRANSPARENT_RED_VALUE_EMU:
+        case EGL_TRANSPARENT_GREEN_VALUE_EMU:
+        case EGL_TRANSPARENT_BLUE_VALUE_EMU:
+        case EGL_LUMINANCE_SIZE_EMU:
+        case EGL_ALPHA_MASK_SIZE_EMU:
+            *value = 0;
             break;
 
         default:
@@ -905,5 +1163,73 @@ namespace eka2l1::dispatch {
 
         egl_push_error(sys, EGL_SUCCESS);
         return EGL_TRUE;
+    }
+
+    static egl_surface *get_bindable_pbuffer(system *sys, egl_surface_handle surface_h, std::int32_t buffer) {
+        egl_surface *surface = sys->get_dispatcher()->get_egl_controller().get_managed_surface(surface_h);
+        if (!surface || !surface->is_pbuffer_) {
+            egl_push_error(sys, EGL_BAD_SURFACE_EMU);
+            return nullptr;
+        }
+
+        if (buffer != EGL_BACK_BUFFER_EMU) {
+            egl_push_error(sys, EGL_BAD_PARAMETER_EMU);
+            return nullptr;
+        }
+
+        if (surface->texture_format_ == EGL_NO_TEXTURE_EMU) {
+            egl_push_error(sys, EGL_BAD_MATCH_EMU);
+            return nullptr;
+        }
+
+        return surface;
+    }
+
+    BRIDGE_FUNC_LIBRARY(egl_boolean, egl_bind_tex_image_emu, egl_display display, egl_surface_handle surface_h, std::int32_t buffer) {
+        egl_surface *surface = get_bindable_pbuffer(sys, surface_h, buffer);
+        if (!surface) {
+            return EGL_FALSE;
+        }
+
+        dispatch::egl_controller &controller = sys->get_dispatcher()->get_egl_controller();
+        egl_context *current = controller.current_context(sys->get_kernel_system()->crr_thread()->unique_id());
+
+        // Without a current OpenGL ES context there is no texture to bind to, and the call is ignored.
+        if (!current || (current->context_type() == EGL_VG_CONTEXT)) {
+            return EGL_TRUE;
+        }
+
+        // The default texture object (name 0) is not materialized, so there is nothing to attach the buffer to.
+        egl_context_es_shared *es_context = static_cast<egl_context_es_shared *>(current);
+        if (!es_context->binded_texture()) {
+            return EGL_TRUE;
+        }
+
+        // The pbuffer cannot be rendered to while bound, so a snapshot of it is equivalent to sharing its storage.
+        const std::uint32_t format = (surface->texture_format_ == EGL_TEXTURE_RGBA_EMU) ? GL_RGBA_EMU : GL_RGB_EMU;
+        gl_tex_image_2d_emu(sys, GL_TEXTURE_2D_EMU, 0, format, surface->dimension_.x, surface->dimension_.y, 0, format,
+            GL_UNSIGNED_BYTE_EMU, nullptr);
+
+        gles_driver_texture *tex = es_context->binded_texture();
+        if (!tex->handle_value()) {
+            return EGL_TRUE;
+        }
+
+        eka2l1::rect source_rect(eka2l1::vec2(0, 0), surface->dimension_);
+        source_rect.scale(surface->current_scale_);
+
+        es_context->cmd_builder_.copy_framebuffer_to_texture(surface->handle_, tex->handle_value(), 2, 0, source_rect,
+            eka2l1::rect(eka2l1::vec2(0, 0), surface->dimension_), false);
+
+        if (tex->auto_regenerate_mipmap()) {
+            es_context->cmd_builder_.regenerate_mips(tex->handle_value());
+            tex->set_mipmap_generated(true);
+        }
+
+        return EGL_TRUE;
+    }
+
+    BRIDGE_FUNC_LIBRARY(egl_boolean, egl_release_tex_image_emu, egl_display display, egl_surface_handle surface_h, std::int32_t buffer) {
+        return get_bindable_pbuffer(sys, surface_h, buffer) ? EGL_TRUE : EGL_FALSE;
     }
 }

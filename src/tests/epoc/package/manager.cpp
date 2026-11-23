@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <memory>
 
 using namespace eka2l1;
 
@@ -55,6 +56,16 @@ namespace {
     // C:\eka2l1test\addon.txt.
     static constexpr const char *IF_BLOCK_SP_SIS_PATH = "packageassets//ifblock_sp.sis";
 
+    // assets/casefold.pkg spells one directory two ways: it installs
+    // C:\EKA2L1Case\Sub\first.txt and C:\eka2l1case\sub\second.txt.
+    static constexpr const char *CASE_FOLD_SIS_PATH = "packageassets//casefold.sis";
+
+    // assets/nestedsis.pkg carries ifblock.sis as a plain file, installed to
+    // C:\eka2l1test\nested.sis, the way a SmartInstaller package ships the
+    // package it really installs.
+    static constexpr const char *NESTED_SIS_SIS_PATH = "packageassets//nestedsis.sis";
+    static constexpr manager::uid NESTED_SIS_PACKAGE_UID = 0xE1234573;
+
     // assets/embedder.pkg installs C:\eka2l1test\host.txt and embeds embedded.pkg,
     // which installs C:\eka2l1test\guest.txt under its own UID.
     static constexpr const char *EMBEDDER_SIS_PATH = "packageassets//embedder.sis";
@@ -64,8 +75,8 @@ namespace {
     // A package manager backed by a throwaway host folder mounted as drive C, with
     // a second one mounted read-only as drive Z to stand in for the ROM.
     struct package_test_env {
-        std::string root;
-        std::string rom_root;
+        host_path root;
+        host_path rom_root;
         io_system io;
         config::state conf;
         std::unique_ptr<manager::packages> packages;
@@ -84,9 +95,9 @@ namespace {
             file_system_inst physical_fs = create_physical_filesystem(epocver::epoc94, "");
             io.add_filesystem(physical_fs);
             io.mount_physical_path(drive_number::drive_c, drive_media::physical, io_attrib_internal,
-                common::utf8_to_ucs2(root));
+                root);
             io.mount_physical_path(drive_number::drive_z, drive_media::physical,
-                io_attrib_internal | io_attrib_write_protected, common::utf8_to_ucs2(rom_root));
+                io_attrib_internal | io_attrib_write_protected, rom_root);
 
             conf.storage = root;
             packages = std::make_unique<manager::packages>(&io, &conf, drive_number::drive_c);
@@ -99,7 +110,7 @@ namespace {
         }
 
         bool install_sis(const char *path) {
-            return packages->install_package(common::utf8_to_ucs2(path), drive_number::drive_c, nullptr, nullptr, true)
+            return packages->install_package(eka2l1::host_path{path}, drive_number::drive_c, nullptr, nullptr, true)
                 == package::installation_result_success;
         }
 
@@ -108,10 +119,10 @@ namespace {
         }
 
         // Put a file where a package's guest data would live, to watch it go.
-        void write_file(const std::u16string &path) {
-            io.create_directories(eka2l1::file_directory(path));
+        void write_file(const guest_path &path) {
+            io.create_directories(eka2l1::guest_path{eka2l1::file_directory(path)});
 
-            symfile file = io.open_file(path, WRITE_MODE | BIN_MODE);
+            symfile file = io.open_file(eka2l1::guest_path{path}, WRITE_MODE | BIN_MODE);
             REQUIRE(file);
 
             const char content[] = "data";
@@ -122,16 +133,36 @@ namespace {
         // Drive Z takes no writes through the io system, so its content is laid
         // down on the host the way a ROM dump already carries it.
         void write_rom_file(const std::string &relative) {
-            const std::string path = add_path(rom_root, relative);
-            common::create_directories(eka2l1::file_directory(path));
+            const host_path path = add_path(rom_root, relative);
+            common::create_directories(eka2l1::host_path{eka2l1::file_directory(path)});
 
-            std::ofstream file(path, std::ios::binary);
+            std::ofstream file(path.c_str(), std::ios::binary);
             file << "data";
         }
 
-        bool owns_file(package::object &pkg, const std::u16string &target) const {
+        // Host entries directly under the drive that carry `name`, matched
+        // case-insensitively. More than one is the installer having created a
+        // second spelling of a single guest directory, which only a
+        // case-sensitive host keeps apart.
+        std::size_t host_spellings(const std::string &name) const {
+            std::unique_ptr<common::dir_iterator> ite = common::make_directory_iterator(root, name);
+            if (!ite) {
+                return 0;
+            }
+
+            std::size_t count = 0;
+            common::dir_entry entry;
+
+            while (ite->next_entry(entry) == 0) {
+                count++;
+            }
+
+            return count;
+        }
+
+        bool owns_file(package::object &pkg, const guest_path &target) const {
             for (const package::file_description &desc : pkg.file_descriptions) {
-                if (common::compare_ignore_case(desc.target, target) == 0) {
+                if (desc.target == target) {
                     return true;
                 }
             }
@@ -140,9 +171,9 @@ namespace {
         }
 
         // Operation the package recorded for a file it owns, -1 when it owns none.
-        int file_operation(package::object &pkg, const std::u16string &target) const {
+        int file_operation(package::object &pkg, const guest_path &target) const {
             for (const package::file_description &desc : pkg.file_descriptions) {
-                if (common::compare_ignore_case(desc.target, target) == 0) {
+                if (desc.target == target) {
                     return static_cast<int>(desc.operation);
                 }
             }
@@ -151,9 +182,9 @@ namespace {
         }
 
         // Secure ID the package recorded for a file it owns.
-        epoc::uid file_secure_id(package::object &pkg, const std::u16string &target) const {
+        epoc::uid file_secure_id(package::object &pkg, const guest_path &target) const {
             for (const package::file_description &desc : pkg.file_descriptions) {
-                if (common::compare_ignore_case(desc.target, target) == 0) {
+                if (desc.target == target) {
                     return desc.sid;
                 }
             }
@@ -163,7 +194,7 @@ namespace {
 
         // Secure ID as the E32 image itself states it, the value the installer
         // should have recorded.
-        epoc::uid read_secure_id(const std::u16string &target) {
+        epoc::uid read_secure_id(const guest_path &target) {
             symfile file = io.open_file(target, READ_MODE | BIN_MODE);
             if (!file) {
                 return 0;
@@ -197,27 +228,27 @@ TEST_CASE("conditional_block_files_are_owned_by_the_package", "package_manager")
     REQUIRE(pkg != nullptr);
 
     // The file in the controller's own install block was always recorded...
-    REQUIRE(env.owns_file(*pkg, u"C:\\eka2l1test\\base.txt"));
+    REQUIRE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
     // ...the one behind the conditional is the regression: without it, uninstall
     // leaves the file (an app's _reg.rsc, in the case that surfaced this) behind.
-    REQUIRE(env.owns_file(*pkg, u"C:\\eka2l1test\\cond.txt"));
+    REQUIRE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
     // The branch that did not run installs nothing, so it owns nothing.
-    REQUIRE_FALSE(env.owns_file(*pkg, u"C:\\eka2l1test\\other.txt"));
+    REQUIRE_FALSE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\other.txt"}));
 }
 
 TEST_CASE("uninstall_deletes_conditional_block_files", "package_manager") {
     package_test_env env("uninstall_conditional_block");
     REQUIRE(env.install_if_block_sis());
 
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
     REQUIRE(env.packages->uninstall_package(*pkg));
 
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
 }
 
 TEST_CASE("uninstall_deletes_files_with_an_undefined_operation", "package_manager") {
@@ -230,18 +261,18 @@ TEST_CASE("uninstall_deletes_files_with_an_undefined_operation", "package_manage
     // A language-dependent file carries no explicit operation, yet the installer
     // writes it like any other. Uninstall used to skip exactly these, leaving
     // Opera Mobile's UI resources behind.
-    REQUIRE(env.file_operation(*pkg, u"C:\\eka2l1test\\lang.txt")
+    REQUIRE(env.file_operation(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\lang.txt"})
         == static_cast<int>(loader::ss_op::undefined));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\lang.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\lang.txt"}));
 
     REQUIRE(env.packages->uninstall_package(*pkg));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\lang.txt"));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\lang.txt"}));
 }
 
 TEST_CASE("uninstall_removes_the_registry_entry", "package_manager") {
     package_test_env env("uninstall_registry_entry");
     REQUIRE(env.install_if_block_sis());
-    REQUIRE(env.io.exist(u"C:\\sys\\install\\sisregistry\\e1234567\\00000000.reg"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\sys\\install\\sisregistry\\e1234567\\00000000.reg"}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
@@ -249,8 +280,8 @@ TEST_CASE("uninstall_removes_the_registry_entry", "package_manager") {
 
     // A registry left on disk comes back as an installed package on the next
     // load_registries(), for files that are no longer there.
-    REQUIRE_FALSE(env.io.exist(u"C:\\sys\\install\\sisregistry\\e1234567\\00000000.reg"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\sys\\install\\sisregistry\\e1234567"));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\sys\\install\\sisregistry\\e1234567\\00000000.reg"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\sys\\install\\sisregistry\\e1234567"}));
     REQUIRE(env.packages->package(IF_BLOCK_PACKAGE_UID, 0) == nullptr);
 }
 
@@ -270,15 +301,15 @@ TEST_CASE("uninstall_keeps_the_registries_of_other_indices", "package_manager") 
 
     const std::u16string base_registry = u"C:\\sys\\install\\sisregistry\\e1234567\\00000000.reg";
     const std::u16string augmentation_registry = u"C:\\sys\\install\\sisregistry\\e1234567\\00000001.reg";
-    REQUIRE(env.io.exist(base_registry));
-    REQUIRE(env.io.exist(augmentation_registry));
+    REQUIRE(env.io.exist(eka2l1::guest_path{base_registry}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{augmentation_registry}));
 
     package::object *base = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(base != nullptr);
     REQUIRE(env.packages->uninstall_package(*base));
 
-    REQUIRE_FALSE(env.io.exist(base_registry));
-    REQUIRE(env.io.exist(augmentation_registry));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{base_registry}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{augmentation_registry}));
 }
 
 TEST_CASE("installing_resolves_executable_secure_ids", "package_manager") {
@@ -287,12 +318,12 @@ TEST_CASE("installing_resolves_executable_secure_ids", "package_manager") {
 
     // The SID has to come from the extracted file: at registration time, when the
     // installer used to read it, the file is not on the drive yet.
-    const epoc::uid sid = env.read_secure_id(u"C:\\eka2l1test\\sample.dll");
+    const epoc::uid sid = env.read_secure_id(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"});
     REQUIRE(sid != 0);
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
-    REQUIRE(env.file_secure_id(*pkg, u"C:\\eka2l1test\\sample.dll") == sid);
+    REQUIRE(env.file_secure_id(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}) == sid);
 
     // Which is what makes a package findable by the app UID it installs.
     package::object *owner = env.packages->package_owning_executable(sid);
@@ -302,7 +333,7 @@ TEST_CASE("installing_resolves_executable_secure_ids", "package_manager") {
     REQUIRE(env.packages->package_owning_executable(sid + 1) == nullptr);
     REQUIRE(env.packages->package_owning_executable(0) == nullptr);
     // A plain data file carries no SID to confuse the lookup with.
-    REQUIRE(env.file_secure_id(*pkg, u"C:\\eka2l1test\\base.txt") == 0);
+    REQUIRE(env.file_secure_id(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}) == 0);
 }
 
 TEST_CASE("package_owning_file_looks_past_the_uid", "package_manager") {
@@ -315,12 +346,12 @@ TEST_CASE("package_owning_file_looks_past_the_uid", "package_manager") {
     REQUIRE(env.packages->package(IF_BLOCK_PACKAGE_UID - 1, 0) == nullptr);
 
     // Looking the file up instead finds the package, case-insensitively.
-    package::object *owner = env.packages->package_owning_file(u"c:\\eka2l1test\\CoNd.txt");
+    package::object *owner = env.packages->package_owning_file(eka2l1::guest_path{u"c:\\eka2l1test\\CoNd.txt"});
     REQUIRE(owner != nullptr);
     REQUIRE(owner->uid == IF_BLOCK_PACKAGE_UID);
 
-    REQUIRE(env.packages->package_owning_file(u"C:\\eka2l1test\\other.txt") == nullptr);
-    REQUIRE(env.packages->package_owning_file(u"") == nullptr);
+    REQUIRE(env.packages->package_owning_file(eka2l1::guest_path{u"C:\\eka2l1test\\other.txt"}) == nullptr);
+    REQUIRE(env.packages->package_owning_file(eka2l1::guest_path{u""}) == nullptr);
 }
 
 TEST_CASE("package_owning_file_accepts_another_directory", "package_manager") {
@@ -332,14 +363,14 @@ TEST_CASE("package_owning_file_accepts_another_directory", "package_manager") {
     // <drive>:\<name>.exe) no matter where the package put the file.
     for (const std::u16string &path : { std::u16string(u"C:\\base.txt"),
              std::u16string(u"C:\\system\\programs\\base.txt") }) {
-        package::object *owner = env.packages->package_owning_file(path);
+        package::object *owner = env.packages->package_owning_file(eka2l1::guest_path{path});
         REQUIRE(owner != nullptr);
         REQUIRE(owner->uid == IF_BLOCK_PACKAGE_UID);
     }
 
     // Only on the drive the package installed to, and only for a name it owns.
-    REQUIRE(env.packages->package_owning_file(u"E:\\base.txt") == nullptr);
-    REQUIRE(env.packages->package_owning_file(u"C:\\other.txt") == nullptr);
+    REQUIRE(env.packages->package_owning_file(eka2l1::guest_path{u"E:\\base.txt"}) == nullptr);
+    REQUIRE(env.packages->package_owning_file(eka2l1::guest_path{u"C:\\other.txt"}) == nullptr);
 }
 
 TEST_CASE("package_owning_file_refuses_an_ambiguous_name", "package_manager") {
@@ -355,14 +386,14 @@ TEST_CASE("package_owning_file_refuses_an_ambiguous_name", "package_manager") {
     other.vendor_name = u"EKA2L1";
 
     package::file_description desc;
-    desc.target = u"C:\\somewhere\\else\\base.txt";
+    desc.target = guest_path{u"C:\\somewhere\\else\\base.txt"};
     other.file_descriptions.push_back(desc);
 
     REQUIRE(env.packages->add_package(other, nullptr));
 
-    REQUIRE(env.packages->package_owning_file(u"C:\\system\\programs\\base.txt") == nullptr);
+    REQUIRE(env.packages->package_owning_file(eka2l1::guest_path{u"C:\\system\\programs\\base.txt"}) == nullptr);
     // The exact path still resolves: it names one package on its own.
-    package::object *owner = env.packages->package_owning_file(u"C:\\eka2l1test\\base.txt");
+    package::object *owner = env.packages->package_owning_file(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"});
     REQUIRE(owner != nullptr);
     REQUIRE(owner->uid == IF_BLOCK_PACKAGE_UID);
 }
@@ -431,16 +462,16 @@ TEST_CASE("uninstall_takes_embedded_packages_with_it", "package_manager") {
 
     REQUIRE(env.packages->package(EMBEDDER_PACKAGE_UID, 0) != nullptr);
     REQUIRE(env.packages->package(EMBEDDED_PACKAGE_UID, 0) != nullptr);
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\host.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\guest.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\host.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\guest.txt"}));
 
     package::object *embedder = env.packages->package(EMBEDDER_PACKAGE_UID, 0);
     REQUIRE(env.packages->uninstall_package(*embedder));
 
     // The embedded package is not a package the user ever installed on its own, so
     // leaving it behind leaves an entry nothing can reach and files nothing owns.
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\host.txt"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\guest.txt"));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\host.txt"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\guest.txt"}));
     REQUIRE(env.packages->package(EMBEDDER_PACKAGE_UID, 0) == nullptr);
     REQUIRE(env.packages->package(EMBEDDED_PACKAGE_UID, 0) == nullptr);
 }
@@ -449,28 +480,28 @@ TEST_CASE("uninstall_removes_the_private_directory_of_an_executable", "package_m
     package_test_env env("uninstall_private_dir");
     REQUIRE(env.install_if_block_sis());
 
-    const epoc::uid sid = env.read_secure_id(u"C:\\eka2l1test\\sample.dll");
+    const epoc::uid sid = env.read_secure_id(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"});
     REQUIRE(sid != 0);
 
     char private_path[64];
     std::snprintf(private_path, sizeof(private_path), "C:\\private\\%08x\\settings.dat", sid);
     const std::u16string private_file = common::utf8_to_ucs2(private_path);
-    env.write_file(private_file);
-    REQUIRE(env.io.exist(private_file));
+    env.write_file(eka2l1::guest_path{private_file});
+    REQUIRE(env.io.exist(eka2l1::guest_path{private_file}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
     REQUIRE(env.packages->uninstall_package(*pkg));
 
-    REQUIRE_FALSE(env.io.exist(private_file));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{private_file}));
 }
 
 TEST_CASE("upgrading_removes_files_the_new_version_dropped", "package_manager") {
     package_test_env env("upgrade_stale_files");
     REQUIRE(env.install_if_block_sis());
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\sample.dll"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}));
 
     REQUIRE(env.install_sis(IF_BLOCK_V2_SIS_PATH));
 
@@ -480,11 +511,11 @@ TEST_CASE("upgrading_removes_files_the_new_version_dropped", "package_manager") 
 
     // Files the new version still installs stay; the ones it dropped go, instead of
     // lingering forever because only the registration was replaced.
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\new.txt"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\sample.dll"));
-    REQUIRE_FALSE(env.io.exist(u"C:\\eka2l1test\\lang.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\new.txt"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}));
+    REQUIRE_FALSE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\lang.txt"}));
 }
 
 // Installer::UninstallPkg (secureswitools/swisistools/source/interpretsislib):
@@ -494,7 +525,7 @@ TEST_CASE("a_partial_upgrade_keeps_the_base_package", "package_manager") {
     package_test_env env("partial_upgrade_keeps_base");
     REQUIRE(env.install_if_block_sis());
 
-    const std::u16string base_controller = u"C:\\sys\\install\\sisregistry\\e1234567\\00000000_0000.ctl";
+    const guest_path base_controller = guest_path(u"C:\\sys\\install\\sisregistry\\e1234567\\00000000_0000.ctl");
     const std::u16string patch_controller = u"C:\\sys\\install\\sisregistry\\e1234567\\00000000_0001.ctl";
 
     REQUIRE(env.io.exist(base_controller));
@@ -502,22 +533,22 @@ TEST_CASE("a_partial_upgrade_keeps_the_base_package", "package_manager") {
 
     REQUIRE(env.install_sis(IF_BLOCK_PU_SIS_PATH));
 
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\sample.dll"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\patch.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\patch.txt"}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
-    REQUIRE(env.owns_file(*pkg, u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.owns_file(*pkg, u"C:\\eka2l1test\\sample.dll"));
-    REQUIRE(env.owns_file(*pkg, u"C:\\eka2l1test\\patch.txt"));
+    REQUIRE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}));
+    REQUIRE(env.owns_file(*pkg, eka2l1::guest_path{u"C:\\eka2l1test\\patch.txt"}));
 
     REQUIRE(env.packages->package(IF_BLOCK_PACKAGE_UID, 1) == nullptr);
     REQUIRE(env.packages->augmentations(IF_BLOCK_PACKAGE_UID).empty());
 
     REQUIRE(env.io.get_entry_info(base_controller)->size == base_controller_size);
-    REQUIRE(env.io.exist(patch_controller));
+    REQUIRE(env.io.exist(eka2l1::guest_path{patch_controller}));
 }
 
 // Installer::UninstallPkg removes, for an augmentation, only the entry carrying the
@@ -528,20 +559,20 @@ TEST_CASE("an_augmentation_keeps_the_base_package", "package_manager") {
     REQUIRE(env.install_sis(IF_BLOCK_SP_SIS_PATH));
     REQUIRE(env.install_sis(IF_BLOCK_SP_SIS_PATH));
 
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\base.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\cond.txt"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\sample.dll"));
-    REQUIRE(env.io.exist(u"C:\\eka2l1test\\addon.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\cond.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\sample.dll"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\addon.txt"}));
 
     package::object *base = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(base != nullptr);
     REQUIRE(base->install_type == package::install_type_normal_install);
-    REQUIRE(env.owns_file(*base, u"C:\\eka2l1test\\base.txt"));
-    REQUIRE_FALSE(env.owns_file(*base, u"C:\\eka2l1test\\addon.txt"));
+    REQUIRE(env.owns_file(*base, eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+    REQUIRE_FALSE(env.owns_file(*base, eka2l1::guest_path{u"C:\\eka2l1test\\addon.txt"}));
 
     std::vector<package::object *> extras = env.packages->augmentations(IF_BLOCK_PACKAGE_UID);
     REQUIRE(extras.size() == 1);
-    REQUIRE(env.owns_file(*extras[0], u"C:\\eka2l1test\\addon.txt"));
+    REQUIRE(env.owns_file(*extras[0], eka2l1::guest_path{u"C:\\eka2l1test\\addon.txt"}));
 }
 
 TEST_CASE("invalid_target_paths_are_rejected", "package_manager") {
@@ -559,12 +590,44 @@ TEST_CASE("invalid_target_paths_are_rejected", "package_manager") {
     REQUIRE(package::is_valid_target_path(u"C:\\resource\\apps\\\u4e2d\u6587.rsc"));
 }
 
+TEST_CASE("installing_folds_a_second_spelling_of_a_directory", "package_manager") {
+    package_test_env env("case_fold_target");
+    REQUIRE(env.install_sis(CASE_FOLD_SIS_PATH));
+
+    // Guest paths do not distinguish case, so one directory holds both files and
+    // either spelling reaches both. Resolving every target before the first file
+    // is written cannot get there -- a name only folds onto a directory already
+    // on disk -- and a case-sensitive host is left with "EKA2L1Case" beside
+    // "eka2l1case", each file reachable only through the spelling that made it.
+    // A case-insensitive host folds the two itself and notices nothing.
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\EKA2L1Case\\Sub\\first.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\EKA2L1Case\\Sub\\second.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1case\\sub\\first.txt"}));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1case\\sub\\second.txt"}));
+
+    REQUIRE(env.host_spellings("eka2l1case") == 1);
+}
+
+TEST_CASE("a_packaged_sis_is_installed_with_its_carrier", "package_manager") {
+    package_test_env env("nested_sis");
+    REQUIRE(env.install_sis(NESTED_SIS_SIS_PATH));
+
+    REQUIRE(env.packages->package(NESTED_SIS_PACKAGE_UID, 0) != nullptr);
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\nested.sis"}));
+
+    // A carried SIS is recognised by reading the file, which only says anything
+    // once the file is on the drive. The package it installs is the point of a
+    // SmartInstaller package.
+    REQUIRE(env.packages->package(IF_BLOCK_PACKAGE_UID, 0) != nullptr);
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\eka2l1test\\base.txt"}));
+}
+
 TEST_CASE("uninstall_leaves_rom_files_alone", "package_manager") {
     package_test_env env("uninstall_rom_file");
     REQUIRE(env.install_if_block_sis());
 
     env.write_rom_file("eka2l1test/rom.txt");
-    REQUIRE(env.io.exist(u"Z:\\eka2l1test\\rom.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"Z:\\eka2l1test\\rom.txt"}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
@@ -573,12 +636,12 @@ TEST_CASE("uninstall_leaves_rom_files_alone", "package_manager") {
     // own. Removing the package does not remove that file: it is not the
     // package's, and the emulated Z drive maps straight onto the user's ROM dump.
     package::file_description rom_file;
-    rom_file.target = u"Z:\\eka2l1test\\rom.txt";
+    rom_file.target = guest_path{u"Z:\\eka2l1test\\rom.txt"};
     rom_file.operation = static_cast<std::uint32_t>(loader::ss_op::install);
     pkg->file_descriptions.push_back(rom_file);
 
     REQUIRE(env.packages->uninstall_package(*pkg));
-    REQUIRE(env.io.exist(u"Z:\\eka2l1test\\rom.txt"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"Z:\\eka2l1test\\rom.txt"}));
 }
 
 TEST_CASE("uninstall_leaves_invalid_targets_alone", "package_manager") {
@@ -587,17 +650,17 @@ TEST_CASE("uninstall_leaves_invalid_targets_alone", "package_manager") {
 
     // A registry entry naming a path outside what a package may own does not earn a
     // deletion just because it is written down.
-    env.write_file(u"C:\\sys\\bin\\victim.exe");
-    REQUIRE(env.io.exist(u"C:\\sys\\bin\\victim.exe"));
+    env.write_file(eka2l1::guest_path{u"C:\\sys\\bin\\victim.exe"});
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\sys\\bin\\victim.exe"}));
 
     package::object *pkg = env.packages->package(IF_BLOCK_PACKAGE_UID, 0);
     REQUIRE(pkg != nullptr);
 
     package::file_description escape;
-    escape.target = u"C:\\eka2l1test\\..\\sys\\bin\\victim.exe";
+    escape.target = guest_path{u"C:\\eka2l1test\\..\\sys\\bin\\victim.exe"};
     escape.operation = static_cast<std::uint32_t>(loader::ss_op::install);
     pkg->file_descriptions.push_back(escape);
 
     REQUIRE(env.packages->uninstall_package(*pkg));
-    REQUIRE(env.io.exist(u"C:\\sys\\bin\\victim.exe"));
+    REQUIRE(env.io.exist(eka2l1::guest_path{u"C:\\sys\\bin\\victim.exe"}));
 }

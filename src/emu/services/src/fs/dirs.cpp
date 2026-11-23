@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <common/path_types.h>
 #include <services/fs/fs.h>
 #include <services/fs/std.h>
 
@@ -64,7 +65,7 @@ namespace eka2l1 {
     }
 
     void fs_server_client::open_dir(service::ipc_context *ctx) {
-        auto dir = ctx->get_argument_value<std::u16string>(0);
+        auto dir = ctx->get_path_argument(0);
         std::optional<epoc::uid_type> utype = ctx->get_argument_data_from_descriptor<epoc::uid_type>(2);
 
         if (!dir.has_value()) {
@@ -72,7 +73,7 @@ namespace eka2l1 {
             return;
         }
 
-        std::u16string path_relative = ss_path;
+        guest_path path_relative(ss_path);
         kernel_system *kern = ctx->sys->get_kernel_system();
 
         if (kern->is_eka1()) {
@@ -83,13 +84,13 @@ namespace eka2l1 {
             config::app_setting *setting = settings->get_setting(ctx->msg->own_thr->owning_process()->get_uid());
 
             if (setting && setting->t9_bypass_hack) {
-                if ((common::compare_ignore_case(dir.value(), u"*.dll") == 0) || ((common::compare_ignore_case(dir.value(), u"*.rsc") == 0))) {
-                    path_relative = T9LDB_PATH_FULL;
+                if ((dir.value() == u"*.dll") || ((dir.value() == u"*.rsc"))) {
+                    path_relative = guest_path(T9LDB_PATH_FULL);
                 }
             }
         }
 
-        dir.value() = get_full_symbian_path(path_relative, dir.value());
+        dir.value() = get_full_symbian_path(path_relative, eka2l1::guest_path{dir.value()});
         LOG_TRACE(SERVICE_EFSRV, "Opening directory: {}", common::ucs2_to_utf8(*dir));
 
         kernel::process *opener_pr = ctx->msg->own_thr ? ctx->msg->own_thr->owning_process() : nullptr;
@@ -102,7 +103,7 @@ namespace eka2l1 {
             if (j9_opener) {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs DirOpen bad-args raw='{}' from {}",
                     common::ucs2_to_utf8(*dir), opener_name);
-                note_j9_fs_miss(*dir, -6);
+                note_j9_fs_miss(dir->utf16(), -6);
             }
             ctx->complete(epoc::error_argument);
             return;
@@ -154,7 +155,7 @@ namespace eka2l1 {
             && (((*dir)[0] == u'Z') || ((*dir)[0] == u'z')) && ((*dir)[1] == u':')) {
             const std::string lower_dir = common::lowercase_string(common::ucs2_to_utf8(*dir));
             if (lower_dir.find("\\resource\\ive\\lib") != std::string::npos) {
-                std::u16string staged = *dir;
+                std::u16string staged = dir->utf16();
                 staged[0] = u'C';
                 if (auto staged_dir = io->open_dir(staged, utype.value(), attrib)) {
                     node->vfs_node = std::move(staged_dir);
@@ -178,7 +179,7 @@ namespace eka2l1 {
             const std::string lower_dir = common::lowercase_string(common::ucs2_to_utf8(*dir));
             const bool ive_lib = lower_dir.find("\\resource\\ive\\lib") != std::string::npos;
             if (ive_lib && (dir->size() >= 2) && ((*dir)[1] == u':')) {
-                std::u16string alt = *dir;
+                std::u16string alt = dir->utf16();
                 if ((alt[0] == u'C') || (alt[0] == u'c')) {
                     alt[0] = u'Z';
                 } else if ((alt[0] == u'Z') || (alt[0] == u'z')) {
@@ -198,7 +199,7 @@ namespace eka2l1 {
                 // J9 bootstrap expects its private suite directories to exist.
                 // Never create public paths here: FileConnection probes missing
                 // files using DirOpen(path + '\\'), including MP3/.part files.
-                const std::u16string create_dir = j9_dir_parent_to_create(*dir);
+                const std::u16string create_dir = j9_dir_parent_to_create(dir->utf16());
                 if (!create_dir.empty()) {
                     io->create_directories(create_dir);
                     node->vfs_node = io->open_dir(create_dir, utype.value(), attrib);
@@ -216,7 +217,7 @@ namespace eka2l1 {
                 LOG_WARN(EMULATED_STDOUT, "[j9-nf] fs DirOpen miss raw='{}' resolved='{}' ss='{}' from {}",
                     common::ucs2_to_utf8(*dir), common::ucs2_to_utf8(*dir),
                     common::ucs2_to_utf8(ss_path), opener_name);
-                note_j9_fs_miss(*dir, -12);
+                note_j9_fs_miss(dir->utf16(), -12);
             }
             // RDir::Open reports a missing directory as KErrPathNotFound.
             // Native Mediator treats an absent optional events directory as

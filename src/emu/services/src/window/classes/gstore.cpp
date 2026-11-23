@@ -124,7 +124,7 @@ namespace eka2l1::epoc {
         lastest_segment->type_ = gdi_store_command_segment_redraw;
     }
 
-    bool gdi_store_command_collection::clean_old_nonredraw_segments() {
+    bool gdi_store_command_collection::clean_old_nonredraw_segments(const segment_flattener &flatten) {
         if (segments_.empty()) {
             return false;
         }
@@ -140,19 +140,15 @@ namespace eka2l1::epoc {
         // Because some non-redraw segment may need to stay there.
         bool need_invalidate = false;
         std::int32_t left_to_keep = KEEP_NON_REDRAW_SEGMENTS;
+        std::vector<bool> expired(segments_.size(), false);
 
         if (non_redraw_segment_count > LIMIT_NON_REDRAW_SEGMENTS) {
-            for (std::int32_t i = 0; i < static_cast<std::int32_t>(segments_.size()); ) {
+            for (std::size_t i = 0; i < segments_.size(); i++) {
                 if ((segments_[i].get() != current_segment_) && (segments_[i]->type_ == gdi_store_command_segment_non_redraw)) {
-                    if (left_to_keep-- > 0) {
-                        i++;
-                        continue;
-                    } else {
-                        segments_.erase(segments_.begin() + i);
+                    if (left_to_keep-- <= 0) {
+                        expired[i] = true;
                         need_invalidate = true;
                     }
-                } else {
-                    i++;
                 }
             }
         }
@@ -163,15 +159,11 @@ namespace eka2l1::epoc {
             // Try to make it able to be cleaned (this routine is actually from OSS)
             if (current_time - current_segment_->creation_date_ > AGE_LIMIT_NONREDRAW_US) {
                 // Try to find older segments
-                for (std::size_t i = 0; i < segments_.size(); ) {
+                for (std::size_t i = 0; i < segments_.size(); i++) {
                     if ((segments_[i].get() != current_segment_) && (segments_[i]->type_ == gdi_store_command_segment_non_redraw)) {
                         if ((current_time - segments_[i]->creation_date_) > AGE_LIMIT_NONREDRAW_US * 2) {
-                            segments_.erase(segments_.begin() + i);
-                        } else {
-                            i++;
+                            expired[i] = true;
                         }
-                    } else {
-                        i++;
                     }
                 }
 
@@ -179,6 +171,32 @@ namespace eka2l1::epoc {
                 current_segment_ = nullptr;
 
                 need_invalidate = true;
+            }
+        }
+
+        const auto last_expired = std::find(expired.rbegin(), expired.rend(), true);
+        if (last_expired == expired.rend()) {
+            return need_invalidate;
+        }
+
+        // Older segments may be painted over by an expired one, so they have to go into the merge too.
+        const std::size_t merge_count = std::distance(last_expired, expired.rend());
+        std::unique_ptr<gdi_store_command_segment> merged = flatten ? flatten(segments_.data(), merge_count) : nullptr;
+
+        if (merged) {
+            for (std::size_t i = 0; i < merge_count; i++) {
+                if (segments_[i].get() == current_segment_) {
+                    current_segment_ = nullptr;
+                }
+            }
+
+            segments_.erase(segments_.begin(), segments_.begin() + merge_count);
+            segments_.insert(segments_.begin(), std::move(merged));
+        } else {
+            for (std::size_t i = expired.size(); i-- > 0;) {
+                if (expired[i]) {
+                    segments_.erase(segments_.begin() + i);
+                }
             }
         }
 
@@ -228,6 +246,14 @@ namespace eka2l1::epoc {
             build_command_draw_rect(command.get_data_struct_const<gdi_store_command_draw_rect_data>());
             break;
 
+        case gdi_store_command_xor_rect:
+            build_command_draw_rect(command.get_data_struct_const<gdi_store_command_draw_rect_data>(), true);
+            break;
+
+        case gdi_store_command_blend_rect:
+            build_command_draw_rect(command.get_data_struct_const<gdi_store_command_draw_rect_data>(), false, true);
+            break;
+
         case gdi_store_command_draw_line:
             build_command_draw_line(command.get_data_struct_const<gdi_store_command_draw_line_data>());
             break;
@@ -242,6 +268,10 @@ namespace eka2l1::epoc {
 
         case gdi_store_command_draw_bitmap:
             build_command_draw_bitmap(command.get_data_struct_const<gdi_store_command_draw_bitmap_data>());
+            break;
+
+        case gdi_store_command_draw_raw_texture:
+            build_command_draw_raw_texture(command.get_data_struct_const<gdi_store_command_draw_raw_texture_data>());
             break;
 
         case gdi_store_command_disable_clip:
@@ -265,14 +295,28 @@ namespace eka2l1::epoc {
         }
     }
 
-    void gdi_command_builder::build_command_draw_rect(const gdi_store_command_draw_rect_data &cmd) {
+    void gdi_command_builder::build_command_draw_rect(const gdi_store_command_draw_rect_data &cmd, const bool exclusive_or, const bool blend) {
         eka2l1::rect scaled_rect = cmd.rect_;
         scaled_rect.top += position_;
 
         scale_rectangle(scaled_rect, scale_factor_);
 
         builder_.set_brush_color_detail(cmd.color_);
+        if (exclusive_or) {
+            builder_.set_feature(drivers::graphics_feature::blend, true);
+            builder_.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+                drivers::blend_factor::one_minus_current_color, drivers::blend_factor::one_minus_frag_out_color,
+                drivers::blend_factor::zero, drivers::blend_factor::one);
+        } else if (blend) {
+            builder_.set_feature(drivers::graphics_feature::blend, true);
+            builder_.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+                drivers::blend_factor::frag_out_alpha, drivers::blend_factor::one_minus_frag_out_alpha,
+                drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
+        }
         builder_.draw_rectangle(scaled_rect);
+        if (exclusive_or || blend) {
+            builder_.set_feature(drivers::graphics_feature::blend, false);
+        }
     }
 
     void gdi_command_builder::build_command_draw_line(const gdi_store_command_draw_line_data &cmd) {
@@ -323,9 +367,11 @@ namespace eka2l1::epoc {
         
         std::int16_t scaled_font_size = text_font->of_info.metrics.max_height;
         std::uint32_t metric_identifier = text_font->of_info.metric_identifier;
+        std::uint32_t layout_metric_identifier = 0;
         float scale_to_pass = 1.0f;
 
         if (text_font->of_info.adapter->vectorizable()) {
+            layout_metric_identifier = metric_identifier;
             scaled_font_size = static_cast<std::int16_t>(scaled_font_size * scale_factor_);
             metric_identifier = scaled_font_size;       // Vectorizable font metric identifier is font size
 
@@ -347,7 +393,7 @@ namespace eka2l1::epoc {
         scale_rectangle(scaled_text_box, scale_factor_);
 
         text_font->atlas.draw_text(cmd.string_, scaled_text_box, static_cast<epoc::text_alignment>(cmd.alignment_),
-            driver_, builder_, { scale_to_pass, scale_to_pass }, premultiplied_target_);
+            driver_, builder_, { scale_to_pass, scale_to_pass }, premultiplied_target_, layout_metric_identifier, scale_factor_);
     }
 
     void gdi_command_builder::build_command_draw_raw_texture(const gdi_store_command_draw_raw_texture_data &cmd) {
@@ -356,8 +402,16 @@ namespace eka2l1::epoc {
 
         scale_rectangle(scaled_dest_rect, scale_factor_);
 
+        // The texture holds premultiplied pixels and stays transparent where nothing was drawn.
+        builder_.set_feature(drivers::graphics_feature::blend, true);
+        builder_.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+            drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha,
+            drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
+        builder_.set_texture_filter(cmd.texture_, false, texture_filter_);
+        builder_.set_texture_filter(cmd.texture_, true, texture_filter_);
         builder_.draw_bitmap(cmd.texture_, 0, scaled_dest_rect, eka2l1::rect{}, eka2l1::vec2(0, 0), 0.0f,
             cmd.flags_);
+        builder_.set_feature(drivers::graphics_feature::blend, false);
     }
 
     void gdi_command_builder::build_command_draw_bitmap(const gdi_store_command_draw_bitmap_data &cmd) {
@@ -488,8 +542,19 @@ namespace eka2l1::epoc {
             builder_.set_texture_filter(mask_bitmap_drv, true, texture_filter_);
         }
 
+        const bool brush_pattern = (cmd.gdi_flags_ & GDI_STORE_COMMAND_BRUSH_PATTERN) != 0;
+        if (brush_pattern) {
+            builder_.set_texture_addressing_mode(source_bitmap_drv, drivers::addressing_direction::s, drivers::addressing_option::repeat);
+            builder_.set_texture_addressing_mode(source_bitmap_drv, drivers::addressing_direction::t, drivers::addressing_option::repeat);
+        }
+
         builder_.draw_bitmap(source_bitmap_drv, mask_bitmap_drv, scaled_dest_rect, adjusted_source_rect,
             eka2l1::vec2(0, 0), 0.0f, flags);
+
+        if (brush_pattern) {
+            builder_.set_texture_addressing_mode(source_bitmap_drv, drivers::addressing_direction::s, drivers::addressing_option::clamp_to_edge);
+            builder_.set_texture_addressing_mode(source_bitmap_drv, drivers::addressing_direction::t, drivers::addressing_option::clamp_to_edge);
+        }
 
         if (mask_bitmap_bw) {
             builder_.set_feature(drivers::graphics_feature::blend, false);
@@ -509,11 +574,7 @@ namespace eka2l1::epoc {
         clipped.add_rect(rect_advanced);
         clipped = clipped.intersect(clip_);
 
-        if ((clipped.rects_.size() == 1) && (clipped.rects_[0].size == eka2l1::vec2(1, 1))) {
-            LOG_TRACE(KERNEL, "HI!");
-        }
-        
-        builder_.clip_bitmap_region(clipped, scale_factor_);
+        clip_to_region(clipped);
     }
 
     void gdi_command_builder::build_command_set_clip_rect_multiple(const gdi_store_command_set_clip_rect_multiple_data &cmd) {
@@ -521,6 +582,17 @@ namespace eka2l1::epoc {
         clipped.rects_.insert(clipped.rects_.begin(), cmd.rects_, cmd.rects_ + cmd.rect_count_);
         clipped.advance(position_);
         clipped = clipped.intersect(clip_);
+
+        clip_to_region(clipped);
+    }
+
+    void gdi_command_builder::clip_to_region(const common::region &clipped) {
+        if (clipped.empty()) {
+            builder_.set_feature(drivers::graphics_feature::stencil_test, false);
+            builder_.set_feature(drivers::graphics_feature::clipping, true);
+            builder_.clip_bitmap_rect(eka2l1::rect({ 0, 0 }, { 0, 0 }));
+            return;
+        }
 
         builder_.clip_bitmap_region(clipped, scale_factor_);
     }

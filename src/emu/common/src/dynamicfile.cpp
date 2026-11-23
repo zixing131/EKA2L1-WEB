@@ -26,7 +26,7 @@
 
 namespace eka2l1::common {
 
-    dynamic_ifile::dynamic_ifile(const std::string &name)
+    dynamic_ifile::dynamic_ifile(const host_path &name)
         : fp_(nullptr), ucs2_(-1), eof_(false), fail_(false) {
         fp_ = common::open_c_file(name, "rb");
         if (!fp_) {

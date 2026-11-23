@@ -30,6 +30,8 @@
 #include <utils/cardinality.h>
 #include <utils/consts.h>
 
+#include <utility>
+
 namespace eka2l1 {
     static bool read_str16_aligned(common::ro_stream *stream, std::u16string &dat) {
         char len = 0;
@@ -61,8 +63,15 @@ namespace eka2l1 {
         return true;
     }
 
+    static bool read_path_aligned(common::ro_stream *stream, guest_path &path) {
+        std::u16string text;
+        if (!read_str16_aligned(stream, text) || text.find(u'\0') != text.npos) return false;
+        path = guest_path(std::move(text));
+        return true;
+    }
+
     static bool read_non_localisable_info(common::ro_stream *stream, apa_app_registry &reg, const drive_number land_drive) {
-        if (!read_str16_aligned(stream, reg.localised_info_rsc_path)) {
+        if (!read_path_aligned(stream, reg.localised_info_rsc_path)) {
             return false;
         }
 
@@ -107,8 +116,21 @@ namespace eka2l1 {
             return false;
         }
 
-        // TODO: Read MIME infos, and file ownership lists
+        std::int16_t datatype_count = 0;
+        if (stream->read(&datatype_count, sizeof(datatype_count)) != sizeof(datatype_count) || datatype_count < 0) {
+            return false;
+        }
 
+        std::vector<data_type> data_types;
+        for (std::int16_t i = 0; i < datatype_count; ++i) {
+            data_type type;
+            if (stream->read(&type.priority_, sizeof(type.priority_)) != sizeof(type.priority_)
+                || !loader::read_resource_string(*stream, type.type_)) {
+                return false;
+            }
+            data_types.push_back(std::move(type));
+        }
+        reg.data_types = std::move(data_types);
         return true;
     }
 
@@ -188,7 +210,7 @@ namespace eka2l1 {
             return false;
         }
 
-        reg.icon_file_path = cap;
+        reg.icon_file_path = guest_path(cap);
 
         std::uint16_t view_count = 0;
         if (stream->read(&view_count, 2) != 2) {
@@ -213,7 +235,7 @@ namespace eka2l1 {
                 return false;
             }
             reg.view_datas[i].icon_count_ = icon_count_temp;
-            if (!read_str16_aligned(stream, reg.view_datas[i].icon_path_)) {
+            if (!read_path_aligned(stream, reg.view_datas[i].icon_path_)) {
                 return false;
             }
         }
@@ -529,7 +551,7 @@ namespace eka2l1 {
             const std::size_t crr_pos = stream->tell();
             stream->seek(view_data_offset, common::seek_where::beg);
 
-            view_data the_view_data;
+            view_data the_view_data{};
 
             if (stream->read(&the_view_data.uid_, sizeof(std::uint32_t)) != sizeof(std::uint32_t)) {
                 return false;
@@ -539,16 +561,31 @@ namespace eka2l1 {
                 return false;
             }
 
-            if (stream->read(&the_view_data.icon_count_, sizeof(std::uint16_t)) != sizeof(std::uint16_t)) {
+            utils::cardinality caption_count;
+            if (!caption_count.internalize(*stream)) {
                 return false;
             }
 
-            std::optional<std::u16string> cap_string = read_caption_list_and_find_best();
-            if (!cap_string) {
+            // View captions are inline descriptors followed by their language code.
+            for (std::uint32_t caption_index = 0; caption_index < caption_count.value(); caption_index++) {
+                std::u16string caption;
+                std::uint16_t language_code = 0;
+                if (!epoc::read_des_string(caption, stream, true)
+                    || stream->read(&language_code, sizeof(language_code)) != sizeof(language_code)) {
+                    return false;
+                }
+                if (the_view_data.caption_.empty() || static_cast<language>(language_code) == lang) {
+                    the_view_data.caption_ = std::move(caption);
+                }
+            }
+
+            utils::cardinality icon_count;
+            if (!icon_count.internalize(*stream)) {
                 return false;
             }
 
-            the_view_data.caption_ = std::move(cap_string.value());
+            the_view_data.icon_count_ = icon_count.value();
+            reg.view_datas.push_back(std::move(the_view_data));
 
             stream->seek(crr_pos, common::seek_where::beg);
         }
