@@ -5,7 +5,6 @@
 #define CITRA_IGNORE_EXIT(x)
 
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cinttypes>
 #include <common/log.h>
@@ -33,14 +32,12 @@
 #define DPO(s) glue(DataProcessingOperands, s)
 #define ROTATE_RIGHT_32(n, i) std::rotr(static_cast<std::uint32_t>(n), (i))
 
-#ifdef _MSC_VER
-#define DYNCOM_FORCE_INLINE __forceinline
-#else
-#define DYNCOM_FORCE_INLINE __attribute__((always_inline)) inline
-#endif
+static bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
+    const bool n_flag = cpu->NFlag != 0;
+    const bool z_flag = cpu->ZFlag != 0;
+    const bool c_flag = cpu->CFlag != 0;
+    const bool v_flag = cpu->VFlag != 0;
 
-// Build the same NZCV truth table used by the native interpreter.
-static constexpr bool CondPassedRef(unsigned int cond, bool n_flag, bool z_flag, bool c_flag, bool v_flag) {
     switch (cond) {
     case ConditionCode::EQ:
         return z_flag;
@@ -76,24 +73,6 @@ static constexpr bool CondPassedRef(unsigned int cond, bool n_flag, bool z_flag,
     }
 
     return false;
-}
-
-static constexpr auto cond_passed_masks = [] {
-    std::array<std::uint16_t, 16> masks{};
-    for (unsigned cond = 0; cond < masks.size(); ++cond) {
-        for (unsigned flags = 0; flags < 16; ++flags) {
-            if (CondPassedRef(cond, flags & 8, flags & 4, flags & 2, flags & 1)) {
-                masks[cond] |= static_cast<std::uint16_t>(1u << flags);
-            }
-        }
-    }
-    return masks;
-}();
-
-DYNCOM_FORCE_INLINE static bool CondPassed(const ARMul_State *cpu, unsigned int cond) {
-    const unsigned flags = ((cpu->NFlag != 0) << 3) | ((cpu->ZFlag != 0) << 2)
-        | ((cpu->CFlag != 0) << 1) | (cpu->VFlag != 0);
-    return (cond_passed_masks[cond & 15] >> flags) & 1;
 }
 
 // Register-list size for LDM/STM. The bit-at-a-time loop this replaces ran on
@@ -858,6 +837,12 @@ static void EvalGetAddr(ARMul_State *cpu, unsigned int idx, unsigned int inst, u
 // encodings in compiled Symbian code), everything else takes the out-of-line
 // switch. This removes one call per executed memory/ALU instruction on the
 // hot path without duplicating the full evaluators 20+ times.
+#ifdef _MSC_VER
+#define DYNCOM_FORCE_INLINE __forceinline
+#else
+#define DYNCOM_FORCE_INLINE __attribute__((always_inline)) inline
+#endif
+
 DYNCOM_FORCE_INLINE static unsigned int ShtOpEval(ARMul_State *cpu, unsigned int idx, unsigned int sht_oper) {
     if (idx <= SHTOP_ROTATED_IMMEDIATE) {
         cpu->shifter_carry_out = (idx == SHTOP_IMMEDIATE) ? cpu->CFlag : (sht_oper >> 31);

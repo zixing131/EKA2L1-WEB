@@ -1424,12 +1424,6 @@ static void main_loop() {
         }
     }
 
-    // A guest slice can queue a redraw after the pre-slice flush. Commit
-    // any now-due updates before presenting to avoid a one-RAF delay.
-    if (g_state.winserv) {
-        g_state.winserv->get_anim_scheduler()->flush_pending_redraws();
-    }
-
     // Drain the graphics command queue on the browser main thread (the only
     // thread allowed to touch WebGL). This executes window-server composition
     // and the present command lists queued by the screen redraw callbacks.
