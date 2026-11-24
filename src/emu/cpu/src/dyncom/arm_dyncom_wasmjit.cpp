@@ -30,6 +30,7 @@
 
 #include <emscripten/em_js.h>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -175,6 +176,7 @@ namespace eka2l1::arm::dyncom_jit {
             I32_SHL = 0x74,
             I32_SHR_S = 0x75,
             I32_SHR_U = 0x76,
+            I32_ROTR = 0x78,
             I64_ADD = 0x7C,
             I64_SHR_U = 0x88,
             I32_WRAP_I64 = 0xA7,
@@ -713,22 +715,22 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.local_get(L_ADDR); w_.const_i32(~page_mask_); w_.u8(op::I32_AND);
                 w_.u8(op::I32_NE);
                 w_.local_get(L_T2); w_.load_u32(offsetof(r12l1::tlb_entry, host_base));
-                w_.u8(op::I32_EQZ);
+                w_.local_tee(L_T2); w_.u8(op::I32_EQZ);
                 w_.u8(op::I32_OR);
                 w_.if_void();
                 emit_exit_const_pc(pc_, count_); // re-run this inst on the interpreter
                 w_.end();
 
                 // host = entry.host_base + (addr & page_mask)
-                w_.local_get(L_T2); w_.load_u32(offsetof(r12l1::tlb_entry, host_base));
+                w_.local_get(L_T2);
                 w_.local_get(L_ADDR); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
                 w_.u8(op::I32_ADD);
             }
 
             void emit_reg_read_wa(unsigned r);
-            void emit_ldm_word_load(int i, bool load_pc);
-            void emit_stm_word_store(int i, unsigned Rn);
-            void emit_flag_writeback_only_and_count(int extra);
+            void emit_scaled_index(unsigned reg, std::uint32_t inst);
+            void emit_ldm_word_load(int i, std::uint32_t offset);
+            void emit_stm_word_store(int i, unsigned Rn, std::uint32_t offset);
             bool emit_alu(const inst_class &cls, arm_inst *base);
             bool emit_ldst(const inst_class &cls, arm_inst *base);
             bool emit_ldm_stm(const inst_class &cls, arm_inst *base, bool &terminates);
@@ -929,6 +931,37 @@ namespace eka2l1::arm::dyncom_jit {
             }
         }
 
+        void block_compiler::emit_scaled_index(unsigned reg, std::uint32_t inst) {
+            const unsigned amount = (inst >> 7) & 31;
+            const unsigned shift = (inst >> 5) & 3;
+            switch (shift) {
+            case 0: // LSL
+                emit_reg_read_wa(reg);
+                if (amount) { w_.const_i32(amount); w_.u8(op::I32_SHL); }
+                break;
+            case 1: // LSR #32 yields zero. Wasm masks shift counts to five bits.
+                if (amount) {
+                    emit_reg_read_wa(reg); w_.const_i32(amount); w_.u8(op::I32_SHR_U);
+                } else {
+                    w_.const_i32(0);
+                }
+                break;
+            case 2: // ASR #32 repeats the sign bit.
+                emit_reg_read_wa(reg); w_.const_i32(amount ? amount : 31); w_.u8(op::I32_SHR_S);
+                break;
+            case 3: // ROR #0 encodes RRX, using carry without changing it.
+                emit_reg_read_wa(reg);
+                if (amount) {
+                    w_.const_i32(amount); w_.u8(op::I32_ROTR);
+                } else {
+                    w_.const_i32(1); w_.u8(op::I32_SHR_U);
+                    w_.local_get(L_C); w_.const_i32(31); w_.u8(op::I32_SHL);
+                    w_.u8(op::I32_OR);
+                }
+                break;
+            }
+        }
+
         bool block_compiler::emit_ldst(const inst_class &cls, arm_inst *base) {
             ldst_inst *c = (ldst_inst *)base->component;
 
@@ -941,12 +974,15 @@ namespace eka2l1::arm::dyncom_jit {
             // (halfword/signed) encoding, which splits its 8-bit immediate.
             std::uint32_t imm_off = 0;
             unsigned Rm = inst & 0xF;
-            bool writeback_pre = false, writeback_post = false, reg_offset = false;
+            bool writeback_pre = false, writeback_post = false, reg_offset = false, scaled = false;
 
             switch (c->addr_mode) {
             case ADDRMODE_LNSW_IMM_OFFSET:
                 imm_off = inst & 0xFFF;
                 break;
+            case ADDRMODE_LNSW_SCALED_REG_OFFSET:
+                scaled = true;
+                [[fallthrough]];
             case ADDRMODE_LNSW_REG_OFFSET:
                 reg_offset = true;
                 break;
@@ -954,6 +990,9 @@ namespace eka2l1::arm::dyncom_jit {
                 imm_off = inst & 0xFFF;
                 writeback_pre = true;
                 break;
+            case ADDRMODE_LNSW_SCALED_REG_PRE:
+                scaled = true;
+                [[fallthrough]];
             case ADDRMODE_LNSW_REG_PRE:
                 reg_offset = true;
                 writeback_pre = true;
@@ -962,6 +1001,9 @@ namespace eka2l1::arm::dyncom_jit {
                 imm_off = inst & 0xFFF;
                 writeback_post = true;
                 break;
+            case ADDRMODE_LNSW_SCALED_REG_POST:
+                scaled = true;
+                [[fallthrough]];
             case ADDRMODE_LNSW_REG_POST:
                 reg_offset = true;
                 writeback_post = true;
@@ -973,7 +1015,7 @@ namespace eka2l1::arm::dyncom_jit {
                 reg_offset = true;
                 break;
             default:
-                return false; // scaled-register & misc pre/post: interpreter
+                return false; // miscellaneous pre/post: interpreter
             }
 
             // PC destinations/sources switch modes / need extra rules, and a
@@ -992,21 +1034,26 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.if_void();
             }
 
-            // ADDR = access address (post-indexed accesses use the original Rn)
-            if (writeback_post) {
-                emit_reg_read_wa(Rn);
-                w_.local_set(L_ADDR);
-            } else {
-                emit_reg_read_wa(Rn);
+            // Add the index to the base already on the stack.
+            const auto emit_indexed_address = [&] {
                 if (reg_offset) {
-                    emit_reg_read_wa(Rm);
-                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
+                    if (scaled) {
+                        emit_scaled_index(Rm, inst);
+                    } else {
+                        emit_reg_read_wa(Rm);
+                    }
                 } else if (imm_off) {
                     w_.const_i32(imm_off);
-                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
+                } else {
+                    return;
                 }
-                w_.local_set(L_ADDR);
-            }
+                w_.u8(up ? op::I32_ADD : op::I32_SUB);
+            };
+
+            // ADDR = access address (post-indexed accesses use the original Rn).
+            emit_reg_read_wa(Rn);
+            if (!writeback_post) emit_indexed_address();
+            w_.local_set(L_ADDR);
 
             // Resolve the host pointer FIRST (bails happen before any side
             // effect), capture it in T0, then do writeback + the access.
@@ -1034,13 +1081,7 @@ namespace eka2l1::arm::dyncom_jit {
                 // access itself used the original Rn already in L_ADDR)
                 w_.local_get(L_STATE);
                 w_.local_get(L_ADDR);
-                if (reg_offset) {
-                    emit_reg_read_wa(Rm);
-                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
-                } else if (imm_off) {
-                    w_.const_i32(imm_off);
-                    w_.u8(up ? op::I32_ADD : op::I32_SUB);
-                }
+                emit_indexed_address();
                 w_.store_u32(off_reg(Rn));
             }
 
@@ -1069,11 +1110,9 @@ namespace eka2l1::arm::dyncom_jit {
             return true;
         }
 
-        // LDM/STM, plain-register form only (no S/user-bank bit). Strategy:
-        // pre-resolve the host pointers for the first and last byte of the
-        // whole range BEFORE any side effect (bail-idempotent), then perform
-        // writeback and the per-word accesses through the captured bases —
-        // immune to concurrent TLB invalidation mid-op.
+        // LDM/STM, plain-register form only (no S/user-bank bit). A transfer
+        // inside one page needs only one TLB lookup and one base address.
+        // Let the interpreter handle a page crossing before any side effects.
         bool block_compiler::emit_ldm_stm(const inst_class &cls, arm_inst *base, bool &terminates) {
             ldst_inst *c = (ldst_inst *)base->component;
             const std::uint32_t inst = c->inst;
@@ -1088,15 +1127,7 @@ namespace eka2l1::arm::dyncom_jit {
                 return false;
             }
             const bool load_pc = cls.is_ldm && (list & (1u << 15));
-            if (cls.is_stm && (list & (1u << 15))) {
-                // STM with PC stores pc+8: supported via constant below.
-            }
-
-            int count = 0;
-            for (int i = 0; i < 16; i++) {
-                if (list & (1u << i)) count++;
-            }
-            const std::uint32_t span = static_cast<std::uint32_t>(count) * 4;
+            const std::uint32_t span = static_cast<std::uint32_t>(std::popcount(list)) * 4;
             const bool writeback = (inst >> 21) & 1;
 
             const unsigned cond = base->cond;
@@ -1132,24 +1163,18 @@ namespace eka2l1::arm::dyncom_jit {
             if (start_delta) { w_.const_i32(static_cast<std::uint32_t>(start_delta)); w_.u8(op::I32_ADD); }
             w_.local_set(L_ADDR);
 
-            // hostA = resolve(start) (bails if unmapped)
+            // Bail before writeback or a partial transfer if the last byte
+            // lies on another page.
+            w_.const_i32(page_mask_ - span + 1);
+            w_.local_get(L_ADDR); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
+            w_.u8(op::I32_LT_U);
+            w_.if_void();
+            emit_exit_const_pc(pc_, count_);
+            w_.end();
+
             emit_tlb_host_addr_or_bail(perm_off);
             w_.local_set(L_T0);
-            // keep the guest start address in T1 for per-word page checks
-            w_.local_get(L_ADDR); w_.local_set(L_T1);
-            w_.local_get(L_ADDR); w_.const_i32(span - 1); w_.u8(op::I32_ADD); w_.local_set(L_ADDR);
-            emit_tlb_host_addr_or_bail(perm_off);
-            // hostB currently points at start+span-1; rebase to the second page start
-            // hostB_base = hostB - ((start+span-1) & page_mask)
-            w_.local_get(L_ADDR); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
-            w_.u8(op::I32_SUB);
-            // (stack: hostB_pagebase)  boundary = (start+span-1) & ~page_mask
-            w_.local_set(L_ADDR); // ADDR = hostB page base (guest start addr no longer needed in ADDR)
 
-            // From here: T1 = guest start, T0 = hostA, ADDR = hostB page base.
-
-            // writeback BEFORE the accesses (mirrors get_addr-then-access; safe
-            // now that both pages are resolved and captured).
             if (writeback) {
                 w_.local_get(L_STATE);
                 w_.local_get(L_T3);
@@ -1157,49 +1182,23 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.store_u32(off_reg(Rn));
             }
 
-            std::uint32_t word_index = 0;
-            for (int i = 0; i < 16; i++) {
+            std::uint32_t offset = 0;
+            for (int i = 0; i < 16; ++i) {
                 if (!(list & (1u << i))) continue;
-                const std::uint32_t off = word_index * 4;
-                word_index++;
-
-                // host = (same page as start ? hostA : hostB_base + in-page offset)
-                // guest addr g = start + off; same-page iff (g & ~mask) == (start & ~mask)
-                // Emit: g = T1 + off; if ((g ^ T1) & ~mask) -> cross -> hostB_base + (g & mask) else hostA + off
-                // Simpler branch-free: cross = ((T1 & mask) + off) >= page_size
-                // host = cross ? (ADDR + (g & mask)) : (T0 + off)
-                w_.local_get(L_T1); w_.const_i32(page_mask_); w_.u8(op::I32_AND);
-                w_.const_i32(off); w_.u8(op::I32_ADD);
-                w_.const_i32(page_mask_ + 1); w_.u8(op::I32_LT_U);
-                w_.if_void();
-                {
-                    if (cls.is_ldm) {
-                        w_.local_get(L_T0); w_.const_i32(off); w_.u8(op::I32_ADD);
-                        emit_ldm_word_load(i, load_pc);
-                    } else {
-                        w_.local_get(L_T0); w_.const_i32(off); w_.u8(op::I32_ADD);
-                        emit_stm_word_store(i, Rn);
-                    }
+                w_.local_get(L_T0);
+                if (cls.is_ldm) {
+                    emit_ldm_word_load(i, offset);
+                } else {
+                    emit_stm_word_store(i, Rn, offset);
                 }
-                w_.u8(op::ELSE_OP);
-                {
-                    // host = hostB_base + ((T1 + off) & mask)
-                    w_.local_get(L_ADDR);
-                    w_.local_get(L_T1); w_.const_i32(off); w_.u8(op::I32_ADD);
-                    w_.const_i32(page_mask_); w_.u8(op::I32_AND);
-                    w_.u8(op::I32_ADD);
-                    if (cls.is_ldm) {
-                        emit_ldm_word_load(i, load_pc);
-                    } else {
-                        emit_stm_word_store(i, Rn);
-                    }
-                }
-                w_.end();
+                offset += 4;
             }
 
             if (load_pc) {
                 // Reg15/TFlag were written by the PC word; end the block.
-                emit_flag_writeback_only_and_count(count);
+                emit_flag_writeback();
+                emit_executed_value(count_ + 1);
+                w_.ret();
                 terminates = !guarded;
                 if (guarded) {
                     w_.end();
@@ -1215,10 +1214,10 @@ namespace eka2l1::arm::dyncom_jit {
         }
 
         // helper: stack has host addr; load word into Reg[i] (or PC+TFlag)
-        void block_compiler::emit_ldm_word_load(int i, bool /*load_pc*/) {
+        void block_compiler::emit_ldm_word_load(int i, std::uint32_t offset) {
             if (i == 15) {
                 // ret = mem; TFlag = ret & 1; Reg15 = ret & ~1
-                w_.load_u32(0);
+                w_.load_u32(offset);
                 w_.local_set(L_T2);
                 w_.local_get(L_STATE);
                 w_.local_get(L_T2); w_.const_i32(1); w_.u8(op::I32_AND);
@@ -1227,7 +1226,7 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.local_get(L_T2); w_.const_i32(~1u); w_.u8(op::I32_AND);
                 w_.store_u32(off_reg(15));
             } else {
-                w_.load_u32(0);
+                w_.load_u32(offset);
                 w_.local_set(L_T2);
                 w_.local_get(L_STATE);
                 w_.local_get(L_T2);
@@ -1235,9 +1234,8 @@ namespace eka2l1::arm::dyncom_jit {
             }
         }
 
-        // helper: stack has host addr; store Reg[i] (original Rn from T2 is
-        // NOT used here: Rn's original value lives in... see caller note)
-        void block_compiler::emit_stm_word_store(int i, unsigned Rn) {
+        // Store Reg[i] at the host base plus offset (T3 holds the original Rn).
+        void block_compiler::emit_stm_word_store(int i, unsigned Rn, std::uint32_t offset) {
             if (i == 15) {
                 w_.const_i32(pc_ + 8);
             } else if (static_cast<unsigned>(i) == Rn) {
@@ -1247,14 +1245,7 @@ namespace eka2l1::arm::dyncom_jit {
                 w_.local_get(L_STATE);
                 w_.load_u32(off_reg(static_cast<unsigned>(i)));
             }
-            w_.store_u32(0);
-        }
-
-        // flags writeback + return count (used by LDM-with-PC terminator)
-        void block_compiler::emit_flag_writeback_only_and_count(int extra) {
-            emit_flag_writeback();
-            w_.const_i32(count_ + static_cast<std::uint32_t>(extra >= 0 ? 1 : 1));
-            w_.ret();
+            w_.store_u32(offset);
         }
 
         void block_compiler::emit_mul(const inst_class &cls, arm_inst *base) {

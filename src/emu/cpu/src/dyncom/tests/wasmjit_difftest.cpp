@@ -197,9 +197,126 @@ static bool check_translation_cache_wrap() {
     return true;
 }
 
+static bool check_block_transfers() {
+    diff_env env;
+    auto core = make_core(env);
+    constexpr std::array<std::uint32_t, 4> words{ 0x11223344, 0x55667788, 0xAABBCCDD, 0xEEFF1234 };
+    dyncom_jit::enabled_default = 1;
+    for (const bool store : {false, true}) {
+        // STMDB sp!, {r0-r3} or LDMIA sp!, {r0-r3}, then BX lr.
+        const std::uint32_t code[] = {store ? 0xE92D000Fu : 0xE8BD000Fu, 0xE12FFF1E};
+        std::memcpy(env.mem.data() + code_base, code, sizeof(code));
+        core->clear_instruction_cache();
+        auto run = [&](std::uint32_t address) {
+            cpu_state input{};
+            input.reg[13] = address + (store ? sizeof(words) : 0);
+            input.reg[14] = return_pc;
+            input.reg[15] = code_base;
+            input.cpsr = 0x10;
+            if (store) {
+                std::copy(words.begin(), words.end(), input.reg);
+                std::memset(env.mem.data() + address, 0, sizeof(words));
+            } else {
+                std::memcpy(env.mem.data() + address, words.data(), sizeof(words));
+            }
+            write_state(*core, input);
+            core->run(2);
+            if (core->get_pc() != return_pc || core->get_reg(13) != address + (store ? 0 : sizeof(words))) {
+                std::printf("FAIL: %s at %08X ended with PC=%08X SP=%08X\n",
+                    store ? "STM" : "LDM", address, core->get_pc(), core->get_reg(13));
+                return false;
+            }
+            const auto actual = read_state(*core);
+            const bool data_correct = store ? std::memcmp(env.mem.data() + address, words.data(), sizeof(words)) == 0
+                                            : std::equal(words.begin(), words.end(), actual.reg);
+            if (!data_correct) std::printf("FAIL: %s data at %08X\n", store ? "STM" : "LDM", address);
+            return data_correct;
+        };
+        const auto before = dyncom_jit::stat_jit_instrs;
+        for (unsigned i = 0; i < 40; ++i) {
+            if (!run(0x3000)) return false;
+        }
+        if (dyncom_jit::stat_jit_instrs == before) {
+            std::printf("FAIL: %s never ran as WASM\n", store ? "STM" : "LDM");
+            return false;
+        }
+        if (!run(0x3FF8)) return false;
+    }
+    std::puts("PASS: LDM/STM preserve register lists and writeback across page boundaries");
+    return true;
+}
+
+static bool check_scaled_transfers() {
+    diff_env env;
+    auto core = make_core(env);
+    constexpr std::uint32_t data = 0x3000;
+    constexpr std::uint32_t payload = 0x41424344;
+    struct test_shift {
+        unsigned kind, amount;
+        std::uint32_t operand, result;
+        bool carry;
+    };
+    constexpr test_shift shifts[] = {
+        {0, 2, 3, 12, false}, {1, 1, 16, 8, false}, {1, 0, ~0u, 0, false},
+        {2, 2, 16, 4, false}, {2, 0, ~0u, ~0u, false}, {3, 4, 64, 4, false},
+        {3, 0, 16, 8, false}, {3, 0, 16, 0x80000008u, true},
+    };
+    for (const auto &shift : shifts) {
+        for (const auto mode : {1u << 24, (1u << 24) | (1u << 21), 0u}) {
+            for (const bool load : {false, true}) {
+                for (const bool up : {false, true}) {
+                    const std::uint32_t inst = 0xE6000000u | mode | (std::uint32_t(up) << 23)
+                        | (std::uint32_t(load) << 20) | (1u << 16) | (2u << 12)
+                        | (shift.amount << 7) | (shift.kind << 5) | 3;
+                    const std::uint32_t code[] = {inst, 0xE12FFF1E};
+                    std::memcpy(env.mem.data() + code_base, code, sizeof(code));
+                    core->clear_instruction_cache();
+
+                    const auto delta = up ? shift.result : 0u - shift.result;
+                    const bool post = mode == 0;
+                    const bool writeback = post || (mode & (1u << 21));
+                    cpu_state input{};
+                    input.reg[1] = post ? data : data - delta;
+                    input.reg[2] = load ? 0 : payload;
+                    input.reg[3] = shift.operand;
+                    input.reg[14] = return_pc;
+                    input.reg[15] = code_base;
+                    input.cpsr = 0x10 | (std::uint32_t(shift.carry) << 29);
+                    const auto before = dyncom_jit::stat_jit_instrs;
+                    for (unsigned i = 0; i < 35; ++i) {
+                        const std::uint32_t initial = load ? payload : 0;
+                        std::memcpy(env.mem.data() + data, &initial, sizeof(initial));
+                        write_state(*core, input);
+                        core->run(2);
+                        auto expected = input;
+                        expected.reg[1] += writeback ? delta : 0;
+                        if (load) expected.reg[2] = payload;
+                        expected.reg[15] = return_pc;
+                        if (!(read_state(*core) == expected)
+                            || std::memcmp(env.mem.data() + data, &payload, sizeof(payload)) != 0) {
+                            std::printf("FAIL: scaled transfer result %08X\n", inst);
+                            return false;
+                        }
+                    }
+                    if (dyncom_jit::stat_jit_instrs == before) {
+                        std::printf("FAIL: scaled transfer never ran as WASM %08X\n", inst);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    std::puts("PASS: scaled load/store indexes, carry, and writeback match expected results");
+    return true;
+}
+
 int main() {
     if (!check_translation_cache_wrap()) {
         std::puts("FAIL: translation cache slab changes or wrap");
+        return 1;
+    }
+    if (!check_block_transfers() || !check_scaled_transfers()) {
+        std::puts("FAIL: compiled multi-register or scaled memory transfer");
         return 1;
     }
     if (!check_memory_bailouts()) {
